@@ -1,3 +1,4 @@
+pub mod conv_direct;
 pub mod conv_scan;
 pub mod conv_update;
 pub mod norm_gate;

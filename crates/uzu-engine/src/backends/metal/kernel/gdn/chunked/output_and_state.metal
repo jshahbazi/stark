@@ -16,7 +16,7 @@ using namespace uzu::matmul;
 
 // q_norm:    [suffix_len, key_dim].
 // k_norm:    [suffix_len, key_dim].
-// in_proj:   [suffix_len, total_proj_dim]; V starts at offset 2*key_dim.
+// in_proj:   [suffix_len, qkv_stride]; V starts at offset 2*key_dim.
 // qk_scaled: [chunks, num_v_heads, CHUNK, CHUNK] from Gram.
 // t_mat:     [chunks, num_v_heads, CHUNK, CHUNK] dense causal inverse, bf16.
 // g:         [num_v_heads, suffix_len] cumulative log decay.
@@ -54,6 +54,7 @@ KERNEL(DeltaNetChunkedOutputAndState)(
     constant const uint& key_dim,
     constant const uint& value_dim,
     constant const uint& suffix_len,
+    constant const uint& qkv_stride,
     threadgroup float transposed_state_tile[HEAD_K_DIM * VT],
     threadgroup ScratchT residual_new_value_tile[OUTPUT_STATE_CHUNK * VT],
     const ThreadContext thread_context,
@@ -91,8 +92,6 @@ KERNEL(DeltaNetChunkedOutputAndState)(
   }
   const uint hk_idx = hv_idx / (num_v_heads / num_k_heads);
   const uint num_chunks = (suffix_len + OUTPUT_STATE_CHUNK - 1) / OUTPUT_STATE_CHUNK;
-  const uint conv_dim = 2 * key_dim + value_dim;
-  const uint total_proj_dim = conv_dim + value_dim + num_v_heads + num_v_heads;
   const device float* g_head = g + hv_idx * suffix_len;
 
   // Load the initial state slice transposed into threadgroup memory:
@@ -137,7 +136,7 @@ KERNEL(DeltaNetChunkedOutputAndState)(
       }
 
       const device T* value_input_tile =
-          in_proj + (token_base + token_tile_base) * total_proj_dim + 2 * key_dim + hv_idx * head_v_dim + value_base;
+          in_proj + (token_base + token_tile_base) * qkv_stride + 2 * key_dim + hv_idx * head_v_dim + value_base;
       residual_acc.map_coords(lane, [&](short row, short col, float state_projection) {
         if (uint(row) >= valid_token_rows) {
           return 0.0f;
@@ -145,7 +144,7 @@ KERNEL(DeltaNetChunkedOutputAndState)(
         const uint token = token_base + token_tile_base + uint(row);
         const float beta_t = beta[token * num_v_heads + hv_idx];
         const float g_t = g_head[token];
-        const float value_input = float(value_input_tile[uint(row) * total_proj_dim + uint(col)]);
+        const float value_input = float(value_input_tile[uint(row) * qkv_stride + uint(col)]);
         return beta_t * (value_input - fast::exp(g_t) * state_projection);
       });
       residual_acc.store(lane, residual_new_value_tile + token_tile_base * VT, int(VT));

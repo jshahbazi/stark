@@ -5,6 +5,8 @@ use crate::{
 
 pub struct DeltaNetChunkedPrefillArgs<'a, B: Backend> {
     pub in_projected: &'a B::ScratchBuffer,
+    pub controls: &'a B::ScratchBuffer,
+    pub qkv_stride: u32,
     pub a_log: &'a B::GlobalBuffer,
     pub dt_bias: &'a B::GlobalBuffer,
     pub ssm_state: &'a mut B::GlobalBuffer,

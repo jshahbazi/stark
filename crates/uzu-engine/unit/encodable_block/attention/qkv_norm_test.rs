@@ -68,3 +68,62 @@ fn run_key_value_row_stride_test<B: Backend>() {
 fn test_key_value_norm_uses_element_row_stride() {
     for_each_backend!(|B| run_key_value_row_stride_test::<B>());
 }
+
+#[cfg(feature = "attention-kv-only")]
+fn run_projected_key_value_exact<B: Backend>() {
+    use half::bf16;
+    const Q_HEADS: u32 = 3;
+    const KV_HEADS: u32 = 2;
+    const DIM: u32 = 128;
+    const STRIDE: u32 = (2 * Q_HEADS + 2 * KV_HEADS) * DIM;
+    const BATCH: u32 = 9;
+    let context = create_context::<B>();
+    for upcast_mode in [UpcastMode::OnlyNormalization, UpcastMode::FullLayer] {
+        let config = NormalizationConfig {
+            epsilon: 1e-6,
+            scale_offset: None,
+            upcast_mode,
+            subtract_mean: false,
+            has_scale: false,
+            has_biases: false,
+        };
+        let make_head = || {
+            QKVNorm::<B>::build_head(&context, DataType::BF16, config.clone(), None, DIM)
+                .expect("failed to create norm head")
+        };
+        let norm = QKVNorm {
+            query: Some(make_head()),
+            key: Some(make_head()),
+            value: Some(make_head()),
+            num_q_heads: Q_HEADS,
+            num_kv_heads: KV_HEADS,
+            projection_row_stride: STRIDE,
+            head_dim: DIM,
+        };
+        let input = (0..BATCH * STRIDE).map(|i| bf16::from_f32((i % 127) as f32 * 0.0625 - 4.0)).collect::<Vec<_>>();
+        let mut ordinary = create_buffer_with_data::<B, bf16>(&context, &input);
+        let mut kv_only = create_buffer_with_data::<B, bf16>(&context, &input);
+        let mut command = context.create_command_buffer(None, None).expect("failed to create command buffer");
+        norm.encode(&mut ordinary, BATCH, &mut command).expect("failed to encode ordinary norm");
+        norm.encode_projected_key_value(&mut kv_only, BATCH, &mut command).expect("failed to encode projected KV norm");
+        command.end_encoding().submit().wait_until_completed().expect("failed to execute projected KV norm");
+        let ordinary = buffer_to_vec::<B, bf16>(&ordinary);
+        let kv_only = buffer_to_vec::<B, bf16>(&kv_only);
+        for i in 0..input.len() {
+            let channel = i as u32 % STRIDE;
+            let is_kv = channel >= Q_HEADS * DIM && channel < (Q_HEADS + 2 * KV_HEADS) * DIM;
+            let expected = if is_kv {
+                ordinary[i]
+            } else {
+                input[i]
+            };
+            assert_eq!(kv_only[i].to_bits(), expected.to_bits(), "projected KV norm bit mismatch");
+        }
+    }
+}
+
+#[cfg(feature = "attention-kv-only")]
+#[uzu_test]
+fn test_projected_key_value_norm_retains_offsets_and_dead_channels() {
+    for_each_backend!(|B| run_projected_key_value_exact::<B>());
+}

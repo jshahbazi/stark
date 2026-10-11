@@ -120,6 +120,7 @@ impl DeltaNetChunkedPrefill for MetalDeltaNetChunkedPrefill {
 
         self.prep.encode(
             args.in_projected,
+            args.controls,
             args.a_log,
             args.dt_bias,
             &mut q_norm,
@@ -132,6 +133,7 @@ impl DeltaNetChunkedPrefill for MetalDeltaNetChunkedPrefill {
             args.key_dim,
             args.value_dim,
             suffix_len,
+            args.qkv_stride,
             command_buffer,
         );
         self.cumsum.encode(&log_decay, &mut g, args.num_heads, suffix_len, command_buffer);
@@ -175,6 +177,7 @@ impl DeltaNetChunkedPrefill for MetalDeltaNetChunkedPrefill {
             args.key_dim,
             args.value_dim,
             suffix_len,
+            args.qkv_stride,
             command_buffer,
         );
         Ok(())

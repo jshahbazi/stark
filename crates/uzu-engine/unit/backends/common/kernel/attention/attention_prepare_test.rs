@@ -5,7 +5,7 @@ use crate::{
     backends::{
         common::{
             Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
-            kernel::AttentionPrepareKernel,
+            kernel::{AttentionPrepareKVOnlyKernel, AttentionPrepareKernel},
         },
         cpu::Cpu,
     },
@@ -130,4 +130,102 @@ fn test_attention_prepare_uses_query_gate_row_stride() {
     for_each_non_cpu_backend!(|B| {
         assert_eq!(run_query_only::<B>(), expected, "query mismatch on {}", std::any::type_name::<B>());
     });
+}
+
+fn run_kv_only_exact<B: Backend>() {
+    let context = B::Context::new().expect("failed to create context");
+    // Include dispatch-family and preserved scorer-batch boundaries. Preparation
+    // never changes the suffix size presented to subsequent attention consumers.
+    for (q_heads, kv_heads, head_dim, batch_dim) in
+        [(2, 1, 4, 2), (3, 2, 128, 9), (4, 1, 128, 65), (4, 1, 128, 1023), (4, 1, 128, 1024), (4, 1, 128, 1025)]
+    {
+        for rope_dim in [None, Some(head_dim / 2), Some(head_dim)] {
+            let ordinary = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKernel::new(
+                &context,
+                DataType::BF16,
+                DataType::F32,
+                true,
+                rope_dim.is_some(),
+            )
+            .expect("failed to create ordinary prepare");
+            let kv_only = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKVOnlyKernel::new(
+                &context,
+                DataType::BF16,
+                DataType::F32,
+                rope_dim.is_some(),
+            )
+            .expect("failed to create KV-only prepare");
+            let prefix = 3;
+            let stride = (2 * q_heads + 2 * kv_heads) * head_dim;
+            let input = (0..batch_dim * stride)
+                .map(|i| {
+                    // Poison dead Q/gate channels to detect incorrect packed offsets.
+                    let channel = i % stride;
+                    if channel < q_heads * head_dim || channel >= (q_heads + 2 * kv_heads) * head_dim {
+                        bf16::from_bits(0x7fc1)
+                    } else {
+                        bf16::from_f32((i % 101) as f32 * 0.0625 - 3.0)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let qkvg = create_buffer_with_data::<B, bf16>(&context, &input);
+            let cos = (0..batch_dim * rope_dim.unwrap_or(0)).map(|i| (i as f32 * 0.013).cos()).collect::<Vec<_>>();
+            let sin = (0..batch_dim * rope_dim.unwrap_or(0)).map(|i| (i as f32 * 0.013).sin()).collect::<Vec<_>>();
+            let cos = rope_dim.map(|_| create_buffer_with_data::<B, f32>(&context, &cos));
+            let sin = rope_dim.map(|_| create_buffer_with_data::<B, f32>(&context, &sin));
+            let initial = vec![bf16::from_bits(0x7fc2); ((prefix + batch_dim) * kv_heads * head_dim) as usize];
+            let mut keys = create_buffer_with_data::<B, bf16>(&context, &initial);
+            let mut values = create_buffer_with_data::<B, bf16>(&context, &initial);
+            let mut actual_keys = create_buffer_with_data::<B, bf16>(&context, &initial);
+            let mut actual_values = create_buffer_with_data::<B, bf16>(&context, &initial);
+            let mut queries = create_buffer::<B, bf16>(&context, (q_heads * batch_dim * head_dim) as usize);
+            let mut command = context.create_command_buffer(None, None).expect("failed to create command buffer");
+            ordinary.encode(
+                &qkvg,
+                &mut queries,
+                Some(&mut keys),
+                Some(&mut values),
+                cos.as_ref(),
+                sin.as_ref(),
+                q_heads,
+                Some(kv_heads),
+                head_dim,
+                rope_dim,
+                Some(prefix),
+                stride,
+                batch_dim,
+                &mut command,
+            );
+            kv_only.encode(
+                &qkvg,
+                &mut actual_keys,
+                &mut actual_values,
+                cos.as_ref(),
+                sin.as_ref(),
+                q_heads,
+                kv_heads,
+                head_dim,
+                rope_dim,
+                prefix,
+                stride,
+                batch_dim,
+                &mut command,
+            );
+            command.end_encoding().submit().wait_until_completed().expect("failed to execute prepare comparison");
+            let bits = |buffer: &B::GlobalBuffer| {
+                buffer_to_vec::<B, bf16>(buffer).into_iter().map(bf16::to_bits).collect::<Vec<_>>()
+            };
+            assert_eq!(bits(&keys), bits(&actual_keys), "KV-only key bit mismatch");
+            assert_eq!(bits(&values), bits(&actual_values), "KV-only value bit mismatch");
+            let prefix_len = (prefix * kv_heads * head_dim) as usize;
+            assert!(bits(&actual_keys)[..prefix_len].iter().all(|bits| *bits == 0x7fc2), "key prefix overwritten");
+            assert!(bits(&actual_values)[..prefix_len].iter().all(|bits| *bits == 0x7fc2), "value prefix overwritten");
+        }
+    }
+}
+
+#[uzu_test]
+fn test_kv_only_prepare_preserves_packed_rope_bits_and_prefix() {
+    run_kv_only_exact::<Cpu>();
+    for_each_non_cpu_backend!(|B| run_kv_only_exact::<B>());
 }

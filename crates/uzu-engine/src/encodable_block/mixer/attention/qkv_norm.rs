@@ -126,7 +126,7 @@ impl<B: Backend> QKVNorm<B> {
         batch_dim: u32,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<(), B::Error> {
-        self.encode_packed(qkvg, batch_dim, self.num_q_heads, self.projection_row_stride, command_buffer)
+        self.encode_packed(qkvg, batch_dim, self.num_q_heads, self.projection_row_stride, false, command_buffer)
     }
 
     pub fn encode_key_value(
@@ -135,7 +135,18 @@ impl<B: Backend> QKVNorm<B> {
         batch_dim: u32,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<(), B::Error> {
-        self.encode_packed(key_value, batch_dim, 0, 2 * self.num_kv_heads * self.head_dim, command_buffer)
+        self.encode_packed(key_value, batch_dim, 0, 2 * self.num_kv_heads * self.head_dim, false, command_buffer)
+    }
+
+    /// Normalize K/V in the original full QKVG layout, retaining query offsets.
+    #[cfg(feature = "attention-kv-only")]
+    pub(super) fn encode_projected_key_value(
+        &self,
+        qkvg: impl BufferMut<Backend = B>,
+        batch_dim: u32,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        self.encode_packed(qkvg, batch_dim, self.num_q_heads, self.projection_row_stride, true, command_buffer)
     }
 
     fn encode_packed(
@@ -144,6 +155,7 @@ impl<B: Backend> QKVNorm<B> {
         batch_dim: u32,
         q_heads: u32,
         input_row_stride: u32,
+        skip_queries: bool,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<(), B::Error> {
         let packed_row_width = (q_heads + 2 * self.num_kv_heads) * self.head_dim;
@@ -155,7 +167,12 @@ impl<B: Backend> QKVNorm<B> {
         command_buffer.push_debug_group("qkv norm");
 
         let kv = self.num_kv_heads;
-        let heads = [(&self.query, 0, q_heads), (&self.key, q_heads, kv), (&self.value, q_heads + kv, kv)];
+        let query = if skip_queries {
+            &None
+        } else {
+            &self.query
+        };
+        let heads = [(query, 0, q_heads), (&self.key, q_heads, kv), (&self.value, q_heads + kv, kv)];
         for (head, head_offset, head_count) in heads {
             let Some(head) = head else {
                 continue;

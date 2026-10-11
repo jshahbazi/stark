@@ -22,6 +22,7 @@ use crate::{
 
 pub mod state;
 pub mod stream;
+pub mod scoring;
 
 #[cfg(grammar)]
 pub mod grammar;

@@ -23,6 +23,52 @@ METAL_FUNC ElementT apply_rope(
   return static_cast<ElementT>(input * cos_val + signed_paired * sin_val);
 }
 
+// Cache-only final-layer preparation keeps the original QKVG row stride and
+// head coordinates. Query lanes return before loading, RoPE or storing. K/V
+// expressions and the original exact dispatch extents are retained.
+template <typename ElementT, typename RopeT>
+VARIANTS(ElementT, bfloat)
+VARIANTS(RopeT, float)
+PUBLIC KERNEL(AttentionPrepareKVOnly) (
+  const device ElementT* qkvg,
+  device ElementT* keys,
+  device ElementT* values,
+  const device RopeT* cosines OPTIONAL(has_rope),
+  const device RopeT* sines OPTIONAL(has_rope),
+  const constant uint32_t& num_q_heads,
+  const constant uint32_t& num_kv_heads,
+  const constant uint32_t& head_dim,
+  const constant uint32_t& rope_dim OPTIONAL(has_rope),
+  const constant uint32_t& kv_token_offset,
+  const constant uint32_t& input_row_stride,
+  const constant uint32_t& batch_dim,
+  const bool has_rope SPECIALIZE,
+  const uint32_t head_dim_idx AXIS(head_dim, 128),
+  const uint32_t head_idx AXIS(num_q_heads + num_kv_heads * 2, 1),
+  const uint32_t batch_idx AXIS(batch_dim, 1)
+) {
+  if (head_idx < num_q_heads) {
+    return;
+  }
+  const uint32_t qkvg_head_idx = batch_idx * input_row_stride + head_idx * head_dim;
+  const device ElementT* qkvg_head = qkvg + qkvg_head_idx;
+  const bool is_key = head_idx < num_q_heads + num_kv_heads;
+
+  ElementT element = qkvg_head[head_dim_idx];
+  if (has_rope && head_dim_idx < rope_dim && is_key) {
+    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+  }
+  if (is_key) {
+    const uint32_t k_idx =
+        (kv_token_offset + batch_idx) * num_kv_heads * head_dim + (head_idx - num_q_heads) * head_dim + head_dim_idx;
+    keys[k_idx] = element;
+  } else {
+    const uint32_t v_idx = (kv_token_offset + batch_idx) * num_kv_heads * head_dim +
+                           (head_idx - num_q_heads - num_kv_heads) * head_dim + head_dim_idx;
+    values[v_idx] = element;
+  }
+}
+
 template <typename ElementT, typename RopeT>
 VARIANTS(ElementT, bfloat)
 VARIANTS(RopeT, float)
