@@ -1,26 +1,14 @@
-<Step title="Create a new SwiftUI project">
-    ![](/images/quick-start/xcode-new-project.png)
+<Step title="Build the local Swift artifact">
+From a Stark checkout:
+```sh
+cargo tools install swift
+cargo tools build swift --targets macos
+```
+The package requires the local `stark.xcframework`; Stark has no published Swift binary.
 </Step>
-<Step title="Add the SDK">
-    Add this package through SPM:
-    ```sh
-    https://github.com/trymirai/uzu.git
-    ```
+<Step title="Add the local package">
+Add the Stark checkout as a local package in Xcode, then depend on the `Stark` product.
 </Step>
-<Step title="Paste the snippet">
-    <CodeSwift/>
-</Step>
-<Step title="Add the snippet call">
-    ```swift
-    var body: some View {
-        VStack {
-            Text("On-device AI")
-        }
-        .onAppear() {
-            Task {
-                try await runExampleName()
-            }
-        }
-    }
-    ```
+<Step title="Adapt the snippet">
+<CodeSwift/>
 </Step>

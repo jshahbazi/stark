@@ -1,6 +1,6 @@
 use indoc::indoc;
 use iocraft::prelude::*;
-use uzu_engine::VERSION;
+use stark_engine::VERSION;
 
 use crate::interactive::components::ApplicationState;
 

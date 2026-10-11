@@ -691,6 +691,7 @@ fn build_message(
 
 /// Key wrapping tool call arguments that survived no parsing attempt, so
 /// templates always see an object and clients can recognize the failure.
+// Preserve this serialized tool-call fallback key for existing consumers.
 pub const UNPARSED_ARGUMENTS_KEY: &str = "__uzu_unparsed_arguments";
 
 /// Canonicalizes tool call arguments to a compact JSON object. Models sometimes

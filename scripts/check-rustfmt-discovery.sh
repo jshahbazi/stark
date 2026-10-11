@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")"/.. && pwd)"
 cd "$ROOT_DIR"
 
-PACKAGE="uzu-engine"
-CRATE_DIR="crates/uzu-engine"
+PACKAGE="stark-engine"
+CRATE_DIR="crates/stark-engine"
 
 normalize_paths() {
   perl -MCwd=abs_path -ne 'chomp; my $path = abs_path($_); print "$path\n" if defined $path'

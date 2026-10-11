@@ -3,7 +3,7 @@ import Observation
 import SFSymbols
 import SwiftUI
 import AVFoundation
-import Uzu
+import Stark
 
 #if canImport(UIKit)
     import UIKit

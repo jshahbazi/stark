@@ -1,5 +1,5 @@
 use serde_json::json;
-use uzu::types::{
+use stark::types::{
     basic::ToolDescription,
     session::chat::{ChatContentBlock, ChatRole},
 };

@@ -1,6 +1,5 @@
 import SwiftUI
-import Uzu
-import FirebaseCrashlytics
+import Stark
 
 #if os(macOS)
     import AppKit
@@ -73,18 +72,6 @@ struct AboutView: View {
                         url: "https://trymirai.com/blog/brief-history-of-apple-ml-stack",
                         title: "Brief history of Apple ML Stack"
                     )
-                    
-                    #if DEBUG
-                    // Crashlytics test button (Debug only)
-                    Button(action: {
-                        Crashlytics.crashlytics().log("User triggered test crash")
-                        Crashlytics.crashlytics().setCustomValue("test", forKey: "crash_source")
-                        fatalError("Test crash triggered from About view")
-                    }) {
-                        linkView(title: "Test Crashlytics", subtitle: "⚠️ This will crash the app (Debug only)")
-                    }
-                    .buttonStyle(.plain)
-                    #endif
                 }
             }
             .scrollIndicators(.hidden)

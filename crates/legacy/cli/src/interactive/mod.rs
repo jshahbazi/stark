@@ -4,7 +4,7 @@ use comfy_table::{
     presets::UTF8_FULL,
 };
 use shoji::types::basic::ReasoningEffort;
-use uzu::engine::{Engine, EngineConfig};
+use stark::engine::{Engine, EngineConfig};
 
 use crate::interactive::{
     app::CliApplication,

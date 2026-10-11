@@ -1,44 +1,16 @@
-<Step title="Make a new project folder">
+<Step title="Build the local TypeScript binding">
+From a Stark checkout:
 ```sh
-mkdir demo && cd demo
+cargo tools install typescript
+cargo tools build typescript
 ```
+The local package uses `@jshahbazi/stark`. Stark has no published npm or JSR package.
 </Step>
-<Step title="Initialize with pnpm">
+<Step title="Run the example">
 ```sh
-pnpm init
+cargo tools example typescript chat
 ```
 </Step>
-<Step title="Install dependencies">
-```sh
-pnpm add typescript ts-node @types/node -D
-pnpm add @trymirai/uzu
-```
-</Step>
-<Step title="Initialize a tsconfig.json">
-```json
-{
-    "compilerOptions": {
-        "target": "es2020",
-        "module": "commonjs",
-        "moduleResolution": "node",
-        "strict": true,
-        "esModuleInterop": true,
-        "outDir": "dist",
-        "types": [
-            "node"
-        ]
-    },
-    "include": [
-        "*.ts"
-    ]
-}
-```
-</Step>
-<Step title="Create main.ts">
+<Step title="Adapt the snippet">
 <CodeTypeScript />
-</Step>
-<Step title="Run the snippet">
-```sh
-pnpm ts-node main.ts
-```
 </Step>

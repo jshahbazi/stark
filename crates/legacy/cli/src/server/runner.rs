@@ -14,7 +14,7 @@ use tokio::{
     io::{AsyncRead, ReadBuf},
     sync::Mutex,
 };
-use uzu::{
+use stark::{
     engine::{Engine, EngineConfig},
     types::session::chat::ChatConfig,
 };

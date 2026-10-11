@@ -31,7 +31,7 @@ mod tests {
     fn context() -> TelemetryContext {
         TelemetryContext {
             engine_session_id: "session-1".to_string(),
-            uzu_version: "0.5.7".to_string(),
+            stark_version: "0.5.7".to_string(),
             toolchain_version: "0.12.1".to_string(),
             device: TelemetryDevice {
                 os_name: Some("macOS".to_string()),

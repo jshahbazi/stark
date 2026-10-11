@@ -1,4 +1,4 @@
-use uzu::storage::DownloadPhase;
+use stark::storage::DownloadPhase;
 
 use super::app::ModelWithState;
 

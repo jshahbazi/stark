@@ -5,7 +5,7 @@ use shoji::types::{
     basic::{ReasoningEffort, SamplingParameters},
     model::Model,
 };
-use uzu::{
+use stark::{
     engine::Engine,
     settings::Settings,
     storage::{DownloadPhase, DownloadState},

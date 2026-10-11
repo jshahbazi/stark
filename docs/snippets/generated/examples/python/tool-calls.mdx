@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel
 
-from uzu import (
+from stark import (
     ChatConfig,
     ChatMessage,
     ChatReplyConfig,
@@ -12,7 +12,7 @@ from uzu import (
     EngineConfig,
     SamplingMethod,
     SamplingPolicy,
-    uzu_tool_function,
+    stark_tool_function,
 )
 
 
@@ -28,12 +28,12 @@ class Coordinate(BaseModel):
     longitude: Annotated[float, "Longitude in decimal degrees."]
 
 
-@uzu_tool_function(name="get_location", description="Return the current location in coordinates")
+@stark_tool_function(name="get_location", description="Return the current location in coordinates")
 def get_current_location() -> Coordinate:
     return Coordinate(latitude=51.5074, longitude=-0.1278)
 
 
-@uzu_tool_function
+@stark_tool_function
 def get_current_temperature(
     latitude: float,
     longitude: Annotated[float, "Longitude in decimal degrees."],

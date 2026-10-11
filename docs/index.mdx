@@ -1,102 +1,31 @@
 ---
-title: 'About'
+title: 'Stark'
 ---
 
-<Tip>
-Looking for an instant start? Check out the drop-in snippets:
+Stark is an independent fork of the Uzu inference engine. The repository includes
+the Rust engine, Metal and CPU backends, and inherited high-level language bindings.
+See the [repository README](https://github.com/jshahbazi/stark) for the scoring scope,
+supported build workflow, and current validation evidence.
 
-<Tabs>
-    <Tab title="Python">
-        <Columns cols={2}>
-            <Card href="/quick-start/chat#python">
-                Chat
-            </Card>
-            <Card href="/quick-start/chat-structured-output#python">
-                Structured output
-            </Card>
-            <Card href="/quick-start/chat-cloud#python">
-                Cloud
-            </Card>
-        </Columns>
-    </Tab>
-    <Tab title="Swift">
-        <Columns cols={2}>
-            <Card href="/quick-start/chat#swift">
-                Chat
-            </Card>
-            <Card href="/quick-start/chat-structured-output#swift">
-                Structured output
-            </Card>
-            <Card href="/quick-start/chat-cloud#swift">
-                Cloud
-            </Card>
-        </Columns>
-    </Tab>
-    <Tab title="TypeScript">
-        <Columns cols={2}>
-            <Card href="/quick-start/chat#typescript">
-                Chat
-            </Card>
-            <Card href="/quick-start/chat-structured-output#typescript">
-                Structured output
-            </Card>
-            <Card href="/quick-start/chat-cloud#typescript">
-                Cloud
-            </Card>
-        </Columns>
-    </Tab>
-    <Tab title="Rust">
-        <Columns cols={2}>
-            <Card href="/quick-start/chat#rust">
-                Chat
-            </Card>
-            <Card href="/quick-start/chat-structured-output#rust">
-                Structured output
-            </Card>
-            <Card href="/quick-start/chat-cloud#rust">
-                Cloud
-            </Card>
-        </Columns>
-    </Tab>
-</Tabs>
+The high-level examples in these pages were inherited from Uzu and now use the
+Stark namespace. Python, TypeScript, and Swift packages have not been published for
+this fork. Build the bindings from a local checkout before running the examples.
 
-</Tip>
+```sh
+git clone https://github.com/jshahbazi/stark.git
+cd stark
+cargo tools install python
+cargo tools build python
+```
 
-[**Mirai**](https://trymirai.com/) lets you add high-performance AI right into your app with zero latency, full data privacy, and no inference costs. You don’t need an ML team or weeks of setup anymore. One developer can get it all running in minutes. To achieve this, we offer the following key products:
+Replace `python` with `typescript` or `swift` for the corresponding local binding.
+Swift requires a locally built `stark.xcframework`; the package never downloads an
+upstream Uzu binary as a Stark artifact.
 
-<Columns cols={3}>
-    <Card title="uzu" img="/images/headers/uzu.jpg" href="https://github.com/trymirai/uzu">
-        A Rust inference engine built to run AI with hardware specifics in mind.
-    </Card>
-    <Card title="lalamo" img="/images/headers/lalamo.jpg" href="https://github.com/trymirai/lalamo">
-        A set of tools to optimize and convert models for on-device use.
-    </Card>
-    <Card title="cli" img="/images/headers/cli.jpg" href="https://github.com/trymirai/uzu#cli">
-        A command-line tool to chat with models and serve them as a local API.
-    </Card>
-</Columns>
+The inherited Mirai registry integration uses upstream provider endpoints and
+model identifiers. Those identifiers remain unchanged for format compatibility.
+The upstream [lalamo converter](https://github.com/trymirai/lalamo) and
+[Uzu repository](https://github.com/trymirai/uzu) remain separate projects.
 
-<Tip>
-    If you run into a problem and don’t find an answer here, feel free to reach out in our [Discord](https://discord.com/invite/trymirai) community. We can even debug the issue with you over voice chat, or you can [book a call](https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ0RkTVFVCqRHJdidCc0aRAr4T44KeO58N01tMrNBkjbNFndBAaTf6rKdtTTEryPo8JB_UNQ8Lx6) with our engineers ❤️.
-</Tip>
-
-## FAQ
-
-<AccordionGroup>
-    <Accordion title="Is this project open source?">
-        <Check>
-            The [**uzu**](https://github.com/trymirai/uzu) and [**lalamo**](https://github.com/trymirai/lalamo) libraries are fully open source under the MIT license.
-        </Check>
-    </Accordion>
-    <Accordion title="Is it free to use?">
-        <Check>
-            The [**uzu**](https://github.com/trymirai/uzu) and [**lalamo**](https://github.com/trymirai/lalamo) libraries are completly free to use.
-        </Check>
-    </Accordion>
-    <Accordion title="Which devices are supported?">
-        <Info>Currently, only Apple Silicon (iOS/macOS) devices are supported.</Info>
-    </Accordion>
-    <Accordion title="Which models are supported?">
-        <Info>The full list of supported models is available [here](https://trymirai.com/local-models).</Info>
-    </Accordion>
-</AccordionGroup>
+Report Stark issues in the
+[Stark issue tracker](https://github.com/jshahbazi/stark/issues).

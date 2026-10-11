@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, ensure};
 use rocket::serde::{Deserialize, Serialize};
-use uzu::types::session::chat::{ChatMessage, ChatReplyEnergy};
-use uzu_engine::data_type::DataType;
+use stark::types::session::chat::{ChatMessage, ChatReplyEnergy};
+use stark_engine::data_type::DataType;
 
 use crate::server::{
     chat_completions::{OaiMessage, to_chat_messages},

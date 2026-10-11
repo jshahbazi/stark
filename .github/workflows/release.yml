@@ -22,6 +22,9 @@ defaults:
 
 jobs:
   release:
+    # Inherited release pipeline requires upstream infrastructure. Stark package
+    # publication has not been configured or authorized.
+    if: false
     runs-on: macos-26
     env:
       VERSION: ${{ inputs.version }}
@@ -48,7 +51,7 @@ jobs:
             '{
               allowed_mentions: {parse: []},
               content: ([
-                "\u23f3 **uzu \u00b7 \($version)**",
+                "\u23f3 **stark \u00b7 \($version)**",
                 "In progress, <t:\($started_at):R>. [Logs](<\($run_url)>)",
                 "-# Triggered by: \($actor)"
               ] | join("\n"))
@@ -105,7 +108,7 @@ jobs:
 
           : "${NODE_AUTH_TOKEN:?NPM_TOKEN secret is required}"
 
-          npm_package_name="@trymirai/uzu"
+          npm_package_name="@jshahbazi/stark"
           npm_username=$(npm whoami --registry=https://registry.npmjs.org)
           npm_package_owners=$(npm owner ls "$npm_package_name" --registry=https://registry.npmjs.org)
           npm_package_versions_json=$(npm view "$npm_package_name" versions --json --registry=https://registry.npmjs.org)
@@ -205,12 +208,12 @@ jobs:
 
       - name: "Release: Create staging directory"
         run: |
-          release_path="$(mktemp -d -t uzu-release)"
+          release_path="$(mktemp -d -t stark-release)"
           chmod 700 "$release_path"
-          echo "UZU_RELEASE_PATH=$release_path" >> "$GITHUB_ENV"
+          echo "STARK_RELEASE_PATH=$release_path" >> "$GITHUB_ENV"
 
       - name: "Release: Build artifacts"
-        run: cargo tools release "${VERSION}" "$UZU_RELEASE_PATH"
+        run: cargo tools release "${VERSION}" "$STARK_RELEASE_PATH"
 
       - name: "Binaries: Codesign"
         shell: bash
@@ -227,7 +230,7 @@ jobs:
               "$binary_path"
             codesign --verify --strict --verbose=2 "$binary_path"
             signed=$((signed + 1))
-          done < <(find "$UZU_RELEASE_PATH/binaries" \
+          done < <(find "$STARK_RELEASE_PATH/binaries" \
             -type f \
             ! -name '.DS_Store' \
             ! -name '*.zip' \
@@ -235,7 +238,7 @@ jobs:
             -print0)
 
           if [ "$signed" -eq 0 ]; then
-            echo "No binaries found under $UZU_RELEASE_PATH/binaries" >&2
+            echo "No binaries found under $STARK_RELEASE_PATH/binaries" >&2
             exit 1
           fi
 
@@ -244,7 +247,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          zip_root="$UZU_RELEASE_PATH/notarization"
+          zip_root="$STARK_RELEASE_PATH/notarization"
           mkdir -p "$zip_root"
 
           packaged=0
@@ -258,7 +261,7 @@ jobs:
             ditto -c -k --sequesterRsrc --keepParent "$binary_path" "$zip_path"
             tar -czf "$tarball_path" -C "$binary_dir" "$artifact_name"
             packaged=$((packaged + 1))
-          done < <(find "$UZU_RELEASE_PATH/binaries" \
+          done < <(find "$STARK_RELEASE_PATH/binaries" \
             -type f \
             ! -name '.DS_Store' \
             ! -name '*.zip' \
@@ -266,7 +269,7 @@ jobs:
             -print0)
 
           if [ "$packaged" -eq 0 ]; then
-            echo "No binaries found under $UZU_RELEASE_PATH/binaries" >&2
+            echo "No binaries found under $STARK_RELEASE_PATH/binaries" >&2
             exit 1
           fi
 
@@ -287,10 +290,10 @@ jobs:
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
               --wait
             notarized=$((notarized + 1))
-          done < <(find "$UZU_RELEASE_PATH/notarization" -type f -name '*.zip' -print0)
+          done < <(find "$STARK_RELEASE_PATH/notarization" -type f -name '*.zip' -print0)
 
           if [ "$notarized" -eq 0 ]; then
-            echo "No notarization zips found under $UZU_RELEASE_PATH/notarization" >&2
+            echo "No notarization zips found under $STARK_RELEASE_PATH/notarization" >&2
             exit 1
           fi
 
@@ -324,7 +327,7 @@ jobs:
 
       - name: "Publish Platform: Upload snippets"
         run: |
-          gcloud storage rsync "$UZU_RELEASE_PATH/platform" \
+          gcloud storage rsync "$STARK_RELEASE_PATH/platform" \
             "gs://platform-bucket-0485e11/snippets" \
             --recursive --delete-unmatched-destination-objects
 
@@ -346,13 +349,13 @@ jobs:
           if gsutil -q stat "$GS_URI"; then
             echo "Release zip already exists at $GS_URI"; exit 1
           fi
-          gsutil cp "$UZU_RELEASE_PATH/swift-spm/${VERSION}.zip" "$GS_URI"
+          gsutil cp "$STARK_RELEASE_PATH/swift-spm/${VERSION}.zip" "$GS_URI"
 
       # ---------------------------------------------------------------
       # Publish TypeScript
       # ---------------------------------------------------------------
       - name: "Publish TypeScript"
-        working-directory: ${{ env.UZU_RELEASE_PATH }}/typescript-npm
+        working-directory: ${{ env.STARK_RELEASE_PATH }}/typescript-npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: pnpm publish --access public --no-git-checks
@@ -364,7 +367,7 @@ jobs:
         env:
           UV_PUBLISH_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
-          uv publish "$UZU_RELEASE_PATH"/python-pypi/*.whl
+          uv publish "$STARK_RELEASE_PATH"/python-pypi/*.whl
 
       # ---------------------------------------------------------------
       # Push the release commit and tag now that every publish has
@@ -376,15 +379,15 @@ jobs:
         with:
           app-id: ${{ vars.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: trymirai
-          repositories: uzu
+          owner: jshahbazi
+          repositories: stark
 
       - name: "Release: Push"
         env:
           GH_TOKEN: ${{ steps.release-token.outputs.token }}
         run: |
           set -euo pipefail
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/trymirai/uzu.git"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/jshahbazi/stark.git"
           git push origin HEAD:main
           git push origin "${VERSION}"
 
@@ -394,7 +397,7 @@ jobs:
           token: ${{ steps.release-token.outputs.token }}
           tag_name: ${{ env.VERSION }}
           name: ${{ env.VERSION }}
-          files: ${{ env.UZU_RELEASE_PATH }}/binaries/**/*.tar.gz
+          files: ${{ env.STARK_RELEASE_PATH }}/binaries/**/*.tar.gz
           fail_on_unmatched_files: true
 
       - name: "Send final release notification"
@@ -432,8 +435,8 @@ jobs:
             {
               allowed_mentions: {parse: []},
               content: ([
-                (if $success then "\($icon) **[uzu \u00b7 \($version)](<\($release_url)>)**"
-                 else "\($icon) **uzu \u00b7 \($version)**" end),
+                (if $success then "\($icon) **[stark \u00b7 \($version)](<\($release_url)>)**"
+                 else "\($icon) **stark \u00b7 \($version)**" end),
                 "Release \($status) in \($duration). [Logs](<\($run_url)>)",
                 "-# Triggered by: \($actor)"
               ] | join("\n"))

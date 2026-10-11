@@ -29,7 +29,7 @@ pub fn handle_models(
             id: state.model_name.clone(),
             object: "model".to_string(),
             created: 0,
-            owned_by: "uzu".to_string(),
+            owned_by: "stark".to_string(),
         }],
     })
 }

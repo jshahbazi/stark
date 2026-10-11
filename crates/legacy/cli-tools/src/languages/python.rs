@@ -62,11 +62,11 @@ impl LanguageBackend for PythonLanguageBackend {
                 Command::new("unzip")
                     .with_argument("-o")
                     .with_argument(&wheel_path.to_string_lossy())
-                    .with_argument(&format!("{}/uzu.abi3.so", paths.main_crate))
+                    .with_argument(&format!("{}/stark.abi3.so", paths.main_crate))
                     .with_argument("-d")
                     .with_argument(&bindings_path.to_string_lossy())
                     .run()?;
-                Command::uv_python("import uzu; uzu.generate_annotations()")
+                Command::uv_python("import stark; stark.generate_annotations()")
                     .with_current_path(&bindings_path)
                     .with_envs(envs)
                     .run()?;

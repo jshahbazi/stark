@@ -7,7 +7,7 @@ use shoji::types::{
     basic::ReasoningEffort,
     session::chat::{ChatMessage, ChatReplyConfig},
 };
-use uzu::{
+use stark::{
     engine::{Engine, EngineConfig},
     storage::DownloadPhase,
 };

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use iocraft::prelude::*;
 use tokio_stream::StreamExt;
-use uzu::storage::DownloadPhase;
+use stark::storage::DownloadPhase;
 
 use crate::{
     common::thinking::ThinkingSupport,

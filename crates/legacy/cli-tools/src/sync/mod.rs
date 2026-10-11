@@ -58,13 +58,9 @@ pub fn run_sync(check: bool) -> Result<()> {
     let workspace = WorkspaceManifest::load()?;
     let root_path = &paths.root_path;
 
-    ToolchainsSyncTask.run(&platforms, &workspace, &root_path.join("rust-toolchain.toml"), check)?;
-    ReadmeSyncTask::new(vec![Language::Rust, Language::Python, Language::Swift, Language::TypeScript]).run(
-        &platforms,
-        &workspace,
-        &root_path.join("README.md"),
-        check,
-    )?;
+    // The accepted Stark production compiler and minimal targets are pinned by hand.
+    // Language-specific installation handles any additional binding build targets.
+    // The Stark root README is maintained by hand to document the fork and scoring scope.
 
     let python_bindings_path = paths.bindings_for_language_path(Language::Python);
     PyprojectSyncTask.run(&platforms, &workspace, &python_bindings_path.join("pyproject.toml"), check)?;

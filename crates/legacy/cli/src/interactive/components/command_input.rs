@@ -1,6 +1,6 @@
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
-use uzu::storage::DownloadPhase;
+use stark::storage::DownloadPhase;
 
 use crate::interactive::{
     components::{ApplicationState, InputType, Selector, SelectorItem, SelectorStyle, TextInput, TextInputFocus},

@@ -59,7 +59,7 @@ impl ChatSession {
         py: Python<'py>,
         #[gen_stub(
             override_type(
-                type_repr = "UzuToolFunction[..., typing.Any]",
+                type_repr = "StarkToolFunction[..., typing.Any]",
                 imports = ("typing")
             )
         )]
@@ -86,7 +86,7 @@ impl ChatSession {
         py: Python<'py>,
         #[gen_stub(
             override_type(
-                type_repr = "collections.abc.Sequence[UzuToolFunction[..., typing.Any]]",
+                type_repr = "collections.abc.Sequence[StarkToolFunction[..., typing.Any]]",
                 imports = ("collections.abc", "typing")
             )
         )]

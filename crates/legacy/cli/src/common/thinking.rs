@@ -232,8 +232,8 @@ mod tests {
             "test".to_string(),
             "test".to_string(),
             "test".to_string(),
-            "uzu".to_string(),
-            "uzu".to_string(),
+            "stark".to_string(),
+            "stark".to_string(),
             "0.0".to_string(),
             vec![ModelSpecialization::Chat {}],
             ModelAccessibility::OnDevice {

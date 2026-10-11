@@ -1,4 +1,0 @@
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/crates/legacy/uzu/bindings/python/.venv/bin/python",
-  "ruff.path": ["${workspaceFolder}/crates/legacy/uzu/bindings/python/.venv/bin/ruff"]
-}

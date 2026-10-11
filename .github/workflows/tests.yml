@@ -21,6 +21,8 @@ defaults:
 
 jobs:
   linters:
+    # Inherited self-hosted runners are not configured for Stark.
+    if: false
     name: linters
     runs-on: [self-hosted, macos, arm64]
 
@@ -32,7 +34,7 @@ jobs:
           linters: true
           metal: true
 
-      - name: Check uzu-engine rustfmt discovery
+      - name: Check stark-engine rustfmt discovery
         if: ${{ always() && steps.setup.outcome == 'success' }}
         run: RUSTUP_TOOLCHAIN=nightly ./scripts/check-rustfmt-discovery.sh
 
@@ -63,6 +65,8 @@ jobs:
         run: cargo tools sync --check
 
   tests:
+    # Inherited self-hosted runners are not configured for Stark.
+    if: false
     name: ${{ matrix.host }}${{ matrix.target && format(' ({0})', matrix.target) }}
     runs-on: ${{ matrix.host == 'linux' && 'uzu-n4std16' || fromJSON('["self-hosted","macos","arm64"]') }}
 
@@ -77,7 +81,7 @@ jobs:
           - host: 'linux'
             target: 'wasm32-wasip1-threads'
             nightly: true
-            crates: ['uzu']
+            crates: ['stark']
             tests: 'kernels'
           - host: 'linux'
             target: 'wasm32-unknown-unknown'
@@ -114,9 +118,11 @@ jobs:
         run: |
           cargo +nightly nextest run --profile=ci \
             ${{ matrix.target && format('--target {0}', matrix.target) || '' }} \
-            ${{ matrix.tests == 'kernels' && '-p uzu-engine backends::common::kernel::tests --lib' || '' }}
+            ${{ matrix.tests == 'kernels' && '-p stark-engine backends::common::kernel::tests --lib' || '' }}
 
   validate-bindings:
+    # Inherited self-hosted runners are not configured for Stark.
+    if: false
     name: validate-bindings
     runs-on: [self-hosted, macos, arm64]
 
@@ -154,7 +160,7 @@ jobs:
     name: completed
     runs-on: ubuntu-latest
     needs: [linters, tests, validate-bindings]
-    if: ${{ always() }}
+    if: false
 
     steps:
       - run: |

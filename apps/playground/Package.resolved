@@ -136,9 +136,9 @@
       }
     },
     {
-      "identity" : "uzu-swift",
+      "identity" : "stark-swift",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/trymirai/uzu-swift.git",
+      "location" : "https://github.com/jshahbazi/stark-swift.git",
       "state" : {
         "revision" : "f9be166de173de30e3eadf0e8a11f4e9706134cd",
         "version" : "0.1.2"

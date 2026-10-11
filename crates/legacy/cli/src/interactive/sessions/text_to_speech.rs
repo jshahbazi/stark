@@ -3,7 +3,7 @@ use std::any::Any;
 use iocraft::prelude::*;
 use nagare::text_to_speech::{TextToSpeechSession, TextToSpeechSessionStreamChunk};
 use shoji::types::{basic::CancelToken, model::Model, session::text_to_speech::TextToSpeechStats};
-use uzu::player::Player;
+use stark::player::Player;
 
 use crate::interactive::{
     components::{ApplicationState, HistoryCellType},

@@ -25,7 +25,7 @@ impl Paths {
         Ok(Self {
             manifest_path,
             root_path,
-            main_crate: "uzu".to_string(),
+            main_crate: "stark".to_string(),
         })
     }
 
@@ -99,7 +99,7 @@ impl Paths {
     }
 
     pub fn swift_generated_sources_path(&self) -> PathBuf {
-        self.bindings_for_language_path(Language::Swift).join("Sources").join("Uzu").join("Generated")
+        self.bindings_for_language_path(Language::Swift).join("Sources").join("Stark").join("Generated")
     }
 
     pub fn swift_slices_path(&self) -> PathBuf {

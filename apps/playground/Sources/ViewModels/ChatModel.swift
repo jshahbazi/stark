@@ -1,6 +1,6 @@
 import Foundation
 import Observation
-import Uzu
+import Stark
 
 // MARK: - Supporting Types
 
