@@ -118,8 +118,17 @@ def approved_runner(job: object) -> bool:
     strategy = job.get("strategy")
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     values = matrix.get("os") if isinstance(matrix, dict) else None
-    return isinstance(values, list) and bool(values) and all(
+    if not isinstance(values, list) or not values or not all(
         isinstance(value, str) and value in APPROVED_RUNNERS for value in values
+    ):
+        return False
+    includes = matrix.get("include", []) if isinstance(matrix, dict) else []
+    if not isinstance(includes, list):
+        return False
+    return all(
+        isinstance(entry, dict)
+        and ("os" not in entry or entry["os"] in APPROVED_RUNNERS)
+        for entry in includes
     )
 
 
@@ -129,6 +138,22 @@ def has_trigger(triggers: object, name: str) -> bool:
     if isinstance(triggers, list):
         return name in triggers
     return triggers == name
+
+
+def has_secrets_mapping(value: object, seen: set[int] | None = None) -> bool:
+    if seen is None:
+        seen = set()
+    if isinstance(value, (dict, list)):
+        if id(value) in seen:
+            return False
+        seen.add(id(value))
+    if isinstance(value, dict):
+        if any(str(key) == "secrets" for key in value):
+            return True
+        return any(has_secrets_mapping(child, seen) for child in value.values())
+    if isinstance(value, list):
+        return any(has_secrets_mapping(child, seen) for child in value)
+    return False
 
 
 def check_workflows(paths: list[Path]) -> list[str]:
@@ -141,7 +166,7 @@ def check_workflows(paths: list[Path]) -> list[str]:
             relative = path.as_posix()
         try:
             document = yaml.load(text, Loader=UniqueKeyLoader)
-        except (yaml.YAMLError, RecursionError, MemoryError) as exc:
+        except (yaml.YAMLError, RecursionError, MemoryError, TypeError, ValueError) as exc:
             errors.append(f"invalid workflow YAML: {relative} ({type(exc).__name__})")
             continue
         for reference in iter_uses(document):
@@ -176,6 +201,8 @@ def check_workflows(paths: list[Path]) -> list[str]:
                 errors.append(f"pull_request_target is forbidden in active workflow: {relative}")
             if re.search(r"\bsecrets\s*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])", text):
                 errors.append(f"secrets reference is forbidden in active workflow: {relative}")
+            if has_secrets_mapping(document):
+                errors.append(f"secrets mapping is forbidden in active workflow: {relative}")
             for job, definition in active_jobs(document):
                 if not approved_runner(definition):
                     errors.append(f"unsupported runner configuration in active workflow: {relative}:{job}")
