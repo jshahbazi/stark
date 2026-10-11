@@ -2,7 +2,7 @@ use std::io::IsTerminal;
 
 use iocraft::prelude::*;
 use shoji::types::basic::ReasoningEffort;
-use uzu::{
+use stark::{
     engine::{Engine, EngineConfig, EngineError},
     settings::SettingsError,
 };

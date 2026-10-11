@@ -1,5 +1,5 @@
 import Foundation
-import Uzu
+import Stark
 
 struct ReplyStats: Equatable {
     let timeToFirstToken: Double

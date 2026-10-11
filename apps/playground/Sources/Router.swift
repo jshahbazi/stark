@@ -1,6 +1,6 @@
 import Observation
 import SwiftUI
-import Uzu
+import Stark
 
 @MainActor
 @Observable

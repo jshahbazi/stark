@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
 };
 use shoji::types::model::ModelIdentifier;
-use uzu::storage::DownloadPhase;
+use stark::storage::DownloadPhase;
 
 use super::{
     app::{App, ModelWithState},

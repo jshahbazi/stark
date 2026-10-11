@@ -1,7 +1,6 @@
 import Observation
 import SwiftUI
-import Uzu
-import Firebase
+import Stark
 #if os(iOS)
 import UIKit
 #endif
@@ -19,8 +18,6 @@ struct PlaygroundApp: App {
     @State private var audioController: AudioController
 
     init() {
-        _ = _firebaseInitialized
-        
         let engineWrapper = EngineObservableWrapper(config: .create())
         _engineWrapper = StateObject(wrappedValue: engineWrapper)
         
@@ -58,7 +55,3 @@ struct PlaygroundApp: App {
         }
     }
 }
-
-private let _firebaseInitialized: Void = {
-    FirebaseApp.configure()
-}()

@@ -11,7 +11,9 @@ pub struct TelemetryDevice {
 #[derive(Debug, Clone, Serialize)]
 pub struct TelemetryContext {
     pub engine_session_id: String,
-    pub uzu_version: String,
+    // The upstream Mirai telemetry endpoint expects this serialized key.
+    #[serde(rename = "uzu_version")]
+    pub stark_version: String,
     pub toolchain_version: String,
     pub device: TelemetryDevice,
 }
@@ -20,13 +22,13 @@ pub struct TelemetryContext {
 #[cfg(not(target_family = "wasm"))]
 impl TelemetryContext {
     pub fn new(
-        uzu_version: String,
+        stark_version: String,
         toolchain_version: String,
         device: TelemetryDevice,
     ) -> Self {
         Self {
             engine_session_id: uuid::Uuid::new_v4().to_string(),
-            uzu_version,
+            stark_version,
             toolchain_version,
             device,
         }

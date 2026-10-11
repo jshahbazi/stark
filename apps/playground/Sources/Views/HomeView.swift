@@ -1,7 +1,7 @@
 import AVFoundation
 import SFSymbols
 import SwiftUI
-import Uzu
+import Stark
 
 #if os(macOS)
     import AppKit

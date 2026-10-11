@@ -4,14 +4,14 @@ use chrono::Local;
 use iocraft::prelude::*;
 use nagare::{
     chat::{ChatSession, ChatSessionStreamChunk},
-    tool::uzu_tool_function,
+    tool::stark_tool_function,
 };
 use shoji::types::{
     basic::{CancelToken, SamplingSeed, ToolCall},
     model::Model,
     session::chat::{ChatConfig, ChatMessage, ChatReplyConfig, ChatReplyStats, ChatRole},
 };
-use uzu::engine::Engine;
+use stark::engine::Engine;
 
 use crate::interactive::{
     components::{ApplicationState, HistoryCellType, TranscriptItem},
@@ -330,13 +330,13 @@ fn chat_state_mut(state: &mut ApplicationState) -> Option<&mut ChatSessionState>
 }
 
 /// Returns current date and time in RFC 3339 format: YYYY-MM-DDTHH:MM:SSZ
-#[uzu_tool_function]
+#[stark_tool_function]
 fn get_current_date_time() -> String {
     Local::now().to_rfc3339()
 }
 
 /// Sleeps for the given number of seconds before responding, at most 60 seconds.
-#[uzu_tool_function]
+#[stark_tool_function]
 async fn sleep(
     /// Number of seconds to sleep, at most 60.
     seconds: f64

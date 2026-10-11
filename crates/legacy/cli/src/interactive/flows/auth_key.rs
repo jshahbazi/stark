@@ -1,6 +1,6 @@
 use iocraft::prelude::*;
 use unicode_width::UnicodeWidthStr;
-use uzu::settings::SettingKind;
+use stark::settings::SettingKind;
 
 use crate::interactive::{
     components::{ApplicationState, InputType, TextInput, TextInputFocus},

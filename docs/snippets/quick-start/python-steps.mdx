@@ -1,18 +1,16 @@
-<Step title="Create a new project">
+<Step title="Build the local Python binding">
+From a Stark checkout:
 ```sh
-uv init demo && cd demo
+cargo tools install python
+cargo tools build python
+```
+Stark has no published PyPI package. The local wheel is installed into the binding's `.venv`.
+</Step>
+<Step title="Run the example">
+```sh
+cargo tools example python chat
 ```
 </Step>
-<Step title="Install dependencies">
-```sh
-uv add uzu
-```
-</Step>
-<Step title="Paste into main.py">
+<Step title="Adapt the snippet">
 <CodePython />
-</Step>
-<Step title="Run the snippet">
-```sh
-uv run main.py
-```
 </Step>

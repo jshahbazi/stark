@@ -115,7 +115,7 @@ fn messages_with_support(
 
 #[test]
 fn reasoning_effort_prepends_system_message_for_levels_model() {
-    use uzu::types::session::chat::ChatMessageList;
+    use stark::types::session::chat::ChatMessageList;
 
     let messages = messages_with_support(
         r#"{"messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}"#,
@@ -323,7 +323,7 @@ fn response_format_composes_with_sampling_options() {
     assert_eq!(stochastic.grammar, Some(Grammar::JsonAny {}));
     assert_eq!(
         stochastic.sampling_policy,
-        uzu::types::basic::SamplingPolicy::Custom {
+        stark::types::basic::SamplingPolicy::Custom {
             method: SamplingMethod::Stochastic {
                 temperature: Some(0.7),
                 top_k: Some(40),
@@ -339,7 +339,7 @@ fn response_format_composes_with_sampling_options() {
     assert_eq!(greedy.grammar, Some(Grammar::JsonAny {}));
     assert_eq!(
         greedy.sampling_policy,
-        uzu::types::basic::SamplingPolicy::Custom {
+        stark::types::basic::SamplingPolicy::Custom {
             method: SamplingMethod::Greedy {},
         }
     );
@@ -407,10 +407,10 @@ fn assistant_reasoning_content_round_trips_in_session_block_order() {
 #[test]
 fn prefix_match_ignores_tool_call_identifiers() {
     let assistant_call = |identifier: &str| {
-        ChatMessage::assistant().with_tool_call(uzu::types::basic::ToolCall {
+        ChatMessage::assistant().with_tool_call(stark::types::basic::ToolCall {
             identifier: Some(identifier.to_string()),
             name: "write".to_string(),
-            arguments: uzu::types::basic::Value {
+            arguments: stark::types::basic::Value {
                 json: r#"{"path":"/tmp/a"}"#.to_string(),
             },
         })
@@ -435,10 +435,10 @@ fn prefix_match_ignores_tool_call_identifiers() {
 #[test]
 fn prefix_match_treats_coerced_arguments_as_equal() {
     let assistant_call = |arguments: &str| {
-        ChatMessage::assistant().with_tool_call(uzu::types::basic::ToolCall {
+        ChatMessage::assistant().with_tool_call(stark::types::basic::ToolCall {
             identifier: Some("id".to_string()),
             name: "search".to_string(),
-            arguments: uzu::types::basic::Value {
+            arguments: stark::types::basic::Value {
                 json: arguments.to_string(),
             },
         })

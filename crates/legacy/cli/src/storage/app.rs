@@ -5,7 +5,7 @@ use futures_util::StreamExt;
 use ratatui::widgets::ListState;
 use shoji::types::model::{Model, ModelIdentifier};
 use tokio::{sync::Mutex as TokioMutex, task::JoinHandle};
-use uzu::{
+use stark::{
     engine::Engine,
     storage::{DownloadPhase, DownloadState},
 };

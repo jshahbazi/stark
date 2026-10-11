@@ -1,4 +1,4 @@
 ```toml
 [dependencies]
-uzu = { git = "https://github.com/trymirai/uzu", branch = "main", package = "uzu" }
+stark = { git = "https://github.com/jshahbazi/stark", branch = "main", package = "stark" }
 ```

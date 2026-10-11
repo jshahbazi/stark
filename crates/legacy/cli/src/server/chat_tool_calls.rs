@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use uzu::{
+use stark::{
     session::chat::normalize_tool_call_arguments,
     types::{
         basic::{ToolCall, ToolDescription, ToolFunction, ToolNamespace, Value, parse_lenient_json},

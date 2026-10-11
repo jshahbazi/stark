@@ -7,8 +7,8 @@ import {
     EngineConfig,
     SamplingMethodGreedy,
     SamplingPolicyCustom,
-    uzuToolFunction,
-} from '@trymirai/uzu';
+    starkToolFunction,
+} from '@jshahbazi/stark';
 import * as z from 'zod';
 
 
@@ -20,7 +20,7 @@ const Coordinate = z.object({
 type Coordinate = z.infer<typeof Coordinate>;
 
 
-const getCurrentLocation = uzuToolFunction({
+const getCurrentLocation = starkToolFunction({
     name: 'get_location',
     description: 'Return the current location in coordinates',
     parameters: z.object({}),
@@ -39,7 +39,7 @@ async function calculateCurrentTemperature({latitude, longitude}: Coordinate): P
     return 25;
 }
 
-const getCurrentTemperature = uzuToolFunction({
+const getCurrentTemperature = starkToolFunction({
     name: 'get_current_temperature',
     description: 'Return the temperature at the provided coordinates',
     parameters: Coordinate,

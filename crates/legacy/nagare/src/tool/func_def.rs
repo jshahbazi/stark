@@ -61,7 +61,7 @@ impl ToolDescriptor {
     }
 }
 
-/// Runtime surface of the `uzu_tool_function`/`uzu_tool_closure` expansions;
+/// Runtime surface of the `stark_tool_function`/`stark_tool_closure` expansions;
 /// public so generated code relies on ordinary API instead of hidden re-exports.
 pub fn parse_arguments(args: Value) -> Result<serde_json::Value, ErrorFuture> {
     Ok(serde_json::Value::try_from(args)?)

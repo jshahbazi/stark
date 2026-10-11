@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import SFSymbols
 import SwiftUI
-import Uzu
+import Stark
 
 #if canImport(UIKit)
     import UIKit

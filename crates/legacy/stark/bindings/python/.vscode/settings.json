@@ -1,0 +1,4 @@
+{
+  "python.defaultInterpreterPath": "${workspaceFolder}/crates/legacy/stark/bindings/python/.venv/bin/python",
+  "ruff.path": ["${workspaceFolder}/crates/legacy/stark/bindings/python/.venv/bin/ruff"]
+}

@@ -1,6 +1,6 @@
 import Foundation
 import Observation
-import Uzu
+import Stark
 
 @Observable
 final class ClassificationModel {

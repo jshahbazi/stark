@@ -1,12 +1,12 @@
 import SFSymbols
 import SwiftUI
-import Uzu
+import Stark
 
 struct ModelRowView: View, Equatable {
 
     // MARK: - Stored Properties
     let identifier: String
-    let model: Uzu.Model
+    let model: Stark.Model
     let state: DownloadState
     let isSelected: Bool
 

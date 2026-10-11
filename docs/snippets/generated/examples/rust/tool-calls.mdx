@@ -1,14 +1,14 @@
 ```rust
 use std::io::{self, Write};
 
-use nagare::tool::{func_def::ErrorFuture, uzu_tool_closure, uzu_tool_function};
+use nagare::tool::{func_def::ErrorFuture, stark_tool_closure, stark_tool_function};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use shoji::types::{
     basic::{SamplingMethod, SamplingPolicy},
     session::chat::{ChatConfig, ChatMessage, ChatReplyConfig},
 };
-use uzu::engine::{Engine, EngineConfig};
+use stark::engine::{Engine, EngineConfig};
 
 /// A geographic coordinate.
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -20,7 +20,7 @@ struct Coordinate {
 }
 
 /// Returns current location in coordinates
-#[uzu_tool_function]
+#[stark_tool_function]
 fn get_current_location() -> Result<Coordinate, ErrorFuture> {
     Ok(Coordinate {
         latitude: 51.5074,
@@ -42,7 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut session = engine.chat(model, ChatConfig::default()).await?;
     session.add_tool(get_current_location).await?;
     session
-        .add_tool(uzu_tool_closure! {
+        .add_tool(stark_tool_closure! {
             /// Returns temperature in provided location
             get_current_temperature: |
                 /// Latitude in decimal degrees.

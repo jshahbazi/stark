@@ -2,7 +2,7 @@ import Foundation
 import Observation
 import SFSymbols
 import SwiftUI
-import Uzu
+import Stark
 
 #if canImport(UIKit)
     import UIKit
@@ -452,7 +452,7 @@ struct ModelListView: View {
         [.installed, .installing, .paused, .notInstalled]
     }
     
-    private func models() -> [Uzu.Model] {
+    private func models() -> [Stark.Model] {
         engineWrapper.models.filter({ model in
             switch self.mode {
             case .manage:
@@ -469,9 +469,9 @@ struct ModelListView: View {
     }
 
     private typealias Grouping = (
-        cloud: [Uzu.Model],
-        local: [Uzu.Model],
-        modelByIdentifier: [String: Uzu.Model],
+        cloud: [Stark.Model],
+        local: [Stark.Model],
+        modelByIdentifier: [String: Stark.Model],
         bySection: [ModelSection: [String]]
     )
 
@@ -519,7 +519,7 @@ struct ModelListView: View {
 // MARK: - Cloud model row
 
 private struct CloudModelRow: View {
-    let model: Uzu.Model
+    let model: Stark.Model
     let isSelected: Bool
     @EnvironmentObject private var engineWrapper: EngineObservableWrapper
 

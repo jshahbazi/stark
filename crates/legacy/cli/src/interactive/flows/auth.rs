@@ -1,5 +1,5 @@
 use iocraft::prelude::*;
-use uzu::engine::config::{
+use stark::engine::config::{
     KEY_ANTHROPIC_API_KEY, KEY_BASETEN_API_KEY, KEY_GEMINI_API_KEY, KEY_HF_TOKEN, KEY_LOCAL_PATH, KEY_MIRAI_API_KEY,
     KEY_OPENAI_API_KEY, KEY_OPENROUTER_API_KEY, KEY_XAI_API_KEY,
 };

@@ -14,6 +14,11 @@ result
 # Rust
 /debug/
 /target/
+/models/
+/runtime/
+/test-artifacts/
+/artifacts/
+.venv/
 **/*.rs.bk
 
 # Python

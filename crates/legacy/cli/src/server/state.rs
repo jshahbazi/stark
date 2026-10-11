@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
-use uzu::session::chat::ChatSession;
+use stark::session::chat::ChatSession;
 
 use crate::common::thinking::ThinkingSupport;
 

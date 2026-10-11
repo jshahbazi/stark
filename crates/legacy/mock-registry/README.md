@@ -11,4 +11,4 @@
 - `Behavior` is a bitflag set for test scenarios such as corrupted bodies and throttled streaming.
 - Public APIs return the crate-local `Result<T>` and `Error` types from `error.rs`.
 
-The crate is intended for integration-style tests in `download-manager` and `uzu`, especially tests that need real HTTP URLs without calling external services.
+The crate is intended for integration-style tests in `download-manager` and `stark`, especially tests that need real HTTP URLs without calling external services.

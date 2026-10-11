@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "Uzu",
+    name: "Stark",
     platforms: [
         .iOS("26.4"),
         .macOS("26.4"),
         .macCatalyst("26.4"),
     ],
     products: [
-        .library(name: "Uzu", targets: ["Uzu"]),
+        .library(name: "Stark", targets: ["Stark"]),
         .executable(name: "examples", targets: ["Examples"]),
     ],
     dependencies: [
@@ -17,14 +17,15 @@ let package = Package(
     ],
     targets: [
         .binaryTarget(
-            name: "uzu",
-            url: "https://artifacts.trymirai.com/uzu-swift/releases/0.6.1.zip",
-            checksum: "4f41d33d98d54ad41bd44da3f4edb2df98b511d5f38c493ad1c091c82c2bc8e7"
+            name: "stark",
+            // Stark has no published Swift binary. Build this local artifact with
+            // `cargo tools build swift --targets macos` before consuming the package.
+            path: "crates/legacy/stark/bindings/swift/stark.xcframework"
         ),
         .target(
-            name: "Uzu",
-            dependencies: ["uzu", "UzuMetalIOSimulatorStubs"],
-            path: "crates/legacy/uzu/bindings/swift/Sources/Uzu",
+            name: "Stark",
+            dependencies: ["stark", "StarkMetalIOSimulatorStubs"],
+            path: "crates/legacy/stark/bindings/swift/Sources/Stark",
             linkerSettings: [
                 .linkedLibrary("c++"),
                 .linkedLibrary("compression"),
@@ -36,22 +37,22 @@ let package = Package(
             ]
         ),
         .target(
-            name: "UzuMetalIOSimulatorStubs",
-            path: "crates/legacy/uzu/bindings/swift/Sources/UzuMetalIOSimulatorStubs",
+            name: "StarkMetalIOSimulatorStubs",
+            path: "crates/legacy/stark/bindings/swift/Sources/StarkMetalIOSimulatorStubs",
             publicHeadersPath: "include"
         ),
         .executableTarget(
             name: "Examples",
             dependencies: [
-                "Uzu",
+                "Stark",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
-            path: "crates/legacy/uzu/bindings/swift/Sources/Examples"
+            path: "crates/legacy/stark/bindings/swift/Sources/Examples"
         ),
         .testTarget(
-            name: "UzuTests",
-            dependencies: ["Uzu"],
-            path: "crates/legacy/uzu/bindings/swift/Tests/UzuTests",
+            name: "StarkTests",
+            dependencies: ["Stark"],
+            path: "crates/legacy/stark/bindings/swift/Tests/StarkTests",
         ),
     ]
 )

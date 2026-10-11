@@ -5,7 +5,7 @@ use shoji::types::{
     basic::SamplingParameters,
     model::{Model, ModelIdentifier},
 };
-use uzu::storage::DownloadState;
+use stark::storage::DownloadState;
 
 use crate::{
     common::thinking::ThinkingSupport,

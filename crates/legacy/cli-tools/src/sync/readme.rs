@@ -113,7 +113,7 @@ impl SyncTask for ReadmeSyncTask {
         }
 
         let rendered = template.render(context! {
-            title => "uzu",
+            title => "Stark",
             version => workspace.workspace.package.version,
             image_url => metadata.image_url,
             badges => badges,

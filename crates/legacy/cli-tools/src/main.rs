@@ -11,7 +11,7 @@ use cli_tools::{
 };
 
 #[derive(Parser)]
-#[command(name = "uzu-tools", bin_name = "uzu-tools")]
+#[command(name = "stark-tools", bin_name = "stark-tools")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

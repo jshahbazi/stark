@@ -18,12 +18,13 @@ from prefect_flow_run_common import (
     PrefectLog,
     observe_flow_run,
     parse_flow_run,
-    print_live_log_line,
     ui_base_url_from_api_url,
     write_artifacts,
 )
 
 
+# These inherited upstream deployments are not configured for the Stark fork.
+# The calling GitHub workflow remains disabled.
 POOL_DEPLOYMENTS: dict[PoolName, str] = {
     PoolName.MACOS_A18_PRO: "run-benchmark-worker-flow/run-benchmark-a18-pro",
     PoolName.MACOS_M1: "run-benchmark-worker-flow/run-benchmark-m1",
@@ -116,14 +117,15 @@ def parse_benchmark_run_parameters(benchmark_args: tuple[str, ...]) -> dict[str,
     run_parser.add_argument("identifier")
     run_parser.add_argument("--task", required=True)
     run_parser.add_argument("--profile", required=True)
-    run_parser.add_argument("--uzu-branch", "--uzu-ref", dest="uzu_ref", default="main")
+    run_parser.add_argument("--stark-branch", "--stark-ref", "--uzu-branch", "--uzu-ref", dest="stark_ref", default="main")
 
     parsed_args = parser.parse_args(list(benchmark_args))
     return {
         "identifier": parsed_args.identifier,
         "task": parsed_args.task,
         "profile": parsed_args.profile,
-        "uzu_ref": parsed_args.uzu_ref,
+        # Preserve the inherited worker parameter until Stark deployments exist.
+        "uzu_ref": parsed_args.stark_ref,
     }
 
 
@@ -276,27 +278,10 @@ def parse_cli_args(argv: list[str] | None = None) -> CliConfig:
 
 
 def main(argv: list[str] | None = None) -> int:
-    config = parse_cli_args(argv)
-    client = PrefectApiClient(
-        api_url=config.api_url.rstrip("/"),
-        api_key=config.api_key,
-        ui_base_url=ui_base_url_from_api_url(config.api_url),
+    raise SystemExit(
+        "Stark Prefect dispatch is unsupported: inherited deployments operate on upstream infrastructure. "
+        "Configure fork-specific deployments before enabling this entry point."
     )
-    result = execute_benchmark_run(
-        client=client,
-        pool=config.pool,
-        benchmark_args=config.benchmark_args,
-        upload_metrics=config.upload_metrics,
-        ui_base_url=client.ui_base_url,
-        poll_interval_seconds=config.poll_interval_seconds,
-        timeout_seconds=config.timeout_seconds,
-        actor=config.actor,
-        triggering_actor=config.triggering_actor,
-        log_sink=print_live_log_line,
-    )
-    write_run_artifacts(config.output_dir, result)
-    print(build_summary_markdown(result))
-    return 0 if result.succeeded else 1
 
 
 if __name__ == "__main__":

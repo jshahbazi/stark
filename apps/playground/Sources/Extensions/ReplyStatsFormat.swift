@@ -1,5 +1,5 @@
 import Foundation
-import Uzu
+import Stark
 
 enum ReplyStatsFormat {
     static let placeholder = "—"

@@ -1,9 +1,3 @@
-<p align="center">
-  <picture>
-    <img alt="Mirai" src="{{ image_url }}" style="max-width: 100%;">
-  </picture>
-</p>
-
 {% for badge in badges %}{{ badge }} {% endfor %}
 
 # {{ title }}
@@ -33,7 +27,7 @@ Run the code below:
 {% endfor %}
 <br>
 
-Everything from model downloading to inference configuration is handled automatically. Refer to the [documentation](https://docs.trymirai.com) for details on how to customize each step of the process.
+These examples use the inherited high-level registry and inference API. See the [repository README](https://github.com/jshahbazi/stark) for the supported scoring scope and validation evidence.
 
 ## Examples
 
@@ -58,7 +52,7 @@ You can run any example via `cargo tools example` \<{% for language in languages
 {% endif %}{% endif %}{% endfor %}{% if has_multiple_languages %}
 ## Development
 
-`uzu` is a native Rust crate with bindings available for:
+`stark` is a native Rust crate with bindings available for:
 
 - `Swift` via [uniffi-rs](https://github.com/mozilla/uniffi-rs)
 - `Python` via [pyo3](https://github.com/PyO3/pyo3)
@@ -84,7 +78,7 @@ To unify cross-language development we introduce <code>cargo tools</code>:
 
 ## Model Format
 
-`uzu` uses its own model format. You can export a model yourself with [lalamo](https://github.com/trymirai/lalamo):
+Stark reads the inherited Uzu model format. You can export a model yourself with [lalamo](https://github.com/trymirai/lalamo):
 
 ```bash
 git clone https://github.com/trymirai/lalamo.git
@@ -95,7 +89,7 @@ uv run lalamo convert meta-llama/Llama-3.2-1B-Instruct
 
 ## CLI
 
-You can run `uzu` in CLI mode:
+You can run `stark` in CLI mode:
 
 ```bash
 cargo run --release -p cli
@@ -121,7 +115,7 @@ cargo run --release -p cli -- bench {MODEL_PATH} {TASK_PATH} {OUTPUT_PATH}
 
 ## Server
 
-You can also run `uzu` as an OpenAI-compatible HTTP server:
+You can also run `stark` as an OpenAI-compatible HTTP server:
 
 ```bash
 cargo run --release -p cli -- server --model trymirai/Qwen3.5-4B-M
@@ -152,7 +146,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## Troubleshooting
 
-If you experience any problems, please contact us via [Discord](https://discord.com/invite/trymirai) or [email](mailto:contact@getmirai.co).
+Report Stark problems in the [issue tracker](https://github.com/jshahbazi/stark/issues).
 
 ## License
 

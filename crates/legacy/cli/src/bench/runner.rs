@@ -6,7 +6,7 @@ use std::{
 use anyhow::{Context, Result};
 use shoji::types::model::{ModelFamily, ModelSource};
 use sysinfo::System;
-use uzu::{
+use stark::{
     engine::{Engine, EngineConfig},
     types::{
         basic::SamplingMethod,
@@ -14,7 +14,7 @@ use uzu::{
         session::chat::{ChatConfig, ChatReplyConfig, ChatReplyEnergy},
     },
 };
-use uzu_engine::{VERSION, data_type::DataType};
+use stark_engine::{VERSION, data_type::DataType};
 
 use crate::bench::{
     model::{BenchDevice, BenchResult, BenchTask},

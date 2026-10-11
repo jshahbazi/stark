@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, mpsc};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::Instrument;
-use uzu::{
+use stark::{
     session::chat::{ChatSession, ChatSessionStream, ChatSessionStreamChunk, UNPARSED_ARGUMENTS_KEY},
     types::{
         basic::{Grammar, ReasoningEffort, SamplingMethod},
@@ -712,7 +712,7 @@ async fn prepare_input(
     session: &ChatSession,
     mut messages: Vec<ChatMessage>,
     prefix_cache: bool,
-) -> Result<Vec<ChatMessage>, uzu::session::chat::ChatSessionError> {
+) -> Result<Vec<ChatMessage>, stark::session::chat::ChatSessionError> {
     if prefix_cache {
         let current = session.messages().await;
         if !current.is_empty() && messages.len() > current.len() && messages_have_prefix(&messages, &current) {

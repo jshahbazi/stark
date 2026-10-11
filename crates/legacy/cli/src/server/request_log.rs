@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use uzu::types::session::chat::ChatReplyStats;
+use stark::types::session::chat::ChatReplyStats;
 
 /// Per-request tracing: one event when the request arrives, one when it ends,
 /// correlated by a short tag derived from the request id.
