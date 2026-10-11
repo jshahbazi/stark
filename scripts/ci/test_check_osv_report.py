@@ -52,6 +52,37 @@ class ReportPolicyTests(unittest.TestCase):
         self.document["results"].pop()
         self.assert_invalid()
 
+    def test_full_report_accepts_valid_vcs_commit_metadata(self):
+        identity = self.document["results"][1]["packages"][0]["package"]
+        for commit in ("a" * 40, "A1" * 20):
+            with self.subTest(commit=commit):
+                identity["commit"] = commit
+                result = self.validate()
+                self.assertEqual((result["sources"], result["packages"], result["blocking"]), (3, 3, []))
+
+    def test_full_report_rejects_invalid_vcs_commit_metadata(self):
+        identity = self.document["results"][1]["packages"][0]["package"]
+        for commit in ("", "a" * 39, "a" * 41, "z" * 40, "a" * 40 + "\n", True, 40, None, ["a" * 40]):
+            with self.subTest(commit=commit):
+                identity["commit"] = commit
+                self.assert_invalid()
+
+    def test_full_report_rejects_unknown_package_identity_fields(self):
+        identity = self.document["results"][1]["packages"][0]["package"]
+        identity["commit"] = "a" * 40
+        identity["unexpected"] = "metadata"
+        self.assert_invalid()
+
+    def test_full_report_requires_identity_fields_when_commit_is_present(self):
+        baseline = copy.deepcopy(self.document)
+        for field in ("ecosystem", "name", "version"):
+            with self.subTest(field=field):
+                self.document = copy.deepcopy(baseline)
+                identity = self.document["results"][1]["packages"][0]["package"]
+                identity["commit"] = "a" * 40
+                identity.pop(field)
+                self.assert_invalid()
+
     def test_maintenance_notice_warns_but_unsound_and_unknown_fail(self):
         self.attach(self.advisory())
         self.assertEqual(len(self.validate()["maintenance"]), 1)

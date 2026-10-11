@@ -75,6 +75,8 @@ jobs:
             -L Cargo.lock \
             -L crates/legacy/download-manager/examples/wasm/Cargo.lock \
             -L tools/uv.lock \
+            -L tools/converter/uv.lock \
+            -L tools/converter/lalamo/uv.lock \
             -L crates/legacy/stark/bindings/python/uv.lock \
             -L crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \
             -L uv.lock:scripts/ci/check_repository.py.lock; then
@@ -90,6 +92,8 @@ jobs:
             --lockfile Cargo.lock \
             --lockfile crates/legacy/download-manager/examples/wasm/Cargo.lock \
             --lockfile tools/uv.lock \
+            --lockfile tools/converter/uv.lock \
+            --lockfile tools/converter/lalamo/uv.lock \
             --lockfile crates/legacy/stark/bindings/python/uv.lock \
             --lockfile crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \
             --lockfile scripts/ci/check_repository.py.lock

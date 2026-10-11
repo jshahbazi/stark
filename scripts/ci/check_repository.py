@@ -34,6 +34,8 @@ SCANNED_LOCKFILES = {
     "crates/legacy/stark/bindings/typescript/pnpm-lock.yaml",
     "scripts/ci/check_repository.py.lock",
     "tools/uv.lock",
+    "tools/converter/uv.lock",
+    "tools/converter/lalamo/uv.lock",
 }
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 

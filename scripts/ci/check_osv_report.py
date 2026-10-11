@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+!-]{0,127}$")
+GIT_COMMIT = re.compile(r"^[0-9A-Fa-f]{40}$")
 SCHEMA_VERSION = re.compile(r"^1\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$")
 TIMESTAMP = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$")
 PACKAGE_NAMES = {
@@ -72,7 +73,10 @@ def expected_sources(root: Path, lockfiles: list[str]) -> dict[Path, str]:
 
 def package_identity(package: object, ecosystem: str) -> tuple[str, str, str]:
     require(isinstance(package, dict))
-    require(set(package) == {"ecosystem", "name", "version"})
+    required = {"ecosystem", "name", "version"}
+    require(required <= set(package) <= required | {"commit"})
+    if "commit" in package:
+        require(isinstance(package["commit"], str) and GIT_COMMIT.fullmatch(package["commit"]) is not None)
     require(package["ecosystem"] == ecosystem)
     name, version = package["name"], package["version"]
     require(isinstance(name, str) and PACKAGE_NAMES[ecosystem].fullmatch(name) is not None)
