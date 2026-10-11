@@ -340,6 +340,50 @@ impl<B: Backend> TransformerLayer<B> {
         })
     }
 
+    /// This narrow path excludes sequence-mixing layer convolutions and shared
+    /// or ring KV caches. Other mixers continue through their ordinary encoder.
+    #[cfg(feature = "scoring-last-layer-pruning")]
+    pub(crate) fn supports_scoring_cache_only(&self) -> bool {
+        use crate::encodable_block::mixer::attention::Attention;
+        use std::any::Any;
+
+        self.mixer_conv.is_none()
+            && self.kv_source_layer_index.is_none()
+            && (self.mixer.as_ref() as &dyn Any)
+                .downcast_ref::<Attention<B>>()
+                .is_some_and(Attention::supports_scoring_cache_only)
+    }
+
+    #[cfg(feature = "scoring-last-layer-pruning")]
+    pub(crate) fn encode_scoring_cache_only(
+        &self,
+        input: B::ScratchBuffer,
+        mut shortcut: impl BufferMut<Backend = B>,
+        precalculated_rope: Option<&PrecalculatedRoPE<B>>,
+        batch_dim: &BatchTopology,
+        state: &mut dyn MixerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<(), B::Error> {
+        use crate::encodable_block::mixer::attention::{Attention, AttentionState};
+        use std::any::Any;
+
+        assert!(self.supports_scoring_cache_only(), "unsupported scoring cache-only layer");
+        assert!(batch_dim.is_flat(), "scoring cache-only requires flat topology");
+        let attention = (self.mixer.as_ref() as &dyn Any).downcast_ref::<Attention<B>>().unwrap();
+        let state = (state as &mut dyn Any).downcast_mut::<AttentionState<B>>().unwrap();
+        command_buffer.push_debug_group("scoring final-layer KV only");
+        let hidden = if let Some(pre_mixer_norm) = &self.pre_mixer_norm {
+            pre_mixer_norm.encode(&input, 0, batch_dim.size(), Some(shortcut.reborrow()), command_buffer)?
+        } else {
+            assert_eq!(self.layer_index, 0);
+            command_buffer.encode_copy(&input, shortcut.reborrow());
+            input
+        };
+        attention.encode_scoring_cache_only(hidden, precalculated_rope, batch_dim, state, command_buffer)?;
+        command_buffer.pop_debug_group();
+        Ok(())
+    }
+
     pub fn encode(
         &self,
         input: B::ScratchBuffer,

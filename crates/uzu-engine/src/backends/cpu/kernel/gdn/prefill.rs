@@ -22,6 +22,7 @@ pub fn delta_net_prefill<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
     value_dim: u32,
     suffix_len: u32,
     #[allow(unused)] num_dv_groups: u32,
+    qkv_stride: u32,
 ) {
     let num_v_heads = num_v_heads as usize;
     let num_k_heads = num_k_heads as usize;
@@ -29,8 +30,6 @@ pub fn delta_net_prefill<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
     let head_v_dim = head_v_dim as usize;
     let key_dim = key_dim as usize;
     let value_dim = value_dim as usize;
-    let conv_dim = 2 * key_dim + value_dim;
-    let total_proj_dim = conv_dim + value_dim + num_v_heads + num_v_heads;
     let suffix_len = suffix_len as usize;
     let groups_per_head = num_v_heads / num_k_heads;
 
@@ -53,7 +52,7 @@ pub fn delta_net_prefill<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
                 }
 
                 let v_val = unsafe {
-                    (*in_proj.add(token * total_proj_dim + 2 * key_dim + hv * head_v_dim + i)).to_f32().unwrap()
+                    (*in_proj.add(token * qkv_stride as usize + 2 * key_dim + hv * head_v_dim + i)).to_f32().unwrap()
                 };
                 let delta = beta * (v_val - kv_mem);
 

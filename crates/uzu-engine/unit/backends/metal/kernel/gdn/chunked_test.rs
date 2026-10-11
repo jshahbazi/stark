@@ -61,11 +61,21 @@ fn run_prefill<T: ArrayElement>(
     context: &MetalContext,
     case: &TestCase,
     mode: PrefillMode,
+    compact: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let in_proj_data: Vec<T> = case.in_proj.iter().copied().map(|value| cast(value).unwrap()).collect();
     let mut command_buffer = context.create_command_buffer(None, None).expect("command buffer");
     let mut in_proj = command_buffer.allocate_scratch(size_of_val(in_proj_data.as_slice())).unwrap();
     in_proj.copyin(&in_proj_data);
+    let qkv_stride = if compact {
+        2 * case.key_dim + case.value_dim
+    } else {
+        case.total_proj_dim
+    };
+    let qkv_data: Vec<T> =
+        in_proj_data.chunks_exact(case.total_proj_dim).flat_map(|row| row[..qkv_stride].iter().copied()).collect();
+    let mut qkv = command_buffer.allocate_scratch(size_of_val(qkv_data.as_slice())).unwrap();
+    qkv.copyin(&qkv_data);
     let a_log = create_buffer_with_data::<Metal, f32>(context, &case.a_log);
     let dt_bias = create_buffer_with_data::<Metal, f32>(context, &case.dt_bias);
     let norm_weight = create_buffer_with_data::<Metal, f32>(context, &case.norm_weight);
@@ -90,6 +100,7 @@ fn run_prefill<T: ArrayElement>(
             )
             .expect("prep")
             .encode(
+                &qkv,
                 &in_proj,
                 &a_log,
                 &dt_bias,
@@ -103,6 +114,7 @@ fn run_prefill<T: ArrayElement>(
                 case.key_dim as u32,
                 case.value_dim as u32,
                 case.suffix_len as u32,
+                qkv_stride as u32,
                 &mut command_buffer,
             );
             <BackendKernels<Metal> as Kernels>::DeltaNetPrefillKernel::new(context, T::data_type(), HEAD_K_DIM as u32)
@@ -112,7 +124,7 @@ fn run_prefill<T: ArrayElement>(
                     &k,
                     &beta,
                     &decay,
-                    &in_proj,
+                    &qkv,
                     &mut state,
                     &mut out,
                     NUM_V_HEADS as u32,
@@ -122,6 +134,7 @@ fn run_prefill<T: ArrayElement>(
                     case.value_dim as u32,
                     case.suffix_len as u32,
                     HEAD_V_DIM.div_ceil(16) as u32,
+                    qkv_stride as u32,
                     &mut command_buffer,
                 );
         },
@@ -131,7 +144,9 @@ fn run_prefill<T: ArrayElement>(
                 .expect("chunked unsupported")
                 .encode(
                     DeltaNetChunkedPrefillArgs {
-                        in_projected: &in_proj,
+                        in_projected: &qkv,
+                        controls: &in_proj,
+                        qkv_stride: qkv_stride as u32,
                         a_log: &a_log,
                         dt_bias: &dt_bias,
                         ssm_state: &mut state,
@@ -184,8 +199,8 @@ fn chunked_prefill_matches_recurrent_prefill() {
 
     for suffix_len in [CHUNK_SIZE - 1, CHUNK_SIZE, CHUNK_SIZE + 1, CHUNK_SIZE * 2 + 1] {
         let case = test_case(suffix_len as usize);
-        let (recurrent_out, recurrent_state) = run_prefill::<bf16>(&context, &case, PrefillMode::Recurrent);
-        let (chunked_out, chunked_state) = run_prefill::<bf16>(&context, &case, PrefillMode::Chunked);
+        let (recurrent_out, recurrent_state) = run_prefill::<bf16>(&context, &case, PrefillMode::Recurrent, false);
+        let (chunked_out, chunked_state) = run_prefill::<bf16>(&context, &case, PrefillMode::Chunked, false);
 
         assert!(
             is_close::default().abs_tol(5e-3).rel_tol(1e-3).all_close(chunked_out.iter().copied(), recurrent_out),
@@ -195,5 +210,32 @@ fn chunked_prefill_matches_recurrent_prefill() {
             is_close::default().abs_tol(2e-4).rel_tol(1e-3).all_close(chunked_state.iter().copied(), recurrent_state),
             "chunked state differs at T={suffix_len}"
         );
+    }
+}
+
+#[uzu_test]
+fn compact_projection_preserves_prefill_bits() {
+    let context = <Metal as Backend>::Context::new().expect("metal context");
+    let chunked_supported =
+        <BackendKernels<Metal> as Kernels>::DeltaNetChunkedPrefill::new(&context, DataType::BF16, HEAD_K_DIM as u32)
+            .expect("chunked")
+            .is_some();
+    for suffix_len in [2, 3, 63, 64, 65, 255, 256, 257, 1023, 1024] {
+        let case = test_case(suffix_len);
+        for mode in [PrefillMode::Recurrent, PrefillMode::Chunked] {
+            if matches!(mode, PrefillMode::Chunked) && !chunked_supported {
+                continue;
+            }
+            let (full_out, full_state) = run_prefill::<bf16>(&context, &case, mode, false);
+            let (compact_out, compact_state) = run_prefill::<bf16>(&context, &case, mode, true);
+            assert!(
+                full_out.iter().zip(&compact_out).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "compact output differs at T={suffix_len}"
+            );
+            assert!(
+                full_state.iter().zip(&compact_state).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "compact state differs at T={suffix_len}"
+            );
+        }
     }
 }

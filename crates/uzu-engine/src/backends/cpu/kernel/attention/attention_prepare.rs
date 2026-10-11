@@ -31,6 +31,74 @@ fn apply_rope<ElementT: ArrayElement + Float>(
     ElementT::from(input * cos_val + signed_paired * sin_val).unwrap()
 }
 
+/// KV-only preparation of full packed QKVG, never tightly packed appended KV.
+#[kernel(AttentionPrepareKVOnly)]
+#[variants(ElementT, bf16)]
+#[variants(RopeT, f32)]
+pub fn attention_prepare_kv_only<ElementT: ArrayElement + Float, RopeT: ArrayElement + Float>(
+    qkvg: *const ElementT,
+    keys: *mut ElementT,
+    values: *mut ElementT,
+    #[optional(has_rope)] cosines: Option<*const RopeT>,
+    #[optional(has_rope)] sines: Option<*const RopeT>,
+    num_q_heads: u32,
+    num_kv_heads: u32,
+    head_dim: u32,
+    #[optional(has_rope)] rope_dim: Option<u32>,
+    kv_token_offset: u32,
+    input_row_stride: u32,
+    batch_dim: u32,
+    #[specialize] has_rope: bool,
+) {
+    assert!(num_kv_heads > 0, "KV-only prepare requires nonzero KV heads");
+    assert!(head_dim > 0, "KV-only prepare requires nonzero head_dim");
+    assert_eq!(cosines.is_some(), has_rope, "KV-only prepare cosines presence mismatch");
+    assert_eq!(sines.is_some(), has_rope, "KV-only prepare sines presence mismatch");
+    assert_eq!(rope_dim.is_some(), has_rope, "KV-only prepare rope_dim presence mismatch");
+    let (cosines, sines, rope_dim) = if let (Some(cosines), Some(sines), Some(rope_dim)) = (cosines, sines, rope_dim) {
+        assert!(rope_dim > 0 && rope_dim <= head_dim && rope_dim.is_multiple_of(2), "invalid KV-only RoPE dimension");
+        (cosines, sines, rope_dim as usize)
+    } else {
+        (std::ptr::null(), std::ptr::null(), 0)
+    };
+    let num_q_heads = num_q_heads as usize;
+    let num_kv_heads = num_kv_heads as usize;
+    let head_dim = head_dim as usize;
+    let batch_dim = batch_dim as usize;
+    let input_row_stride = input_row_stride as usize;
+    let kv_token_offset = kv_token_offset as usize;
+    let total_heads = num_q_heads + 2 * num_kv_heads;
+    assert!(input_row_stride >= total_heads * head_dim, "KV-only prepare row stride is too small");
+
+    for batch_idx in 0..batch_dim {
+        for head_idx in num_q_heads..total_heads {
+            let qkvg_head = unsafe { qkvg.add(batch_idx * input_row_stride + head_idx * head_dim) };
+            let is_key = head_idx < num_q_heads + num_kv_heads;
+            for head_dim_idx in 0..head_dim {
+                let mut element = unsafe { *qkvg_head.add(head_dim_idx) };
+                if has_rope && head_dim_idx < rope_dim && is_key {
+                    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+                }
+                if is_key {
+                    let key_offset = (kv_token_offset + batch_idx) * num_kv_heads * head_dim
+                        + (head_idx - num_q_heads) * head_dim
+                        + head_dim_idx;
+                    unsafe {
+                        *keys.add(key_offset) = element;
+                    }
+                } else {
+                    let value_offset = (kv_token_offset + batch_idx) * num_kv_heads * head_dim
+                        + (head_idx - num_q_heads - num_kv_heads) * head_dim
+                        + head_dim_idx;
+                    unsafe {
+                        *values.add(value_offset) = element;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[kernel(AttentionPrepare)]
 #[variants(ElementT, bf16)]
 #[variants(RopeT, f32)]

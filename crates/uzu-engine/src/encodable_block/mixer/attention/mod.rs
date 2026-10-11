@@ -1,6 +1,9 @@
 use derive_more::Debug;
 use thiserror::Error;
 
+#[cfg(feature = "attention-kv-only")]
+use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
+
 use crate::{
     backends::common::{
         Backend, CommandBuffer, CommandBufferEncoding, Kernels,
@@ -42,6 +45,8 @@ pub struct Attention<B: Backend> {
     projection_dim: u32,
     projection: LinearProjection<B>,
     prepare: <B::Kernels as Kernels>::AttentionPrepareKernel,
+    #[cfg(feature = "attention-kv-only")]
+    prepare_kv_only: Option<<B::Kernels as Kernels>::AttentionPrepareKVOnlyKernel>,
     sinks: Option<B::GlobalBuffer>,
     kernel: <B::Kernels as Kernels>::AttentionKernel,
     gate_kernel: Option<<B::Kernels as Kernels>::SigmoidGateKernel>,
@@ -141,6 +146,19 @@ impl<B: Backend> Attention<B> {
         let ring_capacity = sliding_window_size;
         let is_kv_cache_ring = ring_capacity.is_some();
 
+        #[cfg(feature = "attention-kv-only")]
+        let prepare_kv_only = (!is_kv_sharing && !is_kv_cache_ring)
+            .then(|| {
+                <B::Kernels as Kernels>::AttentionPrepareKVOnlyKernel::new(
+                    context,
+                    data_type,
+                    DataType::F32,
+                    rope_config.is_some(),
+                )
+            })
+            .transpose()
+            .map_err(AttentionNewError::Backend)?;
+
         let kernel = <B::Kernels as Kernels>::AttentionKernel::new(
             context,
             AttentionKernelConfig {
@@ -186,6 +204,8 @@ impl<B: Backend> Attention<B> {
                     norm: qkv_norm,
                 },
                 prepare,
+                #[cfg(feature = "attention-kv-only")]
+                prepare_kv_only,
                 sinks,
                 kernel,
                 gate_kernel,

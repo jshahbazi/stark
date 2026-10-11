@@ -11,6 +11,7 @@ use crate::array::ArrayElement;
 #[variants(HEAD_K_DIM, 128)]
 pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float, const HEAD_K_DIM: u32>(
     in_proj: *const T,
+    controls: *const T,
     a_log: *const f32,
     dt_bias: *const f32,
     q_norm_out: *mut QKT,
@@ -23,6 +24,7 @@ pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float
     key_dim: u32,
     value_dim: u32,
     suffix_len: u32,
+    qkv_stride: u32,
     #[specialize] write_log_decay: bool,
     #[specialize] write_compact_v: bool,
 ) {
@@ -39,7 +41,8 @@ pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float
     let groups_per_head = num_v_heads / num_k_heads;
 
     for token in 0..suffix_len {
-        let tok_offset = token * total_proj_dim;
+        let tok_offset = token * qkv_stride as usize;
+        let control_offset = token * total_proj_dim;
 
         if let Some(compact_v_out) = compact_v_out {
             unsafe {
@@ -83,13 +86,14 @@ pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float
             for group in 0..groups_per_head {
                 let hv = hk * groups_per_head + group;
 
-                let beta_raw = unsafe { (*in_proj.add(tok_offset + conv_dim + value_dim + hv)).to_f32().unwrap() };
+                let beta_raw = unsafe { (*controls.add(control_offset + conv_dim + value_dim + hv)).to_f32().unwrap() };
                 let beta = 1.0 / (1.0 + (-beta_raw).exp());
 
                 let a_log_val = unsafe { *a_log.add(hv) };
                 let dt_bias_val = unsafe { *dt_bias.add(hv) };
-                let a_raw =
-                    unsafe { (*in_proj.add(tok_offset + conv_dim + value_dim + num_v_heads + hv)).to_f32().unwrap() };
+                let a_raw = unsafe {
+                    (*controls.add(control_offset + conv_dim + value_dim + num_v_heads + hv)).to_f32().unwrap()
+                };
                 let sp_in = a_raw + dt_bias_val;
                 let sp = if sp_in > 20.0 {
                     sp_in

@@ -30,6 +30,7 @@ PUBLIC KERNEL(DeltaNetPrefill)(
     constant const uint& value_dim,
     constant const uint& suffix_len,
     constant const uint& num_dv_groups,
+    constant const uint& qkv_stride,
     const uint hv_idx GROUPS(num_v_heads),
     const uint dv_group GROUPS(num_dv_groups),
     const uint tid THREADS(PREFILL_THREADS)
@@ -45,8 +46,6 @@ PUBLIC KERNEL(DeltaNetPrefill)(
   const uint dv_idx = (dv_group * NUM_SG + dv_local) * DV_PER_SIMDGROUP;
 
   const uint hk = hv_idx / (num_v_heads / num_k_heads);
-  const uint conv_dim = 2 * key_dim + value_dim;
-  const uint total_proj_dim = conv_dim + value_dim + num_v_heads + num_v_heads;
   const uint dk_base = lane * ELEMS;
 
   device const float* q_ptr = q_norm + hk * HEAD_K_DIM + dk_base;
@@ -99,7 +98,7 @@ PUBLIC KERNEL(DeltaNetPrefill)(
     k_ptr += key_dim;
     beta_ptr += num_v_heads;
     decay_ptr += num_v_heads;
-    v_row += total_proj_dim;
+    v_row += qkv_stride;
     out_row += value_dim;
   }
 

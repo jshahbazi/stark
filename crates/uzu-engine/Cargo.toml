@@ -15,7 +15,21 @@ workspace = true
 [features]
 default = ["cpu", "metal", "grammar"]
 
+# Experimental scoring optimization. An encoded state must be discarded if its
+# command buffer is abandoned or fails; initialization is ordered on first encode.
+deferred-state-init = []
+
+# Experimental exact-scoring-only pruning. Ordinary generation never enables
+# the per-state flag, even when this feature is built into the engine.
+scoring-last-layer-pruning = []
+
+# Experimental packed-layout KV-only work in eligible cache-only final layers.
+attention-kv-only = ["scoring-last-layer-pruning"]
+
 cpu = [] # TODO: move libm here
+
+# Experimental compact convolved QKV; original gate/control projection is retained.
+compact-delta-conv = ["direct-delta-conv"]
 
 metal = [
     "dep:rayon",
@@ -31,6 +45,12 @@ metal = [
 ]
 
 grammar = ["dep:xgrammar", "dep:schemars"]
+
+# Experimental exact-arithmetic removal of padded DeltaNet convolution tokens.
+direct-delta-conv = []
+
+# Experimental bounded immutable CPU RoPE reuse; GPU arithmetic is unchanged.
+rope-cache = []
 
 [build-dependencies]
 anyhow.workspace = true

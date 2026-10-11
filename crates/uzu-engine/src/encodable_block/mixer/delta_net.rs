@@ -1,11 +1,13 @@
 use derive_more::Debug;
 use thiserror::Error;
 
+#[cfg(feature = "direct-delta-conv")]
+use crate::backends::common::kernel::DeltaNetConvDirectKernel;
+
 use crate::{
     array::size_for_shape,
     backends::common::{
-        Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable,
-        CommandBufferPending, Context, Kernels,
+        Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, Context, Kernels,
         kernel::{
             Conv1dPackKernel, ConvTreeScanKernel, DeltaNetConvScanKernel, DeltaNetConvUpdateKernel,
             DeltaNetNormGateKernel, DeltaNetPrefillKernel, DeltaNetPrefillPrepKernel, DeltaNetUpdateKernel,
@@ -29,6 +31,9 @@ use crate::{
     utils::maybe_mut::MaybeMut,
 };
 
+#[cfg(not(feature = "deferred-state-init"))]
+use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
+
 pub(crate) mod tree_verify;
 
 const INNER_DATA_TYPE: DataType = DataType::F32;
@@ -51,6 +56,8 @@ pub struct DeltaNetState<B: Backend> {
     conv_state: B::GlobalBuffer,
     ssm_state: B::GlobalBuffer,
     suffix_status: Option<DeltaNetSuffixStatus<B>>,
+    #[cfg(feature = "deferred-state-init")]
+    needs_zero_initialization: bool,
     state_advance: <B::Kernels as Kernels>::StateAdvanceKernel,
 }
 
@@ -130,6 +137,8 @@ pub struct DeltaNet<B: Backend> {
     conv_update: <B::Kernels as Kernels>::DeltaNetConvUpdateKernel,
     conv_pack: <B::Kernels as Kernels>::Conv1dPackKernel,
     conv_scan: <B::Kernels as Kernels>::DeltaNetConvScanKernel,
+    #[cfg(feature = "direct-delta-conv")]
+    conv_direct: <B::Kernels as Kernels>::DeltaNetConvDirectKernel,
     conv_tree_scan: <B::Kernels as Kernels>::ConvTreeScanKernel,
     a_log: B::GlobalBuffer,
     dt_bias: B::GlobalBuffer,
@@ -218,6 +227,10 @@ impl<B: Backend> DeltaNet<B> {
             .map_err(DeltaNetNewError::Backend)?;
         let conv_scan =
             <B::Kernels as Kernels>::DeltaNetConvScanKernel::new(context, outer_data_type, conv_config.has_biases)
+                .map_err(DeltaNetNewError::Backend)?;
+        #[cfg(feature = "direct-delta-conv")]
+        let conv_direct =
+            <B::Kernels as Kernels>::DeltaNetConvDirectKernel::new(context, outer_data_type, conv_config.has_biases)
                 .map_err(DeltaNetNewError::Backend)?;
         let conv_tree_scan = <B::Kernels as Kernels>::ConvTreeScanKernel::new(
             context,
@@ -309,6 +322,8 @@ impl<B: Backend> DeltaNet<B> {
                 conv_update,
                 conv_pack,
                 conv_scan,
+                #[cfg(feature = "direct-delta-conv")]
+                conv_direct,
                 conv_tree_scan,
                 a_log,
                 dt_bias,
@@ -366,6 +381,7 @@ impl<B: Backend> DeltaNet<B> {
 
         self.delta_net_tree_prep.encode(
             &tree_projected,
+            &tree_projected,
             &self.a_log,
             &self.dt_bias,
             &mut q,
@@ -378,6 +394,7 @@ impl<B: Backend> DeltaNet<B> {
             self.key_dim,
             self.value_dim,
             tree_size,
+            self.total_proj_dim,
             command_buffer,
         );
 
@@ -435,16 +452,22 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
         _max_context_length: Option<u32>,
         context: &B::Context,
     ) -> Result<Box<dyn MixerState<B>>, B::Error> {
-        let mut conv_state =
+        let conv_state =
             context.create_buffer(size_for_shape(&[self.conv_dim, self.kernel_size - 1], INNER_DATA_TYPE))?;
 
-        let mut ssm_state = context
+        let ssm_state = context
             .create_buffer(size_for_shape(&[self.num_heads, self.value_head_dim, self.head_dim], INNER_DATA_TYPE))?;
 
-        let mut zero_command_buffer = context.create_command_buffer(None, None)?;
-        zero_command_buffer.encode_fill(&mut conv_state, 0);
-        zero_command_buffer.encode_fill(&mut ssm_state, 0);
-        zero_command_buffer.end_encoding().submit().wait_until_completed()?;
+        #[cfg(not(feature = "deferred-state-init"))]
+        let (conv_state, ssm_state) = {
+            let mut conv_state = conv_state;
+            let mut ssm_state = ssm_state;
+            let mut zero_command_buffer = context.create_command_buffer(None, None)?;
+            zero_command_buffer.encode_fill(&mut conv_state, 0);
+            zero_command_buffer.encode_fill(&mut ssm_state, 0);
+            zero_command_buffer.end_encoding().submit().wait_until_completed()?;
+            (conv_state, ssm_state)
+        };
 
         let state_advance = <B::Kernels as Kernels>::StateAdvanceKernel::new(
             context,
@@ -458,6 +481,8 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
             conv_state,
             ssm_state,
             suffix_status: None,
+            #[cfg(feature = "deferred-state-init")]
+            needs_zero_initialization: true,
             state_advance,
         }))
     }
@@ -481,6 +506,20 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
         };
 
         assert!(state.suffix_status.is_none(), "delta net called with state with an unaccepted suffix");
+
+        #[cfg(feature = "deferred-state-init")]
+        if state.needs_zero_initialization {
+            // Order initialization before every state consumer, including tree
+            // verification. Later chunks in this command buffer must preserve
+            // accumulated state, so clear the flag after encoding both fills.
+            // This flag records encoding, not GPU completion. Discard this state
+            // if encoding/submission fails or the command buffer is abandoned.
+            // The isolated scorer owns fresh state until completion and drops
+            // it on every error; this feature does not enable state reuse.
+            command_buffer.encode_fill(&mut state.conv_state, 0);
+            command_buffer.encode_fill(&mut state.ssm_state, 0);
+            state.needs_zero_initialization = false;
+        }
 
         let mut in_projected = self.in_projection.encode(hidden, batch_dim.size(), command_buffer)?;
 
@@ -522,38 +561,88 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                 command_buffer,
             );
         } else {
-            let mut padded = command_buffer.allocate_scratch_for_shape(
-                &[batch_dim.size() + self.kernel_size - 1, self.total_proj_dim],
-                INNER_DATA_TYPE,
-            )?;
-            self.conv_pack.encode(
-                &state.conv_state,
-                &in_projected,
-                &mut padded,
-                self.kernel_size - 1,
-                self.total_proj_dim,
-                batch_dim.size(),
-                self.conv_dim,
-                command_buffer,
-            );
-            self.conv_scan.encode(
-                &padded,
-                &self.conv_weight,
-                self.conv_bias.as_ref(),
-                &mut in_projected,
-                &mut state.conv_state,
-                batch_dim.size(),
-                self.kernel_size,
-                self.total_proj_dim,
-                self.kernel_size - 1,
-                self.conv_dim,
-                self.total_proj_dim,
-                command_buffer,
-            );
+            #[cfg(feature = "compact-delta-conv")]
+            let qkv_stride = self.conv_dim;
+            #[cfg(not(feature = "compact-delta-conv"))]
+            let qkv_stride = self.total_proj_dim;
+            // Keep the original gate/control channels without copying them.
+            // The pool remains owned by the command/pending submission.
+            #[cfg(feature = "compact-delta-conv")]
+            let controls;
+            #[cfg(feature = "direct-delta-conv")]
+            {
+                // Preserve immutable original samples until every output has
+                // been encoded. A history snapshot prevents cross-thread races
+                // between early-token reads and next-state writes.
+                let mut history = command_buffer.allocate_scratch(state.conv_state.size())?;
+                command_buffer.encode_copy(&state.conv_state, &mut history);
+                #[cfg(feature = "compact-delta-conv")]
+                let mut convolved =
+                    command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), qkv_stride], self.outer_data_type)?;
+                #[cfg(not(feature = "compact-delta-conv"))]
+                let mut convolved = command_buffer.allocate_scratch(in_projected.size())?;
+                self.conv_direct.encode(
+                    &in_projected,
+                    &history,
+                    &self.conv_weight,
+                    self.conv_bias.as_ref(),
+                    &mut convolved,
+                    &mut state.conv_state,
+                    batch_dim.size(),
+                    self.kernel_size,
+                    self.total_proj_dim,
+                    qkv_stride,
+                    self.kernel_size - 1,
+                    self.conv_dim,
+                    command_buffer,
+                );
+                #[cfg(feature = "compact-delta-conv")]
+                {
+                    controls = in_projected;
+                }
+                in_projected = convolved;
+            }
+            #[cfg(not(feature = "direct-delta-conv"))]
+            {
+                let mut padded = command_buffer.allocate_scratch_for_shape(
+                    &[batch_dim.size() + self.kernel_size - 1, self.total_proj_dim],
+                    INNER_DATA_TYPE,
+                )?;
+                self.conv_pack.encode(
+                    &state.conv_state,
+                    &in_projected,
+                    &mut padded,
+                    self.kernel_size - 1,
+                    self.total_proj_dim,
+                    batch_dim.size(),
+                    self.conv_dim,
+                    command_buffer,
+                );
+                self.conv_scan.encode(
+                    &padded,
+                    &self.conv_weight,
+                    self.conv_bias.as_ref(),
+                    &mut in_projected,
+                    &mut state.conv_state,
+                    batch_dim.size(),
+                    self.kernel_size,
+                    self.total_proj_dim,
+                    self.kernel_size - 1,
+                    self.conv_dim,
+                    self.total_proj_dim,
+                    command_buffer,
+                );
+            }
+            #[cfg(feature = "compact-delta-conv")]
+            let controls = &controls;
+            #[cfg(not(feature = "compact-delta-conv"))]
+            let controls = &in_projected;
             if let Some(chunked) = self.chunked.as_ref().filter(|chunked| chunked.should_use(batch_dim.size())) {
                 chunked.encode(
                     DeltaNetChunkedPrefillArgs {
                         in_projected: &in_projected,
+                        controls,
+                        qkv_stride,
                         a_log: &self.a_log,
                         dt_bias: &self.dt_bias,
                         ssm_state: &mut state.ssm_state,
@@ -578,6 +667,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), self.num_heads], INNER_DATA_TYPE)?;
                 self.delta_net_prefill_prep.encode(
                     &in_projected,
+                    controls,
                     &self.a_log,
                     &self.dt_bias,
                     &mut prep_q_norm,
@@ -590,6 +680,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     self.key_dim,
                     self.value_dim,
                     batch_dim.size(),
+                    qkv_stride,
                     command_buffer,
                 );
                 self.delta_net_prefill.encode(
@@ -607,12 +698,13 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     self.value_dim,
                     batch_dim.size(),
                     self.value_head_dim.div_ceil(16),
+                    qkv_stride,
                     command_buffer,
                 );
             }
             self.delta_net_norm_gate.encode(
                 &mut delta_output,
-                &in_projected,
+                controls,
                 &self.norm_weight,
                 self.num_heads,
                 self.value_head_dim,

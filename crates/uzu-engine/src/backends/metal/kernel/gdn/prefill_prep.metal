@@ -11,6 +11,7 @@ VARIANTS(QKT, float, bfloat)
 VARIANTS(HEAD_K_DIM, 128)
 PUBLIC KERNEL(DeltaNetPrefillPrep)(
     device const T* in_proj,
+    device const T* controls,
     device const float* a_log,
     device const float* dt_bias,
     device QKT* q_norm_out,
@@ -23,6 +24,7 @@ PUBLIC KERNEL(DeltaNetPrefillPrep)(
     constant const uint& key_dim,
     constant const uint& value_dim,
     constant const uint& suffix_len,
+    constant const uint& qkv_stride,
     const uint token_idx GROUPS(suffix_len),
     const uint hk_idx GROUPS(num_k_heads),
     const bool write_log_decay SPECIALIZE,
@@ -36,7 +38,8 @@ PUBLIC KERNEL(DeltaNetPrefillPrep)(
   const uint total_proj_dim = conv_dim + value_dim + num_v_heads + num_v_heads;
   const uint groups_per_head = num_v_heads / num_k_heads;
 
-  const uint tok_offset = token_idx * total_proj_dim;
+  const uint tok_offset = token_idx * qkv_stride;
+  const uint control_offset = token_idx * total_proj_dim;
   const uint q_base = tok_offset + hk_idx * HEAD_K_DIM;
   const uint k_base = tok_offset + key_dim + hk_idx * HEAD_K_DIM;
 
@@ -66,8 +69,8 @@ PUBLIC KERNEL(DeltaNetPrefillPrep)(
 
   for (uint group = lane; group < groups_per_head; group += METAL_SIMD_SIZE) {
     const uint hv = hk_idx * groups_per_head + group;
-    const float beta_raw = float(in_proj[tok_offset + conv_dim + value_dim + hv]);
-    const float a_raw = float(in_proj[tok_offset + conv_dim + value_dim + num_v_heads + hv]);
+    const float beta_raw = float(controls[control_offset + conv_dim + value_dim + hv]);
+    const float a_raw = float(controls[control_offset + conv_dim + value_dim + num_v_heads + hv]);
     const float log_decay = -fast::exp(a_log[hv]) * activate_softplus(a_raw + dt_bias[hv]);
 
     beta_out[token_idx * num_v_heads + hv] = 1.0f / (1.0f + fast::exp(-beta_raw));

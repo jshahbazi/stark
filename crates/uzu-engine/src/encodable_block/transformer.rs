@@ -27,6 +27,8 @@ enum TransformerLayerStateType<B: Backend> {
 pub struct TransformerState<B: Backend> {
     layer_states: Box<[TransformerLayerStateType<B>]>,
     context_length: u32,
+    #[cfg(feature = "scoring-last-layer-pruning")]
+    scoring_last_layer_pruning: bool,
 }
 
 pub struct TransformerEncodeOutput<B: Backend> {
@@ -34,7 +36,29 @@ pub struct TransformerEncodeOutput<B: Backend> {
     pub hidden_features: Option<Box<[B::ScratchBuffer]>>,
 }
 
+#[cfg(feature = "scoring-last-layer-pruning")]
+fn scoring_cache_only_requested(
+    output_range: Option<Range<u32>>,
+    hidden_feature_layer_indices: Option<&[u32]>,
+    batch_is_flat: bool,
+    layer_index: u32,
+    layer_count: usize,
+    scoring_enabled: bool,
+) -> bool {
+    scoring_enabled
+        && output_range.is_none()
+        && hidden_feature_layer_indices.is_none()
+        && batch_is_flat
+        && layer_index as usize + 1 == layer_count
+}
+
 impl<B: Backend> TransformerState<B> {
+    /// Only the fresh next-token scorer opts into this experimental path.
+    #[cfg(feature = "scoring-last-layer-pruning")]
+    pub(crate) fn enable_scoring_last_layer_pruning(&mut self) {
+        self.scoring_last_layer_pruning = true;
+    }
+
     pub fn context_length(&self) -> u32 {
         self.context_length
     }
@@ -89,7 +113,10 @@ pub enum TransformerNewError<B: Backend> {
 }
 
 pub struct Transformer<B: Backend> {
+    #[cfg(not(feature = "rope-cache"))]
     ropes: Box<[AnyRoPEConfig]>,
+    #[cfg(feature = "rope-cache")]
+    rope_tables: Box<[super::mixer::attention::rope::RoPETableCache]>,
     layers: Box<[(TransformerLayer<B>, Option<usize>)]>,
     output_norm: Normalization<B>,
     model_dim: u32,
@@ -151,6 +178,9 @@ impl<B: Backend> Transformer<B> {
             .map_err(TransformerNewError::Backend)?;
 
         Ok(Self {
+            #[cfg(feature = "rope-cache")]
+            rope_tables: ropes.iter().map(super::mixer::attention::rope::RoPETableCache::new).collect(),
+            #[cfg(not(feature = "rope-cache"))]
             ropes: ropes.into_boxed_slice(),
             layers,
             output_norm,
@@ -222,6 +252,8 @@ impl<B: Backend> Transformer<B> {
         Ok(TransformerState {
             layer_states,
             context_length,
+            #[cfg(feature = "scoring-last-layer-pruning")]
+            scoring_last_layer_pruning: false,
         })
     }
 
@@ -249,14 +281,52 @@ impl<B: Backend> Transformer<B> {
         let context_length = state.as_ref().map(|state| state.context_length).unwrap_or(0);
         let token_positions = batch_dim.heights().map(|rel_pos| context_length + rel_pos).collect::<Box<[u32]>>();
 
+        #[cfg(not(feature = "rope-cache"))]
         let precalculated_ropes = self
             .ropes
             .iter()
             .map(|rope_config| PrecalculatedRoPE::precalculate(rope_config, &token_positions, command_buffer))
             .collect::<Result<Box<[_]>, B::Error>>()?;
 
+        #[cfg(feature = "rope-cache")]
+        let precalculated_ropes = self
+            .rope_tables
+            .iter()
+            .map(|cache| cache.precalculate::<B>(&token_positions, command_buffer))
+            .collect::<Result<Box<[_]>, B::Error>>()?;
+
         for (layer, layer_rope_index) in self.layers.iter().take(layer_count) {
             let precalculated_rope = layer_rope_index.map(|i| &precalculated_ropes[i]);
+
+            // Earlier layers must produce every row for the following layer's
+            // state. Only the actual last layer can stop immediately after KV
+            // preparation, and only when no output or hidden feature is read.
+            #[cfg(feature = "scoring-last-layer-pruning")]
+            if scoring_cache_only_requested(
+                output_range,
+                hidden_feature_layer_indices,
+                batch_dim.is_flat(),
+                layer.layer_index,
+                self.layers.len(),
+                state.as_ref().is_some_and(|state| state.scoring_last_layer_pruning),
+            ) && layer.supports_scoring_cache_only()
+                && let Some(state) = state.as_deref_mut()
+                && let TransformerLayerStateType::Owned(layer_state) =
+                    &mut state.layer_states[layer.layer_index as usize]
+            {
+                layer.encode_scoring_cache_only(
+                    hidden,
+                    &mut shortcut,
+                    precalculated_rope,
+                    batch_dim,
+                    layer_state.as_mut(),
+                    command_buffer,
+                )?;
+                return Ok(TransformerEncodeOutput {
+                    output: None,
+                    hidden_features: None,
+                });
+            }
 
             let layer_state = if let Some(state) = &mut state {
                 Some(match &mut state.layer_states[layer.layer_index as usize] {
@@ -328,5 +398,26 @@ impl<B: Backend> Transformer<B> {
             output: Some(output_normalized),
             hidden_features,
         })
+    }
+}
+
+#[cfg(all(test, feature = "scoring-last-layer-pruning"))]
+mod scoring_cache_only_tests {
+    use super::scoring_cache_only_requested;
+    use uzu_engine_macros::uzu_test;
+
+    #[uzu_test]
+    fn cache_only_requires_an_unobserved_actual_final_layer() {
+        assert!(scoring_cache_only_requested(None, None, true, 31, 32, true));
+        // A final-layer output must be computed even if just one row is read.
+        assert!(!scoring_cache_only_requested(Some((1023..1024).into()), None, true, 31, 32, true));
+        assert!(!scoring_cache_only_requested(None, Some(&[31]), true, 31, 32, true));
+        // Even an explicitly empty feature request conservatively disables it.
+        assert!(!scoring_cache_only_requested(None, Some(&[]), true, 31, 32, true));
+        // A last owned cache layer followed by shared-KV layers is not eligible.
+        assert!(!scoring_cache_only_requested(None, None, true, 30, 32, true));
+        assert!(!scoring_cache_only_requested(None, None, false, 31, 32, true));
+        // Ordinary generation leaves the fresh-state opt-in flag clear.
+        assert!(!scoring_cache_only_requested(None, None, true, 31, 32, false));
     }
 }

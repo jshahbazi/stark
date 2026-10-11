@@ -329,6 +329,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
     head_k_dim: usize,
     head_v_dim: usize,
     suffix_len: usize,
+    compact: bool,
 ) -> (Vec<f32>, Vec<f32>) {
     let key_dim = num_k_heads * head_k_dim;
     let value_dim = num_v_heads * head_v_dim;
@@ -338,6 +339,13 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
 
     let context = <B as Backend>::Context::new().expect("context");
     let in_proj_array = create_buffer_with_data::<B, T>(&context, in_proj);
+    let qkv_stride = if compact {
+        conv_dim
+    } else {
+        total_proj_dim
+    };
+    let qkv: Vec<T> = in_proj.chunks_exact(total_proj_dim).flat_map(|row| row[..qkv_stride].iter().copied()).collect();
+    let qkv_array = create_buffer_with_data::<B, T>(&context, &qkv);
     let a_log_array = create_buffer_with_data::<B, f32>(&context, a_log);
     let dt_bias_array = create_buffer_with_data::<B, f32>(&context, dt_bias);
     let norm_weight_array = create_buffer_with_data::<B, f32>(&context, norm_weight);
@@ -365,6 +373,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
 
     let mut command_buffer = context.create_command_buffer(None, None).expect("Failed to create command buffer");
     prep_k.encode(
+        &qkv_array,
         &in_proj_array,
         &a_log_array,
         &dt_bias_array,
@@ -378,6 +387,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
         key_dim as u32,
         value_dim as u32,
         suffix_len as u32,
+        qkv_stride as u32,
         &mut command_buffer,
     );
     prefill_k.encode(
@@ -385,7 +395,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
         &k_norm_array,
         &beta_array,
         &decay_array,
-        &in_proj_array,
+        &qkv_array,
         &mut state_array,
         &mut out_array,
         num_v_heads as u32,
@@ -395,6 +405,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
         value_dim as u32,
         suffix_len as u32,
         num_dv_groups,
+        qkv_stride as u32,
         &mut command_buffer,
     );
     norm_k.encode(
@@ -485,6 +496,7 @@ fn test_prefill_norm_gate_impl<T: ArrayElement>(
             head_k_dim,
             head_v_dim,
             suffix_len,
+            false,
         );
         let backend = std::any::type_name::<B>();
         assert_close(&ref_outputs, &out, output_atol, output_rtol, &format!("{label} output on {backend}"));
@@ -544,6 +556,7 @@ fn test_delta_net_prefill_prep() {
     let mut cpu_enc = cpu_ctx.create_command_buffer(None, None).expect("command buffer");
     cpu_prep.encode(
         &cpu_in_proj,
+        &cpu_in_proj,
         &cpu_a_log,
         &cpu_dt_bias,
         &mut cpu_q,
@@ -556,6 +569,7 @@ fn test_delta_net_prefill_prep() {
         key_dim as u32,
         value_dim as u32,
         suffix_len as u32,
+        total_proj_dim as u32,
         &mut cpu_enc,
     );
     cpu_enc.end_encoding().submit().wait_until_completed().unwrap();
@@ -596,6 +610,7 @@ fn test_delta_net_prefill_prep() {
     let mut command_buffer = context.create_command_buffer(None, None).expect("command buffer");
     prep_k.encode(
         &in_proj_array,
+        &in_proj_array,
         &a_log_array,
         &dt_bias_array,
         &mut q_norm_array,
@@ -608,6 +623,7 @@ fn test_delta_net_prefill_prep() {
         key_dim as u32,
         value_dim as u32,
         suffix_len as u32,
+        total_proj_dim as u32,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -690,6 +706,7 @@ fn bench_delta_net_prefill() {
         let mut command_buffer = context.create_command_buffer(None, None).expect("command buffer");
         prep_k.encode(
             &in_proj_array,
+            &in_proj_array,
             &a_log_array,
             &dt_bias_array,
             &mut q_norm_array,
@@ -702,6 +719,7 @@ fn bench_delta_net_prefill() {
             key_dim as u32,
             value_dim as u32,
             suffix_len as u32,
+            total_proj_dim as u32,
             &mut command_buffer,
         );
         command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -716,6 +734,7 @@ fn bench_delta_net_prefill() {
         command_buffer.encode_fill(&mut state_array, 0);
         prep_k.encode(
             &in_proj_array,
+            &in_proj_array,
             &a_log_array,
             &dt_bias_array,
             &mut q_norm_array,
@@ -728,6 +747,7 @@ fn bench_delta_net_prefill() {
             key_dim as u32,
             value_dim as u32,
             suffix_len as u32,
+            total_proj_dim as u32,
             &mut command_buffer,
         );
         prefill_k.encode(
@@ -745,6 +765,7 @@ fn bench_delta_net_prefill() {
             value_dim as u32,
             suffix_len as u32,
             num_dv_groups,
+            total_proj_dim as u32,
             &mut command_buffer,
         );
         norm_k.encode(
@@ -763,4 +784,67 @@ fn bench_delta_net_prefill() {
         command_buffer.end_encoding().submit().wait_until_completed().unwrap();
     });
     prefill_result.print();
+}
+
+fn compare_compact_prefill<T: ArrayElement>() {
+    let num_v_heads = 2;
+    let num_k_heads = 1;
+    let key_dim = 128;
+    let value_dim = num_v_heads * 128;
+    let total_proj_dim = 2 * key_dim + 2 * value_dim + 2 * num_v_heads;
+    let a_log = vec![-1.5, -1.45];
+    let dt_bias = vec![0.3, 0.32];
+    let norm_weight = vec![0.9; 128];
+    let state: Vec<f32> = (0..num_v_heads * 128 * 128).map(|i| (i % 29) as f32 * 0.005 - 0.05).collect();
+    for suffix_len in [2, 3, 63, 64, 65] {
+        let input: Vec<T> = (0..suffix_len * total_proj_dim)
+            .map(|i| <T as num_traits::NumCast>::from((i % 37) as f32 * 0.02 - 0.3).unwrap())
+            .collect();
+        for_each_backend!(|B| {
+            let (full_out, full_state) = run_prefill_with_norm_gate_typed::<B, T>(
+                &input,
+                &a_log,
+                &dt_bias,
+                &norm_weight,
+                &state,
+                num_v_heads,
+                num_k_heads,
+                128,
+                128,
+                suffix_len,
+                false,
+            );
+            let (compact_out, compact_state) = run_prefill_with_norm_gate_typed::<B, T>(
+                &input,
+                &a_log,
+                &dt_bias,
+                &norm_weight,
+                &state,
+                num_v_heads,
+                num_k_heads,
+                128,
+                128,
+                suffix_len,
+                true,
+            );
+            assert!(
+                full_out.iter().zip(&compact_out).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "compact recurrent output differs at T={suffix_len}"
+            );
+            assert!(
+                full_state.iter().zip(&compact_state).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "compact recurrent state differs at T={suffix_len}"
+            );
+        });
+    }
+}
+
+#[uzu_test]
+fn compact_delta_prefill_preserves_bf16_bits() {
+    compare_compact_prefill::<bf16>();
+}
+
+#[uzu_test]
+fn compact_delta_prefill_preserves_f32_bits() {
+    compare_compact_prefill::<f32>();
 }
