@@ -2,6 +2,8 @@
 
 `stark-convert` selects a bounded-memory streaming backend for verified dense Qwen3 checkpoints and the pinned upstream Lalamo backend for other registered models or weight formats. Conversion produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors`; it does not introduce a new runtime format.
 
+The [integration and coverage plan](../../docs/MODEL_CONVERSION_PLAN.md) defines the checklist, qualification gates, and parallel workstreams for expanding streaming support while retaining Lalamo fallback.
+
 The streaming environment has no JAX, PyTorch, or Lalamo dependency. The fallback has its own Python environment and lockfile. Both use managed Python 3.13.13 through `uv`.
 
 ## Convert a model
