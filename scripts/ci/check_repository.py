@@ -25,6 +25,16 @@ INHERITED_DISABLED = {
     "tests.yml",
 }
 APPROVED_RUNNERS = {"ubuntu-24.04", "macos-26"}
+# Every tracked supported lockfile must have an explicit OSV scan input in
+# security.yml. Update this inventory and both scanner/gate inputs together.
+SCANNED_LOCKFILES = {
+    "Cargo.lock",
+    "crates/legacy/download-manager/examples/wasm/Cargo.lock",
+    "crates/legacy/stark/bindings/python/uv.lock",
+    "crates/legacy/stark/bindings/typescript/pnpm-lock.yaml",
+    "scripts/ci/check_repository.py.lock",
+    "tools/uv.lock",
+}
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
@@ -63,6 +73,19 @@ def check_tracked_policy(files: list[str]) -> list[str]:
             errors.append(f"environment file is tracked: {name}")
         if path.name.lower().endswith(WEIGHT_SUFFIXES):
             errors.append(f"model weight file is tracked: {name}")
+    return errors
+
+
+def check_lockfile_coverage(files: list[str]) -> list[str]:
+    lockfiles = {
+        name for name in files
+        if Path(name).name in {"Cargo.lock", "uv.lock", "pnpm-lock.yaml"}
+        or Path(name).name.endswith(".py.lock")
+    }
+    errors = [f"lockfile has no declared security scan: {name}"
+              for name in sorted(lockfiles - SCANNED_LOCKFILES)]
+    errors.extend(f"declared security lockfile is missing: {name}"
+                  for name in sorted(SCANNED_LOCKFILES - lockfiles))
     return errors
 
 
@@ -210,7 +233,10 @@ def check_workflows(paths: list[Path]) -> list[str]:
 
 
 def main() -> int:
-    errors = check_tracked_policy(tracked_files())
+    files = tracked_files()
+    errors = check_tracked_policy(files)
+    # git ls-files includes pending working-tree deletions until they are staged.
+    errors.extend(check_lockfile_coverage([name for name in files if (ROOT / name).is_file()]))
     errors.extend(check_workflows(workflow_files()))
     if errors:
         for error in errors:

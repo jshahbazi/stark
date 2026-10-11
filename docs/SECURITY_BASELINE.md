@@ -1,5 +1,7 @@
 # Initial security and CI validation
 
+This document preserves the initial scan and validation results before the dependency migrations. Later dependency changes and their validation are recorded separately in [Dependency security migration](DEPENDENCY_SECURITY_MIGRATION.md).
+
 This is a new tooling run dated 2026-10-11, separate from earlier model-dependent scoring validation. The dependency baseline is commit `97f43755`; `Cargo.lock` is unchanged with SHA-256 `303fc55ff149bada00ee751cac1b869b982b61fc50e1fc8bdd56e892be41d7dd`. Dependency checks used cargo-deny 0.20.2 and RustSec advisory database commit `7eebec69c352c7191b1f13eb95dd510eeca5d1de`.
 
 ## Local results
