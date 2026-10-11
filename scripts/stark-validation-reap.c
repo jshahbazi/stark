@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -27,6 +28,14 @@ static volatile sig_atomic_t stopping = 0;
 static pid_t owner;
 static int control;
 static void stop_signal(int signum) { (void)signum; stopping = 1; }
+static void drain_control(void) {
+    char requests[64];
+    for (;;) {
+        ssize_t count = recv(control, requests, sizeof(requests), MSG_DONTWAIT);
+        if (count > 0 || (count < 0 && errno == EINTR)) continue;
+        break;
+    }
+}
 static double now(void) {
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
@@ -40,7 +49,8 @@ static int read_exact(int fd, void *out, size_t size) {
         struct pollfd fds[2] = {{fd, POLLIN, 0}, {control, POLLIN, 0}};
         int result = poll(fds, 2, 50);
         if (result < 0 && errno == EINTR) continue;
-        if (result < 0 || fds[1].revents) return -1;
+        if (result < 0) return -1;
+        if (fds[1].revents) { drain_control(); return -1; }
         if (!(fds[0].revents & POLLIN)) {
             if (fds[0].revents) return -1;
             continue;
@@ -177,6 +187,10 @@ exec_failed:
                 if (!exec_failed_flag) (void)report("spawn", (int)child);
             }
             int code = WIFEXITED(status) ? WEXITSTATUS(status) : -WTERMSIG(status);
+            /* Refuse late stop writes and drain queued commands before close.
+             * Linux resets a stream peer when receive data remains unread. */
+            (void)shutdown(control, SHUT_RD);
+            drain_control();
             {
                 /* Darwin reports bytes; the other supported test platform
                  * reports KiB. This is the foreground target's observed peak,
@@ -198,7 +212,7 @@ exec_failed:
             {acknowledged || exec_failed_flag ? -1 : exec_status[0], POLLIN, 0}
         };
         (void)poll(fds, 2, 50);
-        if (fds[0].revents) stopping = 1;
+        if (fds[0].revents) { drain_control(); stopping = 1; }
         if (!acknowledged && !exec_failed_flag && fds[1].revents) {
             int failure;
             ssize_t count = read(exec_status[0], &failure, sizeof(failure));
