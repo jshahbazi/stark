@@ -123,7 +123,10 @@ int main(int argc, char **argv) {
         }
         execve(executable, arguments, environment);
 exec_failed:
-        { int failure = errno; (void)write(exec_status[1], &failure, sizeof(failure)); }
+        {
+            int failure = errno;
+            if (write(exec_status[1], &failure, sizeof(failure)) != (ssize_t)sizeof(failure)) _exit(127);
+        }
         _exit(127);
     }
     close(exec_status[1]); close((int)input); close((int)output);
