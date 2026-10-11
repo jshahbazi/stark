@@ -2,6 +2,7 @@
 
 This sample app was inherited from Uzu and retains Mirai's name, bundle identity,
 artwork, and upstream links. Its Swift engine dependency now uses the local Stark
+binding. The inherited Firebase configuration,
 startup collection, crash upload script, and test crash control have been removed.
 
 Build `crates/legacy/stark/bindings/swift/stark.xcframework` from source before

@@ -4,7 +4,7 @@ Active Rust crates and imports use `stark-engine`, `stark-engine-macros`, and `s
 
 These names remain intentional:
 
-- Uzu Git history, upstream license, revision metadata, original patch hashes, and the immutable research archive.
+- Uzu Git history, upstream license, revision metadata, and original patch hashes.
 - Mirai model registry/provider IDs, API schema names, model downloads, and dependency repository URLs.
 - Registry backend IDs `uzu`/`Uzu`, serialized telemetry field `uzu_version`, and fallback key `__uzu_unparsed_arguments`, which preserve external compatibility.
 - Historical `UZU_CAPTURE_` environment names, which the scoring worker clears together with `STARK_CAPTURE_` names.
