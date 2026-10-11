@@ -13,7 +13,7 @@ This run follows the initial 2026-10-11 scan of source revision `97f43755`. The 
 
 ## Security gate behavior
 
-The new RustSec check includes transitive soundness advisories. OSV separately checks every dependency lockfile and its complete package inventory, including Git-sourced dependencies. Scanner errors, incomplete reports, unknown classifications, vulnerabilities, and unsoundness findings fail CI. Only notices explicitly classified as unmaintained packages become visible warnings. There are no vulnerability advisory exceptions.
+The new RustSec check includes transitive soundness advisories. OSV separately scans all six dependency lockfiles, including Git-sourced packages, with its all-packages mode. The report gate verifies declared source coverage and report structure; package extraction and version matching depend on the pinned scanner. Scanner errors, missing lockfile sources, malformed reports, unknown classifications, vulnerabilities, and unsoundness findings fail CI. Only notices explicitly classified as unmaintained packages become visible warnings. There are no vulnerability advisory exceptions.
 
 Ten maintenance notices remain: backoff and instant through async-openai, paste through tokenizer/image dependencies, smartstring through the engine's Rhai build dependency, and six unic packages through the Python stub generator's parser. These require dependency replacement or upstream work. A passing vulnerability check does not resolve that maintenance debt.
 
@@ -23,7 +23,7 @@ All checks use synthetic data or package metadata. No evaluation model, native i
 
 ## CodeQL intake
 
-The first completed CodeQL run on `e020464c737ced890cb6b6e4aabb9532ecf3be8b` reported 67 high-severity `rust/access-invalid-pointer` alerts in inherited N-API bindings. A bounded static review found 166 identical flows from `null_mut()` through the generated `wrapped_val` out parameter to a dereference. The pinned N-API generator checks the `napi_unwrap` return status before conversion; successful unwrap writes the out parameter, and normal native wrappers originate from `Box::into_raw()`.
+The first completed CodeQL run on `e020464c737ced890cb6b6e4aabb9532ecf3be8b` reported 67 high-severity `rust/access-invalid-pointer` alerts in inherited N-API bindings. The completed [migration CodeQL run](https://github.com/jshahbazi/stark/actions/runs/38172755710) on `ddf904aa5ea96b1f509e847f8fbd346b9c3eeece` still reports 67 open instances of that rule. Its Actions, Python, JavaScript/TypeScript, and C/C++ analyses report zero results; all five analyses completed without errors. A bounded static review found 166 identical flows from `null_mut()` through the generated `wrapped_val` out parameter to a dereference. The pinned N-API generator checks the `napi_unwrap` return status before conversion; successful unwrap writes the out parameter, and normal native wrappers originate from `Box::into_raw()`.
 
 Incomplete FFI modeling is a plausible explanation for the initial-null trace. No exploit path was confirmed by this review, and the alerts remain **needs review**. Foreign-wrapper type identity and lifetime safety were not qualified. No alert was dismissed or suppressed. These bindings are absent from the qualified scorer's dependency path, but remain reportable under the repository security policy. Follow-up should test ordinary, unwrapped, and foreign-class objects with a model-free native fixture before classifying the alerts or changing the shared generator. See the [Node-API unwrap contract](https://nodejs.org/api/n-api.html#napi_unwrap) and [CodeQL alerts](https://github.com/jshahbazi/stark/security/code-scanning).
 
@@ -49,6 +49,16 @@ Local validation used Rust 1.98.1, uv 0.12.24, Node 24.19.0, and pnpm 10.18.1 on
 | Native formatting, repository policy, and workflow syntax | Passed. |
 
 Before the dependency migration, the hosted [CI run](https://github.com/jshahbazi/stark/actions/runs/38171067521) and [CodeQL run](https://github.com/jshahbazi/stark/actions/runs/38171067533) both passed on `e020464c737ced890cb6b6e4aabb9532ecf3be8b`. CI included 38 scorer/digest tests in each of the default and optimized configurations and eight lifecycle checks on each operating system. Later pushed commits produce their own hosted runs; those results must be assessed against their recorded source revisions.
+
+Hosted migration validation is bound to `ddf904aa5ea96b1f509e847f8fbd346b9c3eeece` on 2026-10-11:
+
+| Workflow | Result |
+| --- | --- |
+| [CI](https://github.com/jshahbazi/stark/actions/runs/38172755695) | Passed both scorer builds and Clippy, 76 scorer test executions, eight lifecycle checks per operating system, 56 server tests, seven CXX tests, 13 report-policy tests, and four TypeScript tests with two native integration tests explicitly skipped. Python binding, binding-tool, wasm, repository-policy, and package-output checks also passed. |
+| [Security](https://github.com/jshahbazi/stark/actions/runs/38172755731) | Passed RustSec, licenses, bans, sources, and the six-lockfile OSV gate with ten maintenance notices and zero blocking findings. |
+| [CodeQL](https://github.com/jshahbazi/stark/actions/runs/38172755710) | All five language analyses completed successfully. The 67 Rust alerts remain open for review. |
+
+The PR-only dependency-review job was not exercised by these push runs. A subsequent documentation-only commit records these results without changing the tested implementation or lockfiles.
 
 | Lockfile | SHA-256 |
 | --- | --- |
