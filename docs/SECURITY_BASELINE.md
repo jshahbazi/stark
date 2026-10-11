@@ -27,4 +27,14 @@ All tests used synthetic inputs. No model was loaded, no private evaluation was 
 
 The scan also reports unmaintained `backoff`, `instant`, `paste`, `smartstring`, and six `unic-*` crates reached through inherited tooling. Resolve those paths through dependency replacement or separately reviewed maintenance decisions. Existing upstream advisory ignores were removed, including the h2 vulnerability suppression. The new full-workspace security gate fails on these findings; no exception or accepted-risk decision is introduced here.
 
+After Dependabot alerts were enabled, GitHub reported 48 open alerts on `main`: four critical, 20 high, 19 moderate, and five low. This is a broader advisory feed spanning Rust, Python tools, and inherited TypeScript dependencies; the counts overlap package/version lines and are not 48 demonstrated exploits.
+
+| Critical/high alert location | Count | Affected dependencies |
+| --- | --- | --- |
+| `tools/uv.lock` | One critical, three high | anyio, fsspec, and transformers. |
+| `Cargo.lock` | One high | PyO3. |
+| `crates/legacy/stark/bindings/typescript/pnpm-lock.yaml` | Three critical, 16 high | handlebars, js-yaml, browserslist, brace-expansion, flatted, and minimatch across resolved versions. |
+
+Review the current [Dependabot alerts](https://github.com/jshahbazi/stark/security/dependabot) before running inherited tooling. These dependency migrations are unresolved and are not covered by the model-free scorer tests.
+
 Hosted CI execution and CodeQL analysis must be checked on the pushed branch. Required status checks on `main` remain deferred until the workflows are installed there and successful check names are observed. Private numerical parity and performance evidence remain separate.
