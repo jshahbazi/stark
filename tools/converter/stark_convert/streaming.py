@@ -1,0 +1,414 @@
+"""Bounded-memory safetensors transformations for Stark conversion.
+
+The wire format and metadata conventions follow Lalamo, revision
+831accb8252a6b6606c378048caeb44178f1a050 (MIT; Copyright (c) 2025 Mirai Tech Inc.).
+This implementation does not import Lalamo, JAX, or PyTorch.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import os
+import struct
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+import numpy as np
+
+
+class UnsupportedConversion(Exception):
+    """A well-formed model needs the Lalamo backend."""
+
+
+class ConversionError(Exception):
+    """An invalid checkpoint or failed conversion must not be published."""
+
+
+DTYPE_BYTES = {
+    "BOOL": 1,
+    "U8": 1,
+    "I8": 1,
+    "F8_E5M2": 1,
+    "F8_E4M3": 1,
+    "F8_E8M0": 1,
+    "I16": 2,
+    "U16": 2,
+    "F16": 2,
+    "BF16": 2,
+    "I32": 4,
+    "U32": 4,
+    "F32": 4,
+    "I64": 8,
+    "U64": 8,
+    "F64": 8,
+    "C64": 8,
+}
+MAX_HEADER_BYTES = 100_000_000
+DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
+
+
+def _unique_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ConversionError("JSON contains duplicate keys")
+        result[key] = value
+    return result
+
+
+def read_json(path: Path) -> dict:
+    """Read a JSON object while rejecting duplicate keys and nonfinite numbers."""
+    try:
+        with path.open("r", encoding="utf-8") as stream:
+            result = json.load(
+                stream,
+                object_pairs_hook=_unique_object,
+                parse_constant=lambda _: (_ for _ in ()).throw(ConversionError("Nonfinite JSON number")),
+            )
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ConversionError("Cannot read checkpoint JSON") from exc
+    if not isinstance(result, dict):
+        raise ConversionError("Checkpoint JSON must be an object")
+    return result
+
+
+def _signature(stat: os.stat_result) -> tuple[int, int, int, int]:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
+@dataclass(frozen=True)
+class TensorInfo:
+    path: Path
+    dtype: str
+    shape: tuple[int, ...]
+    offset: int
+    nbytes: int
+    file_signature: tuple[int, int, int, int]
+
+    @property
+    def itemsize(self) -> int:
+        return DTYPE_BYTES[self.dtype]
+
+
+@dataclass(frozen=True)
+class TensorOperation:
+    name: str
+    sources: tuple[TensorInfo, ...]
+    dtype: str
+    shape: tuple[int, ...]
+    kind: str = "copy"
+
+    @property
+    def nbytes(self) -> int:
+        return math.prod(self.shape) * DTYPE_BYTES[self.dtype]
+
+
+@dataclass(frozen=True)
+class ConversionPlan:
+    decoder_config: dict
+    operations: tuple[TensorOperation, ...]
+    metadata: dict[str, str]
+    input_bytes: int
+    source_tensors: int
+    input_tensors: tuple[TensorInfo, ...] = ()
+
+
+def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, TensorInfo]]:
+    """Validate the complete on-disk layout without loading tensor payloads."""
+    try:
+        with path.open("rb") as stream:
+            signature = _signature(os.fstat(stream.fileno()))
+            prefix = stream.read(8)
+            if len(prefix) != 8:
+                raise ConversionError("Truncated safetensors header length")
+            header_size = struct.unpack("<Q", prefix)[0]
+            if not 2 <= header_size <= MAX_HEADER_BYTES or header_size > signature[2] - 8:
+                raise ConversionError("Invalid safetensors header size")
+            header_bytes = stream.read(header_size)
+            if len(header_bytes) != header_size or not header_bytes.startswith(b"{"):
+                raise ConversionError("Invalid safetensors JSON header")
+            header = json.loads(header_bytes, object_pairs_hook=_unique_object)
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise ConversionError("Cannot read safetensors header") from exc
+    if not isinstance(header, dict):
+        raise ConversionError("Safetensors header must be an object")
+    metadata = header.pop("__metadata__", {})
+    if not isinstance(metadata, dict) or any(
+        not isinstance(key, str) or not isinstance(value, str) for key, value in metadata.items()
+    ):
+        raise ConversionError("Safetensors metadata must contain strings")
+    data_start = 8 + header_size
+    tensors = {}
+    spans = []
+    for name, info in header.items():
+        if not isinstance(name, str) or not name or not isinstance(info, dict):
+            raise ConversionError("Invalid safetensors tensor entry")
+        if set(info) != {"dtype", "shape", "data_offsets"}:
+            raise ConversionError("Invalid safetensors tensor fields")
+        dtype, shape, offsets = info["dtype"], info["shape"], info["data_offsets"]
+        if not isinstance(dtype, str) or dtype not in DTYPE_BYTES:
+            raise UnsupportedConversion("Checkpoint dtype is outside streaming parser coverage")
+        if not isinstance(shape, list) or any(type(dim) is not int or dim < 0 for dim in shape):
+            raise ConversionError("Invalid safetensors tensor shape")
+        if not isinstance(offsets, list) or len(offsets) != 2 or any(type(x) is not int for x in offsets):
+            raise ConversionError("Invalid safetensors tensor offsets")
+        start, end = offsets
+        nbytes = math.prod(shape) * DTYPE_BYTES[dtype]
+        if start < 0 or end < start or end - start != nbytes or data_start + end > signature[2]:
+            raise ConversionError("Safetensors tensor byte size or offset mismatch")
+        tensors[name] = TensorInfo(path, dtype, tuple(shape), data_start + start, nbytes, signature)
+        spans.append((start, end))
+    cursor = 0
+    for start, end in sorted(spans):
+        if start != cursor:
+            raise ConversionError("Safetensors data has gaps or overlapping tensors")
+        cursor = end
+    if data_start + cursor != signature[2]:
+        raise ConversionError("Safetensors file has unindexed trailing data")
+    return metadata, tensors
+
+
+def load_checkpoint(source: Path) -> dict[str, TensorInfo]:
+    """Load one safetensors checkpoint or its explicitly indexed shards."""
+    source = source.resolve()
+    index_path = source / "model.safetensors.index.json"
+    weight_map = None
+    if index_path.exists():
+        index = read_json(index_path)
+        weight_map = index.get("weight_map")
+        if (
+            not isinstance(weight_map, dict)
+            or not weight_map
+            or any(
+                not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                for key, value in weight_map.items()
+            )
+        ):
+            raise ConversionError("Invalid checkpoint shard index")
+        files = []
+        for filename in sorted(set(weight_map.values())):
+            relative = Path(filename)
+            path = source / relative
+            if relative.is_absolute() or ".." in relative.parts or path.suffix != ".safetensors":
+                raise ConversionError("Invalid checkpoint shard path")
+            # HF snapshot files commonly point to blobs outside the snapshot.
+            # Restrict the index's lexical path; permit those regular symlinks.
+            files.append(path)
+    elif (source / "model.safetensors").exists():
+        files = [source / "model.safetensors"]
+    else:
+        files = sorted(source.glob("*.safetensors"))
+        if len(files) != 1:
+            raise UnsupportedConversion("Streaming requires a safetensors checkpoint or shard index")
+    result = {}
+    for path in files:
+        _, tensors = read_safetensors_header(path)
+        for name, tensor in tensors.items():
+            if name in result:
+                raise ConversionError("Tensor occurs in more than one shard")
+            if weight_map is not None and weight_map.get(name) != str(path.relative_to(source)):
+                raise ConversionError("Checkpoint shard index disagrees with its tensor headers")
+            result[name] = tensor
+    if weight_map is not None and set(result) != set(weight_map):
+        raise ConversionError("Checkpoint shard index references missing tensors")
+    return result
+
+
+def _open_tensor(tensor: TensorInfo) -> BinaryIO:
+    stream = tensor.path.open("rb")
+    if _signature(os.fstat(stream.fileno())) != tensor.file_signature:
+        stream.close()
+        raise ConversionError("Checkpoint changed during conversion")
+    stream.seek(tensor.offset)
+    return stream
+
+
+def tensor_sha256(tensor: TensorInfo, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> str:
+    """Hash a tensor payload without materializing it or exposing its values."""
+    if chunk_bytes < 1:
+        raise ConversionError("Chunk size must be positive")
+    digest = hashlib.sha256()
+    with _open_tensor(tensor) as stream:
+        remaining = tensor.nbytes
+        while remaining:
+            chunk = stream.read(min(chunk_bytes, remaining))
+            if not chunk:
+                raise ConversionError("Checkpoint tensor was truncated")
+            digest.update(chunk)
+            remaining -= len(chunk)
+            del chunk
+    return digest.hexdigest()
+
+
+def _copy(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
+    peak = 0
+    with _open_tensor(tensor) as stream:
+        remaining = tensor.nbytes
+        while remaining:
+            chunk = stream.read(min(chunk_bytes, remaining))
+            if not chunk:
+                raise ConversionError("Checkpoint tensor was truncated")
+            output.write(chunk)
+            peak = max(peak, len(chunk))
+            remaining -= len(chunk)
+            del chunk
+    return peak
+
+
+def _cast_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
+    if tensor.dtype == "F32":
+        return _copy(tensor, output, chunk_bytes)
+    if tensor.dtype not in {"BF16", "F16"}:
+        raise UnsupportedConversion("Normalization dtype is unsupported")
+    # The input bytes and one float32 output array fit together in the budget.
+    elements = max(1, chunk_bytes // (tensor.itemsize + 4))
+    peak = 0
+    with _open_tensor(tensor) as stream:
+        remaining = tensor.nbytes
+        while remaining:
+            chunk = stream.read(min(elements * tensor.itemsize, remaining))
+            if not chunk or len(chunk) % tensor.itemsize:
+                raise ConversionError("Checkpoint tensor was truncated")
+            if tensor.dtype == "BF16":
+                values = np.frombuffer(chunk, dtype="<u2").astype("<u4")
+                np.left_shift(values, 16, out=values)
+                values = values.view("<f4")
+            else:
+                values = np.frombuffer(chunk, dtype="<f2").astype("<f4")
+            output.write(memoryview(values).cast("B"))
+            peak = max(peak, len(chunk) + values.nbytes)
+            remaining -= len(chunk)
+            del chunk, values
+    return peak
+
+
+def transpose_tensor(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> int:
+    """Transpose a dense rank-two tensor into the current output position.
+
+    Use raw integer elements to preserve BF16 and floating-point bit patterns.
+    Tiles avoid a full-model or full-tensor mmap and keep heap buffers bounded.
+    This primitive is available for future adapters; Qwen3 embeds are copied.
+    """
+    if len(tensor.shape) != 2 or chunk_bytes < 16:
+        raise ConversionError("Transpose needs a matrix and at least 16 chunk bytes")
+    rows, cols = tensor.shape
+    itemsize = tensor.itemsize
+    if rows == 0 or cols == 0:
+        return 0
+    if chunk_bytes < 3 * itemsize:
+        raise ConversionError("Transpose chunk cannot hold a tile and its scratch")
+    edge = max(1, int(math.sqrt(chunk_bytes // (3 * itemsize))))
+    tile_rows, tile_cols = min(rows, edge), min(cols, edge)
+    output_start = output.tell()
+    peak = 0
+    raw_dtype = np.dtype(f"u{itemsize}")
+    with _open_tensor(tensor) as stream:
+        for row in range(0, rows, tile_rows):
+            height = min(tile_rows, rows - row)
+            for col in range(0, cols, tile_cols):
+                width = min(tile_cols, cols - col)
+                tile = np.empty((height, width), dtype=raw_dtype)
+                for i in range(height):
+                    stream.seek(tensor.offset + ((row + i) * cols + col) * itemsize)
+                    chunk = stream.read(width * itemsize)
+                    if len(chunk) != width * itemsize:
+                        raise ConversionError("Checkpoint tensor was truncated")
+                    tile[i] = np.frombuffer(chunk, dtype=raw_dtype)
+                transposed = np.ascontiguousarray(tile.T)
+                peak = max(peak, tile.nbytes + transposed.nbytes + len(chunk))
+                for i in range(width):
+                    output.seek(output_start + ((col + i) * rows + row) * itemsize)
+                    output.write(memoryview(transposed[i]).cast("B"))
+                del tile, transposed, chunk
+    output.seek(output_start + tensor.nbytes)
+    return peak
+
+
+def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> dict:
+    """Write a header-first safetensors file into a caller-owned staging area."""
+    if type(chunk_bytes) is not int or chunk_bytes < 16:
+        raise ConversionError("Chunk size must be an integer of at least 16 bytes")
+    operations = sorted(plan.operations, key=lambda op: (-DTYPE_BYTES[op.dtype], op.name))
+    if len({op.name for op in operations}) != len(operations):
+        raise ConversionError("Conversion plan contains duplicate output tensors")
+    header = {"__metadata__": plan.metadata} if plan.metadata else {}
+    offset = 0
+    for op in operations:
+        header[op.name] = {"dtype": op.dtype, "shape": list(op.shape), "data_offsets": [offset, offset + op.nbytes]}
+        offset += op.nbytes
+    encoded = json.dumps(header).encode("utf-8")
+    encoded += b" " * (-len(encoded) % 8)
+    start = time.perf_counter()
+    peak = 0
+    # Refuse accidental in-place conversion, even when the caller bypasses CLI.
+    if path.resolve() in {tensor.path.resolve() for op in operations for tensor in op.sources}:
+        raise ConversionError("Output overlaps checkpoint input")
+    try:
+        with path.open("xb") as output:
+            output.write(struct.pack("<Q", len(encoded)))
+            output.write(encoded)
+            for op in operations:
+                before = output.tell()
+                if op.kind in {"copy", "fuse"}:
+                    for source in op.sources:
+                        peak = max(peak, _copy(source, output, chunk_bytes))
+                elif op.kind == "cast_f32" and len(op.sources) == 1:
+                    peak = max(peak, _cast_f32(op.sources[0], output, chunk_bytes))
+                elif op.kind == "transpose" and len(op.sources) == 1:
+                    peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
+                else:
+                    raise ConversionError("Conversion plan has an invalid operation")
+                if output.tell() - before != op.nbytes:
+                    raise ConversionError("Conversion operation byte count mismatch")
+            output.flush()
+            os.fsync(output.fileno())
+        # Recheck every original input after the last read, including accepted
+        # tied-head duplicates that intentionally do not produce an output.
+        # stat follows the current symlink target, detecting replaced HF blobs.
+        signatures = {
+            tensor.path: tensor.file_signature
+            for tensor in (plan.input_tensors or tuple(source for op in operations for source in op.sources))
+        }
+        for source_path, signature in signatures.items():
+            if _signature(source_path.stat()) != signature:
+                raise ConversionError("Checkpoint changed during conversion")
+    except OSError as exc:
+        raise ConversionError("Cannot write converted checkpoint") from exc
+    return {
+        "tensors": len(operations),
+        "source_tensors": plan.source_tensors,
+        "input_bytes": plan.input_bytes,
+        "output_tensor_bytes": offset,
+        "output_bytes": 8 + len(encoded) + offset,
+        "peak_buffer_bytes": peak,
+        "chunk_bytes": chunk_bytes,
+        "write_seconds": time.perf_counter() - start,
+    }
+
+
+def convert_streaming(
+    source: Path,
+    output: Path,
+    *,
+    dtype: str = "bfloat16",
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+) -> dict:
+    """Convert supported Qwen3 weights; the caller supplies tokenizer/config."""
+    from .qwen3 import build_qwen3_plan
+
+    start = time.perf_counter()
+    plan = build_qwen3_plan(source, dtype=dtype)
+    planned = time.perf_counter()
+    stats = write_plan(plan, output / "model.safetensors", chunk_bytes=chunk_bytes)
+    stats.update(
+        {
+            "plan_seconds": planned - start,
+            "total_seconds": time.perf_counter() - start,
+            "decoder_config": plan.decoder_config,
+        }
+    )
+    return stats
