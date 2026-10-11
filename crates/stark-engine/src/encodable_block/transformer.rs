@@ -3,6 +3,8 @@ use std::range::Range;
 use derive_more::Debug;
 use thiserror::Error;
 
+#[cfg(not(feature = "rope-cache"))]
+use crate::encodable_block::mixer::attention::rope::PrecalculatedRoPE;
 use crate::{
     backends::common::{
         Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, Kernels, kernel::TensorAddScaleKernel,
@@ -11,7 +13,7 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         batch_topology::BatchTopology,
-        mixer::{MixerState, attention::rope::PrecalculatedRoPE},
+        mixer::MixerState,
         normalization::{Normalization, NormalizationNewError, PostLayerScalar, ShortcutMode},
         transformer_layer::{TransformerLayer, TransformerLayerError},
     },
@@ -403,8 +405,9 @@ impl<B: Backend> Transformer<B> {
 
 #[cfg(all(test, feature = "scoring-last-layer-pruning"))]
 mod scoring_cache_only_tests {
-    use super::scoring_cache_only_requested;
     use stark_engine_macros::stark_test;
+
+    use super::scoring_cache_only_requested;
 
     #[stark_test]
     fn cache_only_requires_an_unobserved_actual_final_layer() {

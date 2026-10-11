@@ -80,8 +80,16 @@ trait ScoringBackend {
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     fn peak_memory_usage(&self) -> Option<usize>;
-    fn tokenize(&mut self, text: String, special: bool) -> Result<Vec<u32>, &'static str>;
-    fn score(&mut self, input: &[u32], context: u32) -> Result<NativeScores, &'static str>;
+    fn tokenize(
+        &mut self,
+        text: String,
+        special: bool,
+    ) -> Result<Vec<u32>, &'static str>;
+    fn score(
+        &mut self,
+        input: &[u32],
+        context: u32,
+    ) -> Result<NativeScores, &'static str>;
 }
 
 struct ScoreWorker<B> {
@@ -106,7 +114,10 @@ struct PendingReply {
     hit: bool,
 }
 
-fn write_reply(writer: &mut impl Write, reply: &impl Serialize) -> io::Result<()> {
+fn write_reply(
+    writer: &mut impl Write,
+    reply: &impl Serialize,
+) -> io::Result<()> {
     serde_json::to_writer(&mut *writer, reply)?;
     writer.write_all(b"\n")?;
     writer.flush()
@@ -133,10 +144,7 @@ fn validate_score(
         || context > MAX_CONTEXT_TOKENS
         || !temperature.is_finite()
         || temperature <= 0.0
-        || input
-            .iter()
-            .chain(candidates)
-            .any(|id| *id as usize >= vocab_size)
+        || input.iter().chain(candidates).any(|id| *id as usize >= vocab_size)
         || candidates.iter().collect::<HashSet<_>>().len() != candidates.len()
     {
         return Err("invalid_scoring_request");
@@ -149,7 +157,10 @@ fn validate_score(
 
 /// The common vocabulary normalization constant cancels from Jev's candidate
 /// normalization. Apply its temperature directly to raw candidate logits in f64.
-fn calibrated_probabilities(logits: &[f64], temperature: f64) -> Result<Vec<f64>, &'static str> {
+fn calibrated_probabilities(
+    logits: &[f64],
+    temperature: f64,
+) -> Result<Vec<f64>, &'static str> {
     if logits.is_empty()
         || logits.iter().any(|value| !value.is_finite())
         || !temperature.is_finite()
@@ -158,41 +169,28 @@ fn calibrated_probabilities(logits: &[f64], temperature: f64) -> Result<Vec<f64>
         return Err("invalid_score_values");
     }
     let maximum = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let exponentials: Vec<f64> = logits
-        .iter()
-        .map(|value| ((value - maximum) / temperature).exp())
-        .collect();
+    let exponentials: Vec<f64> = logits.iter().map(|value| ((value - maximum) / temperature).exp()).collect();
     let total: f64 = exponentials.iter().sum();
     Ok(exponentials.iter().map(|value| value / total).collect())
 }
+
+type CandidateReadout = (Vec<f64>, Vec<f64>, Vec<f64>);
 
 fn candidate_readout(
     vocabulary_logits: &[f32],
     candidates: &[u32],
     temperature: f64,
-) -> Result<(Vec<f64>, Vec<f64>, Vec<f64>), &'static str> {
+) -> Result<CandidateReadout, &'static str> {
     if vocabulary_logits.is_empty()
         || vocabulary_logits.iter().any(|value| !value.is_finite())
-        || candidates
-            .iter()
-            .any(|id| *id as usize >= vocabulary_logits.len())
+        || candidates.iter().any(|id| *id as usize >= vocabulary_logits.len())
     {
         return Err("invalid_score_values");
     }
-    let maximum = vocabulary_logits
-        .iter()
-        .copied()
-        .fold(f32::NEG_INFINITY, f32::max) as f64;
-    let log_partition = maximum
-        + vocabulary_logits
-            .iter()
-            .map(|value| (f64::from(*value) - maximum).exp())
-            .sum::<f64>()
-            .ln();
-    let logits: Vec<f64> = candidates
-        .iter()
-        .map(|id| f64::from(vocabulary_logits[*id as usize]))
-        .collect();
+    let maximum = vocabulary_logits.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+    let log_partition =
+        maximum + vocabulary_logits.iter().map(|value| (f64::from(*value) - maximum).exp()).sum::<f64>().ln();
+    let logits: Vec<f64> = candidates.iter().map(|id| f64::from(vocabulary_logits[*id as usize])).collect();
     let log_probabilities = logits.iter().map(|value| value - log_partition).collect();
     let candidate_probabilities = calibrated_probabilities(&logits, temperature)?;
     Ok((logits, log_probabilities, candidate_probabilities))
@@ -203,10 +201,9 @@ impl NativeBackend {
         if path.join("speculator").exists() {
             return Err("speculator_not_supported");
         }
-        let config: Value = serde_json::from_reader(
-            File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?,
-        )
-        .map_err(|_| "invalid_model_config")?;
+        let config: Value =
+            serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
+                .map_err(|_| "invalid_model_config")?;
         let vocab_size = config
             .get("decoder_config")
             .and_then(|decoder| decoder.get("vocab_size"))
@@ -214,9 +211,7 @@ impl NativeBackend {
             .filter(|size| *size > 0 && *size <= u32::MAX as u64)
             .ok_or("invalid_model_config")? as usize;
         let engine = Engine::<Metal>::new().map_err(|_| "metal_initialization_failed")?;
-        let model = engine
-            .load_language_model(path)
-            .map_err(|_| "model_load_failed")?;
+        let model = engine.load_language_model(path).map_err(|_| "model_load_failed")?;
         Ok(Self {
             engine,
             model,
@@ -235,14 +230,22 @@ impl ScoringBackend for NativeBackend {
     fn peak_memory_usage(&self) -> Option<usize> {
         self.engine.peak_memory_usage()
     }
-    fn tokenize(&mut self, text: String, special: bool) -> Result<Vec<u32>, &'static str> {
+    fn tokenize(
+        &mut self,
+        text: String,
+        special: bool,
+    ) -> Result<Vec<u32>, &'static str> {
         self.model
             .tokenizer()
             .encode(text, special)
             .map(|encoding| encoding.get_ids().to_vec())
             .map_err(|_| "tokenization_failed")
     }
-    fn score(&mut self, input: &[u32], context: u32) -> Result<NativeScores, &'static str> {
+    fn score(
+        &mut self,
+        input: &[u32],
+        context: u32,
+    ) -> Result<NativeScores, &'static str> {
         self.model
             .score_next_token(input, context)
             .map(|scores| NativeScores {
@@ -256,7 +259,11 @@ impl ScoringBackend for NativeBackend {
 }
 
 impl<B: ScoringBackend> ScoreWorker<B> {
-    fn new(backend: B, enabled: bool, digest_mode: bool) -> Self {
+    fn new(
+        backend: B,
+        enabled: bool,
+        digest_mode: bool,
+    ) -> Self {
         Self {
             backend,
             cache: LastScoreCache::new(enabled),
@@ -266,7 +273,10 @@ impl<B: ScoringBackend> ScoreWorker<B> {
         }
     }
 
-    fn telemetry(&self, pending_hit: bool) -> CacheTelemetry {
+    fn telemetry(
+        &self,
+        pending_hit: bool,
+    ) -> CacheTelemetry {
         CacheTelemetry {
             enabled: self.cache.enabled(),
             hits: self.hits + u64::from(pending_hit),
@@ -274,7 +284,10 @@ impl<B: ScoringBackend> ScoreWorker<B> {
         }
     }
 
-    fn handle(&mut self, request: ScoreRequest) -> Result<PendingReply, &'static str> {
+    fn handle(
+        &mut self,
+        request: ScoreRequest,
+    ) -> Result<PendingReply, &'static str> {
         let result = self.handle_inner(request);
         if result.is_err() {
             self.cache.clear();
@@ -282,7 +295,10 @@ impl<B: ScoringBackend> ScoreWorker<B> {
         result
     }
 
-    fn handle_inner(&mut self, request: ScoreRequest) -> Result<PendingReply, &'static str> {
+    fn handle_inner(
+        &mut self,
+        request: ScoreRequest,
+    ) -> Result<PendingReply, &'static str> {
         match request {
             ScoreRequest::ResetCache {} => {
                 self.cache.clear();
@@ -291,7 +307,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     next_entry: None,
                     hit: false,
                 })
-            }
+            },
             ScoreRequest::Tokenize {
                 text,
                 add_special_tokens,
@@ -308,7 +324,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     next_entry: None,
                     hit: false,
                 })
-            }
+            },
             ScoreRequest::Score {
                 input_token_ids,
                 candidate_token_ids,
@@ -324,11 +340,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     temperature,
                     self.backend.vocab_size(),
                 )?;
-                if self
-                    .backend
-                    .max_context_length()
-                    .is_some_and(|maximum| context_tokens > maximum)
-                {
+                if self.backend.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
                     return Err("context_overflow");
                 }
                 let prompt_tokens_sha256 = token_hash(&input_token_ids);
@@ -346,7 +358,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                         // This counts API dispatches, including failed attempts.
                         self.native_score_calls += 1;
                         self.backend.score(&input_token_ids, context_tokens)?
-                    }
+                    },
                 };
                 if scores.logits.len() != self.backend.vocab_size()
                     || scores.logits.iter().any(|value| !value.is_finite())
@@ -356,8 +368,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 let readout_started = Instant::now();
                 let (logits, log_probabilities, candidate_probabilities) =
                     candidate_readout(&scores.logits, &candidate_token_ids, temperature)?;
-                let readout_seconds =
-                    scores.readout_seconds + readout_started.elapsed().as_secs_f64();
+                let readout_seconds = scores.readout_seconds + readout_started.elapsed().as_secs_f64();
                 let result = ScoreResult {
                     input_tokens: input_token_ids.len(),
                     prompt_tokens_sha256,
@@ -399,11 +410,15 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     }),
                     hit: cache_hit,
                 })
-            }
+            },
         }
     }
 
-    fn process_line(&mut self, bytes: &[u8], output: &mut impl Write) -> Result<(), &'static str> {
+    fn process_line(
+        &mut self,
+        bytes: &[u8],
+        output: &mut impl Write,
+    ) -> Result<(), &'static str> {
         let result = serde_json::from_slice::<ScoreRequest>(bytes)
             .map_err(|_| "invalid_request")
             .and_then(|request| self.handle(request));
@@ -419,7 +434,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 }
                 self.hits += u64::from(pending.hit);
                 Ok(())
-            }
+            },
             Err(code) => {
                 self.cache.clear();
                 write_reply(output, &json!({"error":code,"cache":self.telemetry(false)}))
@@ -429,7 +444,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 } else {
                     Ok(())
                 }
-            }
+            },
         }
     }
 }
@@ -442,7 +457,9 @@ pub(super) fn run_lines(
 ) -> Result<(), &'static str> {
     let started = Instant::now();
     let mut worker = ScoreWorker::new(NativeBackend::load(path)?, enabled, digest_mode);
-    write_reply(output, &json!({"ready":true,"engine":"stark","version":"0.1.0",
+    write_reply(
+        output,
+        &json!({"ready":true,"engine":"stark","version":"0.1.0",
         "mode":if digest_mode { "exact-token-digest-cache-v1" } else { "exact-token-scoring-cache-v1" },
         "upstream_version":"0.6.1",
         "upstream_revision":"8d01581474760bd1fc7f4a547ff1d02f7dada437",
@@ -451,8 +468,9 @@ pub(super) fn run_lines(
         "cache_key":"exact-token-ids+context-tokens+model-instance",
         "cache":worker.telemetry(false),
         "load_seconds":started.elapsed().as_secs_f64(),"vocab_size":worker.backend.vocab_size(),
-        "peak_memory_bytes":worker.backend.peak_memory_usage()}))
-        .map_err(|_| "protocol_write_failed")?;
+        "peak_memory_bytes":worker.backend.peak_memory_usage()}),
+    )
+    .map_err(|_| "protocol_write_failed")?;
     let mut stdin = io::stdin().lock();
     loop {
         let mut bytes = Vec::new();
@@ -465,11 +483,8 @@ pub(super) fn run_lines(
         }
         if bytes.len() > MAX_REQUEST_BYTES {
             worker.cache.clear();
-            write_reply(
-                output,
-                &json!({"error":"request_too_large","cache":worker.telemetry(false)}),
-            )
-            .map_err(|_| "protocol_write_failed")?;
+            write_reply(output, &json!({"error":"request_too_large","cache":worker.telemetry(false)}))
+                .map_err(|_| "protocol_write_failed")?;
             return Ok(());
         }
         worker.process_line(&bytes, output)?;
@@ -496,14 +511,22 @@ mod tests {
         fn peak_memory_usage(&self) -> Option<usize> {
             None
         }
-        fn tokenize(&mut self, _: String, _: bool) -> Result<Vec<u32>, &'static str> {
+        fn tokenize(
+            &mut self,
+            _: String,
+            _: bool,
+        ) -> Result<Vec<u32>, &'static str> {
             if self.fail_tokenize {
                 Err("tokenization_failed")
             } else {
                 Ok(vec![1, 2])
             }
         }
-        fn score(&mut self, _: &[u32], _: u32) -> Result<NativeScores, &'static str> {
+        fn score(
+            &mut self,
+            _: &[u32],
+            _: u32,
+        ) -> Result<NativeScores, &'static str> {
             self.calls += 1;
             if self.fail_score {
                 return Err("native_scoring_failed");
@@ -520,7 +543,10 @@ mod tests {
             })
         }
     }
-    fn worker(enabled: bool, digest: bool) -> ScoreWorker<FakeBackend> {
+    fn worker(
+        enabled: bool,
+        digest: bool,
+    ) -> ScoreWorker<FakeBackend> {
         ScoreWorker::new(
             FakeBackend {
                 calls: 0,
@@ -532,15 +558,21 @@ mod tests {
             digest,
         )
     }
-    fn request(input: &[u32], candidates: &[u32], context: u32, temperature: f64) -> Value {
+    fn request(
+        input: &[u32],
+        candidates: &[u32],
+        context: u32,
+        temperature: f64,
+    ) -> Value {
         json!({"operation":"score", "input_token_ids":input, "candidate_token_ids":candidates,
             "context_tokens":context,"temperature":temperature})
     }
-    fn post(worker: &mut ScoreWorker<FakeBackend>, request: Value) -> Value {
+    fn post(
+        worker: &mut ScoreWorker<FakeBackend>,
+        request: Value,
+    ) -> Value {
         let mut output = Vec::new();
-        worker
-            .process_line(&serde_json::to_vec(&request).unwrap(), &mut output)
-            .unwrap();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
         serde_json::from_slice(&output).unwrap()
     }
     fn standard() -> Value {
@@ -567,16 +599,8 @@ mod tests {
         assert_eq!(fresh["cache_hit"], false);
         assert_eq!(hit["cache_hit"], true);
         for field in ["logits", "log_probabilities", "candidate_probabilities"] {
-            for (actual, expected) in hit[field]
-                .as_array()
-                .unwrap()
-                .iter()
-                .zip(fresh[field].as_array().unwrap())
-            {
-                assert_eq!(
-                    actual.as_f64().unwrap().to_bits(),
-                    expected.as_f64().unwrap().to_bits()
-                );
+            for (actual, expected) in hit[field].as_array().unwrap().iter().zip(fresh[field].as_array().unwrap()) {
+                assert_eq!(actual.as_f64().unwrap().to_bits(), expected.as_f64().unwrap().to_bits());
             }
         }
         assert_eq!(hit["metrics"]["state_creation_seconds"], 0.0);
@@ -587,16 +611,8 @@ mod tests {
     #[test]
     fn exact_identity_context_and_single_entry_fence_a_b_a() {
         let mut worker = worker(true, false);
-        for (input, context) in [
-            (&[1, 2][..], 8192),
-            (&[2, 1][..], 8192),
-            (&[1, 2][..], 8192),
-            (&[1, 2][..], 8193),
-        ] {
-            assert_eq!(
-                post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"],
-                false
-            );
+        for (input, context) in [(&[1, 2][..], 8192), (&[2, 1][..], 8192), (&[1, 2][..], 8192), (&[1, 2][..], 8193)] {
+            assert_eq!(post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"], false);
         }
         assert_eq!(worker.backend.calls, 4);
     }
@@ -610,21 +626,10 @@ mod tests {
         assert_eq!(hit["cache_hit"], true);
         // Compare complete protocol round trips. serde_json's default parser
         // can round a decimal differently from its in-memory f64 input.
-        let control = post(
-            &mut self::worker(false, false),
-            request(&[1, 2], &[5, 2, 0], 8192, 0.93),
-        );
+        let control = post(&mut self::worker(false, false), request(&[1, 2], &[5, 2, 0], 8192, 0.93));
         for field in ["logits", "log_probabilities", "candidate_probabilities"] {
-            for (actual, expected) in hit[field]
-                .as_array()
-                .unwrap()
-                .iter()
-                .zip(control[field].as_array().unwrap())
-            {
-                assert_eq!(
-                    actual.as_f64().unwrap().to_bits(),
-                    expected.as_f64().unwrap().to_bits()
-                );
+            for (actual, expected) in hit[field].as_array().unwrap().iter().zip(control[field].as_array().unwrap()) {
+                assert_eq!(actual.as_f64().unwrap().to_bits(), expected.as_f64().unwrap().to_bits());
             }
         }
     }
@@ -648,17 +653,11 @@ mod tests {
     fn successful_tokenize_helpers_preserve_scoring_entry_failed_helpers_clear_it() {
         let mut worker = worker(true, false);
         post(&mut worker, standard());
-        post(
-            &mut worker,
-            json!({"operation":"tokenize","text":"synthetic helper"}),
-        );
+        post(&mut worker, json!({"operation":"tokenize","text":"synthetic helper"}));
         assert_eq!(post(&mut worker, standard())["cache_hit"], true);
         worker.backend.fail_tokenize = true;
         assert_eq!(
-            post(
-                &mut worker,
-                json!({"operation":"tokenize","text":"synthetic helper"})
-            )["error"],
+            post(&mut worker, json!({"operation":"tokenize","text":"synthetic helper"}))["error"],
             "tokenization_failed"
         );
         assert_eq!(post(&mut worker, standard())["cache_hit"], false);
@@ -677,12 +676,7 @@ mod tests {
             post(&mut worker, standard());
             let mut output = Vec::new();
             worker.process_line(&invalid, &mut output).unwrap();
-            assert!(
-                serde_json::from_slice::<Value>(&output)
-                    .unwrap()
-                    .get("error")
-                    .is_some()
-            );
+            assert!(serde_json::from_slice::<Value>(&output).unwrap().get("error").is_some());
             assert_eq!(post(&mut worker, standard())["cache_hit"], false);
         }
     }
@@ -696,10 +690,7 @@ mod tests {
             worker.backend.invalid_output = invalid_output;
             let mut output = Vec::new();
             let bytes = serde_json::to_vec(&request(&[2, 1], &[2, 3], 8192, 1.22)).unwrap();
-            assert_eq!(
-                worker.process_line(&bytes, &mut output),
-                Err("native_operation_failed")
-            );
+            assert_eq!(worker.process_line(&bytes, &mut output), Err("native_operation_failed"));
             assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
             worker.backend.fail_score = false;
             worker.backend.invalid_output = false;
@@ -711,7 +702,10 @@ mod tests {
         fail_flush: bool,
     }
     impl Write for FailingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        fn write(
+            &mut self,
+            bytes: &[u8],
+        ) -> io::Result<usize> {
             if self.fail_flush {
                 Ok(bytes.len())
             } else {
@@ -734,7 +728,9 @@ mod tests {
                 assert_eq!(
                     worker.process_line(
                         &serde_json::to_vec(&standard()).unwrap(),
-                        &mut FailingWriter { fail_flush }
+                        &mut FailingWriter {
+                            fail_flush
+                        }
                     ),
                     Err("protocol_write_failed")
                 );
@@ -758,10 +754,7 @@ mod tests {
     #[test]
     fn reset_clears_only_distribution_and_keeps_cumulative_accurate_counters() {
         let mut worker = worker(true, false);
-        assert_eq!(
-            post(&mut worker, standard())["cache"]["native_score_calls"],
-            1
-        );
+        assert_eq!(post(&mut worker, standard())["cache"]["native_score_calls"], 1);
         let hit = post(&mut worker, standard());
         assert_eq!(hit["cache"]["native_score_calls"], 1);
         assert_eq!(hit["cache"]["hits"], 1);
@@ -780,7 +773,12 @@ mod tests {
         post(&mut worker, standard());
         let bytes = serde_json::to_vec(&json!({"operation":"reset_cache"})).unwrap();
         assert_eq!(
-            worker.process_line(&bytes, &mut FailingWriter { fail_flush: true }),
+            worker.process_line(
+                &bytes,
+                &mut FailingWriter {
+                    fail_flush: true
+                }
+            ),
             Err("protocol_write_failed")
         );
         let fresh = post(&mut worker, standard());
@@ -789,7 +787,9 @@ mod tests {
         assert_eq!(
             worker.process_line(
                 &serde_json::to_vec(&standard()).unwrap(),
-                &mut FailingWriter { fail_flush: false }
+                &mut FailingWriter {
+                    fail_flush: false
+                }
             ),
             Err("protocol_write_failed")
         );
@@ -801,10 +801,7 @@ mod tests {
         let logits = [-3.0, 1.25, -0.5, 2.0];
         let temperature = 1.22;
         let uncalibrated = calibrated_probabilities(&logits, 1.0).unwrap();
-        let weights: Vec<f64> = uncalibrated
-            .iter()
-            .map(|p| p.powf(1.0 / temperature))
-            .collect();
+        let weights: Vec<f64> = uncalibrated.iter().map(|p| p.powf(1.0 / temperature)).collect();
         let sum: f64 = weights.iter().sum();
         let calibrated = calibrated_probabilities(&logits, temperature).unwrap();
         for (actual, weight) in calibrated.iter().zip(weights) {
@@ -818,14 +815,8 @@ mod tests {
         let actual = calibrated_probabilities(&[9998.0, 10000.0, 10001.0], 0.93).unwrap();
         assert_eq!(expected, actual);
         assert!((actual.iter().sum::<f64>() - 1.0).abs() < 1e-14);
-        assert_eq!(
-            calibrated_probabilities(&[0.0, 0.0], 1.22).unwrap(),
-            vec![0.5, 0.5]
-        );
-        assert_eq!(
-            calibrated_probabilities(&[f64::MAX, -f64::MAX], 1.22).unwrap(),
-            vec![1.0, 0.0]
-        );
+        assert_eq!(calibrated_probabilities(&[0.0, 0.0], 1.22).unwrap(), vec![0.5, 0.5]);
+        assert_eq!(calibrated_probabilities(&[f64::MAX, -f64::MAX], 1.22).unwrap(), vec![1.0, 0.0]);
     }
 
     #[test]
@@ -857,34 +848,29 @@ mod tests {
         assert!(validate_score(&[100], &[2, 3], 8192, 1.22, 100).is_err());
         assert!(validate_score(&[1], &[2], 8192, 1.22, 100).is_err());
         assert!(validate_score(&[1], &(0..17).collect::<Vec<_>>(), 8192, 1.22, 100).is_err());
-        assert_eq!(
-            validate_score(&[1, 2], &[2, 3], 1, 1.22, 100),
-            Err("context_overflow")
-        );
+        assert_eq!(validate_score(&[1, 2], &[2, 3], 1, 1.22, 100), Err("context_overflow"));
         assert_eq!(validate_score(&[1, 2], &[2, 3], 2, 1.22, 100), Ok(()));
         assert!(validate_score(&[1], &[2, 3], 16385, 1.22, 100).is_err());
     }
 
     #[test]
     fn protocol_rejects_unknown_fields_and_wrong_token_types() {
-        assert!(serde_json::from_value::<ScoreRequest>(json!({"operation":"score","input_token_ids":[1],
-            "candidate_token_ids":[2,3],"context_tokens":8192,"temperature":1.22,"cache_prompt":true})).is_err());
         assert!(
-            serde_json::from_value::<ScoreRequest>(
-                json!({"operation":"score","input_token_ids":[-1],
-            "candidate_token_ids":[2,3],"context_tokens":8192,"temperature":1.22})
-            )
+            serde_json::from_value::<ScoreRequest>(json!({"operation":"score","input_token_ids":[1],
+            "candidate_token_ids":[2,3],"context_tokens":8192,"temperature":1.22,"cache_prompt":true}))
             .is_err()
         );
         assert!(
-            serde_json::from_value::<ScoreRequest>(
-                json!({"operation":"tokenize","text":"test","private":true})
-            )
+            serde_json::from_value::<ScoreRequest>(json!({"operation":"score","input_token_ids":[-1],
+            "candidate_token_ids":[2,3],"context_tokens":8192,"temperature":1.22}))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ScoreRequest>(json!({"operation":"tokenize","text":"test","private":true}))
+                .is_err()
         );
         assert!(matches!(
-            serde_json::from_value::<ScoreRequest>(json!({"operation":"tokenize","text":"test"}))
-                .unwrap(),
+            serde_json::from_value::<ScoreRequest>(json!({"operation":"tokenize","text":"test"})).unwrap(),
             ScoreRequest::Tokenize {
                 add_special_tokens: false,
                 ..
@@ -894,10 +880,7 @@ mod tests {
 
     #[test]
     fn token_identity_matches_little_endian_u32_protocol() {
-        assert_eq!(
-            token_hash(&[1, 2]),
-            format!("{:x}", Sha256::digest([1, 0, 0, 0, 2, 0, 0, 0]))
-        );
+        assert_eq!(token_hash(&[1, 2]), format!("{:x}", Sha256::digest([1, 0, 0, 0, 2, 0, 0, 0])));
         assert_ne!(token_hash(&[1, 2]), token_hash(&[2, 1]));
     }
 }

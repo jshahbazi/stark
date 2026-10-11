@@ -3,7 +3,8 @@ use thiserror::Error;
 
 #[cfg(feature = "direct-delta-conv")]
 use crate::backends::common::kernel::DeltaNetConvDirectKernel;
-
+#[cfg(not(feature = "deferred-state-init"))]
+use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
 use crate::{
     array::size_for_shape,
     backends::common::{
@@ -30,9 +31,6 @@ use crate::{
     parameters::{ParameterLoaderError, ParameterTree},
     utils::maybe_mut::MaybeMut,
 };
-
-#[cfg(not(feature = "deferred-state-init"))]
-use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
 
 pub(crate) mod tree_verify;
 
@@ -135,7 +133,11 @@ pub struct DeltaNet<B: Backend> {
     conv_weight: B::GlobalBuffer,
     conv_bias: Option<B::GlobalBuffer>,
     conv_update: <B::Kernels as Kernels>::DeltaNetConvUpdateKernel,
+    // Retained and initialized for the original indirect-kernel lifetime even
+    // when the direct route is selected; the optimized route bypasses encoding.
+    #[cfg_attr(feature = "direct-delta-conv", allow(dead_code))]
     conv_pack: <B::Kernels as Kernels>::Conv1dPackKernel,
+    #[cfg_attr(feature = "direct-delta-conv", allow(dead_code))]
     conv_scan: <B::Kernels as Kernels>::DeltaNetConvScanKernel,
     #[cfg(feature = "direct-delta-conv")]
     conv_direct: <B::Kernels as Kernels>::DeltaNetConvDirectKernel,
