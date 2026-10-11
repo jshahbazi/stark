@@ -23,6 +23,7 @@ members = [
     "crates/legacy/kiban",
 ]
 resolver = "3"
+exclude = ["vendor/cxx"]
 
 [workspace.package]
 edition = "2024"
@@ -63,6 +64,7 @@ kanka = { path = "crates/legacy/kanka", default-features = false }
 kiban = { path = "crates/legacy/kiban", default-features = false }
 stark = { path = "crates/legacy/stark", default-features = false }
 xgrammar = { package = "xgrammar-rs", git = "https://github.com/trymirai/xgrammar-rs.git", branch = "main", features = ["tokenizers"] }
+cxx = { path = "vendor/cxx", version = "1.0.195" }
 half = { version = "2.7", features = ["bytemuck", "num-traits"] }
 ndarray = "0.17"
 serde = { version = "1.0", features = ["derive"] }
@@ -118,7 +120,9 @@ syn = { version = "2.0", features = ["full", "fold", "visit-mut"] }
 prettyplease = "0.2"
 rhai = "1.24.0"
 indicatif = "0.18"
-rocket = { version = "0.5", features = ["json"] }
+# Rocket's HTTP/2 default pulls the unpatched h2 0.3 line. The inherited
+# local server supports HTTP/1.1 only until a compatible HTTP/2 stack is adopted.
+rocket = { version = "0.5", default-features = false, features = ["json"] }
 uuid = { version = "1.20", features = ["serde", "v4", "v5"] }
 comfy-table = { version = "7.2", default-features = false }
 test-tag = "0.1"
@@ -161,15 +165,15 @@ napi = { version = "3.8.3", features = [
 ] }
 napi-derive = "3.5.2"
 napi-build = "2.3.1"
-pyo3 = { version = "0.28.3", features = [
+pyo3 = { version = "0.29.3", features = [
     "extension-module",
     "abi3-py312",
     "experimental-async",
     "multiple-pymethods",
 ] }
-pyo3-build-config = "0.28.3"
-pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
-pyo3-stub-gen = "0.22.1"
+pyo3-build-config = "0.29.3"
+pyo3-async-runtimes = { version = "0.29.0", features = ["tokio-runtime"] }
+pyo3-stub-gen = "0.23.1"
 inventory = "0.3.24"
 wasm-bindgen = { version = "0.2.114", features = ["serde-serialize"] }
 serde-wasm-bindgen = "0.6.5"
@@ -208,6 +212,10 @@ rodio = { version = "0.22.2", default-features = false, features = [
 ] }
 web-sys = "0.3"
 web-time = "1.1"
+
+[patch."https://github.com/trymirai/cxx.git"]
+cxx = { path = "vendor/cxx" }
+cxx-build = { path = "vendor/cxx/gen/build" }
 
 [workspace.lints.clippy]
 # TODO: add large_stack_frames, large_stack_arrays, trivially_copy_pass_by_ref, needless_pass_by_value, map_err_ignore, use_self, cloned_instead_of_copied, manual_let_else, semicolon_if_nothing_returned, uninlined_format_args, lossy_float_literal

@@ -1,7 +1,9 @@
 [advisories]
 # Inspect the complete workspace, including inherited bindings and tools.
 # Vulnerability exceptions require a separately reviewed scope, rationale and expiry.
+# CI reports unmaintained packages as warnings, without ignoring their advisories.
 ignore = []
+unsound = "all"
 
 [licenses]
 allow = [

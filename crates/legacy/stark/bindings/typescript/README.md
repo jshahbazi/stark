@@ -9,6 +9,33 @@ Stark binding packages have not been published. Build them from the repository
 before using these examples. Upstream Mirai model identifiers and provider
 endpoints remain in the inherited registry integration for compatibility.
 
+## Development checks
+
+Use Node.js 24 and the package's pinned pnpm 10.18.1. Install the locked
+dependencies and run the checks from this directory:
+
+```sh
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm exec eslint .
+pnpm exec tsc --noEmit
+pnpm test
+STARK_SKIP_NATIVE_BUILD_CHECK=1 MIRAI_DISABLE_DENO_BUILD=1 pnpm build
+pnpm test:build
+pnpm exec publint dist
+pnpm audit --audit-level moderate
+```
+
+Vitest runs the tool schema and cancellation tests with native callback stubs.
+The build uses the locked TypeScript compiler to emit CommonJS, ESM,
+declarations, and source maps. `test:build` checks those outputs and both module
+formats with the native wrapper stubbed.
+
+Native integration tests require a built binding and a model and run only with
+`STARK_NATIVE_INTEGRATION=1 pnpm test`. The checks above do not establish native
+or model inference compatibility. Regular `pnpm build` still loads the native
+binding to check both module formats unless `STARK_SKIP_NATIVE_BUILD_CHECK=1`
+is set.
+
 ## Quick Start
 
 
