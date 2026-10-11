@@ -24,10 +24,7 @@ fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<(PathBuf, bool)
 }
 
 fn protocol_output() -> Result<File, &'static str> {
-    let null = OpenOptions::new()
-        .write(true)
-        .open("/dev/null")
-        .map_err(|_| "output_setup_failed")?;
+    let null = OpenOptions::new().write(true).open("/dev/null").map_err(|_| "output_setup_failed")?;
     let fd = unsafe { libc::fcntl(libc::STDOUT_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
     if fd < 0 {
         return Err("output_setup_failed");
@@ -65,10 +62,7 @@ pub fn main(digest_mode: bool) {
         Ok(Err(code)) => code,
         Err(_) => "native_operation_failed",
     };
-    let _ = serde_json::to_writer(
-        &mut output,
-        &serde_json::json!({"ready":false,"error":code}),
-    );
+    let _ = serde_json::to_writer(&mut output, &serde_json::json!({"ready":false,"error":code}));
     let _ = output.write_all(b"\n");
     let _ = output.flush();
     std::process::exit(1);
@@ -82,10 +76,7 @@ mod tests {
     }
     #[test]
     fn cache_requires_explicit_flag_and_rejects_unknown_or_duplicate_flags() {
-        assert_eq!(
-            parse(&["--score-model-path", "/model"]),
-            Ok((PathBuf::from("/model"), false))
-        );
+        assert_eq!(parse(&["--score-model-path", "/model"]), Ok((PathBuf::from("/model"), false)));
         assert_eq!(
             parse(&["--score-model-path", "/model", "--consecutive-cache"]),
             Ok((PathBuf::from("/model"), true))
@@ -95,12 +86,7 @@ mod tests {
             vec!["--score-model-path"],
             vec!["--other", "/model"],
             vec!["--score-model-path", "/model", "--unknown"],
-            vec![
-                "--score-model-path",
-                "/model",
-                "--consecutive-cache",
-                "--consecutive-cache",
-            ],
+            vec!["--score-model-path", "/model", "--consecutive-cache", "--consecutive-cache"],
         ] {
             assert_eq!(parse(&args), Err("invalid_arguments"));
         }

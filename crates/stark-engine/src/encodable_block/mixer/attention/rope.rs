@@ -215,9 +215,10 @@ fn precalculate_cpu_tables(
 
 #[cfg(all(test, feature = "rope-cache"))]
 mod tests {
-    use super::*;
     use serde_json::json;
     use stark_engine_macros::stark_test;
+
+    use super::*;
 
     fn configs() -> Vec<AnyRoPEConfig> {
         let variants = [
