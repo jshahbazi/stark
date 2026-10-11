@@ -1,6 +1,8 @@
 # Stark
 
+Stark is an experimental Rust and Metal inference engine for Apple silicon, forked from [Uzu](https://github.com/trymirai/uzu). It adds exact-token probability scoring and optimizations developed for JevK5.
 
+The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`, and retains its Git history and MIT license.
 
 ## Build the scoring engine
 
@@ -23,6 +25,7 @@ The worker uses a private JSON-lines stdin/stdout protocol. Request and response
 
 The `optimized` feature selects the six accepted optional engine optimizations. Consecutive caching requires the separate `--consecutive-cache` runtime flag and defaults off. These changes do not establish faster general text generation or cross-model quality acceptance.
 
+[Validation](docs/VALIDATION.md) records the BF16 probability and calibration checks for the Stark build. Precise performance testing remains deferred.
 
 ## Scope and attribution
 
