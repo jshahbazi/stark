@@ -260,13 +260,51 @@ def _copy(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
     return peak
 
 
+def _cast_values(source: np.ndarray, source_dtype: str, dtype: str) -> np.ndarray:
+    """Cast with the frozen CPU reference's portable F16 NaN bit policy.
+
+    Native half conversion kernels differ in NaN quieting and payload handling.
+    Reconstruct those exceptional outputs from the source bits; finite values
+    retain the native rounded cast. The only extra array is a one-byte mask.
+    """
+    import ml_dtypes
+
+    dtypes = {"BF16": np.dtype(ml_dtypes.bfloat16), "F16": np.dtype("<f2"), "F32": np.dtype("<f4")}
+    with np.errstate(over="ignore", invalid="ignore"):
+        values = source.astype(dtypes[dtype])
+        if source_dtype == dtype or "F16" not in {source_dtype, dtype}:
+            return values
+        nan_mask = np.isnan(source)
+    if not nan_mask.any():
+        return values
+    source_bits = source.view(f"<u{DTYPE_BYTES[source_dtype]}")
+    target_bits = values.view(f"<u{DTYPE_BYTES[dtype]}")
+    # Scalar reconstruction avoids index/payload arrays for an all-NaN chunk.
+    for index, is_nan in enumerate(nan_mask):
+        if not is_nan:
+            continue
+        bits = int(source_bits[index])
+        sign = bits >> (31 if source_dtype == "F32" else 15)
+        if dtype == "BF16":
+            target_bits[index] = (sign << 15) | 0x7FC0
+        elif dtype == "F32":
+            target_bits[index] = (sign << 31) | 0x7FC00000 | ((bits & 0x03FF) << 13)
+        else:
+            payload = (bits & 0x007F) << 3 if source_dtype == "BF16" else (bits & 0x007FFFFF) >> 13
+            target_bits[index] = (sign << 15) | 0x7E00 | payload
+    return values
+
+
 def _cast_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
     if tensor.dtype == "F32":
         return _copy(tensor, output, chunk_bytes)
     if tensor.dtype not in {"BF16", "F16"}:
         raise UnsupportedConversion("Normalization dtype is unsupported")
-    # The input bytes and one float32 output array fit together in the budget.
-    elements = max(1, chunk_bytes // (tensor.itemsize + 4))
+    # F16 also needs a one-byte NaN mask while constructing the F32 output.
+    mask_bytes = int(tensor.dtype == "F16")
+    elements = chunk_bytes // (tensor.itemsize + 4 + mask_bytes)
+    if elements < 1:
+        raise ConversionError("insufficient_transform_workspace")
     peak = 0
     with _open_tensor(tensor) as stream:
         remaining = tensor.nbytes
@@ -279,10 +317,9 @@ def _cast_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
                 np.left_shift(values, 16, out=values)
                 values = values.view("<f4")
             else:
-                with np.errstate(invalid="ignore"):
-                    values = np.frombuffer(chunk, dtype="<f2").astype("<f4")
+                values = _cast_values(np.frombuffer(chunk, dtype="<f2"), "F16", "F32")
             output.write(memoryview(values).cast("B"))
-            peak = max(peak, len(chunk) + values.nbytes)
+            peak = max(peak, len(chunk) + values.nbytes + len(values) * mask_bytes)
             remaining -= len(chunk)
             del chunk, values
     return peak
@@ -297,9 +334,10 @@ def _cast(tensor: TensorInfo, output: BinaryIO, dtype: str, chunk_bytes: int) ->
     dtypes = {"BF16": np.dtype(ml_dtypes.bfloat16), "F16": np.dtype("<f2"), "F32": np.dtype("<f4")}
     if tensor.dtype not in dtypes or dtype not in dtypes:
         raise UnsupportedConversion("unsupported_dense_dtype")
-    # Input and output coexist; reserve another output-sized scratch budget for
-    # casting internals. This is a transform workspace, not whole-process RSS.
-    elements = chunk_bytes // (tensor.itemsize + 2 * DTYPE_BYTES[dtype])
+    # Reserve native casting scratch and the portable half-cast NaN mask.
+    # This is a transform workspace, not whole-process RSS.
+    mask_bytes = int("F16" in {tensor.dtype, dtype})
+    elements = chunk_bytes // (tensor.itemsize + 2 * DTYPE_BYTES[dtype] + mask_bytes)
     if elements < 1:
         raise ConversionError("insufficient_transform_workspace")
     peak = 0
@@ -310,10 +348,9 @@ def _cast(tensor: TensorInfo, output: BinaryIO, dtype: str, chunk_bytes: int) ->
             if not chunk or len(chunk) % tensor.itemsize:
                 raise ConversionError("truncated_tensor")
             source = np.frombuffer(chunk, dtype=dtypes[tensor.dtype])
-            with np.errstate(over="ignore", invalid="ignore"):
-                values = source.astype(dtypes[dtype])
+            values = _cast_values(source, tensor.dtype, dtype)
             output.write(memoryview(values.view(f"u{DTYPE_BYTES[dtype]}")).cast("B"))
-            peak = max(peak, len(chunk) + 2 * values.nbytes)
+            peak = max(peak, len(chunk) + 2 * values.nbytes + len(values) * mask_bytes)
             remaining -= len(chunk)
             del chunk, source, values
     return peak
@@ -350,7 +387,8 @@ def _scalar_transform(
     # Peak stages: input + F32 working values + exponent/mask scratch (5B),
     # or input + source-rounded values + target cast. The extra target-sized
     # allowance covers the same casting scratch reserved by _cast.
-    bytes_per_element = max(tensor.itemsize + 9, 2 * tensor.itemsize + 2 * DTYPE_BYTES[dtype])
+    mask_bytes = int(tensor.dtype != dtype and "F16" in {tensor.dtype, dtype})
+    bytes_per_element = max(tensor.itemsize + 9, 2 * tensor.itemsize + 2 * DTYPE_BYTES[dtype] + mask_bytes)
     elements = chunk_bytes // bytes_per_element
     if elements < 1:
         raise ConversionError("insufficient_transform_workspace")
@@ -385,7 +423,7 @@ def _scalar_transform(
             count = len(chunk) // tensor.itemsize
             source = np.frombuffer(chunk, dtype=dtypes[tensor.dtype])
             with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
-                values = source.astype("<f4")
+                values = _cast_values(source, tensor.dtype, "F32")
                 _flush_f32_subnormals(values)
                 underflow = None
                 if underflow_limit is not None:
@@ -396,9 +434,9 @@ def _scalar_transform(
                     np.bitwise_and(bits, 0x80000000, out=bits, where=underflow)
                     del underflow
                 _flush_f32_subnormals(values)
-                rounded = values.astype(dtypes[tensor.dtype])
+                rounded = _cast_values(values, "F32", tensor.dtype)
                 del values
-                target = rounded.astype(dtypes[dtype])
+                target = _cast_values(rounded, tensor.dtype, dtype)
             output.write(memoryview(target.view(f"u{DTYPE_BYTES[dtype]}")).cast("B"))
             peak = max(peak, count * bytes_per_element)
             remaining -= len(chunk)
