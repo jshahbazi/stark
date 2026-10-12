@@ -20,18 +20,18 @@ The worker uses a private JSON-lines stdin/stdout protocol. Request and response
 
 `stark-convert` implements 54 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 21 MLX profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. MLX conversion streams existing packed weights and transforms affine coefficients within an 8 MiB workspace, preserving exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled.
 
-The six newly measured MLX tuples used **90.7–96.6% less sampled process-tree RSS** than pinned Lalamo. Llama3.2-1B 4-bit and Gemma3-1B 4-bit conversion were **1.24× and 1.23× faster**, respectively. All six passed exact parity and named-build BF16 load-only checks.
+Sequential coefficient export reduced median complete conversion time by **16–38%** against the previous branch implementation across six MLX tuples. Five measured medians are lower than pinned Lalamo, with **90.7–96.6% less sampled process-tree RSS**. All outputs match the existing exact named-build BF16 load-only qualifications.
 
 | MLX checkpoint, BF16 output | Stark median | Lalamo median | Lower sampled RSS |
 | --- | ---: | ---: | ---: |
-| Llama3.2-1B 4-bit | 1.845 s | 2.292 s | 94.1% |
-| Llama3.2-1B 8-bit | 2.233 s | 2.137 s | 96.6% |
-| SmolLM3-3B 4-bit | 3.979 s | 2.809 s | 95.4% |
-| SmolLM3-3B 8-bit | 6.019 s | 3.544 s | 96.2% |
-| Gemma3-1B 4-bit | 1.991 s | 2.444 s | 90.7% |
-| Gemma3-1B 8-bit | 2.655 s | 2.171 s | 92.5% |
+| Llama3.2-1B 4-bit | 1.256 s | 2.397 s | 94.2% |
+| Llama3.2-1B 8-bit | 2.202 s | 2.604 s | 96.6% |
+| SmolLM3-3B 4-bit | 2.779 s | 3.377 s | 95.4% |
+| SmolLM3-3B 8-bit | 5.083 s | 4.233 s | 96.2% |
+| Gemma3-1B 4-bit | 1.551 s | 2.580 s | 90.7% |
+| Gemma3-1B 8-bit | 2.464 s | 2.537 s | 90.8% |
 
-These are three-repeat, warm-cache complete-command measurements on one Apple silicon host. Stark performs stronger source verification and receipt work. Four of the six tuples have slower median conversion times, so broad latency parity remains open. The earlier Qwen3-0.6B MLX packet measured 1.78×/1.21× speedups at its separately recorded source state. Conversion results do not qualify inference speed or quality. See [current evidence and protocol](docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [earlier Qwen3 results](docs/MODEL_CONVERSION_MILESTONE_3.md), and [converter usage](tools/converter/README.md).
+These are five-repeat, warm-cache complete-command measurements on one Apple silicon host. Stark retains full initial/final source verification and stronger receipt work. SmolLM3 8-bit remains **20% slower** than Lalamo. Gemma 8-bit's median advantage is about 3%; its observed timing ranges overlap, as do Llama 8-bit's. Broad latency parity remains open. Conversion measurements grant no inference speed or quality qualification. See [current evidence and protocol](docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md), [independent review](docs/MODEL_CONVERSION_MILESTONE_3_LATENCY_REVIEW.md), [preserved dense results](docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), and [converter usage](tools/converter/README.md).
 
 ## Changes from Uzu
 

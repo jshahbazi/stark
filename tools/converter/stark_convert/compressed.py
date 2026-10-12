@@ -169,8 +169,45 @@ def validate_mlx_operation(op: TensorOperation) -> None:
         raise ConversionError("Invalid MLX parameter plane operation")
 
 
+def _read_parameter_tile(
+    source: TensorInfo,
+    stream: BinaryIO,
+    row: int,
+    height: int,
+    group: int,
+    width: int,
+    dtype: np.dtype,
+) -> tuple[np.ndarray, int]:
+    """Read contiguous complete rows, or a bounded band of strided rows."""
+    groups = source.shape[1]
+    if width == groups:
+        stream.seek(source.offset + row * groups * source.itemsize)
+        chunk = stream.read(height * width * source.itemsize)
+        if len(chunk) != height * width * source.itemsize:
+            raise ConversionError("Checkpoint tensor was truncated")
+        tile = np.frombuffer(chunk, dtype=dtype).reshape(height, width)
+        return tile, tile.nbytes
+    tile = np.empty((height, width), dtype=dtype)
+    peak = tile.nbytes
+    for index in range(height):
+        stream.seek(source.offset + ((row + index) * groups + group) * source.itemsize)
+        chunk = stream.read(width * source.itemsize)
+        if len(chunk) != width * source.itemsize:
+            raise ConversionError("Checkpoint tensor was truncated")
+        tile[index] = np.frombuffer(chunk, dtype=dtype)
+        peak = max(peak, tile.nbytes + len(chunk))
+        del chunk
+    return tile, peak
+
+
 def write_mlx_params(op: TensorOperation, output: BinaryIO, chunk_bytes: int) -> int:
-    """Cast and transpose fused planes into padded group/output tiles."""
+    """Emit padded fused planes in sequential group/output order.
+
+    Complete output group bands permit contiguous source-plane reads when the
+    workspace holds all groups. Larger planes use narrower bands. If even one
+    complete output group cannot fit, row tiles keep writes sequential under
+    the same workspace limit. No destination seek invalidates inline hashing.
+    """
     import ml_dtypes
 
     validate_mlx_operation(op)
@@ -180,47 +217,78 @@ def write_mlx_params(op: TensorOperation, output: BinaryIO, chunk_bytes: int) ->
     itemsize = DTYPE_BYTES[op.dtype]
     source_size = op.sources[0].itemsize
     mask_bytes = int("F16" in {op.sources[0].dtype, op.dtype})
-    # Reads retain at most an input tile plus a row. Casting reserves both its
-    # output and native scratch; the transpose uses that same two-output budget.
+    # Reads retain at most an input tile plus a row. Casting reserves its
+    # result and native scratch, including the portable half-cast NaN mask.
     bytes_per_element = max(2 * source_size, source_size + 2 * itemsize + mask_bytes)
     elements = chunk_bytes // bytes_per_element
     if elements < 1:
         raise ConversionError("insufficient_transform_workspace")
     groups, padded_rows = op.shape
-    tile_columns = min(groups, max(1, math.isqrt(elements)))
-    tile_rows = max(1, elements // tile_columns)
-    start, fused_row, peak = output.tell(), 0, 0
-    for source in op.sources:
-        rows = source.shape[0]
-        with _open_tensor(source) as stream:
-            for row in range(0, rows, tile_rows):
-                height = min(tile_rows, rows - row)
-                for group in range(0, groups, tile_columns):
-                    width = min(tile_columns, groups - group)
-                    tile = np.empty((height, width), dtype=dtypes[source.dtype])
-                    for index in range(height):
-                        stream.seek(source.offset + ((row + index) * groups + group) * source.itemsize)
-                        chunk = stream.read(width * source.itemsize)
-                        if len(chunk) != width * source.itemsize:
-                            raise ConversionError("Checkpoint tensor was truncated")
-                        tile[index] = np.frombuffer(chunk, dtype=dtypes[source.dtype])
-                        peak = max(peak, tile.nbytes + len(chunk))
-                        del chunk
-                    values = _cast_values(tile.reshape(-1), source.dtype, op.dtype).reshape(height, width)
-                    peak = max(peak, tile.nbytes + 2 * values.nbytes + height * width * mask_bytes)
-                    transposed = np.ascontiguousarray(values.T)
-                    peak = max(peak, tile.nbytes + values.nbytes + transposed.nbytes)
-                    for index in range(width):
-                        offset = ((group + index) * padded_rows + fused_row + row) * itemsize
-                        output.seek(start + offset)
-                        output.write(memoryview(transposed[index].view(f"u{itemsize}")).cast("B"))
-                    del tile, values, transposed
-        fused_row += rows
-    padding = bytes((padded_rows - fused_row) * itemsize)
-    if padding:
-        for group in range(groups):
-            output.seek(start + (group * padded_rows + fused_row) * itemsize)
-            output.write(padding)
-        peak = max(peak, len(padding))
-    output.seek(start + op.nbytes)
+    rows = sum(source.shape[0] for source in op.sources)
+    max_source_rows = max(source.shape[0] for source in op.sources)
+    tile_columns = min(groups, chunk_bytes // (padded_rows * itemsize + max_source_rows * bytes_per_element))
+    peak = 0
+    if tile_columns:
+        for group in range(0, groups, tile_columns):
+            width = min(tile_columns, groups - group)
+            transposed = np.empty((width, padded_rows), dtype=dtypes[op.dtype])
+            transposed[:, rows:] = 0
+            fused_row = 0
+            for source in op.sources:
+                available = chunk_bytes - transposed.nbytes
+                # A narrow output band can still read complete source rows in
+                # contiguous chunks. Reserve the selected-column copy as well
+                # as its cast, so this path does not hide a retained full row.
+                contiguous_cost = groups * source_size + width * (source_size + 2 * itemsize + mask_bytes)
+                read_columns = groups if width == groups or available >= contiguous_cost else width
+                row_cost = contiguous_cost if read_columns != width else width * bytes_per_element
+                tile_rows = min(source.shape[0], available // row_cost)
+                with _open_tensor(source) as stream:
+                    for row in range(0, source.shape[0], tile_rows):
+                        height = min(tile_rows, source.shape[0] - row)
+                        tile, read_peak = _read_parameter_tile(
+                            source,
+                            stream,
+                            row,
+                            height,
+                            0 if read_columns == groups else group,
+                            read_columns,
+                            dtypes[source.dtype],
+                        )
+                        selected = (
+                            tile if read_columns == width else np.ascontiguousarray(tile[:, group : group + width])
+                        )
+                        selected_bytes = 0 if selected is tile else selected.nbytes
+                        peak = max(peak, transposed.nbytes + read_peak)
+                        values = _cast_values(selected.reshape(-1), source.dtype, op.dtype).reshape(height, width)
+                        peak = max(
+                            peak,
+                            transposed.nbytes
+                            + tile.nbytes
+                            + selected_bytes
+                            + 2 * values.nbytes
+                            + height * width * mask_bytes,
+                        )
+                        transposed[:, fused_row + row : fused_row + row + height] = values.T
+                        del tile, selected, values
+                fused_row += source.shape[0]
+            output.write(memoryview(transposed.view(f"u{itemsize}")).cast("B"))
+            del transposed
+        return peak
+    # A small workspace cannot retain a whole group. Each group still reaches
+    # the output in order, with fusion padding written only after all sources.
+    padding_bytes = (padded_rows - rows) * itemsize
+    for group in range(groups):
+        for source in op.sources:
+            with _open_tensor(source) as stream:
+                for row in range(0, source.shape[0], elements):
+                    height = min(elements, source.shape[0] - row)
+                    tile, read_peak = _read_parameter_tile(source, stream, row, height, group, 1, dtypes[source.dtype])
+                    values = _cast_values(tile.reshape(-1), source.dtype, op.dtype)
+                    peak = max(peak, read_peak, tile.nbytes + 2 * values.nbytes + height * mask_bytes)
+                    output.write(memoryview(values.view(f"u{itemsize}")).cast("B"))
+                    del tile, values
+        if padding_bytes:
+            output.write(bytes(padding_bytes))
+            peak = max(peak, padding_bytes)
     return peak

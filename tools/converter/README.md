@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 3 dense MLX evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md) records Llama, SmolLM3 and Gemma text conversion and performance. The [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Convert a model
 
@@ -79,20 +79,20 @@ Stark's supported dense loader selects BF16 weights. F16/F32 outputs are convers
 
 ## Measured improvements over Lalamo
 
-The current Llama/SmolLM3/Gemma MLX packet passed exact parity and BF16 native load-only checks for six group-64 tuples. It reduced median sampled process-tree RSS by **90.7–96.6%**. The bounded writer copies packed codes directly and exports coefficient tiles without allocating complete unpacked weight matrices. The installed runtime has no Lalamo, JAX or PyTorch dependency. Source/content verification remains complete.
+Version 0.5.1 exports MLX coefficients sequentially, preserving inline output hashing and avoiding a completed-model reread. Complete median conversion time fell **16–38%** against the frozen prior implementation for six group-64 BF16 tuples. Five measured medians beat Lalamo, and median sampled process-tree RSS is **90.7–96.6% lower**. The writer copies packed codes directly and keeps transformation workspace at most 8 MiB. The runtime has no Lalamo, JAX or PyTorch dependency. Full initial and final source/content verification remains enabled.
 
 | MLX checkpoint | Stark complete median | Lalamo complete median | Sampled RSS reduction |
 | --- | ---: | ---: | ---: |
-| Llama3.2-1B 4-bit | 1.845 s | 2.292 s | 94.1% |
-| Llama3.2-1B 8-bit | 2.233 s | 2.137 s | 96.6% |
-| SmolLM3-3B 4-bit | 3.979 s | 2.809 s | 95.4% |
-| SmolLM3-3B 8-bit | 6.019 s | 3.544 s | 96.2% |
-| Gemma3-1B 4-bit | 1.991 s | 2.444 s | 90.7% |
-| Gemma3-1B 8-bit | 2.655 s | 2.171 s | 92.5% |
+| Llama3.2-1B 4-bit | 1.256 s | 2.397 s | 94.2% |
+| Llama3.2-1B 8-bit | 2.202 s | 2.604 s | 96.6% |
+| SmolLM3-3B 4-bit | 2.779 s | 3.377 s | 95.4% |
+| SmolLM3-3B 8-bit | 5.083 s | 4.233 s | 96.2% |
+| Gemma3-1B 4-bit | 1.551 s | 2.580 s | 90.7% |
+| Gemma3-1B 8-bit | 2.464 s | 2.537 s | 90.8% |
 
-Llama 4-bit and Gemma 4-bit measured 1.24× and 1.23× complete-command speedups. The other four median timings are slower, and Llama 8-bit timing ranges overlap. Broad latency parity is still open. The earlier Qwen3-0.6B 4/8-bit packet measured 1.78×/1.21× at its own source state. Ratios are conversion measurements only and grant no inference or quality qualification.
+Llama 4-bit and Gemma 4-bit measured 1.91× and 1.66× complete-command ratios. SmolLM3 8-bit remains 20% slower than Lalamo, despite its 28% improvement against the previous branch. Gemma 8-bit's advantage is about 3%; its observed ranges overlap, as do Llama 8-bit's. Broad latency parity remains open. Earlier Qwen3-0.6B and dense-family measurements retain their separate source states. Ratios describe conversion and grant no inference or quality qualification.
 
-Each backend ran three serial fresh processes per tuple with warm selected files and alternating order. Setup/download, warming and parity comparisons were excluded. Complete commands include verification, metadata, writing, hashes and receipts; Lalamo performs weaker source/receipt verification. RSS was sampled every 10 ms and is not a total-memory ceiling. Exact sources, timing ranges, host versions, failed hypotheses and independent review are in the [current evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md).
+Each of the frozen baseline, final candidate and external Lalamo ran five serial fresh processes per tuple with warm selected files and rotating/reversed order: 90 complete commands. All passed exact tensor/spec/config/tokenizer parity. Every baseline and candidate also matched the previous whole-file artifact hashes and exact native qualification. Those unchanged bytes retain the prior named-build load-only scope; this packet made zero scoring or generation calls. Setup/download, warming and comparisons were excluded. Complete commands include verification, metadata, writing, hashes and receipts; Lalamo performs weaker source/receipt verification. RSS was sampled every 10 ms and is separate from the workspace limit. Exact sources, timing ranges, host versions, failed hypotheses and [independent review](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY_REVIEW.md) are in the [current evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md).
 
 ## Offline replay and source manifests
 
