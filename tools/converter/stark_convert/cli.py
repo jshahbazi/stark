@@ -120,12 +120,17 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         adapter = adapter_for_model(request.repo, config.get("model_type"))
         if request.architecture is not None and adapter != request.architecture:
             raise ConversionError("Requested architecture disagrees with catalog profile")
-    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text"}:
+    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
         from .compressed import parse_mlx_quantization
 
         entry = get_model(request.repo)
         packing = entry.get("compressed_format") if entry else None
-        quantization = parse_mlx_quantization(config)
+        packing_config = config
+        if adapter == "qwen3_5":
+            from .adapters.qwen35 import normalize_qwen35_config
+
+            packing_config = normalize_qwen35_config(config)
+        quantization = parse_mlx_quantization(packing_config)
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
                 raise ConversionError("Checkpoint packing disagrees with its catalog profile")

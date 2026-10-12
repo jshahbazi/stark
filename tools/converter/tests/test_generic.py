@@ -7,6 +7,8 @@ import pytest
 from test_cli import REPOS, source_fixture, source_tooling  # noqa: F401
 from test_lfm2 import lfm2_fixture
 from test_mlx import mlx_qwen_fixture
+from test_mlx_lfm2 import mlx_lfm2_fixture
+from test_mlx_qwen35 import mlx_qwen35_fixture
 from test_qwen35 import qwen35_fixture
 from test_sources import Hub
 from tokenizers import Tokenizer, models
@@ -76,6 +78,59 @@ def test_future_mlx_checkpoint_uses_its_declared_packing(tmp_path, bits):
     assert receipt["architecture"] == "qwen3"
     assert receipt["native_qualification"] is None
     assert receipt["transform_peak_bytes"] <= 4096
+
+
+@pytest.mark.parametrize("architecture", ["qwen3_5", "lfm2"])
+@pytest.mark.parametrize("bits", [4, 8])
+def test_future_hybrid_mlx_checkpoint_converts_and_replays_offline(tmp_path, architecture, bits):
+    source = tmp_path / "source"
+    if architecture == "qwen3_5":
+        mlx_qwen35_fixture(source, bits=bits, wrapper=True, vl_wrapper=True, layout="grouped", sharded=True, mtp=True)
+    else:
+        mlx_lfm2_fixture(source, bits=bits, variant="flat", sharded=True)
+    tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(17)}, unk_token="[SYNTHETIC_0]"))
+    tokenizer.save(str(source / "tokenizer.json"))
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
+    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": 1}))
+    selected = snapshot(source)
+    manifest = tmp_path / "manifest.json"
+    selected.write_manifest(manifest)
+    replay = resolve_source(FUTURE, source_manifest=manifest, offline=True, hub=object())
+    receipt = cli.convert(replay, tmp_path / "output", repo=FUTURE, chunk_bytes=4096)
+    assert receipt["architecture"] == architecture
+    assert receipt["metadata_profile"] == "hf-generic"
+    assert receipt["catalogued"] is False
+    assert receipt["native_qualification"] is None
+    assert receipt["capability"]["native_loading"] == (
+        "runtime_blocked" if architecture == "qwen3_5" else "unverified"
+    )
+    assert receipt["capability"]["source_validation"] == "complete"
+    assert receipt["transform_peak_bytes"] <= 4096
+
+
+@pytest.mark.parametrize("architecture", ["qwen3_5", "lfm2"])
+@pytest.mark.parametrize("bits", [4, 8])
+def test_hybrid_catalog_packing_must_match_config_before_conversion(tmp_path, architecture, bits):
+    source = tmp_path / "source"
+    if architecture == "qwen3_5":
+        mlx_qwen35_fixture(source, bits=bits, wrapper=True)
+        repo = f"mlx-community/Qwen3.5-0.8B-MLX-{12 - bits}bit"
+        external = tmp_path / "external"
+        external.mkdir()
+        for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+            (external / name).write_text("{}")
+        selected = resolve_source(
+            source, repo=repo, hub=Hub({"Qwen/Qwen3.5-0.8B": external, "Qwen/Qwen3.5-27B": external})
+        )
+    else:
+        mlx_lfm2_fixture(source, bits=bits)
+        repo = f"mlx-community/LFM2-350M-{12 - bits}bit"
+        for name in ("tokenizer.json", "tokenizer_config.json", "chat_template.jinja"):
+            (source / name).write_text("{}")
+        selected = resolve_source(source, repo=repo)
+    with pytest.raises(ConversionError, match="packing disagrees"):
+        cli.plan_conversion(selected, ConversionRequest(repo))
+    assert not (tmp_path / "output").exists()
 
 
 def test_generic_remote_pins_before_download_and_replays_without_network(tmp_path):

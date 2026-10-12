@@ -295,7 +295,7 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
         ),
         ("attn_output_gate", False, UnsupportedConversion),
         ("mlp_only_layers", [0], UnsupportedConversion),
-        ("quantization", {"bits": 4}, UnsupportedConversion),
+        ("quantization", {"bits": 4}, ConversionError),
         ("unknown", True, UnsupportedConversion),
         ("mamba_ssm_dtype", "float16", UnsupportedConversion),
         ("hidden_act", "relu", UnsupportedConversion),

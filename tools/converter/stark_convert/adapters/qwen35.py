@@ -13,6 +13,7 @@ import math
 from dataclasses import replace
 from pathlib import Path
 
+from ..compressed import MLXMatrixSource, parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -70,8 +71,18 @@ def _row_range(info: TensorInfo, start: int, count: int) -> TensorInfo:
     return replace(info, shape=(count, *rest), offset=info.offset + start * row_bytes, nbytes=count * row_bytes)
 
 
+def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int):
+    """Apply a decoder row permutation equally to all affine source planes."""
+    if isinstance(info, MLXMatrixSource):
+        return MLXMatrixSource(
+            *(_row_range(plane, start, count) for plane in info.planes),
+            logical_shape=(count, info.logical_shape[1]),
+        )
+    return _row_range(info, start, count)
+
+
 def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
-    """Plan the dense text decoder using dimensions from the checkpoint config.
+    """Plan dense or existing affine MLX text weights from checkpoint dimensions.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
     adapter. Vision weights are omitted only from an explicitly declared wrapper;
@@ -87,6 +98,11 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
     target = _DTYPES[dtype]
+    # The pinned Qwen importer uses this specific field to select baked norms.
+    # An alias-only description cannot safely establish that interpretation.
+    if config.get("quantization_config") is not None and config.get("quantization") is None:
+        raise UnsupportedConversion("Qwen3.5 MLX requires the quantization field for baked normalization weights")
+    quantization = parse_mlx_quantization(config)
     unsupported: list[str] = []
     dim = _positive_int(config, "hidden_size")
     hidden = _positive_int(config, "intermediate_size")
@@ -186,11 +202,6 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     for field in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder"):
         if _bool(config, field, False):
             unsupported.append("Qwen3.5 encoder/cross-attention variants are unsupported")
-    for field in ("quantization", "quantization_config"):
-        if config.get(field) is not None:
-            if not isinstance(config[field], dict) or not config[field]:
-                raise ConversionError("Qwen3.5 quantization configuration is malformed")
-            unsupported.append("Qwen3.5 quantized checkpoints are outside implemented coverage")
     tensors = load_checkpoint(source)
     prefixes = [
         prefix
@@ -203,6 +214,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
+    used_mlx = False
 
     def tensor(name: str, shape: tuple[int, ...]) -> TensorInfo:
         expected.add(name)
@@ -223,7 +235,31 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             kind = "fuse_cast" if len(sources) > 1 else "cast"
         operations.append(TensorOperation(out, sources, output_dtype, shape, kind))
 
-    def matrix(out: str, sources: tuple[TensorInfo, ...], shape: tuple[int, ...], layout="output_input"):
+    def matrix_source(name: str, shape: tuple[int, int]) -> TensorInfo | MLXMatrixSource:
+        prefix = name.removesuffix(".weight")
+        packed = any(prefix + suffix in tensors for suffix in (".scales", ".biases")) or (
+            name in tensors and tensors[name].dtype in {"I32", "U32"}
+        )
+        if packed:
+            if quantization is None:
+                raise UnsupportedConversion("Qwen3.5 MLX checkpoint requires explicit quantization configuration")
+            info = read_mlx_matrix(tensors, name, shape, quantization)
+            expected.update((name, prefix + ".scales", prefix + ".biases"))
+            return info
+        return tensor(name, shape)
+
+    def matrix(out: str, sources, shape: tuple[int, ...], layout="output_input"):
+        nonlocal used_mlx
+        packed = [isinstance(info, MLXMatrixSource) for info in sources]
+        if any(packed):
+            if not all(packed):
+                raise UnsupportedConversion("Qwen3.5 mixed full-precision/MLX fusion is outside implemented coverage")
+            operations.extend(plan_mlx_matrix(out, sources, dtype=target, layout=layout, quantization=quantization))
+            metadata[out + ".spec"] = json.dumps(
+                {"type": "MLXSpec", "bits": quantization.bits, "group_size": quantization.group_size, "layout": layout}
+            )
+            used_mlx = True
+            return
         payload(out + ".weights", sources, shape)
         metadata[out + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": layout})
 
@@ -231,21 +267,28 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         info = tensor(name, (size,))
         operations.append(TensorOperation(out + ".scales", (info,), "F32", (size,), "cast_f32"))
 
-    embed = tensor(prefix + ".embed_tokens.weight", (vocab, dim))
+    embed = matrix_source(prefix + ".embed_tokens.weight", (vocab, dim))
     embed_out = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
     matrix(embed_out, (embed,), (vocab, dim), "input_output")
     head_names = [
         name
         for name in ("lm_head.weight", prefix + ".lm_head.weight", prefix.removesuffix(".model") + ".lm_head.weight")
-        if name in tensors
+        if any(name.removesuffix(".weight") + suffix in tensors for suffix in (".weight", ".scales", ".biases"))
     ]
     head_names = list(dict.fromkeys(head_names))
     if len(head_names) > 1 or (not tied and not head_names):
         raise ConversionError("Qwen3.5 checkpoint has ambiguous or missing lm_head")
     if head_names:
-        head = tensor(head_names[0], (vocab, dim))
+        head = matrix_source(head_names[0], (vocab, dim))
         if tied:
-            if head.dtype != embed.dtype or tensor_sha256(head) != tensor_sha256(embed):
+            if type(head) is not type(embed):
+                raise ConversionError("Qwen3.5 tied lm_head representation differs from its embedding")
+            head_planes = head.planes if isinstance(head, MLXMatrixSource) else (head,)
+            embed_planes = embed.planes if isinstance(embed, MLXMatrixSource) else (embed,)
+            if any(
+                left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                for left, right in zip(head_planes, embed_planes, strict=True)
+            ):
                 raise ConversionError("Qwen3.5 tied lm_head differs from its embedding")
         else:
             matrix("decoder.embedding.output_embedding", (head,), (vocab, dim))
@@ -259,14 +302,14 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         if layer == "full_attention":
             attn = src + ".self_attn"
             explicit_gate = attn + ".gate_proj.weight" in tensors
-            q = tensor(attn + ".q_proj.weight", (q_width if explicit_gate else 2 * q_width, dim))
-            k = tensor(attn + ".k_proj.weight", (kv_width, dim))
-            v = tensor(attn + ".v_proj.weight", (kv_width, dim))
+            q = matrix_source(attn + ".q_proj.weight", (q_width if explicit_gate else 2 * q_width, dim))
+            k = matrix_source(attn + ".k_proj.weight", (kv_width, dim))
+            v = matrix_source(attn + ".v_proj.weight", (kv_width, dim))
             if explicit_gate:
-                sources = (q, k, v, tensor(attn + ".gate_proj.weight", (q_width, dim)))
+                sources = (q, k, v, matrix_source(attn + ".gate_proj.weight", (q_width, dim)))
             else:
-                queries = tuple(_row_range(q, h * 2 * head_dim, head_dim) for h in range(heads))
-                gates = tuple(_row_range(q, h * 2 * head_dim + head_dim, head_dim) for h in range(heads))
+                queries = tuple(_matrix_row_range(q, h * 2 * head_dim, head_dim) for h in range(heads))
+                gates = tuple(_matrix_row_range(q, h * 2 * head_dim + head_dim, head_dim) for h in range(heads))
                 sources = (*queries, k, v, *gates)
             matrix(out + ".mixer.qkvg_projection.weights", sources, (2 * q_width + 2 * kv_width, dim))
             if biases:
@@ -285,7 +328,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 payload(out + ".mixer.qkvg_projection.biases", sources, (2 * q_width + 2 * kv_width,))
             matrix(
                 out + ".mixer.out_projection.weights",
-                (tensor(attn + ".o_proj.weight", (dim, q_width)),),
+                (matrix_source(attn + ".o_proj.weight", (dim, q_width)),),
                 (dim, q_width),
             )
             if biases:
@@ -296,10 +339,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             attn = src + ".linear_attn"
             total = conv_width + value_width + 2 * linear_heads
             if attn + ".in_proj.weight" in tensors:
-                sources = (tensor(attn + ".in_proj.weight", (total, dim)),)
+                sources = (matrix_source(attn + ".in_proj.weight", (total, dim)),)
             elif all(attn + f".in_proj_{branch}.weight" in tensors for branch in ("qkv", "z", "b", "a")):
                 sources = tuple(
-                    tensor(attn + f".in_proj_{branch}.weight", (width, dim))
+                    matrix_source(attn + f".in_proj_{branch}.weight", (width, dim))
                     for branch, width in (
                         ("qkv", conv_width),
                         ("z", value_width),
@@ -308,12 +351,12 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                     )
                 )
             else:
-                qkvz = tensor(attn + ".in_proj_qkvz.weight", (conv_width + value_width, dim))
-                ba = tensor(attn + ".in_proj_ba.weight", (2 * linear_heads, dim))
+                qkvz = matrix_source(attn + ".in_proj_qkvz.weight", (conv_width + value_width, dim))
+                ba = matrix_source(attn + ".in_proj_ba.weight", (2 * linear_heads, dim))
                 per_group_values = value_width // linear_groups
                 block = 2 * key_dim + 2 * per_group_values
                 qkvz_parts = tuple(
-                    _row_range(qkvz, group * block + offset, width)
+                    _matrix_row_range(qkvz, group * block + offset, width)
                     for offset, width in (
                         (0, key_dim),
                         (key_dim, key_dim),
@@ -324,7 +367,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 )
                 per_group_heads = linear_heads // linear_groups
                 ba_parts = tuple(
-                    _row_range(ba, group * 2 * per_group_heads + offset, per_group_heads)
+                    _matrix_row_range(ba, group * 2 * per_group_heads + offset, per_group_heads)
                     for offset in (0, per_group_heads)
                     for group in range(linear_groups)
                 )
@@ -347,7 +390,7 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             )
             matrix(
                 out + ".mixer.out_proj.weights",
-                (tensor(attn + ".out_proj.weight", (dim, value_width)),),
+                (matrix_source(attn + ".out_proj.weight", (dim, value_width)),),
                 (dim, value_width),
             )
             norm(out + ".mixer.norm", attn + ".norm.weight", value_dim)
@@ -358,30 +401,36 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 )
         matrix(
             out + ".mlp.up_projection.weights",
-            tuple(tensor(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
+            tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
             (2 * hidden, dim),
         )
         matrix(
             out + ".mlp.down_projection.weights",
-            (tensor(src + ".mlp.down_proj.weight", (dim, hidden)),),
+            (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
             (dim, hidden),
         )
     norm("decoder.transformer.output_norm", prefix + ".norm.weight", dim)
     vision = outer.get("vision_config")
     if vision is not None and not isinstance(vision, dict):
         raise ConversionError("Qwen3.5 vision_config must be an object")
-    ignored = {name for name in tensors if name.startswith("model.visual.")} if text and vision else set()
+    # The pinned decoder root dispatch also accepts MLX-VL's language_model.model.
+    # Its declared visual tower has a separate exact namespace; do not permit
+    # another wrapper's visual alias to hide an otherwise unconsumed tensor.
+    vision_prefix = "vision_tower." if prefix == "language_model.model" else "model.visual."
+    ignored = {name for name in tensors if name.startswith(vision_prefix)} if text and vision else set()
     # The reference text loader also omits the declared auxiliary MTP decoder.
     # Untrusted prefixes alone never authorize dropping source tensors.
     if config.get("mtp_num_hidden_layers", 0) > 0:
         ignored.update(name for name in tensors if name.startswith("mtp."))
     if set(tensors) != expected | ignored:
         raise ConversionError("Qwen3.5 checkpoint has unexpected tensors")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("Qwen3.5 MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
     norm_config = {
         "epsilon": epsilon,
-        "scale_offset": 1.0,
+        "scale_offset": None if quantization is not None else 1.0,
         "upcast_mode": "only_normalization",
         "subtract_mean": False,
         "has_scale": True,

@@ -161,7 +161,6 @@ def test_lfm2_malformed_recognized_layout_precedes_unknown_semantics(tmp_path, c
         {"full_attn_idxs": [0]},
         {"rope_parameters": {"rope_theta": 1000000.0, "rope_type": "linear"}},
         {"rope_parameters": {"rope_theta": 1000000.0, "factor": 2.0}},
-        {"quantization": {"bits": 4, "group_size": 64}},
     ],
 )
 def test_lfm2_semantics_outside_explicit_dense_coverage_fail_closed(tmp_path, changes):
