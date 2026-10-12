@@ -6,7 +6,7 @@ The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`,
 
 ## Build the scoring engine
 
-Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite and SmolLM profiles, plus affine MLX 4/8-bit Qwen3, Llama, SmolLM3 and Gemma text checkpoints. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
+Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM and LFM2 profiles, including Qwen3.5 text/DeltaNet, plus affine MLX 4/8-bit Qwen3, Llama, SmolLM3 and Gemma text checkpoints. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
 
 ```sh
 cargo build --release --locked -p stark-score --features optimized
@@ -18,9 +18,13 @@ The worker uses a private JSON-lines stdin/stdout protocol. Request and response
 
 ## Model conversion and Lalamo comparison
 
-`stark-convert` implements 54 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 21 MLX profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. MLX conversion streams existing packed weights and transforms affine coefficients within an 8 MiB workspace, preserving exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled.
+`stark-convert` implements 63 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 21 MLX profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. Conversion uses an 8 MiB transformation workspace and preserves exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled. Twenty-one exact BF16 tuples have named-build load-only qualifications.
 
-Sequential coefficient export reduced median complete conversion time by **16–38%** against the previous branch implementation across six MLX tuples. Five measured medians are lower than pinned Lalamo, with **90.7–96.6% less sampled process-tree RSS**. All outputs match the existing exact named-build BF16 load-only qualifications.
+Conversion adapters are tracked by architecture and weight format. Checkpoint metadata, source revisions and exact qualifications are tracked separately. The new explicit [`hf-generic` path](tools/converter/README.md#future-checkpoints-and-architecture-tracking) lets a future Hugging Face checkpoint reuse a supported adapter with its own self-contained metadata, without adding a catalog entry. Its complete config/layout still must pass validation, and it starts native-unqualified.
+
+The [milestone 4 dense benchmarks](docs/MODEL_CONVERSION_MILESTONE_4.md) measured LFM2-350M at **1.233 s versus Lalamo's 1.688 s** and Qwen3.5-0.8B text at **3.525 s versus 2.707 s**. LFM2's median is 27% lower; Qwen3.5's is 30% higher. Median sampled process-tree RSS is 90–91% lower for both. Five-repeat ranges are broad and overlap; all observations and the failed Qwen3.5 latency objective remain recorded. Both outputs pass exact parity and named-build native loading, with zero scoring calls.
+
+The preserved milestone 3 sequential coefficient export reduced median complete conversion time by **16–38%** against its previous branch implementation across six MLX tuples. Five measured medians are lower than pinned Lalamo, with **90.7–96.6% less sampled process-tree RSS**. All outputs match the existing exact named-build BF16 load-only qualifications.
 
 | MLX checkpoint, BF16 output | Stark median | Lalamo median | Lower sampled RSS |
 | --- | ---: | ---: | ---: |

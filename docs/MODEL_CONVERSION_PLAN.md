@@ -2,6 +2,8 @@
 
 Updated: 2026-10-12. Milestone 1's G0/G1/selected G2, milestone 2's scoped G3 and the first Qwen3 MLX packet remain preserved. Milestone 3 includes independent MLX Llama/SmolLM3/Gemma text conversion and six additional exact BF16 load-only qualifications. The new [latency packet](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) reduces six complete-command medians by 16–38% against the frozen prior implementation; five beat Lalamo and SmolLM3 8-bit remains slower. The [dense continuation](MODEL_CONVERSION_MILESTONE_3_DENSE.md) and [original review](MODEL_CONVERSION_MILESTONE_3_DENSE_REVIEW.md) retain their separate source bindings and four failed latency hypotheses. Full G4 and broad latency parity remain open.
 
+[Milestone 4](MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet and LFM2 short-convolution/attention, plus explicit architecture dispatch for self-contained future checkpoints. The format inventory is complete for the pinned baseline. Prior benchmark and qualification packets retain their original source bindings.
+
 Keep `stark-convert` in this repository as a first-class companion to the Stark engine. The user-directed target is to supplant Lalamo with independently implemented conversion and remove the runtime fallback. Lalamo remains an attributed, pinned reference for registry inventory, format semantics, and externally generated qualification artifacts. The installed converter must neither import nor invoke Lalamo, JAX, or PyTorch.
 
 This policy supersedes the permanent-fallback policy in the plan committed at `e51ed763`. The [earlier plan review](MODEL_CONVERSION_PLAN_REVIEW.md) reviewed that historical policy and source state; its acceptance does not approve this replacement policy or the current implementation. The [prototype evidence](MODEL_CONVERSION.md) retains its original source/lock hashes and results. New code and tooling receive separate source-bound evidence.
@@ -10,7 +12,9 @@ This policy supersedes the permanent-fallback policy in the plan committed at `e
 
 The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **four explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct`, `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`, and `google/gemma-2-2b-it`. Gemma2 uses the pinned config/loader with a standard LanguageModelSpec; the registry has no Gemma2 built-in. Extensions do not alter the built-in denominator or imply upstream registration.
 
-The current implementation covers **54 built-in profiles and four extensions**, including 33 dense built-ins for Qwen, Llama, Mistral, Gemma3 text, Phi-4-mini, Granite and SmolLM, plus 21 MLX 4/8-bit Qwen3/Llama/SmolLM3/Gemma text built-ins. Gemma2 remains separately counted as a Stark extension. Nineteen exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 56 built-ins need independent adapters; 39 implemented identities remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
+The current implementation covers **63 built-in profiles and four extensions**, including 42 dense built-ins for Qwen, Llama, Mistral, Gemma3 text, Phi-4-mini, Granite, SmolLM and LFM2, plus 21 MLX 4/8-bit Qwen3/Llama/SmolLM3/Gemma text built-ins. Gemma2 remains separately counted as a Stark extension. Twenty-one exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 47 built-ins need independent adapters; 46 implemented identities remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The pinned replacement denominator excludes arbitrary Hugging Face repositories, third-party Lalamo plugins, and a moving upstream branch.
+
+Reusable adapters are tracked by architecture and input format. The catalog tracks checkpoint-specific metadata/source rules and implementation status; the native ledger tracks exact source/artifact tuples and named builds. An explicit `hf-generic` profile can convert a future repository with a supported architecture and self-contained metadata without adding a catalog entry. It retains strict config/layout/source validation, plain metadata defaults and an unqualified native status. It cannot override a known catalog profile or expand the pinned denominator. See [future-checkpoint usage](../tools/converter/README.md#future-checkpoints-and-architecture-tracking).
 
 Conversion, native loading, execution, and performance are separate dimensions. Current Stark dense loading selects BF16; F16/F32 conversion-only outputs remain runtime-blocked. MoE construction is currently rejected. Existing kernel/config enums do not establish acceptance for every model using them. Language scoring, generation, classification, and TTS each require the corresponding execution evidence.
 
@@ -124,12 +128,12 @@ Dependencies: inspected native matrix/kernel/embedding contracts, source metadat
 - [x] Independently implement the 12 registered MLX Qwen3 4-bit/8-bit profiles with affine groups 16/32/64/128, both accepted physical layouts, dtype casts and cross-shard fusion; preserve the prototype MLX result as historical evidence.
 - [x] Qualify the exact 0.6B 4-bit and 8-bit group-128 BF16 tuples with full reference parity, named-build load-only evidence and source-bound performance; keep other profiles/groups unqualified.
 - [x] Freeze 288 external packed/spec/dequantized synthetic cases, exceptional coefficient casts and 12 complete synthetic artifact variants; enforce workspace and malformed-input/publication/source gates.
-- [ ] Inventory remaining packed schemes from actual reference loaders rather than quantization enums.
+- [x] Inventory remaining packed schemes from actual reference loaders rather than quantization enums; preserve the [baseline format report](MODEL_CONVERSION_FORMAT_INVENTORY.md) and its source binding. GPTQ enum presence alone does not prove a complete input loader.
 - [x] Extend the unchanged MLX helper to five Llama, two SmolLM3 and two Gemma3 text profiles; qualify the selected six group-64 BF16 tuples with exact artifact parity, named-build load-only and source-bound benchmark evidence. Keep other variants unqualified.
 - [x] Freeze additional actual-loader decoder exports and complete synthetic CLI metadata/artifact comparisons; preserve family RoPE/norm/embedding semantics and reject mixed/malformed representations.
 - [x] Record explicit canonical/transport provenance for Llama's exact public metadata copy, authenticated against the official pinned Git blob; keep direct gated resolution and automatic substitution policies unchanged.
 - [x] Profile and optimize MLX coefficient export with sequential output bands, bounded complete-row reads and inline hashing; retain exact artifact bytes, full source verification and the 8 MiB workspace limit. Independently review and benchmark six tuples against the frozen prior implementation and Lalamo.
-- [ ] Close the remaining SmolLM3-3B 8-bit complete-command latency objective and qualify broader latency claims with additional sources/hosts.
+- [ ] Deferred by user choice: close the remaining SmolLM3-3B 8-bit complete-command latency objective and qualify broader latency claims with additional sources/hosts. This does not block the next architecture packet.
 - [ ] Extend independent compressed conversion to remaining families/schemes and qualify each additionally claimed tuple.
 - [ ] Define bit order, packing divisor, group axis, scales/zero points, padding, fusion, and cross-chunk/shard boundaries for every additional scheme.
 - [ ] Keep repacking an existing compressed checkpoint separate from computing new quantization and its quality acceptance.
@@ -146,7 +150,13 @@ The **third milestone comprises the initial Qwen3 MLX packet, the Llama/SmolLM3/
 
 Dependencies: the operators and root-output contracts needed by each row. Independent packets can overlap when those requirements pass.
 
-- [ ] Implement DeltaNet/Qwen hybrids, Mamba/LLaMBA, short-convolution/LFM, and other state-space families individually.
+- [x] Implement dense Qwen3.5 text/DeltaNet and LFM2 attention/short convolution with exact pinned reference exports; preserve unsupported MoE, compressed and later-generation variants.
+- [x] Qualify the exact Qwen3.5-0.8B and LFM2-350M BF16 tuples with full tensor/spec/config/tokenizer parity and named-build native readiness/EOF, with zero scoring calls. Preserve the prior nineteen records.
+- [x] Add explicit `hf-generic` architecture dispatch, self-contained checkpoint metadata and schema-2 offline replay for future supported checkpoints; keep catalog profiles authoritative and qualification per tuple.
+- [x] Run the preregistered twenty-command dense architecture benchmark against live pinned Lalamo; retain every observation and exact qualification. LFM2's raw median latency hypothesis passes; Qwen3.5's fails. Both memory hypotheses pass, with broad overlapping timing ranges.
+- [ ] Improve Qwen3.5-0.8B complete-command conversion latency and qualify any improvement against preserved source-bound measurements.
+- [ ] Extend MLX conversion to Qwen3.5 text and LFM2, then separately qualify bit/group/config/checkpoint tuples and benchmark them.
+- [ ] Implement Mamba/LLaMBA and other remaining state-space families individually.
 - [ ] Implement classifier roots/metadata and separate native loading/classification acceptance.
 - [ ] Implement conversion-only MoE artifacts as a distinct adapter; native expert/router/kernel work requires a separately scoped implementation.
 - [ ] Account for audio/TTS, auxiliary/speculator models, NeMo/archive origins, and their dependency/access requirements; implement each independently where in scope.
@@ -155,6 +165,8 @@ Dependencies: the operators and root-output contracts needed by each row. Indepe
 - [ ] Close every unsupported row or record an explicit bounded access/dependency/runtime disposition; do not call blocked rows independently qualified.
 
 Gate G5: all in-scope pinned conversion rows have independently implemented and qualified parity within documented source/access/dependency limits. Runtime and execution blocks remain separate. Complete registry accounting is a prerequisite for a claim of replacing Lalamo's conversion reach.
+
+The **fourth milestone's dense architecture packet** adds five Qwen3.5 and four LFM2 built-ins. Only the selected 0.8B/350M BF16 tuples gain exact named-build load-only qualification. Qwen3.5-35B-A3B is MoE and remains planned despite sharing the pinned reference config class. The [milestone evidence](MODEL_CONVERSION_MILESTONE_4.md) records bounded workspace, fresh external benchmarks, exact hashes and [independent review](MODEL_CONVERSION_MILESTONE_4_REVIEW.md). Generic conversion reuses supported adapters without granting checkpoint-wide or architecture-wide native qualification. Full G4/G5 and complete replacement remain open; Qwen3.5/LFM2 MLX is the next dependency-ready continuation.
 
 ## Per-tuple qualification and promotion checklist
 

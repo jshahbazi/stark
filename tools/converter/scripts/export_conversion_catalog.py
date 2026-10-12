@@ -54,6 +54,8 @@ def export(reference: Path) -> dict:
         "HFPhi3Config": "phi3",
         "HFGraniteConfig": "granite",
         "HFSmolLM3Config": "smollm3",
+        "HFQwen35Config": "qwen3_5",
+        "HFLFM2Config": "lfm2",
     }
     for spec in ModelRegistry.build(allow_third_party_plugins=False).models:
         repo = spec.origin.description
@@ -114,6 +116,20 @@ def export(reference: Path) -> dict:
             and any(width in spec.name.lower() for width in ("4bit", "8bit"))
         )
         adapter = profiles.get(class_name) if dense or mlx else None
+        # Promote inspected dense families; later generations keep their own
+        # metadata/variant gates even when the reference shares a config class.
+        # The shared upstream config class also handles MoE. These exact pinned
+        # identities use the inspected dense decoder; 35B-A3B is qwen3_5_moe.
+        if class_name == "HFQwen35Config" and repo not in {
+            "Qwen/Qwen3.5-0.8B",
+            "Qwen/Qwen3.5-2B",
+            "Qwen/Qwen3.5-4B",
+            "Qwen/Qwen3.5-9B",
+            "Qwen/Qwen3.5-27B",
+        }:
+            adapter = None
+        if class_name == "HFLFM2Config" and spec.family != "LFM2":
+            adapter = None
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,

@@ -23,6 +23,7 @@ from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 
+from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
 from stark_convert.streaming import ConversionError, read_json
 
@@ -53,6 +54,18 @@ _INLINE_TEXT = {
     ): "{{ bos_token or '' }}{% for message in messages %}{{ message.content }}{% endfor %}",
 }
 SUPPORTED_METADATA_REPOS = frozenset(entry["repo"] for entry in models() if entry.get("metadata_profile") is not None)
+_INLINE_GENERATION = {
+    ("generation_config", "2a5490399d96986a6555fe8bfa2562b8740ae444c6158f1dcfaa2cf97626da92"): {
+        "temperature": 0.3,
+        "min_p": 0.15,
+    },
+    ("generation_params_overrides", "70d45ef6963ee481c03dc57ed865b205baffe32cfcff1388b1d88189a6a97bec"): {
+        "temperature": 0.8,
+        "top_k": 40,
+        "repetition_penalty": 1.15,
+        "suffix_repetition_length": 1024,
+    },
+}
 
 
 class UnsupportedMetadata(ValueError):
@@ -309,12 +322,12 @@ def _profile_generation_config(
         )
         result = _generation_config(generation_source, hf_config)
     else:
-        inline_source = metadata.get("generation_config")
+        inline_source = _generation_profile_value(metadata, "generation_config")
         if inline_source is not None and not isinstance(inline_source, dict):
             raise ConversionError("Invalid generation-config profile.")
         result = _native_generation_config(inline_source or {}, hf_config)
 
-    overrides = metadata.get("generation_params_overrides")
+    overrides = _generation_profile_value(metadata, "generation_params_overrides")
     if overrides is not None:
         if not isinstance(overrides, dict):
             raise ConversionError("Invalid generation-override profile.")
@@ -330,6 +343,23 @@ def _profile_generation_config(
             else:
                 result[name] = value
     return result
+
+
+def _generation_profile_value(metadata: dict, role: str) -> dict | None:
+    """Resolve only reviewed public scalar defaults at their exact upstream hash."""
+    value = metadata.get(role)
+    identity = metadata.get("inline_sources", {}).get(role)
+    if identity is None:
+        return value
+    if value is not None or not isinstance(identity, dict) or set(identity) != {"sha256"}:
+        raise ConversionError("Conflicting inline generation profile.")
+    digest = identity["sha256"]
+    if not isinstance(digest, str) or (role, digest) not in _INLINE_GENERATION:
+        raise UnsupportedMetadata("Unsupported inline generation profile.")
+    value = {**_native_generation_config({}, {"eos_token_id": []}), **_INLINE_GENERATION[(role, digest)]}
+    if hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest() != digest:
+        raise ConversionError("Inline generation profile identity changed.")
+    return value
 
 
 def write_metadata(
@@ -356,12 +386,36 @@ def write_metadata(
     expected_type = _MODEL_TYPES.get(model_entry.get("config_class"))
     if expected_type is None:
         raise UnsupportedMetadata("Unsupported metadata architecture.")
+    if expected_type == "qwen3_5":
+        from .adapters.qwen35 import normalize_qwen35_config
+
+        hf_config = normalize_qwen35_config(hf_config)
     if hf_config.get("model_type") != expected_type:
         raise ConversionError("Model architecture does not match metadata profile.")
 
     source = Path(source)
     output = Path(output)
     tokenizer_config = _read_object(_file_path(source, model_entry, "tokenizer_config", resolve_file), "tokenizer")
+    if model_entry["metadata_profile"] == GENERIC_PROFILE:
+        # Generic profiles pin all present sidecars. When both template forms
+        # exist, accept only identical text before choosing the inline form.
+        if tokenizer_config.get("chat_template") is not None and "chat_template" in model_entry["files"]:
+            supplied = _read_text(_file_path(source, model_entry, "chat_template", resolve_file), "chat-template")
+            if tokenizer_config["chat_template"] != supplied:
+                raise ConversionError("Conflicting generic chat-template metadata.")
+            model_entry = {
+                **model_entry,
+                "files": {key: value for key, value in model_entry["files"].items() if key != "chat_template"},
+            }
+        if hf_config.get("eos_token_id") is None:
+            generation = (
+                _read_object(_file_path(source, model_entry, "generation_config", resolve_file), "generation")
+                if "generation_config" in model_entry["files"]
+                else {}
+            )
+            if generation.get("eos_token_id") is None:
+                raise ConversionError("Generic metadata requires explicit stop-token identifiers.")
+            hf_config = {**hf_config, "eos_token_id": generation["eos_token_id"]}
     prompt_template = _chat_template(source, model_entry, tokenizer_config, resolve_file)
     codec_profile = _profile_codec(model_entry["metadata"])
     system_prompt = None
@@ -373,6 +427,8 @@ def write_metadata(
     bos_token = _optional_text(tokenizer_config.get("bos_token"))
     eos_token = _optional_text(tokenizer_config.get("eos_token"))
     generation_config = _profile_generation_config(source, model_entry, hf_config, resolve_file)
+    if model_entry["metadata_profile"] == GENERIC_PROFILE and not generation_config["stop_token_ids"]:
+        raise ConversionError("Generic metadata requires nonempty stop-token identifiers.")
 
     try:
         tokenizer = Tokenizer.from_file(str(_file_path(source, model_entry, "tokenizer", resolve_file)))
