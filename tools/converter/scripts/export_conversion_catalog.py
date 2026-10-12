@@ -56,6 +56,7 @@ def export(reference: Path) -> dict:
         "HFSmolLM3Config": "smollm3",
         "HFQwen35Config": "qwen3_5",
         "HFLFM2Config": "lfm2",
+        "HFLlambaConfig": "llamba",
     }
     for spec in ModelRegistry.build(allow_third_party_plugins=False).models:
         repo = spec.origin.description
@@ -120,6 +121,7 @@ def export(reference: Path) -> dict:
                 "HFGemma3TextConfig",
                 "HFQwen35Config",
                 "HFLFM2Config",
+                "HFLlambaConfig",
             }
             and any(width in spec.name.lower() for width in ("4bit", "8bit"))
         )
@@ -136,6 +138,8 @@ def export(reference: Path) -> dict:
         if class_name == "HFQwen35Config" and repo not in qwen35_repos:
             adapter = None
         if class_name == "HFLFM2Config" and spec.family != "LFM2":
+            adapter = None
+        if class_name == "HFLlambaConfig" and repo not in {"cartesia-ai/Llamba-1B", "cartesia-ai/Llamba-1B-4bit-mlx"}:
             adapter = None
         metadata = {
             "parser_id": parser_id,

@@ -21,6 +21,7 @@ CONFIG_ADAPTERS = {
     "HFSmolLM3Config": "smollm3",
     "HFQwen35Config": "qwen3_5",
     "HFLFM2Config": "lfm2",
+    "HFLlambaConfig": "llamba",
 }
 
 

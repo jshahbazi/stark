@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 from test_cli import REPOS, source_fixture, source_tooling  # noqa: F401
 from test_lfm2 import lfm2_fixture
+from test_llamba import llamba_fixture
 from test_mlx import mlx_qwen_fixture
 from test_mlx_lfm2 import mlx_lfm2_fixture
 from test_mlx_qwen35 import mlx_qwen35_fixture
@@ -26,6 +27,8 @@ def future_source(path, architecture="qwen3"):
         return source_fixture(path, architecture)
     if architecture == "qwen3_5":
         qwen35_fixture(path, wrapper=True)
+    elif architecture == "llamba":
+        llamba_fixture(path)
     else:
         lfm2_fixture(path)
     tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(32)}, unk_token="[SYNTHETIC_0]"))
@@ -39,7 +42,7 @@ def snapshot(path, **kwargs):
     return resolve_source(path, repo=FUTURE, metadata_profile="hf-generic", **kwargs)
 
 
-@pytest.mark.parametrize("architecture", [*REPOS, "qwen3_5", "lfm2"])
+@pytest.mark.parametrize("architecture", [*REPOS, "qwen3_5", "lfm2", "llamba"])
 def test_future_models_reuse_every_supported_architecture(tmp_path, architecture):
     source = future_source(tmp_path / "source", architecture)
     receipt = cli.convert(snapshot(source), tmp_path / "output", repo=FUTURE, chunk_bytes=4096)
@@ -106,6 +109,42 @@ def test_future_hybrid_mlx_checkpoint_converts_and_replays_offline(tmp_path, arc
     )
     assert receipt["capability"]["source_validation"] == "complete"
     assert receipt["transform_peak_bytes"] <= 4096
+
+
+@pytest.mark.parametrize("case", ["mlx4_group16", "mlx8_group16"])
+def test_future_llamba_mlx_reuses_explicit_config_and_own_stop_metadata(tmp_path, case):
+    source = tmp_path / "source"
+    config, _ = llamba_fixture(source, case)
+    config["eos_token_id"] = 1
+    (source / "config.json").write_text(json.dumps(config))
+    tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(64)}, unk_token="[SYNTHETIC_0]"))
+    tokenizer.save(str(source / "tokenizer.json"))
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
+    selected = snapshot(source)
+    manifest = tmp_path / "manifest.json"
+    selected.write_manifest(manifest)
+    replay = resolve_source(FUTURE, source_manifest=manifest, offline=True, hub=object())
+    receipt = cli.convert(replay, tmp_path / "output", repo=FUTURE, chunk_bytes=4096)
+    assert receipt["architecture"] == "llamba"
+    assert receipt["metadata_profile"] == "hf-generic"
+    assert receipt["capability"]["native_loading"] == "unverified"
+    assert receipt["native_qualification"] is None
+    assert receipt["transform_peak_bytes"] <= 4096
+    output = json.loads((tmp_path / "output/config.json").read_text())
+    assert output["generation_config"]["stop_token_ids"] == [1]
+
+
+def test_llamba_dense_catalog_cannot_bypass_the_compressed_profile(tmp_path):
+    source = tmp_path / "source"
+    llamba_fixture(source, "mlx4_group16")
+    external = tmp_path / "external"
+    external.mkdir()
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        (external / name).write_text("{}")
+    repo = "cartesia-ai/Llamba-1B"
+    selected = resolve_source(source, repo=repo, hub=Hub({"meta-llama/Llama-3.2-1B-Instruct": external}))
+    with pytest.raises(UnsupportedConversion, match="registered compressed profile"):
+        cli.plan_conversion(selected, ConversionRequest(repo))
 
 
 @pytest.mark.parametrize("architecture", ["qwen3_5", "lfm2"])

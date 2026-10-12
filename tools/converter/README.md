@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) completes the scoped dense and 4-bit MLX LLaMBA conversion packet, with exact qualifications and the dense latency objective still open. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Convert a model
 
@@ -29,7 +29,7 @@ The command emits aggregate timings, hashes, and capability status. Its private 
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **81 built-ins plus four extensions**, or 85 identities. This includes 42 dense built-ins and 39 MLX built-ins:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **83 built-ins plus four extensions**, or 87 identities. This includes 43 dense built-ins and 40 MLX built-ins:
 
 | Adapter | Implemented identities |
 | --- | --- |
@@ -40,6 +40,7 @@ The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in
 | Qwen3.5 text MLX | `mlx-community/Qwen3.5-{0.8B,2B,4B,9B}-MLX-{4bit,8bit}` and `mlx-community/Qwen3.5-27B-{4bit,8bit}` |
 | LFM2 | Dense `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}`; short-convolution and attention layers |
 | LFM2 MLX | `mlx-community/LFM2-{350M,700M,1.2B,2.6B}-{4bit,8bit}` |
+| LLaMBA / Mamba2 | `cartesia-ai/Llamba-1B` and `cartesia-ai/Llamba-1B-4bit-mlx`; backbone and alternating SSM/MLP layouts |
 | Llama | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `HuggingFaceTB/SmolLM2-1.7B-Instruct`, `Nanbeige/Nanbeige4.1-3B`, `RekaAI/reka-flash-3.1`; extension `unsloth/Llama-3.2-1B-Instruct` |
 | Llama MLX | `mlx-community/Llama-3.1-8B-Instruct-4bit`, `mlx-community/Llama-3.2-{1B,3B}-Instruct-{4bit,8bit}` |
 | Mistral | `mistralai/Codestral-22B-v0.1`, `mistralai/Devstral-Small-2505`; extensions `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}` |
@@ -55,7 +56,7 @@ This is implementation coverage. Exact checkpoint/dtype/config qualification rem
 
 The preserved dense milestone 4 adds `Qwen/Qwen3.5-0.8B` and `LiquidAI/LFM2-350M`, with exact complete reference parity. Qwen3.5 conversion extracts the text decoder from its declared wrapper, preserving source verification of omitted vision/MTP tensors. It preserves gated attention, DeltaNet projection ordering and F32 recurrent/convolution/normalization parameters. LFM2 retains attention/short-convolution layer order, accepted 2D/3D convolution shapes and its feed-forward dimension rules. Qwen3.5 MoE, later Qwen/LFM generations, multimodal execution and scoring/generation quality remain unqualified or unsupported.
 
-The [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds exact group-64 BF16 qualifications for `mlx-community/Qwen3.5-0.8B-MLX-{4bit,8bit}` and `mlx-community/LFM2-350M-{4bit,8bit}`. All four match every pinned reference tensor/spec/config/tokenizer and pass named-build native readiness/EOF with zero scoring calls. There are now twenty-five exact qualified tuples; all other implemented identities and variants retain their separate unqualified status.
+The [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds exact group-64 BF16 qualifications for `mlx-community/Qwen3.5-0.8B-MLX-{4bit,8bit}` and `mlx-community/LFM2-350M-{4bit,8bit}`. All four match every pinned reference tensor/spec/config/tokenizer and pass named-build native readiness/EOF with zero scoring calls. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) adds dense and group-128 4-bit LLaMBA BF16 qualifications. There are now twenty-seven exact qualified tuples; all other implemented identities and variants retain their separate unqualified status.
 
 ## Future checkpoints and architecture tracking
 
@@ -68,7 +69,7 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
   --output models/future-model-stark
 ```
 
-The converter selects the adapter from the checkpoint's `model_type` and validates the full config and tensor layout. Optional `--architecture llama` asserts the expected type; it cannot override a conflicting checkpoint. Accepted architecture identifiers are `qwen2`, `qwen3`, `qwen3_5`, `llama`, `mistral`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, and `lfm2`. Dense BF16/F16/F32 uses the corresponding strict planner. Existing affine MLX 4/8-bit support applies to Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma3 text and LFM2. A different architecture or unsupported variant still needs implementation.
+The converter selects the adapter from the checkpoint's `model_type` and validates the full config and tensor layout. Optional `--architecture llama` asserts the expected type; it cannot override a conflicting checkpoint. Accepted architecture identifiers are `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, and `lfm2`. Dense BF16/F16/F32 uses the corresponding strict planner. Existing affine MLX 4/8-bit support applies to Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma3 text and LFM2; the pinned LLaMBA catalog has one 4-bit profile. A different architecture or unsupported variant still needs implementation.
 
 `hf-generic` requires self-contained `config.json`, `tokenizer.json`, and `tokenizer_config.json`; it selects `generation_config.json` and `chat_template.jinja` whenever present. It requires a supported chat template and explicit nonempty EOS identifiers in the model or generation metadata. Duplicate inline/Jinja templates must agree exactly. It uses the checkpoint's tokenizer, template and supported generation fields, with plain system/user/assistant roles. Output parsers, reasoning controls and system-prompt defaults require a separately reviewed checkpoint profile. Registered profiles retain their authoritative metadata and packing rules and refuse generic overrides.
 
@@ -89,6 +90,8 @@ All MLX families use affine groups 16/32/64/128 and the same bounded coefficient
 
 MLX metadata follows each registered source rule: Qwen3 uses its original repository's tokenizer/generation files; Qwen3.5 uses its corresponding official tokenizer and the Qwen3.5-27B generation file; LFM2 uses its own tokenizer/Jinja template and reviewed static generation defaults. Llama uses the MLX tokenizer and official generation file; SmolLM3 uses its MLX tokenizer and original chat-template/generation files; Gemma text uses its MLX tokenizer and official generation file. External sources are independently pinned. Missing or gated dependencies fail rather than silently replacing metadata. An explicit private offline manifest can reference verified local content; the separate qualification evidence records any public mirror transport and its exact canonical Git-blob match.
 
+LLaMBA uses the official Llama-3.2-1B tokenizer/generation files and its registered fixed EOS property. Its config-less MLX repository selects the dense LLaMBA config externally; profile bits plus validated matrix planes establish group size. Unselected primary config files never override that source. The real MLX profile has a dense tied embedding and an unused approximate `head.linear`; all three head planes are validated, omitted under the declared tied semantics and retained in full source verification. Other head/layout variants fail or require exact duplicate-plane comparison. A self-contained future `model_type=llamba` checkpoint can use `hf-generic` with its own explicit stop metadata and, for MLX, explicit quantization.
+
 ```sh
 uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.8B-MLX-4bit \
   --output ./models/qwen35-0.8b-4bit
@@ -105,15 +108,24 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
   --capabilities
 ```
 
-The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Current implemented adapters emit language-model root configs. Classifier, TTS, Mamba/LLaMBA and other unimplemented state-space families, MoE, and other compressed conversion remain later workstreams.
+The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Current implemented adapters emit language-model root configs. Classifier, TTS, Mamba1 and other unimplemented state-space families, MoE, and other compressed conversion remain later workstreams.
 
-Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. A catalog probe does not inspect source or output artifacts. BF16 conversions retain their planner's status: earlier families report `supported_layout_unverified_tuple`; Qwen3.5, LFM2 and generic routes remain `unverified`, with `runtime_blocked` for unsupported native dimensions/configs. An exact match of registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash promotes the result to `qualified_tuple` using the stored named-build record.
+Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. A catalog probe does not inspect source or output artifacts. BF16 conversions retain their planner's status: earlier families report `supported_layout_unverified_tuple`; Qwen3.5, LFM2, LLaMBA and generic routes remain `unverified`, with `runtime_blocked` for unsupported native dimensions/configs. An exact match of registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash promotes the result to `qualified_tuple` using the stored named-build record.
 
 `--require-native-support` requires that exact stored match before publication; unmatched artifacts fail cleanly. A match reports `native_loading=qualified_tuple` and emits the full `native_qualification` record, including the named build's worker/source/Cargo-lock/toolchain hashes, Rust 1.98.1, release profile, features, and load-only result. That result applies to the recorded build and exact artifacts. It provides no guarantee for another current or future engine binary. Execution remains unverified: readiness and EOF do not establish scoring, generation, classification, or TTS correctness. Stark currently rejects MoE construction.
 
 ## Measured improvements over Lalamo
 
-Version 0.7.0 adds four hybrid MLX benchmarks with exact parity, named-build loading and the same 8 MiB workspace. Five serial warm-file complete commands per backend/tuple measured:
+Version 0.8.0 adds dense and 4-bit MLX LLaMBA benchmarks. Five serial warm-file complete commands per backend/tuple measured:
+
+| LLaMBA checkpoint, BF16 output | Stark median | Lalamo median | Lower sampled RSS |
+| --- | ---: | ---: | ---: |
+| 1B 4-bit MLX, group 128 | 2.142 s | 2.225 s | 96.42% |
+| 1B, F32 source | 5.791 s | 2.105 s | 97.13% |
+
+All twenty outputs pass exact tensor/spec/config/tokenizer parity, and all ten candidate commands match exact named-build load-only qualifications. MLX's median is 3.73% lower, with overlapping ranges. Dense conversion is 2.75 times as slow and its latency objective remains open. Candidate timing includes full initial/final source verification; Lalamo's source/receipt checks are weaker. These descriptive one-host results make no inference-speed or quality claim. [Milestone 5 evidence](../../docs/MODEL_CONVERSION_MILESTONE_5.md) and [independent review](../../docs/MODEL_CONVERSION_MILESTONE_5_REVIEW.md) retain all observations, hashes and limits.
+
+The preserved version 0.7.0 adds four hybrid MLX benchmarks with exact parity, named-build loading and the same 8 MiB workspace. Five serial warm-file complete commands per backend/tuple measured:
 
 | MLX checkpoint, group 64 BF16 | Stark median | Lalamo median | Lower time | Lower sampled RSS |
 | --- | ---: | ---: | ---: | ---: |

@@ -463,7 +463,8 @@ def test_exact_external_reference_metadata_parity(tmp_path: Path, repo: str) -> 
     provenance = json.loads((reference / "provenance.json").read_text())
     assert provenance["reference_revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
     source = reference / "sources" / repo
-    config = json.loads((source / "config.json").read_text())
+    config_rule = get_model(repo)["files"]["model_config"]
+    config = json.loads((reference / "sources" / config_rule["repo"] / config_rule["filename"]).read_text())
     ours = tmp_path / "stream"
     fragments = write_metadata(
         source,

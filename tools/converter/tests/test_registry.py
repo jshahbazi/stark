@@ -42,8 +42,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 85
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 81
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 87
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 83
 
 
 def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
@@ -68,16 +68,19 @@ def test_extensions_are_separate_from_builtin_inventory():
 
 def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
     packed = [entry for entry in models() if entry.get("compressed_format") is not None]
-    assert len(packed) == 39
+    assert len(packed) == 40
     assert {
         adapter: sum(entry["adapter"] == adapter for entry in packed)
-        for adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}
-    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2, "qwen3_5": 10, "lfm2": 8}
+        for adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2", "llamba"}
+    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2, "qwen3_5": 10, "lfm2": 8, "llamba": 1}
     assert {entry["compressed_format"]["bits"] for entry in packed} == {4, 8}
     for entry in packed:
         assert entry["adapter"] == entry["metadata_profile"]
         assert entry["compressed_format"]["scheme"] == "mlx_affine"
-        assert entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
+        assert (
+            entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
+            or entry["repo"] == "cartesia-ai/Llamba-1B-4bit-mlx"
+        )
         assert entry["status"]["qualification"] == "pending"
     assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] == "qwen3_5"
     assert get_model("mlx-community/gemma-3-4b-it-4bit")["adapter"] is None
@@ -90,6 +93,19 @@ def test_external_files_and_field_selection_are_retained():
     assert rules["tokenizer"]["repo"] == "mistralai/Mistral-Small-3.1-24B-Base-2503"
     assert rules["chat_template"]["field"] == "chat_template"
     assert rules["system_prompt"]["filename"] == "SYSTEM_PROMPT.txt"
+
+
+def test_llamba_profiles_keep_external_config_and_exact_format_identity():
+    assert {entry["repo"] for entry in models() if entry["adapter"] == "llamba"} == {
+        "cartesia-ai/Llamba-1B",
+        "cartesia-ai/Llamba-1B-4bit-mlx",
+    }
+    dense = get_model("cartesia-ai/Llamba-1B")
+    packed = get_model("cartesia-ai/Llamba-1B-4bit-mlx")
+    assert dense["compressed_format"] is None
+    assert packed["compressed_format"] == {"scheme": "mlx_affine", "bits": 4}
+    assert packed["files"]["model_config"] == {"repo": dense["repo"], "filename": "config.json"}
+    assert {entry["files"]["tokenizer"]["repo"] for entry in (dense, packed)} == {"meta-llama/Llama-3.2-1B-Instruct"}
 
 
 def test_dispatch_requires_an_implemented_specific_tuple():
