@@ -57,6 +57,7 @@ def export(reference: Path) -> dict:
         "HFQwen35Config": "qwen3_5",
         "HFLFM2Config": "lfm2",
         "HFLlambaConfig": "llamba",
+        "ModernBERTConfig": "modernbert",
     }
     for spec in ModelRegistry.build(allow_third_party_plugins=False).models:
         repo = spec.origin.description
@@ -80,6 +81,10 @@ def export(reference: Path) -> dict:
                 inline[field.name] = {
                     "sha256": _digest(dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value)
                 }
+        if type(spec).__name__ == "ClassifierModelSpec":
+            # ConfigMap inherits this language default, but classifier import
+            # never selects or reads a generation policy file.
+            files.pop("generation_config", None)
         parser = getattr(spec, "output_parser_regex", None)
         parsers = {
             OPTIONAL_THINKING_OUTPUT_PARSER_REGEX: "optional_thinking",
@@ -141,6 +146,11 @@ def export(reference: Path) -> dict:
             adapter = None
         if class_name == "HFLlambaConfig" and repo not in {"cartesia-ai/Llamba-1B", "cartesia-ai/Llamba-1B-4bit-mlx"}:
             adapter = None
+        if class_name == "ModernBERTConfig" and repo not in {
+            "trymirai/chat-moderation-router",
+            "trymirai/health-related-router",
+        }:
+            adapter = None
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,
@@ -167,7 +177,7 @@ def export(reference: Path) -> dict:
                 "files": files,
                 "metadata": metadata,
                 "adapter": adapter,
-                "metadata_profile": adapter,
+                "metadata_profile": "modernbert-classifier" if adapter == "modernbert" else adapter,
                 "compressed_format": {
                     "scheme": "mlx_affine",
                     "bits": 4 if "4bit" in spec.name.lower() else 8,

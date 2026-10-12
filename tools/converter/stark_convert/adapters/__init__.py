@@ -6,6 +6,7 @@ from .lfm2 import build_lfm2_plan
 from .llama import build_llama_plan
 from .llamba import build_llamba_plan
 from .mistral import build_mistral_plan
+from .modernbert import build_modernbert_plan
 from .phi import build_phi_plan
 from .qwen2 import build_qwen2_plan
 from .qwen35 import build_qwen35_plan
@@ -18,6 +19,7 @@ __all__ = [
     "build_lfm2_plan",
     "build_llamba_plan",
     "build_mistral_plan",
+    "build_modernbert_plan",
     "build_phi_plan",
     "build_qwen2_plan",
     "build_qwen35_plan",

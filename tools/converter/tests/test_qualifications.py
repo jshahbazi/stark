@@ -172,3 +172,78 @@ def test_invalid_json_error_does_not_expose_contents(document):
     with pytest.raises(ConversionError) as caught:
         qualifications.qualification_for(REPO, "bfloat16", HASHES)
     assert str(caught.value) == "Invalid native qualification catalog"
+
+
+def classifier_evidence_record():
+    record = evidence_record()
+    record.update(repo="trymirai/chat-moderation-router", model_kind="classifier")
+    record["native_build"].update(
+        loader="classifier_load_harness",
+        native_classification_calls=0,
+        native_generation_calls=0,
+        harness_source_sha256="a" * 64,
+        harness_manifest_sha256="b" * 64,
+        harness_lock_sha256="c" * 64,
+    )
+    return record
+
+
+def test_classifier_qualification_requires_explicit_loader_and_zero_execution(document):
+    record = classifier_evidence_record()
+    document.write_text(json.dumps({"schema_version": 1, "records": [evidence_record(), record]}))
+    assert qualifications.qualification_for(record["repo"], "bfloat16", HASHES) == record
+    assert qualifications.qualification_for(REPO, "bfloat16", HASHES) == evidence_record()
+
+
+@pytest.mark.parametrize("field", ["model_kind"])
+@pytest.mark.parametrize("value", [None, "language", "tts", True])
+def test_classifier_record_cannot_inherit_language_proof(document, field, value):
+    record = classifier_evidence_record()
+    if value is None:
+        record.pop(field)
+    else:
+        record[field] = value
+    document.write_text(json.dumps({"schema_version": 1, "records": [record]}))
+    with pytest.raises(ConversionError, match="^Invalid native qualification catalog$"):
+        qualifications.qualification_for(record["repo"], "bfloat16", HASHES)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("loader", "scoring_worker"),
+        ("native_classification_calls", 1),
+        ("native_classification_calls", False),
+        ("native_generation_calls", 1),
+        ("native_generation_calls", False),
+        ("harness_source_sha256", "bad"),
+        ("harness_manifest_sha256", "bad"),
+        ("harness_lock_sha256", "bad"),
+    ],
+)
+def test_classifier_execution_or_incomplete_harness_evidence_fails(document, field, value):
+    record = classifier_evidence_record()
+    record["native_build"][field] = value
+    document.write_text(json.dumps({"schema_version": 1, "records": [record]}))
+    with pytest.raises(ConversionError):
+        qualifications.qualification_for(record["repo"], "bfloat16", HASHES)
+
+
+@pytest.mark.parametrize(
+    "field",
+    sorted(qualifications._CLASSIFIER_HASHES | {"loader", "native_classification_calls", "native_generation_calls"}),
+)
+def test_classifier_harness_fields_cannot_be_missing(document, field):
+    record = classifier_evidence_record()
+    record["native_build"].pop(field)
+    document.write_text(json.dumps({"schema_version": 1, "records": [record]}))
+    with pytest.raises(ConversionError):
+        qualifications.qualification_for(record["repo"], "bfloat16", HASHES)
+
+
+def test_language_record_cannot_use_classifier_harness_schema(document):
+    record = classifier_evidence_record()
+    record["repo"] = REPO
+    document.write_text(json.dumps({"schema_version": 1, "records": [record]}))
+    with pytest.raises(ConversionError):
+        qualifications.qualification_for(REPO, "bfloat16", HASHES)

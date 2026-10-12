@@ -6359,7 +6359,7 @@
       "vendor": "PrismML"
     },
     {
-      "adapter": null,
+      "adapter": "modernbert",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "ModernBERTConfig",
@@ -6368,10 +6368,6 @@
       "files": {
         "chat_template": {
           "filename": "chat_template.jinja",
-          "repo": "trymirai/chat-moderation-router"
-        },
-        "generation_config": {
-          "filename": "generation_config.json",
           "repo": "trymirai/chat-moderation-router"
         },
         "model_config": {
@@ -6402,7 +6398,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "modernbert-classifier",
       "model_kind": "ClassifierModelSpec",
       "name": "chat-moderation-router",
       "origin": "HuggingFaceOrigin",
@@ -6410,14 +6406,14 @@
       "size": "0.15B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Mirai"
     },
     {
-      "adapter": null,
+      "adapter": "modernbert",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "ModernBERTConfig",
@@ -6426,10 +6422,6 @@
       "files": {
         "chat_template": {
           "filename": "chat_template.jinja",
-          "repo": "trymirai/health-related-router"
-        },
-        "generation_config": {
-          "filename": "generation_config.json",
           "repo": "trymirai/health-related-router"
         },
         "model_config": {
@@ -6460,7 +6452,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "modernbert-classifier",
       "model_kind": "ClassifierModelSpec",
       "name": "health-related-router",
       "origin": "HuggingFaceOrigin",
@@ -6468,7 +6460,7 @@
       "size": "0.15B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

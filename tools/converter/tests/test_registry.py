@@ -42,8 +42,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 87
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 83
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 89
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 85
 
 
 def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():

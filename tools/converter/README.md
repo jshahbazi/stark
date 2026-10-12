@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) completes the scoped dense and 4-bit MLX LLaMBA conversion packet, with exact qualifications and the dense latency objective still open. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 6](../../docs/MODEL_CONVERSION_MILESTONE_6.md) adds ModernBERT classifier roots and generic classifier conversion; its public validation fixtures are distinct from the two inaccessible catalog routers. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) retains its dense and 4-bit MLX LLaMBA qualifications and open dense latency objective. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Convert a model
 
@@ -29,7 +29,7 @@ The command emits aggregate timings, hashes, and capability status. Its private 
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **83 built-ins plus four extensions**, or 87 identities. This includes 43 dense built-ins and 40 MLX built-ins:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **85 built-ins plus four extensions**, or 89 identities. This includes 43 dense language profiles, 40 MLX profiles and two dense ModernBERT classifier profiles:
 
 | Adapter | Implemented identities |
 | --- | --- |
@@ -51,6 +51,7 @@ The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
+| ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router`; mean pooling and GELU sequence-classification layout; both repositories currently inaccessible and unqualified |
 
 This is implementation coverage. Exact checkpoint/dtype/config qualification remains per tuple and is recorded in the milestone evidence. A passing small checkpoint does not qualify every size or config variant in its family. Other catalog entries, compressed schemes, custom architectures/RoPE variants, and unsupported metadata representations fail with a sanitized unsupported category. Future repositories can explicitly use the generic path below when their architecture, tensor layout and metadata pass the same validation.
 
@@ -69,9 +70,20 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
   --output models/future-model-stark
 ```
 
-The converter selects the adapter from the checkpoint's `model_type` and validates the full config and tensor layout. Optional `--architecture llama` asserts the expected type; it cannot override a conflicting checkpoint. Accepted architecture identifiers are `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, and `lfm2`. Dense BF16/F16/F32 uses the corresponding strict planner. Existing affine MLX 4/8-bit support applies to Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma3 text and LFM2; the pinned LLaMBA catalog has one 4-bit profile. A different architecture or unsupported variant still needs implementation.
+The converter selects the adapter from the checkpoint's `model_type` and validates the full config and tensor layout. Optional `--architecture llama` asserts the expected type; it cannot override a conflicting checkpoint. Accepted architecture identifiers are `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, and `lfm2`. ModernBERT requires `--model-kind classifier`; the other adapters require the default language kind. Dense BF16/F16/F32 uses the corresponding strict planner. Existing affine MLX 4/8-bit support applies to Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma3 text and LFM2; the pinned LLaMBA catalog has one 4-bit profile. A different architecture or unsupported variant still needs implementation.
 
-`hf-generic` requires self-contained `config.json`, `tokenizer.json`, and `tokenizer_config.json`; it selects `generation_config.json` and `chat_template.jinja` whenever present. It requires a supported chat template and explicit nonempty EOS identifiers in the model or generation metadata. Duplicate inline/Jinja templates must agree exactly. It uses the checkpoint's tokenizer, template and supported generation fields, with plain system/user/assistant roles. Output parsers, reasoning controls and system-prompt defaults require a separately reviewed checkpoint profile. Registered profiles retain their authoritative metadata and packing rules and refuse generic overrides.
+`hf-generic` requires self-contained `config.json`, `tokenizer.json`, and `tokenizer_config.json`; it selects `generation_config.json` and `chat_template.jinja` whenever present. Language models require a supported chat template and explicit nonempty EOS identifiers in the model or generation metadata. Duplicate inline/Jinja templates must agree exactly. It uses the checkpoint's tokenizer, template and supported generation fields, with plain system/user/assistant roles. Output parsers, reasoning controls and system-prompt defaults require a separately reviewed checkpoint profile. Registered profiles retain their authoritative metadata and packing rules and refuse generic overrides.
+
+For a self-contained ModernBERT sequence classifier with a declared chat template:
+
+```sh
+uv run --project tools/converter --locked stark-convert /absolute/path/to/classifier \
+  --metadata-profile hf-generic --model-kind classifier --architecture modernbert \
+  --write-source-manifest runtime/converter-sources/future-classifier.json \
+  --output models/future-classifier-stark
+```
+
+Classifier output uses `ClassifierModelConfig`, numeric label order and its chat token codec, with no generation policy. BOS/EOS codec fields are optional; CLS/SEP/PAD, added tokens, tokenizer padding and post-processor identifiers must agree with the normalized vocabulary. Only mean pooling, the supported GELU layout and dense weights are accepted. `decoder_bias` is an unused masked-LM annotation for this architecture; unexpected masked-LM tensors still fail. A present generic generation sidecar remains source-verified but is not interpreted. Missing templates fail explicitly; the converter does not invent one. Anonymous local checkpoints and schema-2 offline replay retain the same model-kind checks.
 
 Generic conversions emit `catalogued=false` and the chosen architecture/profile in their receipt. New checkpoints remain native-unverified, or runtime-blocked when their requested dtype/config exceeds current native limits. `--require-native-support` refuses them until an exact registered qualification exists. A generic private schema-2 source manifest binds the architecture/profile and optional-sidecar presence; offline replay restores that mode and detects source changes. Existing catalog schema-1 replay identities remain unchanged.
 
@@ -108,15 +120,24 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
   --capabilities
 ```
 
-The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Current implemented adapters emit language-model root configs. Classifier, TTS, Mamba1 and other unimplemented state-space families, MoE, and other compressed conversion remain later workstreams.
+The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Implemented adapters emit language-model or ModernBERT classifier root configs. TTS, Mamba1 and other unimplemented state-space families, MoE, and other compressed conversion remain later workstreams.
 
-Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. A catalog probe does not inspect source or output artifacts. BF16 conversions retain their planner's status: earlier families report `supported_layout_unverified_tuple`; Qwen3.5, LFM2, LLaMBA and generic routes remain `unverified`, with `runtime_blocked` for unsupported native dimensions/configs. An exact match of registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash promotes the result to `qualified_tuple` using the stored named-build record.
+Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. A catalog probe does not inspect source or output artifacts. BF16 conversions retain their planner's status: earlier families report `supported_layout_unverified_tuple`; Qwen3.5, LFM2, LLaMBA, ModernBERT and generic routes remain `unverified`, with `runtime_blocked` for unsupported native dimensions/configs. An exact match of registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash promotes the result to `qualified_tuple` using the stored named-build record.
 
 `--require-native-support` requires that exact stored match before publication; unmatched artifacts fail cleanly. A match reports `native_loading=qualified_tuple` and emits the full `native_qualification` record, including the named build's worker/source/Cargo-lock/toolchain hashes, Rust 1.98.1, release profile, features, and load-only result. That result applies to the recorded build and exact artifacts. It provides no guarantee for another current or future engine binary. Execution remains unverified: readiness and EOF do not establish scoring, generation, classification, or TTS correctness. Stark currently rejects MoE construction.
 
 ## Measured improvements over Lalamo
 
-Version 0.8.0 adds dense and 4-bit MLX LLaMBA benchmarks. Five serial warm-file complete commands per backend/tuple measured:
+Version 0.9.0 benchmarks two public real-weight ModernBERT fixtures with explicit local synthetic chat-template overlays and BF16 output:
+
+| Public classifier fixture | Stark median | Lalamo median | Lower time | Lower sampled RSS |
+| --- | ---: | ---: | ---: | ---: |
+| MoritzLaurer BF16 source | 0.562 s | 1.137 s | 50.59% | 84.90% |
+| SoFairOA F32 source | 0.861 s | 1.312 s | 34.36% | 89.58% |
+
+All twenty serial fresh warm-file commands pass full tensor/spec/config/tokenizer parity. All ten candidate outputs match their frozen private exact source/artifact/load-only proofs, while generic receipts remain native-unverified and have no public ledger qualification. The F32 timing ranges overlap; five repeats on one host establish these measurements only. Templates are explicit fixture additions; no direct unchanged public-repository conversion or inaccessible Mirai qualification is claimed. Full source verification remains enabled. [Milestone 6 evidence](../../docs/MODEL_CONVERSION_MILESTONE_6.md) and [independent review](../../docs/MODEL_CONVERSION_MILESTONE_6_REVIEW.md) record scopes, ranges, hashes and cleanup. Classification correctness, quality and inference speed remain unverified.
+
+The preserved version 0.8.0 adds dense and 4-bit MLX LLaMBA benchmarks. Five serial warm-file complete commands per backend/tuple measured:
 
 | LLaMBA checkpoint, BF16 output | Stark median | Lalamo median | Lower sampled RSS |
 | --- | ---: | ---: | ---: |

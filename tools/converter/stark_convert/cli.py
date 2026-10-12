@@ -20,7 +20,14 @@ from pathlib import Path
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
 from .profiles import GENERIC_PROFILE, generic_entry
 from .provenance import file_hash, toolchain_provenance
-from .registry import CONFIG_ADAPTERS, adapter_for_model, architecture_for_config, catalog_sha256, get_model
+from .registry import (
+    CONFIG_ADAPTERS,
+    adapter_for_model,
+    architecture_for_config,
+    catalog_sha256,
+    get_model,
+    model_kind_for_architecture,
+)
 from .sources import SourceSnapshot, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, write_plan
 
@@ -30,7 +37,9 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     entry = get_model(request.repo)
     if request.metadata_profile == GENERIC_PROFILE:
         supported = (
-            entry is None and request.architecture in CONFIG_ADAPTERS.values() and request.model_kind == "language"
+            entry is None
+            and request.architecture in CONFIG_ADAPTERS.values()
+            and request.model_kind == model_kind_for_architecture(request.architecture)
         )
         return CapabilityResult(
             adapter=request.architecture if supported else None,
@@ -45,7 +54,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     supported = supported and actual_kind == request.model_kind
     supported = supported and (request.architecture is None or entry["adapter"] == request.architecture)
     native = "supported_layout_unverified_tuple" if supported and request.dtype == "bfloat16" else "unverified"
-    if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba"}:
+    if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba", "modernbert"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
         native = "runtime_blocked"
@@ -75,9 +84,11 @@ def _validate_request(request: ConversionRequest) -> None:
         if (
             request.metadata_profile != GENERIC_PROFILE
             or get_model(request.repo) is not None
-            or request.model_kind != "language"
+            or request.model_kind not in {"language", "classifier"}
+            or request.architecture is not None
+            and request.model_kind != model_kind_for_architecture(request.architecture)
         ):
-            raise UnsupportedConversion("Generic metadata requires an uncatalogued language model")
+            raise UnsupportedConversion("Generic metadata requires an uncatalogued model of the matching kind")
         if request.require_native_support:
             raise UnsupportedConversion("Generic conversion has no recorded native qualification")
         return
@@ -94,6 +105,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         build_llama_plan,
         build_llamba_plan,
         build_mistral_plan,
+        build_modernbert_plan,
         build_phi_plan,
         build_qwen2_plan,
         build_qwen35_plan,
@@ -121,6 +133,8 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         adapter = adapter_for_model(request.repo, config.get("model_type"))
         if request.architecture is not None and adapter != request.architecture:
             raise ConversionError("Requested architecture disagrees with catalog profile")
+    if request.model_kind != model_kind_for_architecture(adapter):
+        raise UnsupportedConversion("Checkpoint architecture disagrees with the requested model kind")
     if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
         from .compressed import parse_mlx_quantization
 
@@ -165,6 +179,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             config=config,
             expected_mlx_bits=llamba_packing["bits"] if llamba_packing else None,
         ),
+        "modernbert": build_modernbert_plan,
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     if adapter == "qwen3_5":
@@ -174,7 +189,8 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     # Metadata and final content verification are still pending. Only a
     # successfully published conversion reports complete source validation.
     result = capability(request)
-    for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
+    layers = tensors.decoder_config["transformer_config"]["layer_configs"] if request.model_kind == "language" else ()
+    for layer in layers:
         mixer = layer["mixer_config"]
         if mixer["type"] == "DeltaNetConfig" and (mixer["head_dim"] != 128 or mixer["value_head_dim"] != 128):
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
@@ -252,10 +268,26 @@ def convert(
             names = tuple(record["filename"] for record in snapshot.manifest["files"])
             entry = generic_entry(repo, planned.request.architecture, names)
         config = {**planned.model_config, "_stark_model_repo": repo}
-        fragments = write_metadata(
-            snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
-        )
-        root_config = {"type": "LanguageModelConfig", "decoder_config": planned.tensors.decoder_config, **fragments}
+        if planned.request.model_kind == "classifier":
+            from .classifier_metadata import write_classifier_metadata
+
+            fragments = write_classifier_metadata(
+                snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
+            )
+            root_config = {
+                "type": "ClassifierModelConfig",
+                "classifier_config": planned.tensors.decoder_config,
+                **fragments,
+            }
+        else:
+            fragments = write_metadata(
+                snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
+            )
+            root_config = {
+                "type": "LanguageModelConfig",
+                "decoder_config": planned.tensors.decoder_config,
+                **fragments,
+            }
         (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
         stats = write_plan(planned.tensors, staging / "model.safetensors", chunk_bytes=chunk_bytes)
         elapsed = time.perf_counter() - started
