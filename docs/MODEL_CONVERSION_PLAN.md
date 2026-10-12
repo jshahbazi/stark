@@ -1,6 +1,8 @@
 # Independent model conversion replacement plan
 
-Updated: 2026-10-11. Milestone 1's G0/G1/selected G2 acceptance is preserved. Independent review accepts milestone 2's scoped G3 conversion/load/memory and bounded parallel source hashing. The broad latency objective remains open; exact outcomes are in [milestone 2 evidence](MODEL_CONVERSION_MILESTONE_2.md) and [review](MODEL_CONVERSION_MILESTONE_2_REVIEW.md).
+Updated: 2026-10-12. Milestone 1's G0/G1/selected G2, milestone 2's scoped G3 and the first Qwen3 MLX packet remain preserved. Milestone 3 includes independent MLX Llama/SmolLM3/Gemma text conversion and six additional exact BF16 load-only qualifications. The new [latency packet](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) reduces six complete-command medians by 16–38% against the frozen prior implementation; five beat Lalamo and SmolLM3 8-bit remains slower. The [dense continuation](MODEL_CONVERSION_MILESTONE_3_DENSE.md) and [original review](MODEL_CONVERSION_MILESTONE_3_DENSE_REVIEW.md) retain their separate source bindings and four failed latency hypotheses. Full G4 and broad latency parity remain open.
+
+[Milestone 6](MODEL_CONVERSION_MILESTONE_6.md) adds ModernBERT classifier roots, validated labels/tokenizers and generic classifier conversion. Both pinned Mirai routers are inaccessible to the current account and remain unqualified; public real-weight fixtures with explicit synthetic codec overlays receive separate validation. The existing twenty-seven native ledger records are unchanged. [Milestone 5](MODEL_CONVERSION_MILESTONE_5.md) retains its dense and 4-bit MLX LLaMBA qualifications and open dense latency objective. [Milestone 4](MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet and LFM2 short-convolution/attention, plus explicit architecture dispatch for self-contained future checkpoints. Its [MLX continuation](MODEL_CONVERSION_MILESTONE_4_MLX.md) adds eighteen 4/8-bit profiles and four exact group-64 BF16 load-only qualifications. Prior benchmark and qualification packets retain their original source bindings.
 
 Keep `stark-convert` in this repository as a first-class companion to the Stark engine. The user-directed target is to supplant Lalamo with independently implemented conversion and remove the runtime fallback. Lalamo remains an attributed, pinned reference for registry inventory, format semantics, and externally generated qualification artifacts. The installed converter must neither import nor invoke Lalamo, JAX, or PyTorch.
 
@@ -10,7 +12,9 @@ This policy supersedes the permanent-fallback policy in the plan committed at `e
 
 The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **four explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct`, `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`, and `google/gemma-2-2b-it`. Gemma2 uses the pinned config/loader with a standard LanguageModelSpec; the registry has no Gemma2 built-in. Extensions do not alter the built-in denominator or imply upstream registration.
 
-The current implementation covers **33 built-in profiles and four extensions**, including Qwen, Llama, Mistral, Gemma2/3 text, Phi-4-mini, Granite, and SmolLM. Eleven exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 77 built-ins need independent adapters; other implemented profiles remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
+The current implementation covers **85 built-in profiles and four extensions**, including 43 dense language profiles for Qwen, Llama, LLaMBA, Mistral, Gemma3 text, Phi-4-mini, Granite, SmolLM and LFM2, 40 MLX profiles for the supported language families, and two dense ModernBERT classifier profiles. Gemma2 remains separately counted as a Stark extension. Twenty-seven exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 25 built-ins need independent adapters; 62 implemented identities remain unqualified, including both inaccessible Mirai classifier rows. Qualification remains per exact source revision, config variant, dtype, metadata source set and root model kind. The pinned replacement denominator excludes arbitrary Hugging Face repositories, third-party Lalamo plugins, and a moving upstream branch. Public classifier benchmark fixtures are outside that denominator and do not expand the four-extension count.
+
+Reusable adapters are tracked by architecture and input format. The catalog tracks checkpoint-specific metadata/source rules and implementation status; the native ledger tracks exact source/artifact tuples and named builds. An explicit `hf-generic` profile can convert a future repository with a supported architecture and self-contained metadata without adding a catalog entry. It retains strict config/layout/source validation, plain metadata defaults and an unqualified native status. It cannot override a known catalog profile or expand the pinned denominator. See [future-checkpoint usage](../tools/converter/README.md#future-checkpoints-and-architecture-tracking).
 
 Conversion, native loading, execution, and performance are separate dimensions. Current Stark dense loading selects BF16; F16/F32 conversion-only outputs remain runtime-blocked. MoE construction is currently rejected. Existing kernel/config enums do not establish acceptance for every model using them. Language scoring, generation, classification, and TTS each require the corresponding execution evidence.
 
@@ -40,6 +44,14 @@ The workspace bound covers live transformation buffers. Header JSON, tensor cata
 Catalog implementation status, conversion qualification, access, native loading, execution, and performance remain independent. A catalogued adapter does not mean that every checkpoint/variant has passed exact reference comparison or native construction. Native-qualified selection matches registered identity, BF16 dtype, source-manifest hash, weights/config/tokenizer hashes, and returns the complete recorded build receipt; it qualifies that named build's load-only result. Public ledgers contain public identities/revisions, aggregate outcomes, and hashes. Private source paths, tokenizer vocabularies, and templates stay out of public evidence.
 
 Never capture prompts, responses, token vectors, decision probabilities, credentials, or exception dumps in logs, receipts, benchmark reports, or private validation artifacts. Existing operational checkpoint/config/tokenizer files remain private model inputs. Compare execution values in memory and retain permitted aggregates/hashes only.
+
+## Model artifact cleanup
+
+At the user's direction, remove downloaded conversion-only weights and generated model outputs after a packet's validation, benchmark and review are complete. Keep the small source manifests, receipts, aggregate measurements, audit records, scripts and pinned revision/content hashes. Check for active use before deletion; preserve serving models, externally supplied source models and unrelated caches. Record cleanup separately from the original validation evidence, including what was removed and the measured storage change.
+
+Artifact retention statements describe the validation run's state. A later cleanup does not alter its original hashes or results. Future checks that need deleted weights must reacquire the pinned inputs and regenerate outputs, then verify the recorded hashes; existing manifests alone cannot replay deleted files.
+
+- [ ] For each completed future conversion packet, remove its unused model weights and outputs, retain small evidence, and record cleanup before reporting completion.
 
 ## Phase 0 — Pinned reference inventory and acceptance contract
 
@@ -120,8 +132,18 @@ Gate G3: remaining dense rows have reproducible qualified, implemented-unqualifi
 
 Dependencies: inspected native matrix/kernel/embedding contracts, source metadata, and stable shared operators.
 
-- [ ] Inventory packed layouts from actual reference loaders rather than quantization enums.
-- [ ] Implement MLX 4-bit/8-bit group/layout/spec combinations accepted by Stark; retain the prototype MLX result as historical regression input.
+- [x] Inspect the actual MLX loader/exporter, packed bit order, source planes, padding and native matrix/kernel/embedding contracts for the initial Qwen3 packet.
+- [x] Independently implement the 12 registered MLX Qwen3 4-bit/8-bit profiles with affine groups 16/32/64/128, both accepted physical layouts, dtype casts and cross-shard fusion; preserve the prototype MLX result as historical evidence.
+- [x] Qualify the exact 0.6B 4-bit and 8-bit group-128 BF16 tuples with full reference parity, named-build load-only evidence and source-bound performance; keep other profiles/groups unqualified.
+- [x] Freeze 288 external packed/spec/dequantized synthetic cases, exceptional coefficient casts and 12 complete synthetic artifact variants; enforce workspace and malformed-input/publication/source gates.
+- [x] Inventory remaining packed schemes from actual reference loaders rather than quantization enums; preserve the [baseline format report](MODEL_CONVERSION_FORMAT_INVENTORY.md) and its source binding. GPTQ enum presence alone does not prove a complete input loader.
+- [x] Extend the unchanged MLX helper to five Llama, two SmolLM3 and two Gemma3 text profiles; qualify the selected six group-64 BF16 tuples with exact artifact parity, named-build load-only and source-bound benchmark evidence. Keep other variants unqualified.
+- [x] Freeze additional actual-loader decoder exports and complete synthetic CLI metadata/artifact comparisons; preserve family RoPE/norm/embedding semantics and reject mixed/malformed representations.
+- [x] Record explicit canonical/transport provenance for Llama's exact public metadata copy, authenticated against the official pinned Git blob; keep direct gated resolution and automatic substitution policies unchanged.
+- [x] Profile and optimize MLX coefficient export with sequential output bands, bounded complete-row reads and inline hashing; retain exact artifact bytes, full source verification and the 8 MiB workspace limit. Independently review and benchmark six tuples against the frozen prior implementation and Lalamo.
+- [x] Extend affine MLX 4/8-bit conversion to ten dense Qwen3.5 text and eight LFM2 built-ins; qualify the selected four group-64 BF16 tuples with exact pinned full-export parity and named-build load-only evidence. Preserve earlier qualification records and benchmark bindings.
+- [ ] Deferred by user choice: close the remaining SmolLM3-3B 8-bit complete-command latency objective and qualify broader latency claims with additional sources/hosts. This does not block the next architecture packet.
+- [ ] Extend independent compressed conversion to remaining families/schemes and qualify each additionally claimed tuple.
 - [ ] Define bit order, packing divisor, group axis, scales/zero points, padding, fusion, and cross-chunk/shard boundaries for every additional scheme.
 - [ ] Keep repacking an existing compressed checkpoint separate from computing new quantization and its quality acceptance.
 - [ ] Assess low-rank/hybrid/D4S4/microfloat outputs against their exact native targets.
@@ -131,12 +153,27 @@ Dependencies: inspected native matrix/kernel/embedding contracts, source metadat
 
 Gate G4: qualification is per scheme, bit width, group size, layout, model variant, and native target. Unsupported formats have no delegated execution route.
 
+The **third milestone comprises the initial Qwen3 MLX packet, the Llama/SmolLM3/Gemma text continuation and the sequential coefficient latency packet under scoped G4**. Its exact tuple conversion/load-only/workspace/memory acceptance does not close full Phase 4. The preserved dense continuation records two passing and four failing raw latency medians. The new [five-repeat three-backend comparison](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) improves all six medians against the frozen implementation and records five passing raw Lalamo medians; SmolLM3 8-bit remains slower, and Llama/Gemma 8-bit passing ranges overlap. Specialized/multimodal compressed architectures, other schemes, unmeasured variants and execution quality retain separate gates. The earlier source-bound qualification boundaries remain unchanged.
+
 ## Phase 5 — Specialized models and complete replacement accounting
 
 Dependencies: the operators and root-output contracts needed by each row. Independent packets can overlap when those requirements pass.
 
-- [ ] Implement DeltaNet/Qwen hybrids, Mamba/LLaMBA, short-convolution/LFM, and other state-space families individually.
-- [ ] Implement classifier roots/metadata and separate native loading/classification acceptance.
+- [x] Implement dense Qwen3.5 text/DeltaNet and LFM2 attention/short convolution with exact pinned reference exports; preserve unsupported MoE and later-generation variants. The subsequent MLX packet has separate format/tuple evidence.
+- [x] Qualify the exact Qwen3.5-0.8B and LFM2-350M BF16 tuples with full tensor/spec/config/tokenizer parity and named-build native readiness/EOF, with zero scoring calls. Preserve the prior nineteen records.
+- [x] Add explicit `hf-generic` architecture dispatch, self-contained checkpoint metadata and schema-2 offline replay for future supported checkpoints; keep catalog profiles authoritative and qualification per tuple.
+- [x] Run the preregistered twenty-command dense architecture benchmark against live pinned Lalamo; retain every observation and exact qualification. LFM2's raw median latency hypothesis passes; Qwen3.5's fails. Both memory hypotheses pass, with broad overlapping timing ranges.
+- [ ] Improve Qwen3.5-0.8B complete-command conversion latency and qualify any improvement against preserved source-bound measurements.
+- [x] Extend MLX conversion to Qwen3.5 text and LFM2 and separately qualify four exact bit/group/config/checkpoint tuples; see the [continuation evidence](MODEL_CONVERSION_MILESTONE_4_MLX.md).
+- [x] Benchmark the four selected MLX tuples against live pinned Lalamo with forty serial fresh commands. All parity/source/native/workspace/observed-memory gates pass; measured median times are 28–71% lower and sampled RSS 92–95% lower. Preserve all observations and the separate dense latency failure.
+- [x] Implement the two pinned LLaMBA dense/4-bit MLX rows and their reusable Mamba2 helper, with separately qualified exact BF16 artifacts, external-config source/replay rules and scoped future-checkpoint support; see [milestone 5](MODEL_CONVERSION_MILESTONE_5.md).
+- [x] Benchmark both exact LLaMBA tuples against live pinned Lalamo with twenty serial fresh commands; all parity/native/source/workspace/observed-memory gates pass. MLX raw median passes with overlapping ranges; dense raw median fails. Preserve every observation.
+- [ ] Profile and improve dense F32-source LLaMBA complete-command latency against the frozen milestone 5 implementation/reference while preserving full verification and exact artifacts.
+- [ ] Inspect other remaining state-space families individually; the pinned inventory has no separate Mamba1 row and this packet grants no Mamba1 conversion claim.
+- [x] Implement ModernBERT classifier roots, source/metadata selection, strict label/tokenizer validation and model-kind-bound generic replay, with actual pinned synthetic full-classifier exports; see [milestone 6](MODEL_CONVERSION_MILESTONE_6.md).
+- [x] Validate two separate public real-weight classifier fixtures with explicit synthetic codec overlays against complete pinned reference exports and a separately bound native classifier load-only harness. Preserve generic receipt status and the original twenty-seven ledger records.
+- [ ] Obtain access to the two pinned Mirai classifier repositories, then qualify their exact source/artifact/build tuples separately; private/unavailable repositories are not qualified by public fixtures.
+- [ ] Validate classifier execution correctness and quality with a separately scoped protocol; construction/readiness/EOF proves loading only.
 - [ ] Implement conversion-only MoE artifacts as a distinct adapter; native expert/router/kernel work requires a separately scoped implementation.
 - [ ] Account for audio/TTS, auxiliary/speculator models, NeMo/archive origins, and their dependency/access requirements; implement each independently where in scope.
 - [ ] Complete every remaining pinned row's source, config, tensor, metadata, and failure semantics.
@@ -144,6 +181,8 @@ Dependencies: the operators and root-output contracts needed by each row. Indepe
 - [ ] Close every unsupported row or record an explicit bounded access/dependency/runtime disposition; do not call blocked rows independently qualified.
 
 Gate G5: all in-scope pinned conversion rows have independently implemented and qualified parity within documented source/access/dependency limits. Runtime and execution blocks remain separate. Complete registry accounting is a prerequisite for a claim of replacing Lalamo's conversion reach.
+
+The **fourth milestone's dense architecture packet** adds five Qwen3.5 and four LFM2 built-ins. Only the selected 0.8B/350M BF16 tuples gain exact named-build load-only qualification. Qwen3.5-35B-A3B is MoE and remains planned despite sharing the pinned reference config class. The [dense evidence](MODEL_CONVERSION_MILESTONE_4.md) records bounded workspace, fresh external benchmarks, exact hashes and [independent review](MODEL_CONVERSION_MILESTONE_4_REVIEW.md). Its [MLX continuation](MODEL_CONVERSION_MILESTONE_4_MLX.md) adds eighteen profiles and four exact group-64 BF16 qualifications with separate source bindings. [Milestone 5](MODEL_CONVERSION_MILESTONE_5.md) adds the two pinned LLaMBA rows and their Mamba2 mixer with exact independent qualifications and external-config replay support. Generic conversion reuses supported adapters without granting checkpoint-wide or architecture-wide native qualification. Full G4/G5, classifier/MoE/specialized rows, later state-space variants and complete replacement remain open.
 
 ## Per-tuple qualification and promotion checklist
 

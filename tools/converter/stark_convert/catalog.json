@@ -6,6 +6,7 @@
     {
       "adapter": "gemma2",
       "catalog_origin": "stark_extension",
+      "compressed_format": null,
       "config_class": "HFGemma2Config",
       "container": ".safetensors",
       "family": "Gemma-2",
@@ -60,6 +61,7 @@
     {
       "adapter": "mistral",
       "catalog_origin": "stark_extension",
+      "compressed_format": null,
       "config_class": "HFMistralConfig",
       "container": ".safetensors",
       "family": "Mistral-7B",
@@ -114,6 +116,7 @@
     {
       "adapter": "mistral",
       "catalog_origin": "stark_extension",
+      "compressed_format": null,
       "config_class": "HFMistralConfig",
       "container": ".safetensors",
       "family": "Mistral-7B",
@@ -168,6 +171,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "stark_extension",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -224,6 +228,7 @@
     {
       "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "rnj-1",
@@ -277,6 +282,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "SmolLM2",
@@ -330,6 +336,7 @@
     {
       "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
       "family": "SmolLM3",
@@ -385,8 +392,9 @@
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -427,7 +435,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-1.2B",
       "origin": "HuggingFaceOrigin",
@@ -435,15 +443,16 @@
       "size": "1.2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -484,7 +493,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-2.6B",
       "origin": "HuggingFaceOrigin",
@@ -492,15 +501,16 @@
       "size": "2.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -541,7 +551,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-350M",
       "origin": "HuggingFaceOrigin",
@@ -549,15 +559,16 @@
       "size": "350M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -598,7 +609,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-700M",
       "origin": "HuggingFaceOrigin",
@@ -606,7 +617,7 @@
       "size": "700M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -615,6 +626,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -672,6 +684,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -729,6 +742,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -786,6 +800,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -843,6 +858,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -900,6 +916,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Nanbeige-4.1",
@@ -953,6 +970,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Polaris-Preview",
@@ -1010,6 +1028,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1063,6 +1082,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1116,6 +1136,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1169,6 +1190,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1222,6 +1244,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1275,6 +1298,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "Qwen2.5-Coder",
@@ -1328,6 +1352,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1379,8 +1404,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1417,7 +1446,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-0.6B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -1425,15 +1454,19 @@
       "size": "0.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1470,7 +1503,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-0.6B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -1478,7 +1511,7 @@
       "size": "0.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -1487,6 +1520,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1538,8 +1572,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1576,7 +1614,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-1.7B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -1584,15 +1622,19 @@
       "size": "1.7B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1629,7 +1671,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-1.7B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -1637,7 +1679,7 @@
       "size": "1.7B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -1646,6 +1688,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1697,8 +1740,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1735,7 +1782,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-14B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -1743,15 +1790,19 @@
       "size": "14B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1788,7 +1839,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-14B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -1796,7 +1847,7 @@
       "size": "14B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -1805,6 +1856,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1856,8 +1908,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1894,7 +1950,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-32B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -1902,15 +1958,19 @@
       "size": "32B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -1947,7 +2007,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-32B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -1955,7 +2015,7 @@
       "size": "32B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -1964,6 +2024,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2017,6 +2078,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2068,8 +2130,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2106,7 +2172,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-4B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -2114,15 +2180,19 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2159,7 +2229,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-4B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -2167,7 +2237,7 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2176,6 +2246,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2229,6 +2300,7 @@
     {
       "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2280,8 +2352,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2318,7 +2394,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-8B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -2326,15 +2402,19 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
       "family": "Qwen3",
@@ -2371,7 +2451,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3-8B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -2379,15 +2459,16 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2428,7 +2509,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-0.8B",
       "origin": "HuggingFaceOrigin",
@@ -2436,15 +2517,16 @@
       "size": "0.8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2481,7 +2563,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-27B",
       "origin": "HuggingFaceOrigin",
@@ -2489,15 +2571,16 @@
       "size": "27B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2538,7 +2621,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-2B",
       "origin": "HuggingFaceOrigin",
@@ -2546,7 +2629,7 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2555,6 +2638,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2606,8 +2690,9 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2648,7 +2733,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-4B",
       "origin": "HuggingFaceOrigin",
@@ -2656,15 +2741,16 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -2701,7 +2787,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-9B",
       "origin": "HuggingFaceOrigin",
@@ -2709,7 +2795,7 @@
       "size": "9B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2718,6 +2804,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.6",
@@ -2771,6 +2858,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.6",
@@ -2828,6 +2916,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.8",
@@ -2881,6 +2970,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Reka-Flash",
@@ -2932,8 +3022,9 @@
       "vendor": "Reka"
     },
     {
-      "adapter": null,
+      "adapter": "llamba",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlambaConfig",
       "container": ".safetensors",
       "family": "Llamba",
@@ -2970,7 +3061,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llamba",
       "model_kind": "LanguageModelSpec",
       "name": "Llamba-1B",
       "origin": "HuggingFaceOrigin",
@@ -2978,15 +3069,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Cartesia"
     },
     {
-      "adapter": null,
+      "adapter": "llamba",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlambaConfig",
       "container": ".safetensors",
       "family": "Llamba",
@@ -3023,7 +3118,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llamba",
       "model_kind": "LanguageModelSpec",
       "name": "Llamba-1B-4bit-mlx",
       "origin": "HuggingFaceOrigin",
@@ -3031,7 +3126,7 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -3040,6 +3135,7 @@
     {
       "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
       "family": "R1-Distill-Qwen",
@@ -3093,6 +3189,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "FishAudioConfig",
       "container": ".pth",
       "family": "fishaudio-s1",
@@ -3146,6 +3243,7 @@
     {
       "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -3207,6 +3305,7 @@
     {
       "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -3260,6 +3359,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -3313,6 +3413,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -3366,6 +3467,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma4Config",
       "container": ".safetensors",
       "family": "Gemma-4",
@@ -3423,6 +3525,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma4Config",
       "container": ".safetensors",
       "family": "Gemma-4",
@@ -3480,6 +3583,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma4Config",
       "container": ".safetensors",
       "family": "Gemma-4",
@@ -3537,6 +3641,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma4Config",
       "container": ".safetensors",
       "family": "Gemma-4",
@@ -3594,6 +3699,7 @@
     {
       "adapter": "granite",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
       "family": "Granite",
@@ -3647,6 +3753,7 @@
     {
       "adapter": "granite",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
       "family": "Granite",
@@ -3700,6 +3807,7 @@
     {
       "adapter": "granite",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
       "family": "Granite",
@@ -3753,6 +3861,7 @@
     {
       "adapter": "granite",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
       "family": "Granite",
@@ -3806,6 +3915,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.1",
@@ -3859,6 +3969,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -3912,6 +4023,7 @@
     {
       "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -3965,6 +4077,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFMuseGlimmerConfig",
       "container": ".safetensors",
       "family": "Muse-Glimmer",
@@ -4026,6 +4139,7 @@
     {
       "adapter": "phi3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFPhi3Config",
       "container": ".safetensors",
       "family": "Phi-4",
@@ -4079,6 +4193,7 @@
     {
       "adapter": "mistral",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFMistralConfig",
       "container": ".safetensors",
       "family": "Codestral",
@@ -4132,6 +4247,7 @@
     {
       "adapter": "mistral",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFMistralConfig",
       "container": ".safetensors",
       "family": "Devstral",
@@ -4192,8 +4308,12 @@
       "vendor": "Mistral"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4234,7 +4354,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-1.2B-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4242,15 +4362,19 @@
       "size": "1.2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4291,7 +4415,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-1.2B-8bit",
       "origin": "HuggingFaceOrigin",
@@ -4299,15 +4423,19 @@
       "size": "1.2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4348,7 +4476,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-2.6B-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4356,15 +4484,19 @@
       "size": "2.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4405,7 +4537,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-2.6B-8bit",
       "origin": "HuggingFaceOrigin",
@@ -4413,15 +4545,19 @@
       "size": "2.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4462,7 +4598,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-350M-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4470,15 +4606,19 @@
       "size": "350M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4519,7 +4659,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-350M-8bit",
       "origin": "HuggingFaceOrigin",
@@ -4527,15 +4667,19 @@
       "size": "350M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4576,7 +4720,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-700M-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4584,15 +4728,19 @@
       "size": "700M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2",
@@ -4633,7 +4781,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-700M-8bit",
       "origin": "HuggingFaceOrigin",
@@ -4641,7 +4789,7 @@
       "size": "700M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -4650,6 +4798,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -4707,6 +4856,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFLFM2Config",
       "container": ".safetensors",
       "family": "LFM2.5",
@@ -4762,8 +4912,12 @@
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.1",
@@ -4800,7 +4954,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.1-8B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4808,15 +4962,19 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -4853,7 +5011,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-1B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4861,15 +5019,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -4906,7 +5068,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-1B-Instruct-8bit",
       "origin": "HuggingFaceOrigin",
@@ -4914,15 +5076,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -4959,7 +5125,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-3B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4967,15 +5133,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -5012,7 +5182,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-3B-Instruct-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5020,15 +5190,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5069,7 +5243,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-0.8B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5077,15 +5251,19 @@
       "size": "0.8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5126,7 +5304,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-0.8B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5134,15 +5312,19 @@
       "size": "0.8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5179,7 +5361,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-27B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5187,15 +5369,19 @@
       "size": "27B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5232,7 +5418,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-27B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5240,15 +5426,19 @@
       "size": "27B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5289,7 +5479,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-2B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5297,15 +5487,19 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5346,7 +5540,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-2B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5354,15 +5548,19 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5403,7 +5601,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-4B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5411,15 +5609,19 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5460,7 +5662,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-4B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5468,15 +5670,19 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5513,7 +5719,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-9B-MLX-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5521,15 +5727,19 @@
       "size": "9B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFQwen35Config",
       "container": ".safetensors",
       "family": "Qwen3.5",
@@ -5566,7 +5776,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-9B-MLX-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5574,15 +5784,19 @@
       "size": "9B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
       "family": "SmolLM3",
@@ -5623,7 +5837,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "smollm3",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM3-3B-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5631,15 +5845,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
       "family": "SmolLM3",
@@ -5680,7 +5898,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "smollm3",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM3-3B-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5688,15 +5906,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5733,7 +5955,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "gemma-3-1b-it-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5741,15 +5963,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5786,7 +6012,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "gemma-3-1b-it-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5794,7 +6020,7 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -5803,6 +6029,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5856,6 +6083,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5909,6 +6137,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5962,6 +6191,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGemma3Config",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -6015,6 +6245,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFGPTOssConfig",
       "container": ".safetensors",
       "family": "GPT-OSS",
@@ -6072,6 +6303,7 @@
     {
       "adapter": null,
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "HFBonsaiConfig",
       "container": ".safetensors",
       "family": "Bonsai",
@@ -6127,18 +6359,15 @@
       "vendor": "PrismML"
     },
     {
-      "adapter": null,
+      "adapter": "modernbert",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "ModernBERTConfig",
       "container": ".safetensors",
       "family": "ModernBERT",
       "files": {
         "chat_template": {
           "filename": "chat_template.jinja",
-          "repo": "trymirai/chat-moderation-router"
-        },
-        "generation_config": {
-          "filename": "generation_config.json",
           "repo": "trymirai/chat-moderation-router"
         },
         "model_config": {
@@ -6169,7 +6398,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "modernbert-classifier",
       "model_kind": "ClassifierModelSpec",
       "name": "chat-moderation-router",
       "origin": "HuggingFaceOrigin",
@@ -6177,25 +6406,22 @@
       "size": "0.15B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Mirai"
     },
     {
-      "adapter": null,
+      "adapter": "modernbert",
       "catalog_origin": "pinned_builtin",
+      "compressed_format": null,
       "config_class": "ModernBERTConfig",
       "container": ".safetensors",
       "family": "ModernBERT",
       "files": {
         "chat_template": {
           "filename": "chat_template.jinja",
-          "repo": "trymirai/health-related-router"
-        },
-        "generation_config": {
-          "filename": "generation_config.json",
           "repo": "trymirai/health-related-router"
         },
         "model_config": {
@@ -6226,7 +6452,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "modernbert-classifier",
       "model_kind": "ClassifierModelSpec",
       "name": "health-related-router",
       "origin": "HuggingFaceOrigin",
@@ -6234,7 +6460,7 @@
       "size": "0.15B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

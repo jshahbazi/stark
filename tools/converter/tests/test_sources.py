@@ -291,7 +291,7 @@ def test_forged_config_role_cannot_bypass_root_binding(tmp_path):
     record["sha256"] = hashlib.sha256(alternate.read_bytes()).hexdigest()
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
-    with pytest.raises(ConversionError, match="Source file does not match checkpoint root"):
+    with pytest.raises(ConversionError, match="Catalog source descriptors disagree with the declared profile"):
         resolve_source(PRIMARY, source_manifest=path, hub=object())
 
 

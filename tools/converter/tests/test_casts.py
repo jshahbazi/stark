@@ -24,6 +24,7 @@ from stark_convert.streaming import (
     _cast_f32,
     _cast_values,
     read_safetensors_header,
+    transpose_f32,
     write_plan,
 )
 
@@ -275,3 +276,50 @@ def test_transposed_writer_hash_matches_completed_file_after_random_writes(tmp_p
     assert payload == expected
     assert stats["peak_buffer_bytes"] <= 64
     assert stats["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("dtype", ["BF16", "F16", "F32"])
+@pytest.mark.parametrize("workspace", [16, 96, 4096])
+def test_transpose_f32_matches_frozen_ieee_cast_edges(tmp_path, dtype, workspace):
+    raw = source_tensor(tmp_path / "synthetic-payload.bin", dtype, REFERENCE["cases"][dtype])
+    shape = (2, raw.shape[0] // 2)
+    matrix = TensorInfo(raw.path, raw.dtype, shape, raw.offset, raw.nbytes, raw.file_signature)
+    # The expected cast bytes were frozen externally; transpose their integer
+    # words without running floating-point casts in the test oracle.
+    direct = io.BytesIO()
+    _cast_f32(raw, direct, 96)
+    assert hashlib.sha256(direct.getvalue()).hexdigest() == REFERENCE["cases"][dtype]["output_sha256"]["F32"]
+    expected = np.frombuffer(direct.getvalue(), dtype="<u4").reshape(shape).T.tobytes()
+    operation = TensorOperation("convolution.weights", (matrix,), "F32", shape[::-1], "transpose_f32")
+    plan = ConversionPlan({}, (operation,), {}, matrix.nbytes, 1, (matrix,))
+    output = tmp_path / "converted.safetensors"
+    stats = write_plan(plan, output, chunk_bytes=workspace)
+    result = read_safetensors_header(output)[1]["convolution.weights"]
+    with output.open("rb") as handle:
+        handle.seek(result.offset)
+        payload = handle.read(result.nbytes)
+    assert payload == expected
+    assert stats["peak_buffer_bytes"] <= workspace
+    assert stats["output_sha256"] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("dtype,minimum", [("BF16", 12), ("F16", 13), ("F32", 16)])
+def test_transpose_f32_minimum_workspace_is_enforced(tmp_path, dtype, minimum):
+    raw = source_tensor(tmp_path / "synthetic-payload.bin", dtype, REFERENCE["cases"][dtype])
+    matrix = TensorInfo(raw.path, raw.dtype, (2, raw.shape[0] // 2), raw.offset, raw.nbytes, raw.file_signature)
+    with pytest.raises(ConversionError, match="insufficient_transform_workspace"):
+        transpose_f32(matrix, io.BytesIO(), minimum - 1)
+    output = io.BytesIO()
+    assert transpose_f32(matrix, output, minimum) <= minimum
+    assert len(output.getvalue()) == raw.shape[0] * 4
+
+
+@pytest.mark.parametrize("dtype,shape", [("F16", (5, 4)), ("F32", (4, 5)), ("F32", (20,))])
+def test_invalid_transpose_f32_fails_before_output_creation(tmp_path, dtype, shape):
+    raw = source_tensor(tmp_path / "synthetic-payload.bin", "F16", REFERENCE["cases"]["F16"])
+    matrix = TensorInfo(raw.path, raw.dtype, (4, 5), raw.offset, raw.nbytes, raw.file_signature)
+    operation = TensorOperation("convolution.weights", (matrix,), dtype, shape, "transpose_f32")
+    output = tmp_path / "converted.safetensors"
+    with pytest.raises(ConversionError):
+        write_plan(ConversionPlan({}, (operation,), {}, matrix.nbytes, 1, (matrix,)), output)
+    assert not output.exists()

@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -141,15 +142,18 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
             raise ConversionError("SmolLM3 sliding-window layer boundary is invalid")
         if use_sliding or window is not None:
             unsupported.append("SmolLM3 sliding attention is outside qualified dense coverage")
+    quantization = parse_mlx_quantization(config) if family == "smollm3" else None
     tensors = load_checkpoint(source)
-    for key in ("quantization", "quantization_config"):
-        if config.get(key) is not None:
-            if not isinstance(config[key], dict) or not config[key]:
-                raise ConversionError("Dense config has malformed quantization parameters")
-            raise UnsupportedConversion("Quantized checkpoint is outside qualified dense coverage")
+    if family != "smollm3":
+        for key in ("quantization", "quantization_config"):
+            if config.get(key) is not None:
+                if not isinstance(config[key], dict) or not config[key]:
+                    raise ConversionError("Dense config has malformed quantization parameters")
+                raise UnsupportedConversion("Quantized checkpoint is outside qualified dense coverage")
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
+    used_mlx = False
 
     def tensor(name: str, shape: tuple[int, ...]):
         expected.add(name)
@@ -176,6 +180,39 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
         operations.append(TensorOperation(out, inputs, target_dtype, shape, kind, scalar))
 
     def matrix(out, names, shapes, shape, *, layout="output_input", scalar=None):
+        nonlocal used_mlx
+        representations = [
+            any(name.removesuffix(".weight") + suffix in tensors for suffix in (".scales", ".biases"))
+            or (name in tensors and tensors[name].dtype in {"I32", "U32"})
+            for name in names
+        ]
+        if family == "smollm3" and any(representations):
+            if quantization is None:
+                raise UnsupportedConversion("MLX checkpoint requires explicit quantization configuration")
+            if not all(representations):
+                raise UnsupportedConversion("Mixed full-precision/MLX fusion is outside implemented coverage")
+            if scalar is not None:
+                raise UnsupportedConversion("Scalar transformations of MLX matrices are outside implemented coverage")
+            sources = tuple(
+                read_mlx_matrix(tensors, name, source_shape, quantization)
+                for name, source_shape in zip(names, shapes, strict=True)
+            )
+            for name in names:
+                prefix = name.removesuffix(".weight")
+                expected.update((name, prefix + ".scales", prefix + ".biases"))
+            operations.extend(
+                plan_mlx_matrix(out, sources, dtype=target_dtype, layout=layout, quantization=quantization)
+            )
+            metadata[out + ".spec"] = json.dumps(
+                {
+                    "type": "MLXSpec",
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "layout": layout,
+                }
+            )
+            used_mlx = True
+            return
         parameter(out + ".weights", names, shapes, shape, scalar=scalar)
         metadata[out + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": layout})
 
@@ -187,11 +224,23 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     embedding = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
     matrix(embedding, ("model.embed_tokens.weight",), ((vocab, model_dim),), (vocab, model_dim), layout="input_output")
     if tied:
-        if "lm_head.weight" in tensors:
-            head = tensor("lm_head.weight", (vocab, model_dim))
-            input_embedding = tensors["model.embed_tokens.weight"]
-            if head.dtype != input_embedding.dtype or tensor_sha256(head) != tensor_sha256(input_embedding):
-                raise ConversionError("Tied lm_head differs from the input embedding")
+        if any("lm_head" + suffix in tensors for suffix in (".weight", ".scales", ".biases")):
+            if json.loads(metadata[embedding + ".spec"])["type"] == "MLXSpec":
+                head = read_mlx_matrix(tensors, "lm_head.weight", (vocab, model_dim), quantization)
+                input_embedding = read_mlx_matrix(
+                    tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization
+                )
+                expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
+                if any(
+                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    for left, right in zip(head.planes, input_embedding.planes, strict=True)
+                ):
+                    raise ConversionError("Tied MLX lm_head differs from the input embedding")
+            else:
+                head = tensor("lm_head.weight", (vocab, model_dim))
+                input_embedding = tensors["model.embed_tokens.weight"]
+                if head.dtype != input_embedding.dtype or tensor_sha256(head) != tensor_sha256(input_embedding):
+                    raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix("decoder.embedding.output_embedding", ("lm_head.weight",), ((vocab, model_dim),), (vocab, model_dim))
     q_width, kv_width = heads * head_dim, groups * head_dim
@@ -256,6 +305,8 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     norm("decoder.transformer.output_norm", "model.norm.weight", divisor=logit_divisor)
     if set(tensors) != expected:
         raise ConversionError("Dense checkpoint has unexpected tensors")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
     norm_config = {

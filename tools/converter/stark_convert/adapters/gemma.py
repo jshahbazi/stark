@@ -1,4 +1,4 @@
-"""Bounded Gemma 2 and Gemma 3 text decoder planners.
+"""Bounded dense Gemma 2 and dense/MLX Gemma 3 text decoder planners.
 
 Config and tensor conventions are adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 
+from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -116,7 +117,7 @@ def _global_rope(config: dict, head_dim: int, sequence_length: int, unsupported:
 
 
 def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> ConversionPlan:
-    """Validate the complete recognized dense text layout before transformation.
+    """Validate the complete recognized text layout before transformation.
 
     Embedding and norm scale offsets remain runtime config semantics. The planner
     neither modifies stored norm values nor introduces full-weight allocations.
@@ -130,6 +131,9 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Gemma adapters support BF16, F16, and F32")
     target_dtype = _DTYPES[dtype]
+    quantization = None
+    if family == "gemma3_text":
+        quantization = parse_mlx_quantization(config)
     unsupported: list[str] = []
     model_dim = _integer(config, "hidden_size")
     hidden_dim = _integer(config, "intermediate_size")
@@ -223,13 +227,14 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     final_softcap = _softcap(config, "final_logit_softcapping", required=family == "gemma2")
     tensors = load_checkpoint(source)
     for key in ("quantization", "quantization_config"):
-        if config.get(key) is not None:
+        if family == "gemma2" and config.get(key) is not None:
             if not isinstance(config[key], dict) or not config[key]:
                 raise ConversionError("Gemma config has malformed quantization parameters")
             raise UnsupportedConversion("Quantized Gemma checkpoint requires a separate adapter")
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
+    used_mlx = False
 
     def tensor(name: str, shape: tuple[int, ...]):
         expected.add(name)
@@ -253,6 +258,41 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     def matrix(
         out: str, names: tuple[str, ...], shapes: tuple[tuple[int, ...], ...], shape: tuple[int, ...], layout: str
     ):
+        nonlocal used_mlx
+        representations = []
+        for name in names:
+            prefix = name.removesuffix(".weight")
+            representations.append(
+                any(prefix + suffix in tensors for suffix in (".scales", ".biases"))
+                or (name in tensors and tensors[name].dtype in {"I32", "U32"})
+            )
+        if any(representations):
+            if family != "gemma3_text":
+                raise UnsupportedConversion("Packed Gemma 2 checkpoints require a separate adapter")
+            if quantization is None:
+                raise UnsupportedConversion("MLX Gemma text checkpoint requires explicit quantization configuration")
+            if not all(representations):
+                raise UnsupportedConversion("Mixed full-precision/MLX Gemma fusion is outside implemented coverage")
+            sources = tuple(
+                read_mlx_matrix(tensors, name, source_shape, quantization)
+                for name, source_shape in zip(names, shapes, strict=True)
+            )
+            for name in names:
+                prefix = name.removesuffix(".weight")
+                expected.update((name, prefix + ".scales", prefix + ".biases"))
+            operations.extend(
+                plan_mlx_matrix(out, sources, dtype=target_dtype, layout=layout, quantization=quantization)
+            )
+            metadata[out + ".spec"] = json.dumps(
+                {
+                    "type": "MLXSpec",
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "layout": layout,
+                }
+            )
+            used_mlx = True
+            return
         projected(out + ".weights", names, shapes, shape)
         metadata[out + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": layout})
 
@@ -267,11 +307,21 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         (vocab, model_dim),
         "input_output",
     )
-    if "lm_head.weight" in tensors:
-        head = tensor("lm_head.weight", (vocab, model_dim))
-        embedding = tensors["model.embed_tokens.weight"]
-        if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
-            raise ConversionError("Tied Gemma lm_head differs from the input embedding")
+    if any("lm_head" + suffix in tensors for suffix in (".weight", ".scales", ".biases")):
+        if json.loads(metadata["decoder.embedding.embedding.spec"])["type"] == "MLXSpec":
+            head = read_mlx_matrix(tensors, "lm_head.weight", (vocab, model_dim), quantization)
+            embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
+            expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
+            if any(
+                left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                for left, right in zip(head.planes, embedding.planes, strict=True)
+            ):
+                raise ConversionError("Tied MLX Gemma lm_head differs from the input embedding")
+        else:
+            head = tensor("lm_head.weight", (vocab, model_dim))
+            embedding = tensors["model.embed_tokens.weight"]
+            if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+                raise ConversionError("Tied Gemma lm_head differs from the input embedding")
     norm("decoder.transformer.output_norm", "model.norm.weight", model_dim)
     q_width, kv_width = heads * head_dim, groups * head_dim
     for layer in range(layers):
@@ -330,6 +380,8 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
                 )
     if set(tensors) != expected:
         raise ConversionError("Gemma checkpoint has unexpected tensors")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("MLX Gemma quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
     norm_config = {

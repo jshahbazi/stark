@@ -486,6 +486,58 @@ def transpose_tensor(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int = DE
     return peak
 
 
+def transpose_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
+    """Transpose a dense convolution matrix and widen within bounded tiles.
+
+    This follows normalization widening: BF16 bits widen exactly, F16 uses the
+    portable frozen NaN policy, and F32 payload bits are preserved. The output
+    uses random tile writes, so the writer hashes the completed file afterward.
+    """
+    if len(tensor.shape) != 2 or tensor.dtype not in {"BF16", "F16", "F32"}:
+        raise ConversionError("Invalid F32 transpose source")
+    rows, cols = tensor.shape
+    if rows == 0 or cols == 0:
+        return 0
+    # Include the row read, input tile, cast, contiguous transpose, and NaN mask.
+    mask_bytes = int(tensor.dtype == "F16")
+    bytes_per_element = 2 * tensor.itemsize + 8 + mask_bytes
+    if chunk_bytes < bytes_per_element:
+        raise ConversionError("insufficient_transform_workspace")
+    edge = max(1, math.isqrt(chunk_bytes // bytes_per_element))
+    tile_rows, tile_cols = min(rows, edge), min(cols, edge)
+    output_start = output.tell()
+    peak = 0
+    raw_dtype = np.dtype(f"<u{tensor.itemsize}")
+    with _open_tensor(tensor) as stream:
+        for row in range(0, rows, tile_rows):
+            height = min(tile_rows, rows - row)
+            for col in range(0, cols, tile_cols):
+                width = min(tile_cols, cols - col)
+                tile = np.empty((height, width), dtype=raw_dtype)
+                for i in range(height):
+                    stream.seek(tensor.offset + ((row + i) * cols + col) * tensor.itemsize)
+                    chunk = stream.read(width * tensor.itemsize)
+                    if len(chunk) != width * tensor.itemsize:
+                        raise ConversionError("Checkpoint tensor was truncated")
+                    tile[i] = np.frombuffer(chunk, dtype=raw_dtype)
+                if tensor.dtype == "BF16":
+                    values = tile.astype("<u4")
+                    np.left_shift(values, 16, out=values)
+                    values = values.view("<f4")
+                elif tensor.dtype == "F16":
+                    values = _cast_values(tile.view("<f2").reshape(-1), "F16", "F32").reshape(height, width)
+                else:
+                    values = tile.view("<f4")
+                transposed = np.ascontiguousarray(values.T)
+                peak = max(peak, height * width * bytes_per_element)
+                for i in range(width):
+                    output.seek(output_start + ((col + i) * rows + row) * 4)
+                    output.write(memoryview(transposed[i]).cast("B"))
+                del tile, values, transposed, chunk
+    output.seek(output_start + rows * cols * 4)
+    return peak
+
+
 class _HashingWriter:
     """Hash successful sequential writes without rereading the output payload.
 
@@ -541,6 +593,21 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
         for op in operations
     ):
         raise ConversionError("invalid_scalar_transform")
+    if any(op.kind in {"mlx_repack", "mlx_params"} for op in operations):
+        from .compressed import validate_mlx_operation
+
+        for op in operations:
+            if op.kind in {"mlx_repack", "mlx_params"}:
+                validate_mlx_operation(op)
+    for op in operations:
+        if op.kind == "transpose_f32" and (
+            len(op.sources) != 1
+            or op.dtype != "F32"
+            or len(op.sources[0].shape) != 2
+            or op.shape != op.sources[0].shape[::-1]
+            or op.sources[0].dtype not in {"BF16", "F16", "F32"}
+        ):
+            raise ConversionError("Invalid F32 transpose operation")
     header = {"__metadata__": plan.metadata} if plan.metadata else {}
     offset = 0
     for op in operations:
@@ -560,7 +627,7 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
             output.write(encoded)
             for op in operations:
                 before = output.tell()
-                if op.kind in {"copy", "fuse"}:
+                if op.kind in {"copy", "fuse", "mlx_repack"}:
                     for source in op.sources:
                         peak = max(peak, _copy(source, output, chunk_bytes))
                 elif op.kind == "cast_f32" and len(op.sources) == 1:
@@ -574,6 +641,12 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
                     )
                 elif op.kind == "transpose" and len(op.sources) == 1:
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
+                elif op.kind == "transpose_f32" and len(op.sources) == 1:
+                    peak = max(peak, transpose_f32(op.sources[0], output, chunk_bytes))
+                elif op.kind == "mlx_params":
+                    from .compressed import write_mlx_params
+
+                    peak = max(peak, write_mlx_params(op, output, chunk_bytes))
                 else:
                     raise ConversionError("Conversion plan has an invalid operation")
                 if output.tell() - before != op.nbytes:

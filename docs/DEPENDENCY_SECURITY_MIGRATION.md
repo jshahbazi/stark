@@ -68,3 +68,14 @@ The PR-only dependency-review job was not exercised by these push runs. A subseq
 | Python binding uv | `45462200247bd38b7ac09a826f4d6958a4fa8aa2812b0e47357edb740f3fcc3f` |
 | TypeScript pnpm | `50f83e455c6e3f64a757fd4d77d17940ed198bcfb2af0cc984f19792b1f136ec` |
 | Repository policy uv script | `0e1e290a7c4b246933c8d404fa0a993c3db36363fd9e423b87a36bf002fff7b8` |
+
+## PR #2 lockfile remediation, 2026-10-12
+
+The [failed Security run](https://github.com/jshahbazi/stark/actions/runs/38293010790) on source `c99f39e342310a4b2fcdace69b87469c68cbd10f` reported five blocking quinn-proto advisories: RUSTSEC-2026-0338 through RUSTSEC-2026-0342. Both Cargo lockfiles pinned 0.11.16. Updating their quinn-proto entries to the upstream patched 0.11.18 release resolves these findings without advisory exceptions or gate changes. All other package versions and dependency edges remain unchanged.
+
+Local validation used Rust 1.98.1 and checksum-verified OSV Scanner 2.6.0 on macOS. Both `cargo metadata --locked` checks, `cargo check --locked -p download-manager`, and the repository policy checker passed. The same seven-lockfile offline scan and strict report gate used by CI reported 1,516 packages, ten maintenance notices, and zero blocking findings. These results apply to the lockfile hashes below; earlier source-bound validation remains unchanged. No model-dependent validation was run.
+
+| Lockfile | SHA-256 |
+| --- | --- |
+| Root Cargo | `49a27c8d8b2eebc3bdf47d6957f5b2c8dbbb822ddd66090589a33bcbf1f35ec1` |
+| Inherited wasm example Cargo | `6db0b0c0a8231cf5c44d4fffee1b526402d4df2b67e4f772e9664100ae0f7217` |

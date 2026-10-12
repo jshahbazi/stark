@@ -22,6 +22,10 @@ _BUILD_HASHES = frozenset(
     {"worker_sha256", "native_source_manifest_sha256", "cargo_lock_sha256", "rust_toolchain_sha256"}
 )
 _BUILD_KEYS = _BUILD_HASHES | {"passed", "native_score_calls", "rust", "profile", "features"}
+_CLASSIFIER_HASHES = frozenset({"harness_source_sha256", "harness_manifest_sha256", "harness_lock_sha256"})
+_CLASSIFIER_BUILD_KEYS = (
+    _BUILD_KEYS | _CLASSIFIER_HASHES | {"loader", "native_classification_calls", "native_generation_calls"}
+)
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -53,11 +57,15 @@ def _load_qualifications() -> list[dict]:
             raise ValueError()
         identities = set()
         for record in document["records"]:
+            entry = get_model(record.get("repo")) if isinstance(record, dict) else None
+            classifier = bool(entry and entry["model_kind"] == "ClassifierModelSpec")
             if (
                 not isinstance(record, dict)
-                or set(record) != _RECORD_KEYS
+                or set(record) != _RECORD_KEYS | ({"model_kind"} if classifier else set())
                 or not isinstance(record["repo"], str)
-                or get_model(record["repo"]) is None
+                or entry is None
+                or classifier
+                and record["model_kind"] != "classifier"
                 or record["dtype"] != "bfloat16"
                 or any(not _valid_hash(record[key]) for key in _ARTIFACT_HASHES)
             ):
@@ -65,7 +73,7 @@ def _load_qualifications() -> list[dict]:
             build = record["native_build"]
             if (
                 not isinstance(build, dict)
-                or set(build) != _BUILD_KEYS
+                or set(build) != (_CLASSIFIER_BUILD_KEYS if classifier else _BUILD_KEYS)
                 or build["passed"] is not True
                 or type(build["native_score_calls"]) is not int
                 or build["native_score_calls"] != 0
@@ -75,6 +83,15 @@ def _load_qualifications() -> list[dict]:
                 or len(build["features"]) != 2
                 or set(build["features"]) != {"default", "optimized"}
                 or any(not _valid_hash(build[key]) for key in _BUILD_HASHES)
+            ):
+                raise ValueError()
+            if classifier and (
+                build["loader"] != "classifier_load_harness"
+                or any(
+                    type(build[key]) is not int or build[key] != 0
+                    for key in ("native_classification_calls", "native_generation_calls")
+                )
+                or any(not _valid_hash(build[key]) for key in _CLASSIFIER_HASHES)
             ):
                 raise ValueError()
             identity = (record["repo"], record["dtype"], *(record[key] for key in sorted(_ARTIFACT_HASHES)))
