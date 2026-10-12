@@ -14,6 +14,11 @@ CONFIG_ADAPTERS = {
     "HFQwen2Config": "qwen2",
     "HFLlamaConfig": "llama",
     "HFMistralConfig": "mistral",
+    "HFGemma2Config": "gemma2",
+    "HFGemma3TextConfig": "gemma3_text",
+    "HFPhi3Config": "phi3",
+    "HFGraniteConfig": "granite",
+    "HFSmolLM3Config": "smollm3",
 }
 
 

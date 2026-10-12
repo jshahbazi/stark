@@ -1,6 +1,6 @@
 # Independent model conversion replacement plan
 
-Updated: 2026-10-11. Independent review accepts G0, G1, and selected G2 conversion/load/memory scope. The raw latency objective remains open. Exact qualifications and final review are recorded in [milestone evidence](MODEL_CONVERSION_MILESTONE_1.md) and [implementation review](MODEL_CONVERSION_MILESTONE_1_REVIEW.md).
+Updated: 2026-10-11. Milestone 1's G0/G1/selected G2 acceptance is preserved. Independent review accepts milestone 2's scoped G3 conversion/load/memory and bounded parallel source hashing. The broad latency objective remains open; exact outcomes are in [milestone 2 evidence](MODEL_CONVERSION_MILESTONE_2.md) and [review](MODEL_CONVERSION_MILESTONE_2_REVIEW.md).
 
 Keep `stark-convert` in this repository as a first-class companion to the Stark engine. The user-directed target is to supplant Lalamo with independently implemented conversion and remove the runtime fallback. Lalamo remains an attributed, pinned reference for registry inventory, format semantics, and externally generated qualification artifacts. The installed converter must neither import nor invoke Lalamo, JAX, or PyTorch.
 
@@ -8,9 +8,9 @@ This policy supersedes the permanent-fallback policy in the plan committed at `e
 
 ## Scope and coverage denominator
 
-The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **three explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct` and `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`. Extensions do not alter the built-in denominator or imply that Lalamo registered those repositories.
+The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **four explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct`, `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`, and `google/gemma-2-2b-it`. Gemma2 uses the pinned config/loader with a standard LanguageModelSpec; the registry has no Gemma2 built-in. Extensions do not alter the built-in denominator or imply upstream registration.
 
-The current implementation covers dense configuration and metadata profiles for eight Qwen3 entries, six Qwen2.5-Coder entries, three Meta Llama 3.x entries, two Codestral/Devstral entries, and the three extensions. Qualification remains per exact source revision, config variant, dtype, and metadata source set. Every remaining row stays explicitly unsupported or blocked until its independent adapter and acceptance evidence exist. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
+The current implementation covers **33 built-in profiles and four extensions**, including Qwen, Llama, Mistral, Gemma2/3 text, Phi-4-mini, Granite, and SmolLM. Eleven exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 77 built-ins need independent adapters; other implemented profiles remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
 
 Conversion, native loading, execution, and performance are separate dimensions. Current Stark dense loading selects BF16; F16/F32 conversion-only outputs remain runtime-blocked. MoE construction is currently rejected. Existing kernel/config enums do not establish acceptance for every model using them. Language scoring, generation, classification, and TTS each require the corresponding execution evidence.
 
@@ -105,12 +105,14 @@ The **first milestone is G1 plus selected Qwen2/Qwen2.5-Coder, Llama 3.x, and de
 
 Dependencies: reviewed integration, metadata/source contracts, and the shared operators required by the particular adapter. Work can begin when those dependencies pass.
 
-- [ ] Add Gemma 2/3 text decoder variants with explicit normalization, scaling, attention, activation, and metadata semantics; keep multimodal/newer versions separate.
-- [ ] Add verified Phi-3/Phi-4 fused projections and RoPE variants.
-- [ ] Add SmolLM/Granite and remaining dense inventory rows by shared-operator dependencies and measured need.
-- [ ] Implement currently unsupported parser, reasoning, and inline template/system-prompt semantics from explicit reference profiles.
-- [ ] Extend independently implemented dtype conversion to Qwen3 and remaining adapters/operators, preserving the established exact edge-case reference protocol.
-- [ ] Apply all G2 acceptance items per variant before qualification.
+- [x] Add Gemma 2/3 text decoder variants with explicit normalization, scaling, attention, activation, and metadata semantics; keep multimodal/newer versions separate.
+- [x] Add the pinned tied Phi-4-mini/Phi3 layout, fused projection reorder, and partial LongRoPE. Untied Phi3 remains unsupported because the pinned config/loader does not implement it.
+- [x] Add SmolLM2/3, Granite, and remaining uncompressed Qwen/Llama inventory profiles using their explicit operator/metadata contracts. Unmeasured profiles remain implemented-unqualified.
+- [x] Implement the added dense rows' Granite parser/reasoning field, reasoning boundaries, and reviewed static inline template/system defaults with role/hash binding. Specialized unknown profiles remain unsupported.
+- [x] Extend independently implemented BF16/F16/F32 dtype conversion to Qwen3; all nine source/target pairs have complete external synthetic artifact parity and frozen IEEE edge regressions.
+- [x] Apply G2 acceptance items to the seven newly qualified real BF16 tuples and 26 synthetic variants; retain load-only and conversion-only status boundaries.
+- [x] Implement bounded parallel hashing of independent large shards while preserving complete initial/final content verification and before/after signatures/selection checks.
+- [ ] Close the complete-command latency objective against Lalamo for each claimed tuple; milestone 2 records measured outcomes without granting a general speed qualification.
 
 Gate G3: remaining dense rows have reproducible qualified, implemented-unqualified, unsupported, runtime-blocked, or access-blocked statuses. Family names never substitute for tuple evidence.
 

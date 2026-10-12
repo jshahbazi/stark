@@ -13,6 +13,7 @@ import json
 import os
 import re
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,8 @@ from .streaming import ConversionError, UnsupportedConversion, read_json
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
+_PARALLEL_HASH_MIN_BYTES = 8 * 1024 * 1024
+_HASH_WORKERS = 4
 
 
 def _relative(name: str) -> Path:
@@ -39,28 +42,56 @@ def _signature(path: Path) -> tuple[int, int, int, int]:
 
 
 def _hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    # The pinned CPython 3.13 file_digest uses one reusable 256 KiB buffer.
+    # Unbuffered file handles avoid an additional BufferedReader allocation.
+    with path.open("rb", buffering=0) as handle:
+        return hashlib.file_digest(handle, "sha256").hexdigest()
 
 
-def _record(path: Path, *, repo: str | None, revision: str | None, filename: str, role: str) -> dict:
-    before = _signature(path)
-    digest = _hash(path)
-    if before != _signature(path):
-        raise ConversionError("Source changed while hashing")
-    return {
-        "repo": repo,
-        "revision": revision,
-        "filename": filename,
-        "role": role,
-        "path": str(path.absolute()),
-        "size": before[2],
-        "sha256": digest,
-        "signature": list(before),
-    }
+def _hash_all(paths: list[Path], signatures: list[tuple[int, int, int, int]]) -> list[str]:
+    """Hash independent large files with at most 1 MiB of hashing buffers.
+
+    Small metadata files stay on the calling thread. A single large checkpoint
+    avoids executor startup. Every submitted job is joined, including failures
+    and interruption, so no hash reader survives its verification stage.
+    """
+    large = [index for index, signature in enumerate(signatures) if signature[2] >= _PARALLEL_HASH_MIN_BYTES]
+    if len(large) < 2:
+        return [_hash(path) for path in paths]
+    # Finish metadata first so the calling thread never adds a fifth digest
+    # buffer while four large-file workers are active.
+    large_set = set(large)
+    hashes = {index: _hash(path) for index, path in enumerate(paths) if index not in large_set}
+    pool = ThreadPoolExecutor(max_workers=min(_HASH_WORKERS, len(large)), thread_name_prefix="stark-source-hash")
+    try:
+        pending = {index: pool.submit(_hash, paths[index]) for index in large}
+        for index, future in pending.items():
+            hashes[index] = future.result()
+        return [hashes[index] for index in range(len(paths))]
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _verified_hashes(
+    paths: list[Path], *, expected_signatures: list[tuple[int, int, int, int]] | None = None
+) -> tuple[list[tuple[int, int, int, int]], list[str]]:
+    """Check every file's signature before and after the complete hash batch."""
+    message = "Source changed while hashing" if expected_signatures is None else "Source changed during conversion"
+    try:
+        before = [_signature(path) for path in paths]
+        if expected_signatures is not None and before != expected_signatures:
+            raise ConversionError(message)
+        hashes = _hash_all(paths, before)
+        if before != [_signature(path) for path in paths]:
+            raise ConversionError(message)
+        return before, hashes
+    except OSError:
+        unavailable = (
+            "Source unavailable while hashing"
+            if expected_signatures is None
+            else "Source unavailable during conversion"
+        )
+        raise ConversionError(unavailable) from None
 
 
 def _weights(names: tuple[str, ...], container: str, load: Any) -> tuple[tuple[str, ...], str | None]:
@@ -117,15 +148,7 @@ class SourceSnapshot:
                 return Path(record["path"])
         raise FileNotFoundError("source_file_not_in_manifest")
 
-    def assert_unchanged(self, *, verify_content: bool = True) -> None:
-        """Check bindings and signatures, with full content verification by default.
-
-        Signature-only mode is for a repeated planning check after the initial
-        source hashes have been computed. Offline replay and publication must
-        retain the default full check, including restored-signature mutations.
-        """
-        if type(verify_content) is not bool:
-            raise ValueError("invalid_content_verification_mode")
+    def _assert_selection(self) -> None:
         entry = get_model(self.repo) if self.repo else None
         names = tuple(
             sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file())
@@ -151,17 +174,34 @@ class SourceSnapshot:
         for filename in (*selected, *((index_name,) if index_name else ()), config_name):
             if self.resolve_file(filename).resolve() != (self.root / filename).resolve():
                 raise ConversionError("Source file does not match checkpoint root")
-        for record in self.manifest["files"]:
-            path = Path(record["path"])
-            try:
-                if (
-                    tuple(record["signature"]) != _signature(path)
-                    or (verify_content and record["sha256"] != _hash(path))
-                    or tuple(record["signature"]) != _signature(path)
-                ):
+
+    def assert_unchanged(self, *, verify_content: bool = True) -> None:
+        """Check bindings and signatures, with full content verification by default.
+
+        Signature-only mode is for a repeated planning check after the initial
+        source hashes have been computed. Offline replay and publication must
+        retain the default full check, including restored-signature mutations.
+        """
+        if type(verify_content) is not bool:
+            raise ValueError("invalid_content_verification_mode")
+        try:
+            self._assert_selection()
+            records = self.manifest["files"]
+            paths = [Path(record["path"]) for record in records]
+            expected = [tuple(record["signature"]) for record in records]
+            if verify_content:
+                _, hashes = _verified_hashes(paths, expected_signatures=expected)
+                if hashes != [record["sha256"] for record in records]:
                     raise ConversionError("Source changed during conversion")
-            except OSError:
-                raise ConversionError("Source unavailable during conversion") from None
+            else:
+                for path, signature in zip(paths, expected, strict=True):
+                    if signature != _signature(path) or signature != _signature(path):
+                        raise ConversionError("Source changed during conversion")
+            # Recheck selection after the payload reads: a new index cannot
+            # redirect the source between the initial binding check and publish.
+            self._assert_selection()
+        except OSError:
+            raise ConversionError("Source unavailable during conversion") from None
 
     def receipt(self) -> dict:
         """Exclude private paths, roles, and filenames from public evidence."""
@@ -378,14 +418,17 @@ def resolve_source(
                 )
             )
         records.append(
-            _record(
-                resolved_path,
-                repo=effective_repo,
-                revision=revisions[effective_repo],
-                filename=filename,
-                role=descriptor["role"],
-            )
+            {
+                "repo": effective_repo,
+                "revision": revisions[effective_repo],
+                "filename": filename,
+                "role": descriptor["role"],
+                "path": str(resolved_path.absolute()),
+            }
         )
+    signatures, hashes = _verified_hashes([Path(record["path"]) for record in records])
+    for record, signature, digest in zip(records, signatures, hashes, strict=True):
+        record.update(size=signature[2], sha256=digest, signature=list(signature))
     manifest = {
         "schema_version": 1,
         "root": str(root.absolute()),

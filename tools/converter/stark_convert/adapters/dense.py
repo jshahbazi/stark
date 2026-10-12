@@ -74,7 +74,7 @@ _FAMILY_KEYS = {
     "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers"},
     # Unsloth's mirror records a packaging annotation ignored by HFLlamaConfig;
     # it changes neither the decoder nor tensor interpretation.
-    "llama": {"unsloth_fixed"},
+    "llama": {"unsloth_fixed", "transformers.js_config"},
     "mistral": {"sliding_window"},
 }
 
@@ -190,6 +190,10 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     if dropout < 0 or dropout > 1:
         raise ConversionError("Dense attention_dropout is outside its valid range")
     tp = _positive_int(config, "pretraining_tp", 1)
+    # SmolLM2 records browser-export preferences here. The pinned importer
+    # ignores them; full tensor layout/dtype validation remains authoritative.
+    if "transformers.js_config" in config and not isinstance(config["transformers.js_config"], dict):
+        raise ConversionError("Dense config has malformed browser-export metadata")
     if tp != 1:
         unsupported.append("Tensor-parallel pretraining config is outside qualified dense coverage")
     if (family == "qwen2" and not attention_bias) or (family != "qwen2" and attention_bias) or mlp_bias:

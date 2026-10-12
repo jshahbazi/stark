@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. The [first milestone evidence](../../docs/MODEL_CONVERSION_MILESTONE_1.md) records source-bound qualification and remaining gates. The [implementation review](../../docs/MODEL_CONVERSION_MILESTONE_1_REVIEW.md) is separate from the historical prototype review.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 2 evidence](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and its [independent review](../../docs/MODEL_CONVERSION_MILESTONE_2_REVIEW.md) record current dense coverage, exact qualification, and latency results. [Milestone 1 evidence](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retains its original source versions and results.
 
 ## Convert a model
 
@@ -23,20 +23,25 @@ uv run --project tools/converter --locked stark-convert /absolute/path/to/checkp
   --repo Qwen/Qwen3-0.6B --output models/local-qwen3-stark
 ```
 
-`--backend auto` and `--backend streaming` both use the independent implementation. BF16 is the default output dtype. Qwen2, Llama, and Mistral adapters perform bounded BF16/F16/F32 conversion with frozen reference-byte tests; Qwen3 currently requires matching dense source/target dtype. Existing output directories are refused. The converter stages with owner-only permissions, validates complete supported layouts, and publishes using an atomic no-replace rename on macOS or Linux. Failed conversions remove staging output.
+`--backend auto` and `--backend streaming` both use the independent implementation. BF16 is the default output dtype. All implemented dense adapters perform bounded BF16/F16/F32 conversion with frozen reference-byte tests. Mixed source dtypes within a fused group fail explicitly. Existing output directories are refused. The converter stages with owner-only permissions, validates complete supported layouts, and publishes using an atomic no-replace rename on macOS or Linux. Failed conversions remove staging output.
 
 The command emits aggregate timings, hashes, and capability status. Its private `conversion.json` receipt binds source revisions/content hashes, converter inputs, the dependency lock, emitted files, and transformation workspace use. Errors expose fixed categories without exception text or native diagnostics.
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **three explicitly separated Stark extensions**. Implemented dense adapters and metadata profiles cover these 22 identities:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented dense adapters and metadata profiles cover **33 built-ins plus four extensions**, or 37 identities:
 
 | Adapter | Implemented identities |
 | --- | --- |
-| Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507` |
-| Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct` |
-| Llama | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`; extension `unsloth/Llama-3.2-1B-Instruct` |
+| Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, `POLARIS-Project/Polaris-4B-Preview` |
+| Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
+| Llama | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `HuggingFaceTB/SmolLM2-1.7B-Instruct`, `Nanbeige/Nanbeige4.1-3B`, `RekaAI/reka-flash-3.1`; extension `unsloth/Llama-3.2-1B-Instruct` |
 | Mistral | `mistralai/Codestral-22B-v0.1`, `mistralai/Devstral-Small-2505`; extensions `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}` |
+| Gemma 2 | Extension `google/gemma-2-2b-it`, using the pinned Gemma2 config and standard LanguageModelSpec |
+| Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it`, `EssentialAI/rnj-1-instruct` |
+| Phi | `microsoft/Phi-4-mini-instruct`, the pinned tied Phi3 layout with LongRoPE; untied Phi3 is unsupported |
+| Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
+| SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 
 This is implementation coverage. Exact checkpoint/dtype/config qualification remains per tuple and is recorded in the milestone evidence. A passing small checkpoint does not qualify every size or config variant in its family. Other catalog entries, quantized layouts, custom architectures/RoPE variants, and unsupported metadata representations fail with a sanitized unsupported category. Arbitrary Hugging Face repositories are outside the current catalog.
 
@@ -65,11 +70,11 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
   --output models/qwen3-06b-replayed
 ```
 
-The replay validates required files, immutable external revisions, paths, content hashes, and source identity before conversion, then rechecks consumed inputs before publication. Missing files, changed files, and incomplete external dependencies fail. A local primary source uses content hashes when no remote revision exists. Source manifests retain cache paths, so copied manifests require those referenced local files to remain available.
+The replay validates required files, immutable external revisions, paths, content hashes, and source identity before conversion, then fully rehashes consumed inputs before publication. Independent large shards use at most four hashing workers, with reusable digest buffers totaling at most 1 MiB on pinned CPython 3.13.13. Every file signature is checked before and after the complete hash batch, root/index selection is rechecked, and all workers are joined on errors or interruption. Missing files, changed files, and incomplete external dependencies fail. A local primary source uses content hashes when no remote revision exists. Source manifests retain cache paths, so copied manifests require those referenced local files to remain available.
 
 ## Memory, validation, and measurements
 
-The writer plans names, shapes, dtype/spec metadata, input consumption, and byte offsets from checkpoint headers before writing. Shared typed operations copy/cast dense tensors, fuse projection rows across shards, transpose bounded tiles when needed, and widen normalization scales to F32. Q/K/V and up/gate projection order follows the pinned reference. Tied output heads are checked before omission. Synthetic cast fixtures cover rounding boundaries, subnormals, signed zero, infinities, and NaN payloads against independently generated reference hashes.
+The writer plans names, shapes, dtype/spec metadata, input consumption, and byte offsets from checkpoint headers before writing. Shared typed operations copy/cast dense tensors, fuse projection rows across shards, transpose bounded tiles when needed, and widen normalization scales to F32. Phi gate/up rows are reordered through contiguous bounded views. Granite residual/logit scaling preserves source-precision arithmetic before target casts, including pinned JAX CPU reciprocal and underflow semantics. Gemma normalization, attention softcaps, and local/global RoPE are explicit configs; SmolLM3 preserves its per-layer RoPE mask. Tied output heads are checked before omission. Synthetic cast/scalar fixtures cover rounding boundaries, subnormals, signed zero, infinities, and NaN payloads against independently generated reference hashes, including every BF16/F16 bit pattern for scalar transforms.
 
 `--chunk-mib` sets the enforced live transformation workspace, defaulting to 8 MiB. Header JSON, tensor catalogs, tokenizer normalization, hashing, and interpreter costs contribute additional memory. Sampled process RSS is reported separately; this option does not impose a total-process memory ceiling.
 
@@ -96,6 +101,6 @@ Models and permitted native aggregate/hash validation artifacts remain in ignore
 
 Lalamo serves as a pinned design and qualification reference at [`831accb8252a6b6606c378048caeb44178f1a050`](https://github.com/trymirai/lalamo/tree/831accb8252a6b6606c378048caeb44178f1a050). The catalog exporter reads that source in a separate developer environment. Runtime conversion reads the checked-in declarative catalog and uses Stark implementations. [Lalamo's MIT license](LICENSE.lalamo) and Mirai Tech Inc. copyright are preserved. Stark retains Uzu base revision `8d01581474760bd1fc7f4a547ff1d02f7dada437`.
 
-Adapted source paths include `model_import/model_spec.py`, `model_import/model_specs/`, `model_import/origins.py`, `model_import/loaders/huggingface.py`, `model_import/model_configs/huggingface/{qwen2,qwen3,llama,mistral}.py`, `model_import/common.py`, tokenizer/generation configuration, `modules/normalization.py`, `weight_matrix.py`, and `safetensors.py`. The catalog records the registry-code revision and hashes of inline metadata fragments. Source receipts record checkpoint-file revisions and content hashes. Converter receipts recursively hash conversion-affecting package resources and the exporter, with the dependency lock recorded separately.
+Adapted source paths include `model_import/model_spec.py`, `model_import/model_specs/`, `model_import/origins.py`, `model_import/loaders/huggingface.py`, `model_import/model_configs/huggingface/{qwen2,qwen3,llama,mistral,gemma2,gemma3,phi3,granite,smollm3}.py`, `model_import/common.py`, tokenizer/generation configuration, normalization/linear/embedding/RoPE contracts, `weight_matrix.py`, and `safetensors.py`. The catalog records the registry-code revision and hashes of inline metadata fragments. Source receipts record checkpoint-file revisions and content hashes. Converter receipts recursively hash conversion-affecting package resources and the exporter, with the dependency lock recorded separately.
 
 The replacement target is independently qualified support for every in-scope pinned inventory row. There is no permanent fallback. Unsupported rows remain visible until their implementation and acceptance gates pass. Public package publication and release infrastructure require a separate scoped task.

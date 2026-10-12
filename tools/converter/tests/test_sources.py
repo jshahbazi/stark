@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -291,3 +293,133 @@ def test_forged_config_role_cannot_bypass_root_binding(tmp_path):
     path.write_text(json.dumps(manifest))
     with pytest.raises(ConversionError, match="Source file does not match checkpoint root"):
         resolve_source(PRIMARY, source_manifest=path, hub=object())
+
+
+@pytest.mark.parametrize("size", [0, 1, 256 * 1024 - 1, 256 * 1024, 256 * 1024 + 1, 2 * 256 * 1024 + 17])
+def test_reusable_hash_buffer_preserves_exact_digest_across_read_boundaries(tmp_path, size):
+    payload = (b"independent hash fixture\x00\xff" * (size // 26 + 1))[:size]
+    path = tmp_path / "payload.bin"
+    path.write_bytes(payload)
+    assert sources._hash(path) == hashlib.sha256(payload).hexdigest()
+
+
+def test_parallel_hashes_are_exact_ordered_and_bounded_to_four_readers(tmp_path, monkeypatch):
+    paths = [tmp_path / f"shard-{index}.bin" for index in range(7)]
+    metadata = tmp_path / "metadata.json"
+    for index, path in enumerate(paths):
+        path.write_bytes(bytes([index]) * 32)
+    metadata.write_bytes(b"{}")
+    paths.insert(2, metadata)
+    monkeypatch.setattr(sources, "_PARALLEL_HASH_MIN_BYTES", 16)
+    original_hash = sources._hash
+    lock = threading.Lock()
+    first_wave = threading.Event()
+    active = 0
+    peak = 0
+    seen = []
+
+    def tracked_hash(path):
+        nonlocal active, peak
+        if path == metadata:
+            assert active == 0
+            assert threading.current_thread() is threading.main_thread()
+            seen.append(path)
+            return original_hash(path)
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            seen.append(path)
+            if active == 4:
+                first_wave.set()
+        try:
+            assert first_wave.wait(5), "large hashes did not run concurrently"
+            return original_hash(path)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(sources, "_hash", tracked_hash)
+    _, actual = sources._verified_hashes(paths)
+    assert actual == [hashlib.sha256(path.read_bytes()).hexdigest() for path in paths]
+    assert 2 <= peak <= 4
+    assert active == 0 and len(seen) == len(paths) and set(seen) == set(paths)
+
+
+@pytest.mark.parametrize("failure", [OSError("private checkpoint path and exception details"), KeyboardInterrupt()])
+def test_parallel_hash_failure_joins_all_started_readers(tmp_path, monkeypatch, failure):
+    paths = [tmp_path / f"shard-{index}.bin" for index in range(4)]
+    for path in paths:
+        path.write_bytes(b"payload")
+    monkeypatch.setattr(sources, "_PARALLEL_HASH_MIN_BYTES", 1)
+    barrier = threading.Barrier(4)
+    finished = set()
+    lock = threading.Lock()
+
+    def failing_hash(path):
+        barrier.wait(timeout=5)
+        try:
+            if path == paths[0]:
+                raise failure
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        finally:
+            with lock:
+                finished.add(path)
+
+    monkeypatch.setattr(sources, "_hash", failing_hash)
+    expected = [sources._signature(path) for path in paths]
+    if isinstance(failure, OSError):
+        with pytest.raises(ConversionError, match="^Source unavailable during conversion$") as caught:
+            sources._verified_hashes(paths, expected_signatures=expected)
+        assert "private" not in str(caught.value)
+    else:
+        with pytest.raises(KeyboardInterrupt):
+            sources._verified_hashes(paths, expected_signatures=expected)
+    assert finished == set(paths)
+    assert not any(thread.name.startswith("stark-source-hash") for thread in threading.enumerate())
+
+
+def test_completed_earlier_file_is_rechecked_after_later_hashes(tmp_path, monkeypatch):
+    paths = [tmp_path / "first.bin", tmp_path / "second.bin"]
+    for path in paths:
+        path.write_bytes(b"payload")
+    original_hash = sources._hash
+    first_stat = paths[0].stat()
+
+    def mutating_hash(path):
+        digest = original_hash(path)
+        if path == paths[-1]:
+            paths[0].write_bytes(b"changed")
+            os.utime(paths[0], ns=(first_stat.st_atime_ns, first_stat.st_mtime_ns + 1))
+        return digest
+
+    monkeypatch.setattr(sources, "_hash", mutating_hash)
+    with pytest.raises(ConversionError, match="Source changed while hashing"):
+        sources._verified_hashes(paths)
+
+
+def test_checkpoint_selection_is_rechecked_after_full_hash_batch(tmp_path, monkeypatch):
+    root = files(tmp_path / "source")
+    snapshot = resolve_source(root, repo=PRIMARY)
+    original_hash = sources._hash
+
+    def mutating_hash(path):
+        digest = original_hash(path)
+        if path.name == "model.safetensors":
+            (root / "untracked.safetensors").write_bytes(b"untracked")
+            (root / "model.safetensors.index.json").write_text(
+                json.dumps({"weight_map": {"one": "untracked.safetensors"}})
+            )
+        return digest
+
+    monkeypatch.setattr(sources, "_hash", mutating_hash)
+    with pytest.raises(ConversionError, match="Source checkpoint selection changed during conversion"):
+        snapshot.assert_unchanged()
+
+
+def test_changed_signature_prevents_entire_hash_batch(tmp_path, monkeypatch):
+    root = files(tmp_path / "source")
+    snapshot = resolve_source(root, repo=PRIMARY)
+    (root / "tokenizer_config.json").write_bytes(b"changed")
+    monkeypatch.setattr(sources, "_hash", lambda path: pytest.fail("changed source started a hash batch"))
+    with pytest.raises(ConversionError, match="Source changed during conversion"):
+        snapshot.assert_unchanged()

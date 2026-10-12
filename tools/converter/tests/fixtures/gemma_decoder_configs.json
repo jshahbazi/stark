@@ -1,0 +1,4811 @@
+{
+  "reference": {
+    "repository": "https://github.com/trymirai/lalamo",
+    "revision": "831accb8252a6b6606c378048caeb44178f1a050",
+    "method": "config_type.from_json(...).to_decoder_config({}).to_json()",
+    "license": "MIT; Copyright (c) 2025 Mirai Tech Inc."
+  },
+  "cases": {
+    "gemma2": {
+      "family": "gemma2",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma2",
+        "architectures": [
+          "Gemma2ForCausalLM"
+        ],
+        "rope_theta": 10000.0,
+        "attn_logit_softcapping": 50.0,
+        "final_logit_softcapping": 30.0
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": 30.0,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma2_bias": {
+      "family": "gemma2",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": true,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma2",
+        "architectures": [
+          "Gemma2ForCausalLM"
+        ],
+        "rope_theta": 10000.0,
+        "attn_logit_softcapping": 50.0,
+        "final_logit_softcapping": 30.0
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": 30.0,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": null,
+                "key_norm_config": null,
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_unscaled": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "sliding_window_pattern": 3,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": null
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": null,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_linear_bias": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": true,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "sliding_window_pattern": 3,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": {
+          "rope_type": "linear",
+          "factor": 8.0
+        }
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": null,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "LinearScalingRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 8.0
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": true,
+                "has_out_biases": true,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "LinearScalingRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 8.0
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_yarn": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "sliding_window_pattern": 3,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": {
+          "rope_type": "yarn",
+          "factor": 4.0,
+          "beta_fast": 32.0,
+          "beta_slow": 1.0,
+          "original_max_position_embeddings": 16
+        }
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": null,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "YARNRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 4.0,
+                "original_context_length": 16,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "truncate": false
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "YARNRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 4.0,
+                "original_context_length": 16,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "truncate": false
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_yarn_truncate": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "sliding_window_pattern": 3,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": {
+          "rope_type": "yarn",
+          "factor": 4.0,
+          "beta_fast": 32.0,
+          "beta_slow": 1.0,
+          "original_max_position_embeddings": 16,
+          "truncate": true
+        }
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": null,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "YARNRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 4.0,
+                "original_context_length": 16,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "truncate": true
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "YARNRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2,
+                "scaling_factor": 4.0,
+                "original_context_length": 16,
+                "beta_fast": 32.0,
+                "beta_slow": 1.0,
+                "truncate": true
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_all_global_softcaps": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": 50.0,
+        "final_logit_softcapping": 30.0,
+        "sliding_window_pattern": 1,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": null
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": 30.0,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": 50.0,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    },
+    "gemma3_private_window_annotation": {
+      "family": "gemma3_text",
+      "config": {
+        "hidden_size": 8,
+        "intermediate_size": 12,
+        "num_hidden_layers": 6,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 2,
+        "vocab_size": 16,
+        "rms_norm_eps": 1e-06,
+        "max_position_embeddings": 64,
+        "tie_word_embeddings": true,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_activation": "gelu_pytorch_tanh",
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "query_pre_attn_scalar": 2.0,
+        "sliding_window": 16,
+        "cache_implementation": "hybrid",
+        "eos_token_id": 1,
+        "bos_token_id": 0,
+        "pad_token_id": 0,
+        "torch_dtype": "bfloat16",
+        "initializer_range": 0.02,
+        "transformers_version": "4.50.0",
+        "use_cache": true,
+        "model_type": "gemma3_text",
+        "architectures": [
+          "Gemma3ForCausalLM"
+        ],
+        "rope_theta": 1000000.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": null,
+        "_sliding_window_pattern": 6,
+        "layer_types": [
+          "sliding_attention",
+          "sliding_attention",
+          "sliding_attention",
+          "sliding_attention",
+          "sliding_attention",
+          "full_attention"
+        ],
+        "use_bidirectional_attention": false
+      },
+      "decoder_config": {
+        "embedding_config": {
+          "type": "TiedEmbeddingConfig",
+          "input_scale": 2.8284271247461903,
+          "logit_soft_cap": null,
+          "logit_scale": null
+        },
+        "transformer_config": {
+          "layer_configs": [
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": 16,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 10000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            },
+            {
+              "pre_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mixer_conv_config": null,
+              "mixer_config": {
+                "type": "AttentionConfig",
+                "qkvg_projection_config": {},
+                "out_projection_config": {},
+                "query_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "key_norm_config": {
+                  "epsilon": 1e-06,
+                  "scale_offset": 1.0,
+                  "upcast_mode": "full_layer",
+                  "subtract_mean": false,
+                  "has_scale": true,
+                  "has_biases": false
+                },
+                "num_heads": 4,
+                "num_groups": 2,
+                "head_dim": 2,
+                "is_causal": true,
+                "scale": 0.7071067811865476,
+                "sliding_window_size": null,
+                "logit_soft_cap": null,
+                "has_sinks": false,
+                "has_qkvg_biases": false,
+                "has_out_biases": false,
+                "has_gate": false,
+                "normalize_values": false,
+                "is_kv_sharing": false
+              },
+              "post_mixer_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "pre_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "mlp_conv_config": null,
+              "mlp_config": {
+                "type": "DenseMLPConfig",
+                "linear_config": {},
+                "activation": {
+                  "type": "GELU",
+                  "approximate": true
+                },
+                "has_up_biases": false,
+                "has_down_biases": false,
+                "gate_clipping": null,
+                "up_clipping": null
+              },
+              "post_mlp_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": 1.0,
+                "upcast_mode": "full_layer",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "hidden_dim": null,
+              "ple_config": null,
+              "has_post_layer_scalar": false,
+              "kv_source_layer_index": null,
+              "rope_config": {
+                "type": "UnscaledRoPEConfig",
+                "base": 1000000.0,
+                "max_sequence_length": 64,
+                "head_dim": 2
+              }
+            }
+          ],
+          "output_norm_config": {
+            "epsilon": 1e-06,
+            "scale_offset": 1.0,
+            "upcast_mode": "full_layer",
+            "subtract_mean": false,
+            "has_scale": true,
+            "has_biases": false
+          },
+          "model_dim": 8,
+          "hidden_dim": 12
+        },
+        "vocab_size": 16,
+        "ple_model_config": null,
+        "embedding_norm_config": null
+      }
+    }
+  }
+}

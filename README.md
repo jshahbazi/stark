@@ -6,7 +6,7 @@ The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`,
 
 ## Build the scoring engine
 
-Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen3, Qwen2.5-Coder, Llama 3.x, and Mistral profiles. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
+Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite, and SmolLM profiles. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
 
 ```sh
 cargo build --release --locked -p stark-score --features optimized

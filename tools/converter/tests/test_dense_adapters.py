@@ -347,3 +347,22 @@ def test_missing_required_tensor_is_rejected_before_mixed_qwen2_bias_fusion(tmp_
     save_tensors(source / "model.safetensors", tensors)
     with pytest.raises(ConversionError, match="^Dense checkpoint is missing a required tensor$"):
         build_qwen2_plan(source)
+
+
+def test_llama_browser_export_annotation_preserves_the_plan(tmp_path):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    before = build_llama_plan(source).decoder_config
+    config["transformers.js_config"] = {"dtype": "q4f16", "use_external_data_format": True}
+    (source / "config.json").write_text(json.dumps(config))
+    assert build_llama_plan(source).decoder_config == before
+
+
+@pytest.mark.parametrize("value", [False, None, "q4f16", []])
+def test_malformed_browser_export_annotation_is_rejected(tmp_path, value):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    config["transformers.js_config"] = value
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ConversionError, match="malformed browser-export metadata"):
+        build_llama_plan(source)

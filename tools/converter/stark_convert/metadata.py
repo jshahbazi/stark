@@ -13,6 +13,8 @@ parser. Source files are supplied by the caller's immutable source resolver.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 from collections.abc import Callable
@@ -21,7 +23,7 @@ from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 
-from stark_convert.registry import get_model, models
+from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
 from stark_convert.streaming import ConversionError, read_json
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
@@ -32,17 +34,43 @@ _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?P<response>.*)\Z"
 )
 _GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
-_MODEL_TYPES = {
-    "HFQwen2Config": "qwen2",
-    "HFQwen3Config": "qwen3",
-    "HFLlamaConfig": "llama",
-    "HFMistralConfig": "mistral",
+_MODEL_TYPES = CONFIG_ADAPTERS
+_GRANITE_THINKING_OUTPUT_PARSER_REGEX = (
+    r"(?s)<think>(?P<chain_of_thought>.*?)"
+    r"(?:</think>\s*(?:<response>\s*)?(?P<response>.*?)(?:</response>\s*)?)?\Z"
+)
+# These are public, static upstream format defaults, never evaluation content.
+# The inventory stores only hashes; the runtime resolves an explicit reviewed
+# role/hash pair and rechecks it instead of accepting arbitrary inline content.
+_INLINE_TEXT = {
+    (
+        "system_prompt",
+        "ad1f2d358132633f575755436201edaeb47de52256c93b6876d7233276e6c224",
+    ): "You are a model that can do function calling with the following functions",
+    (
+        "chat_template",
+        "61f8687f0fca06cb9702de0a3e029cdb9cc90208fd3e7f24e57577b877bf2678",
+    ): "{{ bos_token or '' }}{% for message in messages %}{{ message.content }}{% endfor %}",
 }
 SUPPORTED_METADATA_REPOS = frozenset(entry["repo"] for entry in models() if entry.get("metadata_profile") is not None)
 
 
 class UnsupportedMetadata(ValueError):
     """Valid metadata is outside implemented profiles; never include content."""
+
+
+def _inline_text(role: str, spec: object) -> str:
+    if not isinstance(spec, dict) or set(spec) != {"sha256"}:
+        raise ConversionError("Invalid inline metadata profile.")
+    digest = spec["sha256"]
+    if not isinstance(digest, str):
+        raise ConversionError("Invalid inline metadata profile.")
+    value = _INLINE_TEXT.get((role, digest))
+    if value is None:
+        raise UnsupportedMetadata("Unsupported inline metadata profile.")
+    if hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest() != digest:
+        raise ConversionError("Inline metadata profile identity changed.")
+    return value
 
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:
@@ -185,7 +213,7 @@ def _chat_template(
         else:
             prompt_template = _read_object(template_path, "chat-template").get(field_name)
     elif prompt_template is None and inline_id is not None:
-        raise UnsupportedMetadata("Unsupported inline chat-template profile.")
+        prompt_template = _inline_text("chat_template", inline_id)
     if not isinstance(prompt_template, str):
         named_templates = (
             isinstance(prompt_template, list)
@@ -210,11 +238,22 @@ def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
     parser_id = metadata.get("parser_id")
     end_id = metadata.get("end_of_thinking_id")
     reasoning_id = metadata.get("reasoning_id")
-    if parser_id not in (None, "optional_thinking"):
+    parsers = {
+        None: None,
+        "optional_thinking": _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX,
+        "granite_thinking": _GRANITE_THINKING_OUTPUT_PARSER_REGEX,
+    }
+    ends = {
+        None: None,
+        "qwen_think_end": "\n</think>",
+        "double_newline_think_end": "\n\n</think>",
+        "think_end": "</think>",
+    }
+    if parser_id not in parsers:
         raise UnsupportedMetadata("Unsupported output-parser profile.")
-    if end_id not in (None, "qwen_think_end"):
+    if end_id not in ends:
         raise UnsupportedMetadata("Unsupported reasoning-boundary profile.")
-    if reasoning_id not in (None, "boolean_default_on", "boolean_default_off"):
+    if reasoning_id not in (None, "boolean_default_on", "boolean_default_off", "granite_boolean_default_off"):
         raise UnsupportedMetadata("Unsupported reasoning-default profile.")
     roles = metadata.get("roles")
     if not isinstance(roles, dict) or any(
@@ -225,15 +264,15 @@ def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
     if reasoning_id is not None:
         reasoning = {
             "default_reasoning_effort": "medium" if reasoning_id == "boolean_default_on" else "no_reasoning",
-            "field_name": "enable_thinking",
+            "field_name": "thinking" if reasoning_id == "granite_boolean_default_off" else "enable_thinking",
             "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
         }
     return {
-        "output_parser_regex": _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX if parser_id == "optional_thinking" else None,
+        "output_parser_regex": parsers[parser_id],
         "system_role_name": roles["system"],
         "user_role_name": roles["user"],
         "assistant_role_name": roles["assistant"],
-        "end_of_thinking_tag": "\n</think>" if end_id == "qwen_think_end" else None,
+        "end_of_thinking_tag": ends[end_id],
         "reasoning_config": reasoning,
     }
 
@@ -329,7 +368,7 @@ def write_metadata(
     if "system_prompt" in model_entry["files"]:
         system_prompt = _read_text(_file_path(source, model_entry, "system_prompt", resolve_file), "system-prompt")
     elif model_entry["metadata"].get("inline_sources", {}).get("system_prompt") is not None:
-        raise UnsupportedMetadata("Unsupported inline system-prompt profile.")
+        system_prompt = _inline_text("system_prompt", model_entry["metadata"]["inline_sources"]["system_prompt"])
 
     bos_token = _optional_text(tokenizer_config.get("bos_token"))
     eos_token = _optional_text(tokenizer_config.get("eos_token"))

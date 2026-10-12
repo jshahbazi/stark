@@ -101,6 +101,7 @@ class TensorOperation:
     dtype: str
     shape: tuple[int, ...]
     kind: str = "copy"
+    scalar: float | None = None
 
     @property
     def nbytes(self) -> int:
@@ -318,6 +319,93 @@ def _cast(tensor: TensorInfo, output: BinaryIO, dtype: str, chunk_bytes: int) ->
     return peak
 
 
+def _flush_f32_subnormals(values: np.ndarray) -> None:
+    """Reproduce the pinned CPU arithmetic backend's signed flush to zero."""
+    bits = values.view("<u4")
+    subnormal = np.bitwise_and(bits, 0x7F800000) == 0
+    np.bitwise_and(bits, 0x80000000, out=bits, where=subnormal)
+
+
+def _scalar_transform(
+    tensor: TensorInfo, output: BinaryIO, dtype: str, scalar: float, kind: str, chunk_bytes: int
+) -> int:
+    """Scale in the source precision before casting, as the pinned importer does.
+
+    BF16/F16 arithmetic widens to F32, then rounds back to the source dtype.
+    CPU F32 subnormal operands/results flush to signed zero. Division by a
+    constant uses a rounded reciprocal multiplication: F16 rounds its inverse
+    to F16; BF16 widens its divisor before taking an F32 inverse. The subsequent
+    cast remains a separate operation, including widening normalization scales.
+    Frozen independent reference hashes cover every 16-bit source pattern.
+    """
+    import ml_dtypes
+
+    dtypes = {"BF16": np.dtype(ml_dtypes.bfloat16), "F16": np.dtype("<f2"), "F32": np.dtype("<f4")}
+    if tensor.dtype not in dtypes or dtype not in dtypes:
+        raise UnsupportedConversion("unsupported_dense_dtype")
+    if isinstance(scalar, bool) or not isinstance(scalar, (int, float)) or not math.isfinite(scalar):
+        raise ConversionError("invalid_scalar_transform")
+    if kind not in {"scalar_multiply", "scalar_divide"} or (kind == "scalar_divide" and scalar == 0):
+        raise ConversionError("invalid_scalar_transform")
+    # Peak stages: input + F32 working values + exponent/mask scratch (5B),
+    # or input + source-rounded values + target cast. The extra target-sized
+    # allowance covers the same casting scratch reserved by _cast.
+    bytes_per_element = max(tensor.itemsize + 9, 2 * tensor.itemsize + 2 * DTYPE_BYTES[dtype])
+    elements = chunk_bytes // bytes_per_element
+    if elements < 1:
+        raise ConversionError("insufficient_transform_workspace")
+    with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+        operand = np.float32(dtypes[tensor.dtype].type(scalar))
+        if operand.view("<u4") & 0x7F800000 == 0:
+            operand = np.uint32(operand.view("<u4") & 0x80000000).view("<f4")
+        if kind == "scalar_divide":
+            operand = np.float32(1) / operand
+            if tensor.dtype == "F16":
+                operand = np.float32(np.float16(operand))
+            if operand.view("<u4") & 0x7F800000 == 0:
+                operand = np.uint32(operand.view("<u4") & 0x80000000).view("<f4")
+        # Hardware FTZ also flushes an exact tiny result that would otherwise
+        # round UP to the smallest normal F32. Comparing input F32 bit patterns
+        # to the scalar's upward-rounded threshold captures this without F64
+        # payload arrays or changing source precision.
+        underflow_limit = None
+        if np.isfinite(operand) and operand != 0:
+            threshold = float(np.finfo(np.float32).tiny) / abs(float(operand))
+            limit = np.float32(threshold)
+            if float(limit) < threshold:
+                limit = np.nextafter(limit, np.float32(np.inf))
+            underflow_limit = limit.view("<u4")
+    peak = 0
+    with _open_tensor(tensor) as stream:
+        remaining = tensor.nbytes
+        while remaining:
+            chunk = stream.read(min(elements * tensor.itemsize, remaining))
+            if not chunk or len(chunk) % tensor.itemsize:
+                raise ConversionError("truncated_tensor")
+            count = len(chunk) // tensor.itemsize
+            source = np.frombuffer(chunk, dtype=dtypes[tensor.dtype])
+            with np.errstate(over="ignore", under="ignore", invalid="ignore", divide="ignore"):
+                values = source.astype("<f4")
+                _flush_f32_subnormals(values)
+                underflow = None
+                if underflow_limit is not None:
+                    underflow = np.bitwise_and(values.view("<u4"), 0x7FFFFFFF) < underflow_limit
+                np.multiply(values, operand, out=values)
+                if underflow is not None:
+                    bits = values.view("<u4")
+                    np.bitwise_and(bits, 0x80000000, out=bits, where=underflow)
+                    del underflow
+                _flush_f32_subnormals(values)
+                rounded = values.astype(dtypes[tensor.dtype])
+                del values
+                target = rounded.astype(dtypes[dtype])
+            output.write(memoryview(target.view(f"u{DTYPE_BYTES[dtype]}")).cast("B"))
+            peak = max(peak, count * bytes_per_element)
+            remaining -= len(chunk)
+            del chunk, source, rounded, target
+    return peak
+
+
 def transpose_tensor(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> int:
     """Transpose a dense rank-two tensor into the current output position.
 
@@ -403,6 +491,18 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
         raise ConversionError("Conversion plan contains duplicate output tensors")
     if any(op.kind in {"fuse", "fuse_cast"} and len({source.dtype for source in op.sources}) > 1 for op in operations):
         raise UnsupportedConversion("Mixed-dtype fusion promotion is not implemented")
+    if any(
+        op.kind in {"scalar_multiply", "scalar_divide"}
+        and (
+            len(op.sources) != 1
+            or isinstance(op.scalar, bool)
+            or not isinstance(op.scalar, (int, float))
+            or not math.isfinite(op.scalar)
+            or (op.kind == "scalar_divide" and op.scalar == 0)
+        )
+        for op in operations
+    ):
+        raise ConversionError("invalid_scalar_transform")
     header = {"__metadata__": plan.metadata} if plan.metadata else {}
     offset = 0
     for op in operations:
@@ -430,6 +530,10 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
                 elif op.kind in {"cast", "fuse_cast"}:
                     for source in op.sources:
                         peak = max(peak, _cast(source, output, op.dtype, chunk_bytes))
+                elif op.kind in {"scalar_multiply", "scalar_divide"} and len(op.sources) == 1:
+                    peak = max(
+                        peak, _scalar_transform(op.sources[0], output, op.dtype, op.scalar, op.kind, chunk_bytes)
+                    )
                 elif op.kind == "transpose" and len(op.sources) == 1:
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
                 else:
