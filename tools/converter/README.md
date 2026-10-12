@@ -6,6 +6,8 @@ The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete
 
 ## Convert a model
 
+The current [hardening packet](../../docs/MODEL_CONVERSION_HARDENING.md) prioritizes installation, local downloads and failure handling. Further model coverage is deferred.
+
 Run from the repository root with managed Python 3.13.13 through `uv`:
 
 ```sh
@@ -16,12 +18,41 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
   --output models/qwen3-06b-stark
 ```
 
-Remote inputs resolve primary and required external repositories to immutable Hugging Face commits before downloading. Authentication uses Hugging Face's existing credential mechanism, and downloads stay in its local cache. Local checkpoints require their registered profile identity:
+Remote inputs resolve primary and required external repositories to immutable Hugging Face commits before downloading. Authentication uses Hugging Face's existing credential mechanism, and downloads stay in its local cache. A downloaded self-contained folder can be converted offline without an account or repository name:
+
+```sh
+uv run --project tools/converter --locked stark-convert /absolute/path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output models/local-model-stark
+```
+
+The folder needs a supported model config, tokenizer, tokenizer configuration, all safetensors shards, a supported chat template and explicit EOS metadata. Architecture is inferred from `config.json` and validated against the implemented adapters. See [generic metadata requirements](#future-checkpoints-and-architecture-tracking). For a catalog model, supply its registered identity to retain that profile's metadata rules:
 
 ```sh
 uv run --project tools/converter --locked stark-convert /absolute/path/to/checkpoint \
-  --repo Qwen/Qwen3-0.6B --output models/local-qwen3-stark
+  --repo Qwen/Qwen3-0.6B --offline --output models/local-qwen3-stark
 ```
+
+Catalog profiles with external metadata need a complete private source manifest for offline replay. Existing output folders are refused; incomplete downloads fail before publication.
+
+## Install outside the checkout
+
+Version 0.9.1 supports local wheel installation. Build and export locked dependencies from the repository, then install into a managed Python environment:
+
+```sh
+uv build tools/converter --python 3.13.13 --out-dir runtime/converter-package
+uv export --project tools/converter --locked --no-dev --no-emit-project \
+  --output-file runtime/converter-package/requirements.txt
+uv venv --python 3.13.13 /absolute/path/to/converter-env
+uv pip install --python /absolute/path/to/converter-env/bin/python --require-hashes \
+  -r runtime/converter-package/requirements.txt
+uv pip install --python /absolute/path/to/converter-env/bin/python --no-deps \
+  runtime/converter-package/stark_convert-0.9.1-py3-none-any.whl
+/absolute/path/to/converter-env/bin/stark-convert --version
+/absolute/path/to/converter-env/bin/stark-convert /absolute/path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output /absolute/path/to/converted-model
+```
+
+Installed conversion and benchmarking use packaged provenance inputs. Editable installs remain checkout-bound. The bundled lock identifies intended dependencies; the hash-checked export enforces their versions. Package publication remains separate work.
 
 `--backend auto` and `--backend streaming` both use the independent implementation. BF16 is the default output dtype. All implemented dense adapters perform bounded BF16/F16/F32 conversion with frozen reference-byte tests. Mixed source dtypes within a fused group fail explicitly. Existing output directories are refused. The converter stages with owner-only permissions, validates complete supported layouts, and publishes using an atomic no-replace rename on macOS or Linux. Failed conversions remove staging output.
 
@@ -128,7 +159,7 @@ Stark's supported dense loader selects BF16 weights. F16/F32 outputs are convers
 
 ## Measured improvements over Lalamo
 
-Version 0.9.0 benchmarks two public real-weight ModernBERT fixtures with explicit local synthetic chat-template overlays and BF16 output:
+The preserved version 0.9.0 benchmarks two public real-weight ModernBERT fixtures with explicit local synthetic chat-template overlays and BF16 output:
 
 | Public classifier fixture | Stark median | Lalamo median | Lower time | Lower sampled RSS |
 | --- | ---: | ---: | ---: | ---: |
@@ -213,6 +244,8 @@ uv run --project tools/converter --locked stark-convert-benchmark \
 ```
 
 The benchmark starts a fresh streaming process for every repeat, warms source files, and excludes setup/downloads. `--reference-output` is optional and compares independently generated frozen artifacts: tensor names/shapes/dtypes/payload hashes, tensor specs/logical metadata, complete config, and normalized tokenizer. Reference generation occurs externally before timed runs. The benchmark does not measure reference conversion time or produce a speedup ratio. Whole-file safetensors hashes may differ when serialization order differs while all tensor payloads match.
+
+Version 0.9.1 uses the current installed Python for fresh processes and records that launcher in schema-3 reports. Historical measurements retain their original protocols. To benchmark an anonymous local folder, omit `--repo` and add `--metadata-profile hf-generic`; `--architecture` and `--model-kind` are forwarded to conversion. Reports are saved atomically with private permissions throughout the run. Errors and interruption preserve completed measurements and identify the failed repeat; an incomplete or failed report never qualifies as passing evidence. See the [failure contract](../../docs/MODEL_CONVERSION_HARDENING.md#benchmark-report-contract).
 
 Reported complete CLI time includes startup, conversion, verification, and receipt hashing. Process-tree RSS is sampled every 10 ms; shared pages can be counted more than once and brief peaks may be missed. The harness rejects source, reference, and converter-input changes during the run. Measurements run serially with other model-dependent work paused.
 

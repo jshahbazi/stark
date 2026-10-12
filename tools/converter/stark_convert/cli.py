@@ -17,6 +17,7 @@ from dataclasses import asdict, replace
 from functools import partial
 from pathlib import Path
 
+from . import __version__
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
 from .profiles import GENERIC_PROFILE, generic_entry
 from .provenance import file_hash, toolchain_provenance
@@ -358,8 +359,11 @@ class _Parser(argparse.ArgumentParser):
 
 def main() -> int:
     parser = _Parser(description="Convert selected HF catalog profiles with independent Stark streaming adapters.")
+    parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
     parser.add_argument("source", nargs="?", help="HF repository ID or local checkpoint directory")
-    parser.add_argument("--repo", help="Catalog identity required for a local checkpoint")
+    parser.add_argument(
+        "--repo", help="Catalog identity for a local checkpoint; omit with --metadata-profile hf-generic"
+    )
     parser.add_argument("--revision", help="HF revision resolved to an immutable commit")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--backend", choices=("auto", "streaming"), default="auto")
@@ -406,6 +410,22 @@ def main() -> int:
             return 0
         if not args.output or not args.source:
             raise ValueError("missing_arguments")
+        if (
+            Path(args.source).expanduser().is_dir()
+            and repo is None
+            and not (args.metadata_profile or args.source_manifest)
+        ):
+            print(
+                json.dumps(
+                    {
+                        "status": "error",
+                        "error_category": "local_profile_required",
+                        "hint": "Supply --repo for a catalog model or --metadata-profile hf-generic.",
+                    }
+                ),
+                file=sys.stderr,
+            )
+            return 1
         if not args.source_manifest:
             _validate_request(request)
         logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
