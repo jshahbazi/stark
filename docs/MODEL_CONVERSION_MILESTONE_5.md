@@ -2,6 +2,8 @@
 
 This packet continues the [replacement plan](MODEL_CONVERSION_PLAN.md) from `ade81001` on `codex/conversion-milestone-4`. Version 0.8.0 independently converts the two LLaMBA identities in pinned Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`: `cartesia-ai/Llamba-1B` and `cartesia-ai/Llamba-1B-4bit-mlx`. The installed converter never imports or invokes Lalamo, JAX or PyTorch.
 
+Artifact lifecycle update, 2026-10-12: after this packet's validation, review and commit, the user directed removal of completed conversion model weights. The [separate cleanup record](MODEL_CONVERSION_ARTIFACT_CLEANUP.md) documents deletion of this packet's input and frozen output weights. Retention statements below describe the original validation state; small evidence records and original hashes remain retained.
+
 ## Architecture, format and source contracts
 
 The catalog now implements **83/110 built-ins plus four extensions**, comprising 43 dense and 40 MLX built-ins. Twenty-seven built-ins remain planned. This packet adds a reusable `llamba` decoder adapter and its Mamba2 mixer helper. There is no separate Mamba1 or general Mamba architecture row in the pinned registry; those architectures are not claimed here. Extensions and previous reference/qualification results retain their original bindings.

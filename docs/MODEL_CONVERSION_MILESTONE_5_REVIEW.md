@@ -2,6 +2,8 @@
 
 Review baseline: `ade8100117bdf4d5c3f5115bcab52f65466d867e` on `codex/conversion-milestone-4`. The reviewer did not author the adapter, fixtures, fixture generators, source resolver, native qualifications, or benchmark harness.
 
+Post-review artifact lifecycle note, 2026-10-12: the user subsequently directed removal of completed conversion model weights. The [cleanup record](MODEL_CONVERSION_ARTIFACT_CLEANUP.md) records that later action. Artifact-retention statements in this review describe its original inspection state; the reviewed hashes, results and verdict remain historical and unchanged.
+
 ## Scope
 
 This packet implements the two LLaMBA identities in Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`: `cartesia-ai/Llamba-1B` and `cartesia-ai/Llamba-1B-4bit-mlx`. It adds reusable LLaMBA decoder and Mamba2 mixer planning. It does not implement Mamba1, later state-space families, generation quality validation, or complete Lalamo replacement.

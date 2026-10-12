@@ -45,6 +45,14 @@ Catalog implementation status, conversion qualification, access, native loading,
 
 Never capture prompts, responses, token vectors, decision probabilities, credentials, or exception dumps in logs, receipts, benchmark reports, or private validation artifacts. Existing operational checkpoint/config/tokenizer files remain private model inputs. Compare execution values in memory and retain permitted aggregates/hashes only.
 
+## Model artifact cleanup
+
+At the user's direction, remove downloaded conversion-only weights and generated model outputs after a packet's validation, benchmark and review are complete. Keep the small source manifests, receipts, aggregate measurements, audit records, scripts and pinned revision/content hashes. Check for active use before deletion; preserve serving models, externally supplied source models and unrelated caches. Record cleanup separately from the original validation evidence, including what was removed and the measured storage change.
+
+Artifact retention statements describe the validation run's state. A later cleanup does not alter its original hashes or results. Future checks that need deleted weights must reacquire the pinned inputs and regenerate outputs, then verify the recorded hashes; existing manifests alone cannot replay deleted files.
+
+- [ ] For each completed future conversion packet, remove its unused model weights and outputs, retain small evidence, and record cleanup before reporting completion.
+
 ## Phase 0 — Pinned reference inventory and acceptance contract
 
 Dependencies: the existing prototype and pinned reference source.
