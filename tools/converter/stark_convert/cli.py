@@ -45,7 +45,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     supported = supported and actual_kind == request.model_kind
     supported = supported and (request.architecture is None or entry["adapter"] == request.architecture)
     native = "supported_layout_unverified_tuple" if supported and request.dtype == "bfloat16" else "unverified"
-    if supported and entry["adapter"] in {"qwen3_5", "lfm2"}:
+    if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
         native = "runtime_blocked"
@@ -92,6 +92,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         build_granite_plan,
         build_lfm2_plan,
         build_llama_plan,
+        build_llamba_plan,
         build_mistral_plan,
         build_phi_plan,
         build_qwen2_plan,
@@ -106,7 +107,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     # Resolution/replay has already hashed every consumed file. Recheck selection
     # and signatures here; full content verification remains mandatory prepublish.
     snapshot.assert_unchanged(verify_content=False)
-    config = read_json(snapshot.resolve_file("config.json"))
+    config = read_json(snapshot.config_path)
     if snapshot.conversion_profile is not None:
         if request.metadata_profile != GENERIC_PROFILE:
             raise ConversionError("Request and source metadata profile disagree")
@@ -136,6 +137,17 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
                 raise ConversionError("Checkpoint packing disagrees with its catalog profile")
         elif quantization is not None and request.metadata_profile is None:
             raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
+    llamba_packing = None
+    if adapter == "llamba":
+        from .compressed import parse_mlx_quantization
+
+        entry = get_model(request.repo)
+        llamba_packing = entry.get("compressed_format") if entry else None
+        quantization = parse_mlx_quantization(config)
+        if llamba_packing is None and quantization is not None and request.metadata_profile is None:
+            raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
+        if llamba_packing is not None and quantization is not None and quantization.bits != llamba_packing["bits"]:
+            raise ConversionError("Checkpoint packing disagrees with its catalog profile")
     planners = {
         "qwen3": build_qwen3_plan,
         "qwen2": build_qwen2_plan,
@@ -148,6 +160,11 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "smollm3": build_smollm3_plan,
         "qwen3_5": build_qwen35_plan,
         "lfm2": build_lfm2_plan,
+        "llamba": partial(
+            build_llamba_plan,
+            config=config,
+            expected_mlx_bits=llamba_packing["bits"] if llamba_packing else None,
+        ),
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     if adapter == "qwen3_5":
@@ -161,7 +178,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         mixer = layer["mixer_config"]
         if mixer["type"] == "DeltaNetConfig" and (mixer["head_dim"] != 128 or mixer["value_head_dim"] != 128):
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
-        if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig"} and mixer["kernel_size"] < 2:
+        if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig", "Mamba2Config"} and mixer["kernel_size"] < 2:
             result = replace(result, native_loading="runtime_blocked", reason="native_convolution_kernel")
     return PlannedConversion(request, result, tensors, config)
 

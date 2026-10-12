@@ -3022,7 +3022,7 @@
       "vendor": "Reka"
     },
     {
-      "adapter": null,
+      "adapter": "llamba",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFLlambaConfig",
@@ -3061,7 +3061,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llamba",
       "model_kind": "LanguageModelSpec",
       "name": "Llamba-1B",
       "origin": "HuggingFaceOrigin",
@@ -3069,16 +3069,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Cartesia"
     },
     {
-      "adapter": null,
+      "adapter": "llamba",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlambaConfig",
       "container": ".safetensors",
       "family": "Llamba",
@@ -3115,7 +3118,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llamba",
       "model_kind": "LanguageModelSpec",
       "name": "Llamba-1B-4bit-mlx",
       "origin": "HuggingFaceOrigin",
@@ -3123,7 +3126,7 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

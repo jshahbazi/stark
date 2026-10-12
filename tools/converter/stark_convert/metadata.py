@@ -392,6 +392,10 @@ def write_metadata(
         hf_config = normalize_qwen35_config(hf_config)
     if hf_config.get("model_type") != expected_type:
         raise ConversionError("Model architecture does not match metadata profile.")
+    if expected_type == "llamba" and model_entry["metadata_profile"] != GENERIC_PROFILE:
+        # HFLlambaConfig's pinned EOS property is fixed for registered profiles.
+        # Generic checkpoints retain their own explicitly supplied stop metadata.
+        hf_config = {**hf_config, "eos_token_id": [128001, 128008, 128009]}
 
     source = Path(source)
     output = Path(output)

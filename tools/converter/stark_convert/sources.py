@@ -145,6 +145,13 @@ class SourceSnapshot:
     def checkpoint(self) -> Path:
         return self.root
 
+    @property
+    def config_path(self) -> Path:
+        """Return the declared model config, including external source rules."""
+        entry = get_model(self.repo) if self.repo else None
+        rule = entry["files"]["model_config"] if entry else {"repo": self.repo, "filename": "config.json"}
+        return self.resolve_file(rule["filename"], repo=rule["repo"])
+
     def resolve_file(self, filename: str, repo: str | None = None) -> Path:
         _relative(filename)
         effective_repo = repo if repo is not None else self.repo
@@ -198,10 +205,35 @@ class SourceSnapshot:
         )
         if selected != expected_weights or expected_indices != ((index_name,) if index_name else ()):
             raise ConversionError("Source checkpoint selection changed during conversion")
-        config_name = entry["files"]["model_config"]["filename"] if entry else "config.json"
-        for filename in (*selected, *((index_name,) if index_name else ()), config_name):
+        for filename in (*selected, *((index_name,) if index_name else ())):
             if self.resolve_file(filename).resolve() != (self.root / filename).resolve():
                 raise ConversionError("Source file does not match checkpoint root")
+        if entry is not None:
+            # Sidecars can share a physical file (e.g. a JSON-field template).
+            # Resolution keeps the first role in the deterministic rule order.
+            descriptors = [*required_files(entry)]
+            if index_name:
+                descriptors.append({"repo": self.repo, "filename": index_name, "role": "weight_index"})
+            descriptors.extend({"repo": self.repo, "filename": name, "role": "weights"} for name in selected)
+            expected = {}
+            for descriptor in descriptors:
+                expected.setdefault((descriptor["repo"], descriptor["filename"]), descriptor["role"])
+            actual = {(record["repo"], record["filename"]): record["role"] for record in self.manifest["files"]}
+            if len(actual) != len(self.manifest["files"]) or actual != expected:
+                raise ConversionError("Catalog source descriptors disagree with the declared profile")
+            config_rule = entry["files"]["model_config"]
+        else:
+            config_rule = {"repo": self.repo, "filename": "config.json"}
+        if (
+            config_rule["repo"] == self.repo
+            and self.config_path.resolve() != (self.root / config_rule["filename"]).resolve()
+        ):
+            raise ConversionError("Source config does not match checkpoint root")
+        if config_rule["repo"] != self.repo and (
+            Path(os.path.abspath(self.config_path)).is_relative_to(Path(os.path.abspath(self.root)))
+            or self.config_path.resolve().is_relative_to(self.root.resolve())
+        ):
+            raise ConversionError("External model config must be outside checkpoint root")
 
     def assert_unchanged(self, *, verify_content: bool = True) -> None:
         """Check bindings and signatures, with full content verification by default.
@@ -441,6 +473,7 @@ def resolve_source(
             revisions[repository] = resolved
     else:
         revisions = {repo: revision}
+    selected = None
     if local:
         root = path.resolve()
         names = tuple(sorted(file.relative_to(root).as_posix() for file in root.rglob("*") if file.is_file()))
@@ -457,17 +490,24 @@ def resolve_source(
             )
 
         config_rule = next(rule for rule in rules if rule["role"] == "model_config")
-        config_path = loader(config_rule["filename"])
+        root_filename = config_rule["filename"]
+        if config_rule["repo"] != repo:
+            # Config-less checkpoint repositories must derive their physical
+            # root from a selected primary weight, never an external sidecar.
+            selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+            root_filename = selected[0]
+        config_path = loader(root_filename)
         # snapshot files preserve repository-relative placement in the hub cache.
         root = config_path
-        for _ in _relative(config_rule["filename"]).parts:
+        for _ in _relative(root_filename).parts:
             root = root.parent
     profile = None
     if metadata_profile == GENERIC_PROFILE:
         rules = generic_files(repo, names)
         detected = architecture_for_config(read_json(loader("config.json")), architecture)
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
-    selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+    if selected is None:
+        selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     descriptors = list(rules)
     if index_name:
         descriptors.append({"role": "weight_index", "repo": repo, "filename": index_name})
