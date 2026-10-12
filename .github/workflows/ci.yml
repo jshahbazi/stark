@@ -48,6 +48,11 @@ jobs:
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
+      - name: Check installed converter outside the checkout
+        env:
+          HF_HUB_OFFLINE: '1'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: uv run --project tools/converter --locked --python 3.13.13 python tools/converter/scripts/check_installed_package.py
       - name: Check Rust formatting
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
