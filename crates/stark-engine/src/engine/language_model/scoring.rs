@@ -7,8 +7,8 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferCpuAccessible, BufferRef, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending,
-        Context, gpu_types::trie::TrieNode as GpuTrieNode,
+        Backend, BufferCpuAccessible, BufferRef, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable,
+        CommandBufferPending, Context, gpu_types::trie::TrieNode as GpuTrieNode,
     },
     encodable_block::{batch_topology::BatchTopology, decoder::DecoderError},
     engine::language_model::{LanguageModel, state::LanguageModelCreateEmptyStateError},
@@ -35,10 +35,10 @@ fn drain_submissions<T, E>(
 ) -> Result<(), E> {
     let mut first_error = None;
     for item in pending.drain(..) {
-        if let Err(error) = wait(item) {
-            if first_error.is_none() {
-                first_error = Some(error);
-            }
+        if let Err(error) = wait(item)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
         }
     }
     first_error.map_or(Ok(()), Err)
@@ -201,9 +201,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use stark_engine_macros::stark_test;
+
     use super::*;
     use crate::{encodable_block::sampling::PRng, trie::TrieNode};
-    use stark_engine_macros::stark_test;
 
     #[stark_test]
     fn submission_drain_waits_every_buffer_after_failures() {

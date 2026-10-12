@@ -1,0 +1,247 @@
+{
+  "schema_version": 1,
+  "records": [
+    {
+      "repo": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "f787fb5bc57eecee534956680713185c04e4f56d754a08d2cd93c2df2ffc7551",
+      "output_sha256": "626184b6749a37766d7970e203cd2e5877ba643f929a00db38c3d444f018fd1d",
+      "config_sha256": "1797c153dd458e496516b8cbb6d0f3d8527ef223a1677962b948acfe86fbf443",
+      "tokenizer_sha256": "9c5ae00e602b8860cbd784ba82a8aa14e8feecec692e7076590d014d7b7fdafa",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ],
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22"
+      }
+    },
+    {
+      "repo": "Qwen/Qwen3-0.6B",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "e199732d889006d43907f5ebe0b09d136f3da4bb27482efd2b735a3128d0d5c7",
+      "output_sha256": "87c3344a80b7376392cc5c44d5369680b68936e6930bb8ac476ca65a136f64c7",
+      "config_sha256": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ],
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22"
+      }
+    },
+    {
+      "repo": "mistralai/Mistral-7B-Instruct-v0.3",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "8e7e9bd5d9c7cfe817b9e4a4a9b6ccbbd3442392ad2d112dd9176f5eb308186f",
+      "output_sha256": "2029e2ee79d907fee5497ce4e091115ea0b23ce3a2e785650a62dd2488d61062",
+      "config_sha256": "c5a616e5a7c0ff5cfe9c8fed9df4c5fc44377a5d298852e2080ccf7312417d01",
+      "tokenizer_sha256": "3e01771050ce4fba855c59ddb474c72ca1a3f2113a04727990155e3e47390764",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ],
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22"
+      }
+    },
+    {
+      "repo": "unsloth/Llama-3.2-1B-Instruct",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "38b8150ea308df380dcfd102230818deb7db51f4f1436e785493b626d9374a8c",
+      "output_sha256": "55d8fb8bc29c0fad6c43fd73f8fb41c7cd4020bc1665d82bad9547dcf14ce302",
+      "config_sha256": "d5416876ca5f2f5b0e22b063e05af652e44f939bd5e18b89f0e8aa158de6e2c7",
+      "tokenizer_sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ],
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22"
+      }
+    },
+    {
+      "repo": "HuggingFaceTB/SmolLM2-1.7B-Instruct",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "7fd55a74be04309384b070c2ee030ed7feb93f644a2ad361250dbafe89da442e",
+      "output_sha256": "9c3cdea532149861772e3fb28ebc2aefa727f0947ed00ea101e1f236bc966771",
+      "config_sha256": "a388160fae0354ff52e825eeed5f2822762d4e1ed6ab190c066ed243276ca385",
+      "tokenizer_sha256": "7d27c493c729a66ecefc837280b05d948b1ed50d130eebdbf911b1b36cf38ed7",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "HuggingFaceTB/SmolLM3-3B",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "ae4a05f6d066d0e47cfbabca93be16c2c5576206790ac3582674059f88ff3831",
+      "output_sha256": "f6cc12f0b7f8f93d249520d0f775778fc525a48f7b46f08782b7094bf687cd40",
+      "config_sha256": "d4b1431e11dedecc8eb548335c432bcf4d1dc1d2362e4931e2d26d15d236a661",
+      "tokenizer_sha256": "7b6a500b662a34eb3f0374db856ba4ad7de4c81040571d78dc0d357238930005",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "google/functiongemma-270m-it",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "9e2155454ceb295cf53e54e2d1ec6983cc641690b76d53cd09e224a242af9ced",
+      "output_sha256": "163c27d4ba738c522e267b25d097344fa68bf788613e6cd154f68ae4ff195001",
+      "config_sha256": "a86083537bfa3b65c678d32a3ee241230ca18c082423762a8210fdf972fadd72",
+      "tokenizer_sha256": "cab06510581429a52484f103c9df074578506a025c40db1197d3625041566ca7",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "google/gemma-2-2b-it",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "7eec28603e8e008c3ff7d3967298498a32117e019653ebc009399261f0aebb8a",
+      "output_sha256": "de3a93e3e42d16b4ae68f712841a45e4d718cbe7a05e2c3df4d0370688cfb0ee",
+      "config_sha256": "a4ddabd294bdc5ad396d55cbb783c77abd245b29fdcfaa268ef09454c60a89af",
+      "tokenizer_sha256": "5f7eee611703c5ce5d1eee32d9cdcfe465647b8aff0c1dfb3bed7ad7dbb05060",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "google/gemma-3-1b-it",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "ad14e07fa9d8dfb0f68b2f3f2b2b50f9ae70587ef14c3c62a23638c700d342da",
+      "output_sha256": "c154567d8bc77ac4d9dbaeaf9c7ab5b6cd90f956fb050bcf3bd60b9c4fa4f3ff",
+      "config_sha256": "3d69ed169b69074a7f43df4400fa8628b04e7279c321e8cd513c4e09b9b9535d",
+      "tokenizer_sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "ibm-granite/granite-3.3-2b-instruct",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "76a0aeea6f41ba3a3746b7a9ac00d10f48ce46b33695101decb614ef38481feb",
+      "output_sha256": "20854e0db0689b554fd39a5d94e8752cd1f2f70c32aa11896554636f714a52ee",
+      "config_sha256": "9e437e60e0b4e1c7c33f6ff24115dd40efc82f036007960b5f3684baa43ea101",
+      "tokenizer_sha256": "91168e938f05796aa6dcca7e485e4b30ab52785320c7a6391ecef86e6c84681e",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "microsoft/Phi-4-mini-instruct",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "2f54058bc7270e875f714cf9245f53f4f7aa00af95e137b423747b1e625518cf",
+      "output_sha256": "6e40e5bfa796ee6b1673bc8e376b9b6cf23566df8bf59e22d3f323136a6482aa",
+      "config_sha256": "4b47a714d5f817fdf9047d5bc10b6b57cc15a95e0441d3ec8bb75910e0d37cca",
+      "tokenizer_sha256": "382cc235b56c725945e149cc25f191da667c836655efd0857b004320e90e91ea",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    }
+  ]
+}

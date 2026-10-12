@@ -38,13 +38,18 @@ impl LastScoreCache {
 
     // Taking before validation leaves no committed entry on failure or unwind.
     // A mismatch discards the prior distribution immediately: A/B/A cannot hit.
-    pub fn take_matching(&mut self, input: &[u32], context: u32) -> Option<CacheEntry> {
-        self.entry
-            .take()
-            .filter(|entry| self.enabled && entry.input == input && entry.context == context)
+    pub fn take_matching(
+        &mut self,
+        input: &[u32],
+        context: u32,
+    ) -> Option<CacheEntry> {
+        self.entry.take().filter(|entry| self.enabled && entry.input == input && entry.context == context)
     }
 
-    pub fn publish(&mut self, entry: CacheEntry) {
+    pub fn publish(
+        &mut self,
+        entry: CacheEntry,
+    ) {
         self.entry = self.enabled.then_some(entry);
     }
 }

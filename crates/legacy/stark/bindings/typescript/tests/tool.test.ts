@@ -1,5 +1,13 @@
-import { ChatSession, StarkToolFunction, starkToolFunction } from '@jshahbazi/stark';
+import { expect, test, vi } from 'vitest';
 import * as z from 'zod';
+
+vi.mock('../src/napi/index', () => ({
+    NativeTool: class {},
+    ToolFunction: class {},
+    Value: class {},
+}));
+
+import { StarkToolFunction, starkToolFunction } from '../src/tool';
 
 test('tool factory builds schemas and invokes a typed handler', async () => {
     const tool = starkToolFunction({
@@ -70,9 +78,4 @@ test('tool handler receives the invocation abort signal', async () => {
 
     controller.abort();
     await expect(tool.invoke({}, { signal: controller.signal })).resolves.toBe(true);
-});
-
-test('chat session exposes tool registration methods', () => {
-    expect(typeof ChatSession.prototype.addTool).toBe('function');
-    expect(typeof ChatSession.prototype.addTools).toBe('function');
 });

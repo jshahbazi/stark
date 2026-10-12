@@ -102,6 +102,7 @@ xgrammar = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
+cxx.workspace = true
 test-tag.workspace = true
 proptest.workspace = true
 criterion.workspace = true
@@ -127,3 +128,8 @@ tokio = { workspace = true, features = ["full"] }
 stark.workspace = true
 criterion = { workspace = true, default-features = true }
 proptest = { workspace = true, default-features = true }
+
+[[test]]
+name = "cxx_string"
+path = "tests/cxx_string.rs"
+required-features = ["grammar"]

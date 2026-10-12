@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  quality:
+    name: Repository checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Install pinned formatter
+        run: rustup toolchain install nightly-2026-10-01 --profile minimal --component rustfmt
+      - name: Check repository security policy
+        run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
+      - name: Test dependency-report gate
+        run: uv run --no-project --python 3.12.13 python -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Test model-free converter contracts
+        env:
+          HF_HUB_OFFLINE: '1'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
+      - name: Lint converter source and tests
+        run: |
+          uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
+      - name: Check Rust formatting
+        run: |
+          RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
+          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score --check
+      - name: Check locked dependency resolution
+        run: |
+          cargo metadata --locked --format-version=1 > /dev/null
+          cargo metadata --locked --manifest-path crates/legacy/download-manager/examples/wasm/Cargo.toml --format-version=1 > /dev/null
+          uv lock --check --directory tools
+          uv lock --check --directory tools/converter
+          uv lock --check --directory crates/legacy/stark/bindings/python
+          git diff --exit-code -- Cargo.lock crates/legacy/download-manager/examples/wasm/Cargo.lock tools/uv.lock tools/converter/uv.lock crates/legacy/stark/bindings/python/uv.lock
+      - name: Validate workflow syntax
+        run: |
+          archive="$RUNNER_TEMP/actionlint.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8' "$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP" actionlint
+          # Inherited jobs stay deliberately disabled; repository policy checks enforce this.
+          "$RUNNER_TEMP/actionlint" -shellcheck='' -ignore '^constant expression "false" in condition'
+
+  lifecycle:
+    name: Process lifecycle (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-26]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Build process owner
+        run: cc -std=c11 -O2 -Wall -Wextra -Werror scripts/stark-validation-reap.c -o "$RUNNER_TEMP/stark-validation-reap"
+      - name: Run model-free process tests
+        run: uv run --python 3.12.13 python scripts/test_scoring_process.py --reaper "$RUNNER_TEMP/stark-validation-reap"
+
+  scoring:
+    name: Scorer (${{ matrix.configuration }})
+    runs-on: macos-26
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default
+            features: ''
+          - configuration: optimized
+            features: optimized
+    env:
+      SCORING_FEATURES: ${{ matrix.features }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check Apple silicon and Metal tools
+        run: |
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - name: Build scoring worker
+        run: cargo build --release --locked -p stark-score --features "$SCORING_FEATURES"
+      - name: Lint scoring targets
+        run: cargo clippy --release --locked -p stark-score --all-targets --features "$SCORING_FEATURES" -- -D warnings
+      - name: Run synthetic scorer tests
+        run: cargo test --release --locked -p stark-score --features "$SCORING_FEATURES" -- --test-threads=1
+
+  compatibility:
+    name: Inherited dependency compatibility
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - name: Check Python binding dependencies
+        run: cargo check --locked -p stark --no-default-features --features bindings-pyo3,backend-cpu
+      - name: Check HTTP/1.1 server
+        run: cargo check --locked -p cli --no-default-features --features backend-cpu
+      - name: Check binding tool commands
+        run: cargo check --locked -p cli-tools
+      - name: Check inherited wasm example
+        run: cargo check --locked --manifest-path crates/legacy/download-manager/examples/wasm/Cargo.toml --target wasm32-unknown-unknown
+      - name: Test model-free server contracts
+        run: |
+          cargo test --release --locked -p cli --no-default-features --features backend-cpu --bin cli server:: -- --test-threads=1
+      - name: Test CXX panic safety and grammar compatibility
+        run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
+
+  typescript:
+    name: Model-free TypeScript binding checks
+    runs-on: macos-26
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: crates/legacy/stark/bindings/typescript
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24.19.0'
+          package-manager-cache: false
+      - name: Install verified pnpm
+        run: |
+          archive="$RUNNER_TEMP/pnpm.tgz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://registry.npmjs.org/pnpm/-/pnpm-10.18.1.tgz --output "$archive"
+          printf '%s  %s\n' '77a884a165cbba2d8d1c19e3b4880eee6d2fcabd0d879121e282196b80042351d5eb3ca0935fa599da1dc51265cc68816ad2bddd2a2de5ea9fdf92adbec7cd34' "$archive" | shasum -a 512 --check
+          mkdir "$RUNNER_TEMP/pnpm"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/pnpm"
+          ln -s pnpm.cjs "$RUNNER_TEMP/pnpm/package/bin/pnpm"
+          echo "$RUNNER_TEMP/pnpm/package/bin" >> "$GITHUB_PATH"
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Lint and type-check
+        run: |
+          pnpm exec eslint .
+          pnpm exec tsc --noEmit
+      - name: Run model-free tool tests
+        run: pnpm test
+      - name: Validate CommonJS, ESM and type outputs
+        env:
+          STARK_SKIP_NATIVE_BUILD_CHECK: '1'
+          MIRAI_DISABLE_DENO_BUILD: '1'
+        run: |
+          pnpm build
+          pnpm test:build
+          pnpm exec publint dist
+
+  completed:
+    name: CI completed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs: [quality, lifecycle, scoring, compatibility, typescript]
+    env:
+      QUALITY_RESULT: ${{ needs.quality.result }}
+      LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
+      SCORING_RESULT: ${{ needs.scoring.result }}
+      COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+      TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
+    steps:
+      - run: |
+          test "$QUALITY_RESULT" = success
+          test "$LIFECYCLE_RESULT" = success
+          test "$SCORING_RESULT" = success
+          test "$COMPATIBILITY_RESULT" = success
+          test "$TYPESCRIPT_RESULT" = success
