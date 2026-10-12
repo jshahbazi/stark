@@ -114,7 +114,8 @@ def test_independent_reader_rejects_overlapping_tensors(tmp_path):
 def test_measure_includes_fresh_process_wall_time_and_tree_rss():
     child = (
         "import json,time; time.sleep(0.08); "
-        "print(json.dumps({'backend':'streaming','elapsed_seconds':0.01,'total_rss_bytes':1}))"
+        "print(json.dumps({'status':'ok','backend':'streaming','elapsed_seconds':0.01,"
+        "'total_rss_bytes':1,'output_bytes':2,'tensor_count':1}))"
     )
     measured = _measure([sys.executable, "-c", child])
     assert measured["backend"] == "streaming"
@@ -129,6 +130,184 @@ def test_measure_rejects_unsuccessful_backend_without_exposing_output():
     child = "import json,sys; print(json.dumps({'status':'failed','detail':'must stay private'})); sys.exit(1)"
     with pytest.raises(BenchmarkError, match="^backend_conversion_failed$"):
         _measure([sys.executable, "-c", child])
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("status", "failed"),
+        ("elapsed_seconds", None),
+        ("elapsed_seconds", True),
+        ("elapsed_seconds", -1),
+        ("elapsed_seconds", 10**400),
+        ("elapsed_seconds", float("nan")),
+        ("elapsed_seconds", float("inf")),
+        ("tensor_count", None),
+        ("tensor_count", 0),
+        ("tensor_count", True),
+        ("output_bytes", "2"),
+        ("output_bytes", -1),
+        ("total_rss_bytes", 1.5),
+    ],
+)
+def test_measure_rejects_invalid_or_missing_metrics(field, value):
+    receipt = {
+        "status": "ok",
+        "backend": "streaming",
+        "elapsed_seconds": 0.1,
+        "total_rss_bytes": 1,
+        "output_bytes": 2,
+        "tensor_count": 1,
+    }
+    if value is None:
+        receipt.pop(field)
+    else:
+        receipt[field] = value
+    child = "print(" + repr(json.dumps(receipt)) + ")"
+    with pytest.raises(BenchmarkError, match="^invalid_backend_metrics$"):
+        _measure([sys.executable, "-c", child])
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        BenchmarkError("backend_conversion_failed"),
+        KeyboardInterrupt("private details"),
+        RuntimeError("private details"),
+    ],
+)
+def test_failed_repeat_preserves_completed_observations(tmp_path, monkeypatch, failure):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    args = SimpleNamespace(
+        source=source,
+        repo=None,
+        output=tmp_path / "output",
+        repeats=3,
+        dtype="bfloat16",
+        chunk_mib=8,
+        metadata_profile="hf-generic",
+        architecture="qwen3",
+    )
+    calls = []
+
+    def measure(command):
+        calls.append(command)
+        assert command[:3] == [sys.executable, "-m", "stark_convert.cli"]
+        assert "--repo" not in command
+        assert command[command.index("--metadata-profile") + 1] == "hf-generic"
+        if len(calls) == 2:
+            raise failure
+        return {
+            "backend": "streaming",
+            "end_to_end_seconds": 1.0,
+            "cli_conversion_seconds": 0.5,
+            "peak_process_tree_rss_bytes": 100,
+            "rss_samples": 2,
+        }
+
+    monkeypatch.setattr(benchmark_module, "_measure", measure)
+    report = benchmark_module.benchmark(args)
+    assert report == json.loads((args.output / "report.json").read_text())
+    assert report["status"] == "failed" and report["failed_repeat"] == 2
+    assert len(report["runs"]) == 1 and report["summary"]["streaming"]["runs"] == 1
+    assert "private details" not in json.dumps(report)
+    if isinstance(failure, KeyboardInterrupt):
+        assert report["error_category"] == "interrupted"
+    assert (args.output / "report.json").stat().st_mode & 0o777 == 0o600
+    assert args.output.stat().st_mode & 0o777 == 0o700
+
+
+def test_report_replacement_failure_retains_previous_complete_json(tmp_path, monkeypatch):
+    original = {"status": "running", "runs": []}
+    benchmark_module._write_report(tmp_path, original)
+
+    def fail(*args):
+        raise OSError("private details")
+
+    monkeypatch.setattr(benchmark_module.os, "replace", fail)
+    with pytest.raises(BenchmarkError, match="^report_write_failed$"):
+        benchmark_module._write_report(tmp_path, {"status": "passed"})
+    assert json.loads((tmp_path / "report.json").read_text()) == original
+    assert not list(tmp_path.glob(".report-*"))
+
+
+def test_report_write_error_is_sanitized_by_main(tmp_path, monkeypatch, capsys):
+    def fail(args):
+        raise BenchmarkError("report_write_failed")
+
+    monkeypatch.setattr(benchmark_module, "benchmark", fail)
+    monkeypatch.setattr(
+        sys, "argv", ["stark-convert-benchmark", "--source", str(tmp_path), "--output", str(tmp_path / "output")]
+    )
+    assert benchmark_module.main() == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "failed", "error_category": "report_write_failed"}
+
+
+def test_final_write_failure_leaves_running_report_and_unsuccessful_command(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    output = tmp_path / "output"
+    write_report = benchmark_module._write_report
+
+    def write(directory, report):
+        if report["status"] == "failed":
+            raise BenchmarkError("report_write_failed")
+        write_report(directory, report)
+
+    def fail(command):
+        raise BenchmarkError("backend_conversion_failed")
+
+    monkeypatch.setattr(benchmark_module, "_write_report", write)
+    monkeypatch.setattr(benchmark_module, "_measure", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stark-convert-benchmark",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--metadata-profile",
+            "hf-generic",
+        ],
+    )
+    assert benchmark_module.main() == 1
+    assert json.loads(capsys.readouterr().out) == {"status": "failed", "error_category": "report_write_failed"}
+    assert json.loads((output / "report.json").read_text())["status"] == "running"
+
+
+def test_benchmark_interrupt_returns_130_and_saves_failure(tmp_path, monkeypatch, capsys):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "config.json").write_text("{}")
+    output = tmp_path / "output"
+
+    def interrupt(command):
+        raise KeyboardInterrupt("private details")
+
+    monkeypatch.setattr(benchmark_module, "_measure", interrupt)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "stark-convert-benchmark",
+            "--source",
+            str(source),
+            "--output",
+            str(output),
+            "--metadata-profile",
+            "hf-generic",
+        ],
+    )
+    assert benchmark_module.main() == 130
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "failed" and report["error_category"] == "interrupted"
+    assert report == json.loads((output / "report.json").read_text())
+    assert "private details" not in json.dumps(report)
 
 
 @pytest.fixture
@@ -185,7 +364,7 @@ def test_measure_drains_receipts_larger_than_pipe_capacity_with_bounded_deadline
     # of magnitude. Waiting for child exit before reading stdout deadlocks.
     child = (
         "import json; "
-        "print(json.dumps({'backend':'streaming','elapsed_seconds':0.125,'total_rss_bytes':27,"
+        "print(json.dumps({'status':'ok','backend':'streaming','elapsed_seconds':0.125,'total_rss_bytes':27,"
         "'output_bytes':4096,'tensor_count':2048,"
         "'source_files':[{'sha256':'a'*64,'size':1}]*20000}))"
     )
@@ -345,7 +524,6 @@ def test_benchmark_binds_results_to_unchanged_source_and_tooling(tmp_path, monke
             "rss_samples": 2,
         }
 
-    monkeypatch.setattr(benchmark_module, "_sync_environment", lambda project: None)
     monkeypatch.setattr(benchmark_module, "_measure", measure)
     monkeypatch.setattr(cli, "toolchain_provenance", toolchain)
     report = benchmark_module.benchmark(args)
@@ -392,7 +570,6 @@ def test_benchmark_without_reference_measures_streaming_repeats_only(tmp_path, m
             "rss_samples": 2,
         }
 
-    monkeypatch.setattr(benchmark_module, "_sync_environment", lambda project: None)
     monkeypatch.setattr(benchmark_module, "_measure", measure)
     monkeypatch.setattr(cli, "toolchain_provenance", lambda: {"converter_sources_sha256": "a" * 64})
     report = benchmark_module.benchmark(args)

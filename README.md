@@ -98,6 +98,15 @@ uv run --project tools/converter --locked stark-convert mlx-community/LFM2-350M-
 
 Remote inputs resolve to immutable commits. Conversion retains source/content hashes, validates full supported tensor layouts and metadata, and publishes atomically without replacing existing output directories. Existing MLX compression is retained. [Converter usage](tools/converter/README.md).
 
+To convert a downloaded, self-contained safetensors folder without a Hugging Face account:
+
+```sh
+uv run --project tools/converter --locked stark-convert /absolute/path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output models/local-model-stark
+```
+
+This reuses supported architecture adapters and validates the folder's metadata; generic outputs retain native-unverified status. [Local requirements and wheel installation](tools/converter/README.md) and the [hardening checklist](docs/MODEL_CONVERSION_HARDENING.md) describe the current tool work. Further model coverage is deferred.
+
 Build and start the scoring worker with a converted model:
 
 ```sh
