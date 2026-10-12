@@ -81,6 +81,8 @@ The catalog tracks **implementation**, while qualification tracks exact source/c
 
 Twenty-five pinned built-ins remain planned, including specialized/MoE/multimodal and later-generation variants. Unsupported combinations fail explicitly. Complete Lalamo replacement remains an open goal. [Coverage and replacement plan](docs/MODEL_CONVERSION_PLAN.md).
 
+The proposed [Pi-assisted adapter builder](docs/PI_ADAPTER_BUILDER_PLAN.md) would generate missing conversion adapters through an optional developer tool, with host-owned verification and reviewable source patches. The plan covers architecture preflight, process confinement, resource budgets, independent parity checks and staged acceptance. Implementation and new model qualifications remain pending.
+
 ## Quickstart
 
 Run these commands from the repository root.
