@@ -83,31 +83,39 @@ Twenty-five pinned built-ins remain planned, including specialized/MoE/multimoda
 
 ## Quickstart
 
-Use an Apple silicon Mac with Xcode's Metal tools, pinned Rust 1.98.1 and managed Python 3.13.13 through `uv`. Model files are not included.
+Run these commands from the repository root.
 
-Convert a pinned supported MLX checkpoint:
+### Set up the converter
+
+Install `uv`. It manages the converter's Python 3.13.13 environment:
 
 ```sh
 uv sync --project tools/converter --locked
-uv run --project tools/converter --locked stark-convert mlx-community/LFM2-350M-4bit \
-  --revision 18dc72abf3b2337f9123cfd6eeeb58dfa7947066 \
-  --require-native-support \
-  --write-source-manifest runtime/converter-sources/lfm2-350m-4bit.json \
-  --output models/lfm2-350m-4bit-stark
 ```
 
-Remote inputs resolve to immutable commits. Conversion retains source/content hashes, validates full supported tensor layouts and metadata, and publishes atomically without replacing existing output directories. Existing MLX compression is retained. [Converter usage](tools/converter/README.md).
+### Convert from Hugging Face
 
-To convert a downloaded, self-contained safetensors folder without a Hugging Face account:
+Pass the model's repository name. The converter downloads it and saves the result:
 
 ```sh
-uv run --project tools/converter --locked stark-convert /absolute/path/to/downloaded-model \
-  --metadata-profile hf-generic --offline --output models/local-model-stark
+uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
+  --output models/qwen3
 ```
 
-This reuses supported architecture adapters and validates the folder's metadata; generic outputs retain native-unverified status. [Local requirements and wheel installation](tools/converter/README.md) and the [hardening checklist](docs/MODEL_CONVERSION_HARDENING.md) describe the current tool work. Further model coverage is deferred.
+### Convert a downloaded folder
 
-Build and start the scoring worker with a converted model:
+Pass the path to the full model folder. This uses local files and needs no Hugging Face account:
+
+```sh
+uv run --project tools/converter --locked stark-convert /path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output models/local-model
+```
+
+Use a new output folder each time. Your local folder must include the model config, tokenizer metadata and all safetensors weights. See [required files](tools/converter/README.md#convert-a-downloaded-folder) and [optional settings](tools/converter/README.md#optional-settings). Generic conversions remain native-unverified.
+
+### Run the scoring worker
+
+Use an Apple silicon Mac with Xcode's Metal tools and Rust 1.98.1. Build and start the worker with your converted model:
 
 ```sh
 cargo build --release --locked -p stark-score --features optimized
