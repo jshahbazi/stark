@@ -297,7 +297,7 @@ wheels = [
 
 [[package]]
 name = "stark-convert"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
