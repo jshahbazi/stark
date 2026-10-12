@@ -79,6 +79,16 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     snapshot.assert_unchanged(verify_content=False)
     config = read_json(snapshot.resolve_file("config.json"))
     adapter = adapter_for_model(request.repo, config.get("model_type"))
+    if adapter == "qwen3":
+        from .compressed import parse_mlx_quantization
+
+        packing = get_model(request.repo).get("compressed_format")
+        quantization = parse_mlx_quantization(config)
+        if packing is not None:
+            if quantization is None or quantization.bits != packing["bits"]:
+                raise ConversionError("Checkpoint packing disagrees with its catalog profile")
+        elif quantization is not None:
+            raise UnsupportedConversion("Packed checkpoint requires a registered compressed profile")
     planners = {
         "qwen3": build_qwen3_plan,
         "qwen2": build_qwen2_plan,

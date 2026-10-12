@@ -1,4 +1,4 @@
-"""Conservative dense Hugging Face Qwen3 to Stark conversion planner.
+"""Conservative dense and MLX Hugging Face Qwen3 conversion planner.
 
 Config/tensor conventions adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
@@ -11,6 +11,7 @@ import json
 import math
 from pathlib import Path
 
+from .compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from .streaming import (
     ConversionError,
     ConversionPlan,
@@ -48,6 +49,9 @@ _ALLOWED_CONFIG_KEYS = {
     "rope_parameters",
     "layer_types",
     "quantization_config",
+    "quantization",
+    "qkv_bias",
+    "use_qk_norm",
     "bos_token_id",
     "eos_token_id",
     "pad_token_id",
@@ -95,7 +99,7 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     """Plan all output tensors from strict checkpoint headers before writing."""
     config = read_json(source / "config.json")
     if config.get("model_type") != "qwen3":
-        raise UnsupportedConversion("Streaming prototype supports dense Qwen3")
+        raise UnsupportedConversion("Streaming converter supports Qwen3")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Streaming prototype supports BF16, F16, and F32")
     target_dtype = _DTYPES[dtype]
@@ -105,8 +109,9 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
         raise UnsupportedConversion("Qwen3 architecture is outside validated streaming coverage")
     if config.get("hidden_act", "silu") != "silu":
         raise UnsupportedConversion("Qwen3 streaming requires SiLU")
-    if any(config.get(key) is not None for key in ("quantization_config", "rope_scaling", "rope_parameters")):
-        raise UnsupportedConversion("Quantization or scaled/custom RoPE is outside implemented coverage")
+    quantization = parse_mlx_quantization(config)
+    if any(config.get(key) is not None for key in ("rope_scaling", "rope_parameters")):
+        raise UnsupportedConversion("Scaled/custom RoPE is outside implemented coverage")
     if config.get("attention_dropout", 0.0) != 0.0:
         raise UnsupportedConversion("Non-default Qwen3 attention dropout is outside implemented coverage")
     if any(config.get(key, False) for key in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder")):
@@ -131,6 +136,10 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     theta = _positive_float(config, "rope_theta", 10000.0)
     tied = _bool(config, "tie_word_embeddings", False)
     attention_bias = _bool(config, "attention_bias", False)
+    if "qkv_bias" in config and _bool(config, "qkv_bias", False) != attention_bias:
+        raise UnsupportedConversion("Qwen3 qkv_bias disagrees with attention_bias")
+    if not _bool(config, "use_qk_norm", True):
+        raise UnsupportedConversion("Qwen3 requires query/key normalization")
     use_sliding = _bool(config, "use_sliding_window", False)
     max_window_layers = config.get("max_window_layers", layers)
     if type(max_window_layers) is not int or not 0 <= max_window_layers <= layers:
@@ -226,6 +235,7 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     metadata = {}
     unsupported_source_dtype = False
     mixed_fusion_dtype = False
+    used_mlx = False
 
     def tensor(name: str, shape: tuple[int, ...], *, norm_scale: bool = False):
         nonlocal unsupported_source_dtype
@@ -242,7 +252,39 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     def matrix(
         out: str, names: tuple[str, ...], shapes: tuple[tuple[int, ...], ...], shape: tuple[int, ...], layout: str
     ):
-        nonlocal mixed_fusion_dtype
+        nonlocal mixed_fusion_dtype, used_mlx
+        representations = []
+        for name in names:
+            prefix = name.removesuffix(".weight")
+            representations.append(
+                any(prefix + suffix in tensors for suffix in (".scales", ".biases"))
+                or (name in tensors and tensors[name].dtype in {"I32", "U32"})
+            )
+        if any(representations):
+            if quantization is None:
+                raise UnsupportedConversion("MLX checkpoint requires explicit quantization configuration")
+            if not all(representations):
+                raise UnsupportedConversion("Mixed full-precision/MLX fusion is outside implemented coverage")
+            sources = tuple(
+                read_mlx_matrix(tensors, name, source_shape, quantization)
+                for name, source_shape in zip(names, shapes, strict=True)
+            )
+            for name in names:
+                prefix = name.removesuffix(".weight")
+                expected.update((name, prefix + ".scales", prefix + ".biases"))
+            operations.extend(
+                plan_mlx_matrix(out, sources, dtype=target_dtype, layout=layout, quantization=quantization)
+            )
+            metadata[out + ".spec"] = json.dumps(
+                {
+                    "type": "MLXSpec",
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "layout": layout,
+                }
+            )
+            used_mlx = True
+            return
         sources = tuple(tensor(name, source_shape) for name, source_shape in zip(names, shapes, strict=True))
         mixed_fusion_dtype |= len({info.dtype for info in sources}) > 1
         kind = "fuse" if len(sources) > 1 else "copy"
@@ -258,11 +300,21 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     embedding_out = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
     matrix(embedding_out, ("model.embed_tokens.weight",), ((vocab, model_dim),), (vocab, model_dim), "input_output")
     if tied:
-        if "lm_head.weight" in tensors:
-            head = tensor("lm_head.weight", (vocab, model_dim))
-            embedding = tensors["model.embed_tokens.weight"]
-            if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
-                raise ConversionError("Tied lm_head differs from the input embedding")
+        if any("lm_head" + suffix in tensors for suffix in (".weight", ".scales", ".biases")):
+            if json.loads(metadata[embedding_out + ".spec"])["type"] == "MLXSpec":
+                head = read_mlx_matrix(tensors, "lm_head.weight", (vocab, model_dim), quantization)
+                embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
+                expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
+                if any(
+                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    for left, right in zip(head.planes, embedding.planes, strict=True)
+                ):
+                    raise ConversionError("Tied MLX lm_head differs from the input embedding")
+            else:
+                head = tensor("lm_head.weight", (vocab, model_dim))
+                embedding = tensors["model.embed_tokens.weight"]
+                if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+                    raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix(
             "decoder.embedding.output_embedding",
@@ -334,6 +386,8 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
         raise ConversionError("Qwen3 checkpoint has unexpected tensors")
     if unsupported_source_dtype:
         raise UnsupportedConversion("Unsupported Qwen3 checkpoint dtype")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("MLX quantization configuration has no packed checkpoint matrices")
     if mixed_fusion_dtype:
         raise UnsupportedConversion("Mixed-dtype Qwen3 fusion promotion is outside implemented coverage")
     return ConversionPlan(
