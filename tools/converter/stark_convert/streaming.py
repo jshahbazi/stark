@@ -21,7 +21,7 @@ import numpy as np
 
 
 class UnsupportedConversion(Exception):
-    """A well-formed model needs the Lalamo backend."""
+    """A representation is outside independently implemented coverage."""
 
 
 class ConversionError(Exception):
@@ -278,11 +278,43 @@ def _cast_f32(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int) -> int:
                 np.left_shift(values, 16, out=values)
                 values = values.view("<f4")
             else:
-                values = np.frombuffer(chunk, dtype="<f2").astype("<f4")
+                with np.errstate(invalid="ignore"):
+                    values = np.frombuffer(chunk, dtype="<f2").astype("<f4")
             output.write(memoryview(values).cast("B"))
             peak = max(peak, len(chunk) + values.nbytes)
             remaining -= len(chunk)
             del chunk, values
+    return peak
+
+
+def _cast(tensor: TensorInfo, output: BinaryIO, dtype: str, chunk_bytes: int) -> int:
+    """Cast a dense payload in bounded chunks using IEEE target semantics."""
+    if tensor.dtype == dtype:
+        return _copy(tensor, output, chunk_bytes)
+    import ml_dtypes
+
+    dtypes = {"BF16": np.dtype(ml_dtypes.bfloat16), "F16": np.dtype("<f2"), "F32": np.dtype("<f4")}
+    if tensor.dtype not in dtypes or dtype not in dtypes:
+        raise UnsupportedConversion("unsupported_dense_dtype")
+    # Input and output coexist; reserve another output-sized scratch budget for
+    # casting internals. This is a transform workspace, not whole-process RSS.
+    elements = chunk_bytes // (tensor.itemsize + 2 * DTYPE_BYTES[dtype])
+    if elements < 1:
+        raise ConversionError("insufficient_transform_workspace")
+    peak = 0
+    with _open_tensor(tensor) as stream:
+        remaining = tensor.nbytes
+        while remaining:
+            chunk = stream.read(min(elements * tensor.itemsize, remaining))
+            if not chunk or len(chunk) % tensor.itemsize:
+                raise ConversionError("truncated_tensor")
+            source = np.frombuffer(chunk, dtype=dtypes[tensor.dtype])
+            with np.errstate(over="ignore", invalid="ignore"):
+                values = source.astype(dtypes[dtype])
+            output.write(memoryview(values.view(f"u{DTYPE_BYTES[dtype]}")).cast("B"))
+            peak = max(peak, len(chunk) + 2 * values.nbytes)
+            remaining -= len(chunk)
+            del chunk, source, values
     return peak
 
 
@@ -328,6 +360,40 @@ def transpose_tensor(tensor: TensorInfo, output: BinaryIO, chunk_bytes: int = DE
     return peak
 
 
+class _HashingWriter:
+    """Hash successful sequential writes without rereading the output payload.
+
+    Random writes invalidate the incremental digest; tiled transpose falls back
+    to hashing the completed file. This wrapper never retains payload buffers.
+    """
+
+    def __init__(self, stream: BinaryIO):
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.sequential = True
+
+    def write(self, data) -> int:
+        written = self.stream.write(data)
+        if written != len(data):
+            raise ConversionError("Incomplete output write")
+        if self.sequential:
+            self.digest.update(data)
+        return written
+
+    def tell(self) -> int:
+        return self.stream.tell()
+
+    def seek(self, offset, whence=0) -> int:
+        self.sequential = False
+        return self.stream.seek(offset, whence)
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def fileno(self) -> int:
+        return self.stream.fileno()
+
+
 def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> dict:
     """Write a header-first safetensors file into a caller-owned staging area."""
     if type(chunk_bytes) is not int or chunk_bytes < 16:
@@ -335,6 +401,8 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
     operations = sorted(plan.operations, key=lambda op: (-DTYPE_BYTES[op.dtype], op.name))
     if len({op.name for op in operations}) != len(operations):
         raise ConversionError("Conversion plan contains duplicate output tensors")
+    if any(op.kind in {"fuse", "fuse_cast"} and len({source.dtype for source in op.sources}) > 1 for op in operations):
+        raise UnsupportedConversion("Mixed-dtype fusion promotion is not implemented")
     header = {"__metadata__": plan.metadata} if plan.metadata else {}
     offset = 0
     for op in operations:
@@ -348,7 +416,8 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
     if path.resolve() in {tensor.path.resolve() for op in operations for tensor in op.sources}:
         raise ConversionError("Output overlaps checkpoint input")
     try:
-        with path.open("xb") as output:
+        with path.open("xb") as stream:
+            output = _HashingWriter(stream)
             output.write(struct.pack("<Q", len(encoded)))
             output.write(encoded)
             for op in operations:
@@ -358,6 +427,9 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
                         peak = max(peak, _copy(source, output, chunk_bytes))
                 elif op.kind == "cast_f32" and len(op.sources) == 1:
                     peak = max(peak, _cast_f32(op.sources[0], output, chunk_bytes))
+                elif op.kind in {"cast", "fuse_cast"}:
+                    for source in op.sources:
+                        peak = max(peak, _cast(source, output, op.dtype, chunk_bytes))
                 elif op.kind == "transpose" and len(op.sources) == 1:
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
                 else:
@@ -378,12 +450,18 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
                 raise ConversionError("Checkpoint changed during conversion")
     except OSError as exc:
         raise ConversionError("Cannot write converted checkpoint") from exc
+    if output.sequential:
+        output_hash = output.digest.hexdigest()
+    else:
+        with path.open("rb") as stream:
+            output_hash = hashlib.file_digest(stream, "sha256").hexdigest()
     return {
         "tensors": len(operations),
         "source_tensors": plan.source_tensors,
         "input_bytes": plan.input_bytes,
         "output_tensor_bytes": offset,
         "output_bytes": 8 + len(encoded) + offset,
+        "output_sha256": output_hash,
         "peak_buffer_bytes": peak,
         "chunk_bytes": chunk_bytes,
         "write_seconds": time.perf_counter() - start,

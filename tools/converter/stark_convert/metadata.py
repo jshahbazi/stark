@@ -1,4 +1,4 @@
-"""Import verified Qwen3 metadata without importing Lalamo or JAX.
+"""Import registered Hugging Face metadata without model framework imports.
 
 Adapted from Lalamo's metadata import, tokenizer configuration, generation
 configuration, and Qwen model specifications at revision
@@ -7,19 +7,21 @@ Copyright (c) 2025 Mirai Tech Inc. MIT licensed; see ../LICENSE.lalamo.
 
 The registry identity is supplied by the caller as ``_stark_model_repo`` in the
 in-memory Hugging Face configuration. It is never written into model metadata.
-Unknown identities must use the Lalamo backend: architecture alone does not
-determine a model's reasoning defaults or output parser.
+Architecture alone does not determine a model's reasoning defaults or output
+parser. Source files are supplied by the caller's immutable source resolver.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from tokenizers import AddedToken, Tokenizer
 
+from stark_convert.registry import get_model, models
 from stark_convert.streaming import ConversionError, read_json
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
@@ -30,14 +32,17 @@ _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX = (
     r"(?P<response>.*)\Z"
 )
 _GENERATION_BLOCK_TAG = re.compile(r"{%-?\s*(?:generation|endgeneration)\s*-?%}")
-_QWEN3_BASE_REPOS = frozenset(f"Qwen/Qwen3-{size}" for size in ("0.6B", "1.7B", "4B", "8B", "14B", "32B"))
-_QWEN3_INSTRUCT_REPO = "Qwen/Qwen3-4B-Instruct-2507"
-_QWEN3_THINKING_REPO = "Qwen/Qwen3-4B-Thinking-2507"
-SUPPORTED_METADATA_REPOS = _QWEN3_BASE_REPOS | {_QWEN3_INSTRUCT_REPO, _QWEN3_THINKING_REPO}
+_MODEL_TYPES = {
+    "HFQwen2Config": "qwen2",
+    "HFQwen3Config": "qwen3",
+    "HFLlamaConfig": "llama",
+    "HFMistralConfig": "mistral",
+}
+SUPPORTED_METADATA_REPOS = frozenset(entry["repo"] for entry in models() if entry.get("metadata_profile") is not None)
 
 
 class UnsupportedMetadata(ValueError):
-    """Metadata needs Lalamo; messages contain no checkpoint content."""
+    """Valid metadata is outside implemented profiles; never include content."""
 
 
 def _read_object(path: Path, label: str) -> dict[str, Any]:
@@ -135,30 +140,52 @@ def _generation_config(source: dict[str, Any], hf_config: dict[str, Any]) -> dic
     }
 
 
-def write_metadata(source: Path, output: Path, hf_config: dict[str, Any]) -> dict[str, Any]:
-    """Normalize a tokenizer and return Lalamo-compatible config fragments.
+def _file_path(
+    source: Path,
+    model_entry: dict[str, Any],
+    role: str,
+    resolve_file: Callable[..., Path] | None,
+) -> Path:
+    spec = model_entry["files"].get(role)
+    if not isinstance(spec, dict) or not isinstance(spec.get("filename"), str):
+        raise UnsupportedMetadata("Unsupported metadata source specification.")
+    if resolve_file is not None:
+        try:
+            return Path(resolve_file(spec["filename"], repo=spec["repo"]))
+        except Exception:
+            raise ConversionError("Cannot resolve metadata source file.") from None
+    if spec["repo"] != model_entry["repo"]:
+        raise ConversionError("External metadata source requires a resolved snapshot.")
+    return source / spec["filename"]
 
-    Supports only registered, dense Qwen3 metadata profiles. All source files
-    are local; the caller resolves/downloads the checkpoint before invoking
-    this adapter. A checkpoint's chat template and sampling parameters remain
-    authoritative. The registered repository supplies only parser/reasoning
-    defaults, exactly as Lalamo's model specification does.
 
-    ``output`` is the caller's staging directory. The returned fragments are
-    merged with the streaming decoder configuration by the caller. This
-    function creates ``tokenizer.json`` only after validating all metadata.
-    """
-    if hf_config.get("model_type") != "qwen3":
-        raise UnsupportedMetadata("Unsupported metadata architecture.")
-    repo = hf_config.get("_stark_model_repo")
-    if not isinstance(repo, str) or repo not in SUPPORTED_METADATA_REPOS:
-        raise UnsupportedMetadata("Unverified model metadata profile; use Lalamo.")
+def _read_text(path: Path, label: str) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        raise ConversionError(f"Cannot read {label} metadata.") from None
 
-    source = Path(source)
-    output = Path(output)
-    tokenizer_config = _read_object(source / "tokenizer_config.json", "tokenizer")
-    generation_source = _read_object(source / "generation_config.json", "generation")
+
+def _chat_template(
+    source: Path,
+    model_entry: dict[str, Any],
+    tokenizer_config: dict[str, Any],
+    resolve_file: Callable[..., Path] | None,
+) -> str:
     prompt_template = tokenizer_config.get("chat_template")
+    template_spec = model_entry["files"].get("chat_template")
+    inline_id = model_entry["metadata"].get("inline_sources", {}).get("chat_template")
+    if prompt_template is not None and (template_spec is not None or inline_id is not None):
+        raise ConversionError("Conflicting chat-template metadata.")
+    if prompt_template is None and template_spec is not None:
+        template_path = _file_path(source, model_entry, "chat_template", resolve_file)
+        field_name = template_spec.get("field")
+        if field_name is None:
+            prompt_template = _read_text(template_path, "chat-template")
+        else:
+            prompt_template = _read_object(template_path, "chat-template").get(field_name)
+    elif prompt_template is None and inline_id is not None:
+        raise UnsupportedMetadata("Unsupported inline chat-template profile.")
     if not isinstance(prompt_template, str):
         named_templates = (
             isinstance(prompt_template, list)
@@ -176,12 +203,140 @@ def write_metadata(source: Path, output: Path, hf_config: dict[str, Any]) -> dic
         if named_templates or mapped_templates:
             raise UnsupportedMetadata("Unsupported chat-template representation.")
         raise ConversionError("Invalid chat-template metadata.")
+    return _GENERATION_BLOCK_TAG.sub("", prompt_template)
+
+
+def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
+    parser_id = metadata.get("parser_id")
+    end_id = metadata.get("end_of_thinking_id")
+    reasoning_id = metadata.get("reasoning_id")
+    if parser_id not in (None, "optional_thinking"):
+        raise UnsupportedMetadata("Unsupported output-parser profile.")
+    if end_id not in (None, "qwen_think_end"):
+        raise UnsupportedMetadata("Unsupported reasoning-boundary profile.")
+    if reasoning_id not in (None, "boolean_default_on", "boolean_default_off"):
+        raise UnsupportedMetadata("Unsupported reasoning-default profile.")
+    roles = metadata.get("roles")
+    if not isinstance(roles, dict) or any(
+        not isinstance(roles.get(role), str) for role in ("system", "user", "assistant")
+    ):
+        raise ConversionError("Invalid role-name profile.")
+    reasoning = None
+    if reasoning_id is not None:
+        reasoning = {
+            "default_reasoning_effort": "medium" if reasoning_id == "boolean_default_on" else "no_reasoning",
+            "field_name": "enable_thinking",
+            "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
+        }
+    return {
+        "output_parser_regex": _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX if parser_id == "optional_thinking" else None,
+        "system_role_name": roles["system"],
+        "user_role_name": roles["user"],
+        "assistant_role_name": roles["assistant"],
+        "end_of_thinking_tag": "\n</think>" if end_id == "qwen_think_end" else None,
+        "reasoning_config": reasoning,
+    }
+
+
+def _native_generation_config(source: dict[str, Any], hf_config: dict[str, Any]) -> dict[str, Any]:
+    """Interpret an inline native GenerationConfig, rather than an HF file."""
+    result = _generation_config({}, hf_config)
+    result["stop_token_ids"] = sorted(
+        set(result["stop_token_ids"]) | set(_token_ids(source.get("stop_token_ids", []), optional=False))
+    )
+    for name in result:
+        if name == "stop_token_ids":
+            continue
+        if name == "banned_tokens":
+            value = source.get(name)
+            result[name] = None if value is None else _token_ids(value, optional=False)
+        else:
+            result[name] = _optional_sampling_number(
+                source, name, integer=name in ("top_k", "suffix_repetition_length")
+            )
+    return result
+
+
+def _profile_generation_config(
+    source: Path,
+    model_entry: dict[str, Any],
+    hf_config: dict[str, Any],
+    resolve_file: Callable[..., Path] | None,
+) -> dict[str, Any]:
+    metadata = model_entry["metadata"]
+    if "generation_config" in model_entry["files"]:
+        generation_source = _read_object(
+            _file_path(source, model_entry, "generation_config", resolve_file), "generation"
+        )
+        result = _generation_config(generation_source, hf_config)
+    else:
+        inline_source = metadata.get("generation_config")
+        if inline_source is not None and not isinstance(inline_source, dict):
+            raise ConversionError("Invalid generation-config profile.")
+        result = _native_generation_config(inline_source or {}, hf_config)
+
+    overrides = metadata.get("generation_params_overrides")
+    if overrides is not None:
+        if not isinstance(overrides, dict):
+            raise ConversionError("Invalid generation-override profile.")
+        defaults = _native_generation_config({}, {"eos_token_id": []})
+        normalized = _native_generation_config(overrides, {"eos_token_id": []})
+        # Match GenerationConfig.override_with: defaults do not override and
+        # the token-list fields merge only when the existing field is nondefault.
+        for name, value in normalized.items():
+            if value == defaults[name]:
+                continue
+            if name in ("stop_token_ids", "banned_tokens") and result[name] != defaults[name]:
+                result[name] = sorted(set(result[name]) | set(value))
+            else:
+                result[name] = value
+    return result
+
+
+def write_metadata(
+    source: Path,
+    output: Path,
+    hf_config: dict[str, Any],
+    *,
+    model_entry: dict[str, Any] | None = None,
+    resolve_file: Callable[..., Path] | None = None,
+) -> dict[str, Any]:
+    """Normalize tokenizer metadata using an explicit registered model profile.
+
+    The caller resolves metadata files at immutable source revisions, including
+    cross-repository ConfigMap entries, before invoking this adapter. Files are
+    read through ``resolve_file(filename, repo=...)`` when supplied. Without a
+    resolver, only files in the model's own local source directory are accepted.
+    This function creates output only after validating every metadata fragment.
+    """
+    repo = hf_config.get("_stark_model_repo")
+    if model_entry is None:
+        model_entry = get_model(repo) if isinstance(repo, str) else None
+    if model_entry is None or model_entry.get("repo") != repo or model_entry.get("metadata_profile") is None:
+        raise UnsupportedMetadata("Unverified model metadata profile.")
+    expected_type = _MODEL_TYPES.get(model_entry.get("config_class"))
+    if expected_type is None:
+        raise UnsupportedMetadata("Unsupported metadata architecture.")
+    if hf_config.get("model_type") != expected_type:
+        raise ConversionError("Model architecture does not match metadata profile.")
+
+    source = Path(source)
+    output = Path(output)
+    tokenizer_config = _read_object(_file_path(source, model_entry, "tokenizer_config", resolve_file), "tokenizer")
+    prompt_template = _chat_template(source, model_entry, tokenizer_config, resolve_file)
+    codec_profile = _profile_codec(model_entry["metadata"])
+    system_prompt = None
+    if "system_prompt" in model_entry["files"]:
+        system_prompt = _read_text(_file_path(source, model_entry, "system_prompt", resolve_file), "system-prompt")
+    elif model_entry["metadata"].get("inline_sources", {}).get("system_prompt") is not None:
+        raise UnsupportedMetadata("Unsupported inline system-prompt profile.")
+
     bos_token = _optional_text(tokenizer_config.get("bos_token"))
     eos_token = _optional_text(tokenizer_config.get("eos_token"))
-    generation_config = _generation_config(generation_source, hf_config)
+    generation_config = _profile_generation_config(source, model_entry, hf_config, resolve_file)
 
     try:
-        tokenizer = Tokenizer.from_file(str(source / "tokenizer.json"))
+        tokenizer = Tokenizer.from_file(str(_file_path(source, model_entry, "tokenizer", resolve_file)))
         _add_tokens(tokenizer, tokenizer_config)
         if bos_token is None:
             bos_token = _token_ids_to_text(tokenizer, hf_config.get("bos_token_id"))
@@ -194,29 +349,13 @@ def write_metadata(source: Path, output: Path, hf_config: dict[str, Any]) -> dic
         # reason; the CLI must never print the underlying exception context.
         raise ConversionError("Tokenizer normalization failed.") from None
 
-    optional_thinking = repo in _QWEN3_BASE_REPOS
-    has_thinking_parser = optional_thinking or repo == _QWEN3_THINKING_REPO
-    reasoning_config = (
-        {
-            "default_reasoning_effort": "medium",
-            "field_name": "enable_thinking",
-            "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
-        }
-        if optional_thinking
-        else None
-    )
     token_codec_config = {
         "type": "ChatCodecConfig",
-        "prompt_template": _GENERATION_BLOCK_TAG.sub("", prompt_template),
-        "output_parser_regex": _OPTIONAL_THINKING_OUTPUT_PARSER_REGEX if has_thinking_parser else None,
-        "system_role_name": "system",
-        "user_role_name": "user",
-        "assistant_role_name": "assistant",
+        "prompt_template": prompt_template,
+        **codec_profile,
         "eos_token": eos_token,
         "bos_token": bos_token,
-        "end_of_thinking_tag": "\n</think>" if has_thinking_parser else None,
-        "default_system_prompt": None,
-        "reasoning_config": reasoning_config,
+        "default_system_prompt": system_prompt,
     }
     try:
         output.mkdir(parents=True, exist_ok=True)

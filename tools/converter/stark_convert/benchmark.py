@@ -1,4 +1,4 @@
-"""Compare local streaming and pinned Lalamo conversions in fresh processes.
+"""Measure streaming conversions in fresh processes against frozen outputs.
 
 Model artifacts and the aggregate JSON report remain beneath a private output
 directory. No downloads, inference, tensor contents, or exception dumps belong
@@ -12,15 +12,15 @@ import hashlib
 import json
 import os
 import platform
+import signal
 import statistics
 import struct
 import subprocess
+import threading
 import time
 from pathlib import Path
 
 import psutil
-
-from .lalamo_runner import LALAMO_REVISION
 
 CHUNK_BYTES = 8 * 1024 * 1024
 RSS_SAMPLE_SECONDS = 0.01
@@ -96,7 +96,10 @@ def _tensor_manifest(path: Path) -> tuple[dict[str, dict[str, object]], object]:
         header_bytes = struct.unpack("<Q", length_bytes)[0]
         if header_bytes > 100_000_000 or header_bytes > file_size - 8:
             raise BenchmarkError("invalid_output_header")
-        header = json.loads(handle.read(header_bytes))
+        try:
+            header = json.loads(handle.read(header_bytes), object_pairs_hook=_reject_duplicate_keys)
+        except (ValueError, TypeError):
+            raise BenchmarkError("invalid_output_header") from None
         if not isinstance(header, dict):
             raise BenchmarkError("invalid_output_header")
         data_start = 8 + header_bytes
@@ -105,8 +108,10 @@ def _tensor_manifest(path: Path) -> tuple[dict[str, dict[str, object]], object]:
         occupied = []
         for name in sorted(key for key in header if key != "__metadata__"):
             spec = header[name]
-            dtype, shape, offsets = spec["dtype"], spec["shape"], spec["data_offsets"]
-            if dtype not in DTYPE_BYTES or not isinstance(shape, list):
+            if not name or not isinstance(spec, dict) or set(spec) != {"dtype", "shape", "data_offsets"}:
+                raise BenchmarkError("invalid_output_header")
+            dtype, shape, offsets = spec.get("dtype"), spec.get("shape"), spec.get("data_offsets")
+            if not isinstance(dtype, str) or dtype not in DTYPE_BYTES or not isinstance(shape, list):
                 raise BenchmarkError("invalid_output_header")
             expected_bytes = DTYPE_BYTES[dtype]
             for dimension in shape:
@@ -145,40 +150,91 @@ def _tensor_manifest(path: Path) -> tuple[dict[str, dict[str, object]], object]:
     return result, header.get("__metadata__", {})
 
 
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise BenchmarkError("invalid_output_json")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_number(value: str) -> object:
+    raise BenchmarkError("invalid_output_json")
+
+
 def _read_json(path: Path) -> object:
-    with path.open() as handle:
-        return json.load(handle)
+    try:
+        with path.open() as handle:
+            result = json.load(
+                handle, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite_number
+            )
+        if not isinstance(result, dict):
+            raise BenchmarkError("invalid_output_json")
+        return result
+    except (OSError, ValueError, TypeError):
+        raise BenchmarkError("invalid_output_json") from None
 
 
-def compare_outputs(streaming: Path, lalamo: Path) -> dict[str, object]:
-    """Compare every emitted tensor byte and all runtime configuration."""
+def _tensor_specs(metadata: object) -> dict[str, object]:
+    if not isinstance(metadata, dict) or any(
+        not isinstance(name, str) or not isinstance(value, str) for name, value in metadata.items()
+    ):
+        raise BenchmarkError("invalid_output_metadata")
+    specs = {}
+    try:
+        for name, value in metadata.items():
+            if name.endswith(".spec"):
+                parsed = json.loads(
+                    value, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite_number
+                )
+                if not isinstance(parsed, dict):
+                    raise BenchmarkError("invalid_output_tensor_spec")
+                specs[name] = parsed
+    except (ValueError, TypeError):
+        raise BenchmarkError("invalid_output_tensor_spec") from None
+    return specs
+
+
+def compare_outputs(streaming: Path, reference: Path) -> dict[str, object]:
+    """Compare tensor bytes, matrix specifications, and runtime configuration.
+
+    The reference output is generated independently before measurement. Its
+    conversion time is not available here, so this comparison establishes
+    output parity without producing a performance ratio.
+    """
     fast_tensors, fast_metadata = _tensor_manifest(streaming / "model.safetensors")
-    reference_tensors, reference_metadata = _tensor_manifest(lalamo / "model.safetensors")
-    fast_config, reference_config = _read_json(streaming / "config.json"), _read_json(lalamo / "config.json")
+    reference_tensors, reference_metadata = _tensor_manifest(reference / "model.safetensors")
+    fast_specs, reference_specs = _tensor_specs(fast_metadata), _tensor_specs(reference_metadata)
+    fast_config, reference_config = _read_json(streaming / "config.json"), _read_json(reference / "config.json")
     fast_tokenizer = _read_json(streaming / "tokenizer.json")
-    reference_tokenizer = _read_json(lalamo / "tokenizer.json")
+    reference_tokenizer = _read_json(reference / "tokenizer.json")
     tensor_hash = hashlib.sha256(_json_bytes(fast_tensors)).hexdigest()
     reference_hash = hashlib.sha256(_json_bytes(reference_tensors)).hexdigest()
     result = {
         "tensors_match": fast_tensors == reference_tensors,
         "tensor_metadata_match": fast_metadata == reference_metadata,
+        "tensor_specs_match": fast_specs == reference_specs,
         "config_match": fast_config == reference_config,
         "tokenizer_match": fast_tokenizer == reference_tokenizer,
         "tensor_count": len(fast_tensors),
         "streaming_tensor_manifest_sha256": tensor_hash,
-        "lalamo_tensor_manifest_sha256": reference_hash,
+        "reference_tensor_manifest_sha256": reference_hash,
+        "streaming_tensor_specs_sha256": hashlib.sha256(_json_bytes(fast_specs)).hexdigest(),
+        "reference_tensor_specs_sha256": hashlib.sha256(_json_bytes(reference_specs)).hexdigest(),
         "streaming_config_sha256": hashlib.sha256(_json_bytes(fast_config)).hexdigest(),
-        "lalamo_config_sha256": hashlib.sha256(_json_bytes(reference_config)).hexdigest(),
+        "reference_config_sha256": hashlib.sha256(_json_bytes(reference_config)).hexdigest(),
         "streaming_tokenizer_sha256": hashlib.sha256(_json_bytes(fast_tokenizer)).hexdigest(),
-        "lalamo_tokenizer_sha256": hashlib.sha256(_json_bytes(reference_tokenizer)).hexdigest(),
+        "reference_tokenizer_sha256": hashlib.sha256(_json_bytes(reference_tokenizer)).hexdigest(),
         "streaming_weights_sha256": _file_sha256(streaming / "model.safetensors"),
-        "lalamo_weights_sha256": _file_sha256(lalamo / "model.safetensors"),
+        "reference_weights_sha256": _file_sha256(reference / "model.safetensors"),
     }
     result["passed"] = all(
         result[key]
         for key in (
             "tensors_match",
             "tensor_metadata_match",
+            "tensor_specs_match",
             "config_match",
             "tokenizer_match",
         )
@@ -200,32 +256,94 @@ def _tree_rss(process: psutil.Process) -> int:
     return total
 
 
+def _stop_measured_child(child: subprocess.Popen, reader: threading.Thread | None) -> None:
+    """Reap the owned process tree and receipt reader before propagating errors."""
+    try:
+        descendants = psutil.Process(child.pid).children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        descendants = []
+
+    def signal_group(value: int) -> None:
+        if os.name == "posix":
+            try:
+                os.killpg(child.pid, value)
+            except (ProcessLookupError, PermissionError):
+                pass
+        elif child.poll() is None:
+            child.terminate() if value == signal.SIGTERM else child.kill()
+
+    signal_group(signal.SIGTERM)
+    for descendant in descendants:
+        try:
+            descendant.terminate()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    try:
+        child.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        signal_group(signal.SIGKILL)
+    # A launcher may exit while descendants still hold stdout open. Force
+    # their shutdown as well so joining the receipt reader cannot leak it.
+    signal_group(signal.SIGKILL)
+    for descendant in descendants:
+        try:
+            descendant.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    child.wait()
+    if reader is not None:
+        reader.join()
+
+
 def _measure(command: list[str]) -> dict[str, object]:
     environment = os.environ.copy()
     environment.update(HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", HF_HUB_DISABLE_TELEMETRY="1")
     started = time.perf_counter()
-    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment) as child:
+    with subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        env=environment,
+        start_new_session=os.name == "posix",
+    ) as child:
+        received: dict[str, object] = {}
+        reader = None
+
+        def collect_receipt() -> None:
+            try:
+                received["stdout"], _ = child.communicate()
+            except BaseException:
+                # Exceptions can include child output; retain no diagnostic
+                # text and suppress thread exception dumps.
+                received["failed"] = True
+
         try:
             monitored = psutil.Process(child.pid)
             peak = _tree_rss(monitored)
             samples = 1
+            reader = threading.Thread(target=collect_receipt, name="stark-benchmark-receipt")
+            reader.start()
             while child.poll() is None:
+                if received.get("failed"):
+                    raise BenchmarkError("backend_receipt_failed")
                 peak = max(peak, _tree_rss(monitored))
                 samples += 1
                 time.sleep(RSS_SAMPLE_SECONDS)
-            stdout, _ = child.communicate()
+            reader.join()
+            if received.get("failed"):
+                raise BenchmarkError("backend_receipt_failed")
+            stdout = received.get("stdout")
         except BaseException:
-            child.terminate()
-            child.wait()
+            _stop_measured_child(child, reader)
             raise
     elapsed = time.perf_counter() - started
+    if child.returncode != 0:
+        raise BenchmarkError("backend_conversion_failed")
     try:
         conversion = json.loads(stdout)
     except (ValueError, TypeError):
         raise BenchmarkError("invalid_backend_metrics") from None
-    if child.returncode != 0:
-        raise BenchmarkError("backend_conversion_failed")
-    if not isinstance(conversion, dict) or conversion.get("backend") not in ("streaming", "lalamo"):
+    if not isinstance(conversion, dict) or conversion.get("backend") != "streaming":
         raise BenchmarkError("invalid_backend_metrics")
     return {
         "backend": conversion["backend"],
@@ -233,7 +351,7 @@ def _measure(command: list[str]) -> dict[str, object]:
         "cli_conversion_seconds": conversion.get("elapsed_seconds"),
         "peak_process_tree_rss_bytes": peak,
         "rss_samples": samples,
-        "reported_max_rss_bytes": conversion.get("max_rss_bytes"),
+        "reported_max_rss_bytes": conversion.get("total_rss_bytes"),
         "output_bytes": conversion.get("output_bytes"),
         "tensor_count": conversion.get("tensor_count", conversion.get("tensors")),
     }
@@ -278,26 +396,44 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     files = _source_files(source)
     if not files:
         raise BenchmarkError("empty_source_directory")
+    reference = getattr(args, "reference_output", None)
+    reference_files = []
+    reference_hash = None
+    if reference is not None:
+        reference = reference.resolve()
+        if not reference.is_dir():
+            raise BenchmarkError("missing_reference_directory")
+        reference_files = _source_files(reference)
+        reference_hash, _ = _source_digest(reference, reference_files)
+        # Validate the independently generated reference before timed runs.
+        compare_outputs(reference, reference)
+    source_manifest = getattr(args, "source_manifest", None)
+    source_manifest_hash = _file_sha256(source_manifest) if source_manifest is not None else None
+    if args.output.resolve().is_relative_to(source):
+        raise BenchmarkError("output_inside_source")
+    if reference is not None and args.output.resolve().is_relative_to(reference):
+        raise BenchmarkError("output_inside_reference")
     if args.output.exists():
         raise BenchmarkError("output_exists")
     args.output.mkdir(parents=True, mode=0o700)
     args.output.chmod(0o700)
     # Installation and checkpoint hashing are completed before any timed run.
     _sync_environment(project)
-    _sync_environment(project / "lalamo")
     tooling = toolchain_provenance()
     source_hash, source_bytes = _source_digest(source, files)
     report: dict[str, object] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "running",
         "repo": args.repo,
         "dtype": args.dtype,
         "chunk_mib": args.chunk_mib,
-        "lalamo_revision": LALAMO_REVISION,
         **tooling,
         "source_manifest_sha256": source_hash,
         "source_bytes": source_bytes,
-        "repeats_per_backend": args.repeats,
+        "source_replay_manifest_sha256": source_manifest_hash,
+        "repeats": args.repeats,
+        "reference_comparison_requested": reference is not None,
+        "reference_output_manifest_sha256": reference_hash,
         "environment": {
             "system": platform.system(),
             "release": platform.release(),
@@ -311,7 +447,8 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             "fresh_process_per_run": True,
             "source_cache_warmed_before_each_run": True,
             "setup_downloads_excluded": True,
-            "backend_order": "streaming,lalamo on even repeats; lalamo,streaming on odd repeats",
+            "backend": "streaming",
+            "reference_timing_measured": False,
             "rss": "sampled sum of RSS for launcher and descendants; shared pages may be counted more than once",
             "rss_sample_interval_seconds": RSS_SAMPLE_SECONDS,
             "end_to_end": (
@@ -327,70 +464,70 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     report["runs"] = runs
     report["parity"] = comparisons
     for repeat in range(args.repeats):
-        order = ("streaming", "lalamo") if repeat % 2 == 0 else ("lalamo", "streaming")
-        outputs = {}
-        for backend in order:
-            _warm_source(files)
-            destination = args.output / f"repeat-{repeat + 1}" / backend
-            outputs[backend] = destination
-            command = [
-                "uv",
-                "run",
-                "--project",
-                str(project),
-                "--locked",
-                "--no-sync",
-                "stark-convert",
-                str(source),
-                "--repo",
-                args.repo,
-                "--backend",
-                backend,
-                "--output",
-                str(destination),
-                "--dtype",
-                args.dtype,
-                "--chunk-mib",
-                str(args.chunk_mib),
-            ]
-            metrics = _measure(command)
-            if metrics["backend"] != backend:
-                raise BenchmarkError("unexpected_backend_selection")
-            metrics.update(repeat=repeat + 1, order=order.index(backend) + 1)
-            runs.append(metrics)
-        parity = compare_outputs(outputs["streaming"], outputs["lalamo"])
-        parity["repeat"] = repeat + 1
-        comparisons.append(parity)
-        if not parity["passed"]:
-            report["status"] = "parity_failed"
-            break
-    report["summary"] = {backend: _summary(runs, backend) for backend in ("streaming", "lalamo")}
-    fast = report["summary"]["streaming"]
-    reference = report["summary"]["lalamo"]
-    report["ratios"] = {
-        "end_to_end_speedup": reference["median_end_to_end_seconds"] / fast["median_end_to_end_seconds"],
-        "sampled_rss_reduction": (
-            reference["median_peak_process_tree_rss_bytes"] / max(fast["median_peak_process_tree_rss_bytes"], 1)
-        ),
-    }
+        _warm_source(files)
+        destination = args.output / f"repeat-{repeat + 1}" / "streaming"
+        command = [
+            "uv",
+            "run",
+            "--project",
+            str(project),
+            "--locked",
+            "--no-sync",
+            "stark-convert",
+            str(source),
+            "--repo",
+            args.repo,
+            "--offline",
+            "--output",
+            str(destination),
+            "--dtype",
+            args.dtype,
+            "--chunk-mib",
+            str(args.chunk_mib),
+        ]
+        if source_manifest is not None:
+            command.extend(("--source-manifest", str(source_manifest)))
+        metrics = _measure(command)
+        if metrics["backend"] != "streaming":
+            raise BenchmarkError("unexpected_backend_selection")
+        metrics.update(repeat=repeat + 1)
+        runs.append(metrics)
+        if reference is not None:
+            parity = compare_outputs(destination, reference)
+            parity["repeat"] = repeat + 1
+            comparisons.append(parity)
+            if not parity["passed"]:
+                report["status"] = "parity_failed"
+                break
+    report["summary"] = {"streaming": _summary(runs, "streaming")}
     if report["status"] == "running":
         report["status"] = "passed"
     # Checkpoint changes during the benchmark invalidate source-bound evidence.
     if _source_digest(source, files)[0] != source_hash or _source_files(source) != files:
         report["status"] = "source_changed"
+    if source_manifest is not None and _file_sha256(source_manifest) != source_manifest_hash:
+        report["status"] = "source_changed"
+    if reference is not None and (
+        _source_digest(reference, reference_files)[0] != reference_hash or _source_files(reference) != reference_files
+    ):
+        report["status"] = "reference_changed"
     if toolchain_provenance() != tooling:
         report["status"] = "tooling_changed"
     return report
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    from .cli import _Parser
+
+    parser = _Parser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--chunk-mib", type=int, default=8)
+    parser.add_argument("--source-manifest", type=Path)
+    parser.add_argument("--reference-output", type=Path)
     args = parser.parse_args()
     if args.repeats < 1 or args.chunk_mib < 1:
         print('{"status":"failed","error_category":"invalid_benchmark_options"}')
