@@ -16,6 +16,8 @@ class ConversionRequest:
     backend: Literal["auto", "streaming"] = "auto"
     workspace_bytes: int = 8 * 1024 * 1024
     require_native_support: bool = False
+    architecture: str | None = None
+    metadata_profile: Literal["hf-generic"] | None = None
 
 
 @dataclass(frozen=True)

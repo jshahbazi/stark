@@ -54,6 +54,10 @@ def export(reference: Path) -> dict:
         "HFPhi3Config": "phi3",
         "HFGraniteConfig": "granite",
         "HFSmolLM3Config": "smollm3",
+        "HFQwen35Config": "qwen3_5",
+        "HFLFM2Config": "lfm2",
+        "HFLlambaConfig": "llamba",
+        "ModernBERTConfig": "modernbert",
     }
     for spec in ModelRegistry.build(allow_third_party_plugins=False).models:
         repo = spec.origin.description
@@ -77,6 +81,10 @@ def export(reference: Path) -> dict:
                 inline[field.name] = {
                     "sha256": _digest(dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value)
                 }
+        if type(spec).__name__ == "ClassifierModelSpec":
+            # ConfigMap inherits this language default, but classifier import
+            # never selects or reads a generation policy file.
+            files.pop("generation_config", None)
         parser = getattr(spec, "output_parser_regex", None)
         parsers = {
             OPTIONAL_THINKING_OUTPUT_PARSER_REGEX: "optional_thinking",
@@ -106,7 +114,43 @@ def export(reference: Path) -> dict:
         grammar = getattr(spec, "grammar_start_tokens", ())
         roles = {role: getattr(spec, role + "_role_name", role) for role in ("system", "user", "assistant")}
         dense = container == ".safetensors" and not any(word in spec.name.lower() for word in ("mlx", "4bit", "8bit"))
-        adapter = profiles.get(class_name) if dense else None
+        # Only inspected affine MLX decoder layouts are independently planned.
+        # Other packed formats/config classes keep their explicit planned state.
+        mlx = (
+            container == ".safetensors"
+            and class_name
+            in {
+                "HFQwen3Config",
+                "HFLlamaConfig",
+                "HFSmolLM3Config",
+                "HFGemma3TextConfig",
+                "HFQwen35Config",
+                "HFLFM2Config",
+                "HFLlambaConfig",
+            }
+            and any(width in spec.name.lower() for width in ("4bit", "8bit"))
+        )
+        adapter = profiles.get(class_name) if dense or mlx else None
+        # Promote inspected dense families; later generations keep their own
+        # metadata/variant gates even when the reference shares a config class.
+        # The shared upstream config class also handles MoE. These exact pinned
+        # identities use the inspected dense decoder; 35B-A3B is qwen3_5_moe.
+        qwen35_repos = {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")}
+        qwen35_repos.update(
+            f"mlx-community/Qwen3.5-{size}-MLX-{bits}bit" for size in ("0.8B", "2B", "4B", "9B") for bits in (4, 8)
+        )
+        qwen35_repos.update(f"mlx-community/Qwen3.5-27B-{bits}bit" for bits in (4, 8))
+        if class_name == "HFQwen35Config" and repo not in qwen35_repos:
+            adapter = None
+        if class_name == "HFLFM2Config" and spec.family != "LFM2":
+            adapter = None
+        if class_name == "HFLlambaConfig" and repo not in {"cartesia-ai/Llamba-1B", "cartesia-ai/Llamba-1B-4bit-mlx"}:
+            adapter = None
+        if class_name == "ModernBERTConfig" and repo not in {
+            "trymirai/chat-moderation-router",
+            "trymirai/health-related-router",
+        }:
+            adapter = None
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,
@@ -133,7 +177,13 @@ def export(reference: Path) -> dict:
                 "files": files,
                 "metadata": metadata,
                 "adapter": adapter,
-                "metadata_profile": adapter,
+                "metadata_profile": "modernbert-classifier" if adapter == "modernbert" else adapter,
+                "compressed_format": {
+                    "scheme": "mlx_affine",
+                    "bits": 4 if "4bit" in spec.name.lower() else 8,
+                }
+                if mlx and adapter is not None
+                else None,
                 "status": {
                     "conversion": "implemented" if adapter else "planned",
                     "runtime": "not_assessed",

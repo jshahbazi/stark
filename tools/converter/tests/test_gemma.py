@@ -231,7 +231,6 @@ def test_invalid_gemma_config_fails_before_unknown_semantics(tmp_path, family, c
         {"use_bidirectional_attention": True},
         {"tie_word_embeddings": False},
         {"rope_parameters": {"rope_type": "default"}},
-        {"quantization_config": {"bits": 4}},
     ],
 )
 def test_unqualified_gemma_config_fails_closed(tmp_path, family, changes):
@@ -239,6 +238,15 @@ def test_unqualified_gemma_config_fails_closed(tmp_path, family, changes):
     config, _ = gemma_fixture(source, family)
     update_config(source, config, **changes)
     with pytest.raises(UnsupportedConversion):
+        build_gemma_plan(source, family=family)
+
+
+@pytest.mark.parametrize("family,error", [("gemma2", UnsupportedConversion), ("gemma3_text", ConversionError)])
+def test_gemma_quantization_description_missing_group_is_rejected(tmp_path, family, error):
+    source = tmp_path / "source"
+    config, _ = gemma_fixture(source, family)
+    update_config(source, config, quantization_config={"bits": 4})
+    with pytest.raises(error):
         build_gemma_plan(source, family=family)
 
 

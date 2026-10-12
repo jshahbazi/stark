@@ -1,6 +1,7 @@
 """End-to-end synthetic conversion and fail-closed orchestration contracts."""
 
 import json
+import shutil
 from dataclasses import asdict
 from pathlib import Path
 
@@ -8,8 +9,12 @@ import pytest
 from test_dense_adapters import dense_fixture
 from test_gemma import gemma_fixture
 from test_granite_smollm import fixture as scalar_family_fixture
+from test_mlx import mlx_qwen_fixture
+from test_mlx_dense import mlx_dense_fixture
+from test_mlx_gemma import mlx_gemma_fixture
 from test_phi import phi_fixture
 from test_qualifications import evidence_record
+from test_sources import Hub
 from test_streaming import qwen_fixture
 from tokenizers import Tokenizer, models
 
@@ -126,12 +131,95 @@ def test_unsupported_layout_never_invokes_an_external_backend(source, tmp_path, 
     assert not hasattr(cli, "_lalamo")
 
 
-@pytest.mark.parametrize("repo", ["unknown/model", "Qwen/Qwen3-0.6B-MLX-4bit"])
+@pytest.mark.parametrize("repo", ["unknown/model", "Qwen/Qwen3.5-35B-A3B"])
 def test_unsupported_catalog_tuple_is_rejected_before_resolution(tmp_path, monkeypatch, repo):
     monkeypatch.setattr(cli, "resolve_source", lambda *args, **kwargs: pytest.fail("source resolution occurred"))
     with pytest.raises(UnsupportedConversion):
         run(Path("does-not-exist"), tmp_path / "output", repo=repo)
     assert not (tmp_path / "output").exists()
+
+
+MLX_PROFILES = {
+    "qwen3": "Qwen/Qwen3-0.6B-MLX",
+    "llama": "mlx-community/Llama-3.2-1B-Instruct",
+    "smollm3": "mlx-community/SmolLM3-3B",
+    "gemma3_text": "mlx-community/gemma-3-1b-it",
+}
+
+
+def mlx_snapshot(tmp_path, *, bits=4, profile_bits=None, family="qwen3"):
+    primary = tmp_path / "primary"
+    if family == "qwen3":
+        mlx_qwen_fixture(primary, bits=bits, sharded=True)
+    elif family == "gemma3_text":
+        mlx_gemma_fixture(primary, bits=bits, sharded=True)
+    else:
+        mlx_dense_fixture(primary, family, bits=bits, sharded=True)
+    external = source_fixture(tmp_path / "external")
+    (external / "chat_template.jinja").write_text("{{ messages }}")
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        shutil.copyfile(external / name, primary / name)
+    if family == "smollm3":
+        (primary / "tokenizer_config.json").write_text(json.dumps({"chat_template": None}))
+    repo = f"{MLX_PROFILES[family]}-{bits if profile_bits is None else profile_bits}bit"
+    repositories = {rule["repo"]: external for rule in get_model(repo)["files"].values() if rule["repo"] != repo}
+    hub = Hub({**repositories, repo: primary})
+    return resolve_source(repo, hub=hub), hub
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+@pytest.mark.parametrize("backend", ["auto", "streaming"])
+@pytest.mark.parametrize("family", MLX_PROFILES)
+def test_mlx_profile_complete_conversion_and_offline_external_replay(tmp_path, bits, backend, family):
+    snapshot, hub = mlx_snapshot(tmp_path, bits=bits, family=family)
+    assert {event[1] for event in hub.events if event[0] == "pin"} == {snapshot.repo} | {
+        rule["repo"] for rule in get_model(snapshot.repo)["files"].values()
+    }
+    manifest = tmp_path / "source-manifest.json"
+    snapshot.write_manifest(manifest)
+    replay = resolve_source(snapshot.repo, source_manifest=manifest, offline=True, hub=object())
+    receipt = run(replay, tmp_path / "output", repo=replay.repo, backend=backend)
+    assert receipt["backend"] == "streaming" and receipt["native_qualification"] is None
+    assert receipt["capability"]["source_validation"] == "complete"
+    assert receipt["capability"]["native_loading"] == "supported_layout_unverified_tuple"
+    assert receipt["transform_peak_bytes"] <= 4096
+    specs, tensors = read_safetensors_header(tmp_path / "output" / "model.safetensors")
+    assert any(info.dtype == "U8" for info in tensors.values())
+    assert {json.loads(value)["bits"] for value in specs.values() if "MLXSpec" in value} == {bits}
+    assert str(tmp_path) not in json.dumps(receipt)
+
+
+@pytest.mark.parametrize("bits,profile_bits", [(4, 8), (8, 4)])
+@pytest.mark.parametrize("family", MLX_PROFILES)
+def test_mlx_catalog_bit_mismatch_fails_before_staging(tmp_path, bits, profile_bits, family):
+    snapshot, _ = mlx_snapshot(tmp_path, bits=bits, profile_bits=profile_bits, family=family)
+    with pytest.raises(ConversionError, match="packing disagrees"):
+        run(snapshot, tmp_path / "output", repo=snapshot.repo)
+    assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))
+
+
+def test_dense_catalog_profile_rejects_compressed_checkpoint(tmp_path):
+    snapshot, _ = mlx_snapshot(tmp_path)
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        shutil.copyfile(tmp_path / "external" / name, snapshot.root / name)
+    with pytest.raises(UnsupportedConversion, match="registered compressed profile"):
+        run(snapshot.root, tmp_path / "output", repo=REPOS["qwen3"])
+    assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))
+
+
+def test_mlx_parameter_writer_failure_removes_private_staging(tmp_path, monkeypatch):
+    from stark_convert import compressed
+
+    snapshot, _ = mlx_snapshot(tmp_path)
+
+    def fail(op, output, chunk_bytes):
+        assert output.tell() > 0
+        raise ConversionError("synthetic_plane_failure")
+
+    monkeypatch.setattr(compressed, "write_mlx_params", fail)
+    with pytest.raises(ConversionError, match="synthetic_plane_failure"):
+        run(snapshot, tmp_path / "output", repo=snapshot.repo)
+    assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))
 
 
 def test_capability_probe_never_reads_source_or_claims_validation(monkeypatch, capsys):

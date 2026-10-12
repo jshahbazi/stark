@@ -19,7 +19,28 @@ CONFIG_ADAPTERS = {
     "HFPhi3Config": "phi3",
     "HFGraniteConfig": "granite",
     "HFSmolLM3Config": "smollm3",
+    "HFQwen35Config": "qwen3_5",
+    "HFLFM2Config": "lfm2",
+    "HFLlambaConfig": "llamba",
+    "ModernBERTConfig": "modernbert",
 }
+
+
+def model_kind_for_architecture(architecture: str) -> str:
+    """Architecture dispatch also binds the accepted root model kind."""
+    if architecture not in CONFIG_ADAPTERS.values():
+        raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
+    return "classifier" if architecture == "modernbert" else "language"
+
+
+def architecture_for_config(config: dict, expected: str | None = None) -> str:
+    """Select a reusable adapter; its planner still validates every semantic field."""
+    architecture = config.get("model_type")
+    if not isinstance(architecture, str) or architecture not in CONFIG_ADAPTERS.values():
+        raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
+    if expected is not None and architecture != expected:
+        raise ConversionError("Checkpoint architecture disagrees with the requested architecture")
+    return architecture
 
 
 def load_catalog() -> dict:
