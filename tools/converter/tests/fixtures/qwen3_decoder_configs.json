@@ -1,0 +1,211 @@
+{
+  "reference_revision": "831accb8252a6b6606c378048caeb44178f1a050",
+  "cases": {
+    "True": {
+      "embedding_config": {
+        "type": "TiedEmbeddingConfig",
+        "input_scale": null,
+        "logit_soft_cap": null,
+        "logit_scale": null
+      },
+      "transformer_config": {
+        "layer_configs": [
+          {
+            "pre_mixer_norm_config": {
+              "epsilon": 1e-06,
+              "scale_offset": null,
+              "upcast_mode": "only_normalization",
+              "subtract_mean": false,
+              "has_scale": true,
+              "has_biases": false
+            },
+            "mixer_conv_config": null,
+            "mixer_config": {
+              "type": "AttentionConfig",
+              "qkvg_projection_config": {},
+              "out_projection_config": {},
+              "query_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": null,
+                "upcast_mode": "only_normalization",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "key_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": null,
+                "upcast_mode": "only_normalization",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "num_heads": 4,
+              "num_groups": 2,
+              "head_dim": 2,
+              "is_causal": true,
+              "scale": null,
+              "sliding_window_size": 16,
+              "logit_soft_cap": null,
+              "has_sinks": false,
+              "has_qkvg_biases": false,
+              "has_out_biases": false,
+              "has_gate": false,
+              "normalize_values": false,
+              "is_kv_sharing": false
+            },
+            "post_mixer_norm_config": null,
+            "pre_mlp_norm_config": {
+              "epsilon": 1e-06,
+              "scale_offset": null,
+              "upcast_mode": "only_normalization",
+              "subtract_mean": false,
+              "has_scale": true,
+              "has_biases": false
+            },
+            "mlp_conv_config": null,
+            "mlp_config": {
+              "type": "DenseMLPConfig",
+              "linear_config": {},
+              "activation": {
+                "type": "SiLU",
+                "alpha": 1.0
+              },
+              "has_up_biases": false,
+              "has_down_biases": false,
+              "gate_clipping": null,
+              "up_clipping": null
+            },
+            "post_mlp_norm_config": null,
+            "hidden_dim": null,
+            "ple_config": null,
+            "has_post_layer_scalar": false,
+            "kv_source_layer_index": null,
+            "rope_config": {
+              "type": "UnscaledRoPEConfig",
+              "base": 10000.0,
+              "max_sequence_length": 64,
+              "head_dim": 2
+            }
+          }
+        ],
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "scale_offset": null,
+          "upcast_mode": "only_normalization",
+          "subtract_mean": false,
+          "has_scale": true,
+          "has_biases": false
+        },
+        "model_dim": 8,
+        "hidden_dim": 12
+      },
+      "vocab_size": 16,
+      "ple_model_config": null,
+      "embedding_norm_config": null
+    },
+    "False": {
+      "embedding_config": {
+        "type": "UntiedEmbeddingConfig",
+        "input_scale": null,
+        "logit_soft_cap": null,
+        "logit_scale": null
+      },
+      "transformer_config": {
+        "layer_configs": [
+          {
+            "pre_mixer_norm_config": {
+              "epsilon": 1e-06,
+              "scale_offset": null,
+              "upcast_mode": "only_normalization",
+              "subtract_mean": false,
+              "has_scale": true,
+              "has_biases": false
+            },
+            "mixer_conv_config": null,
+            "mixer_config": {
+              "type": "AttentionConfig",
+              "qkvg_projection_config": {},
+              "out_projection_config": {},
+              "query_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": null,
+                "upcast_mode": "only_normalization",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "key_norm_config": {
+                "epsilon": 1e-06,
+                "scale_offset": null,
+                "upcast_mode": "only_normalization",
+                "subtract_mean": false,
+                "has_scale": true,
+                "has_biases": false
+              },
+              "num_heads": 4,
+              "num_groups": 2,
+              "head_dim": 2,
+              "is_causal": true,
+              "scale": null,
+              "sliding_window_size": 16,
+              "logit_soft_cap": null,
+              "has_sinks": false,
+              "has_qkvg_biases": true,
+              "has_out_biases": true,
+              "has_gate": false,
+              "normalize_values": false,
+              "is_kv_sharing": false
+            },
+            "post_mixer_norm_config": null,
+            "pre_mlp_norm_config": {
+              "epsilon": 1e-06,
+              "scale_offset": null,
+              "upcast_mode": "only_normalization",
+              "subtract_mean": false,
+              "has_scale": true,
+              "has_biases": false
+            },
+            "mlp_conv_config": null,
+            "mlp_config": {
+              "type": "DenseMLPConfig",
+              "linear_config": {},
+              "activation": {
+                "type": "SiLU",
+                "alpha": 1.0
+              },
+              "has_up_biases": false,
+              "has_down_biases": false,
+              "gate_clipping": null,
+              "up_clipping": null
+            },
+            "post_mlp_norm_config": null,
+            "hidden_dim": null,
+            "ple_config": null,
+            "has_post_layer_scalar": false,
+            "kv_source_layer_index": null,
+            "rope_config": {
+              "type": "UnscaledRoPEConfig",
+              "base": 10000.0,
+              "max_sequence_length": 64,
+              "head_dim": 2
+            }
+          }
+        ],
+        "output_norm_config": {
+          "epsilon": 1e-06,
+          "scale_offset": null,
+          "upcast_mode": "only_normalization",
+          "subtract_mean": false,
+          "has_scale": true,
+          "has_biases": false
+        },
+        "model_dim": 8,
+        "hidden_dim": 12
+      },
+      "vocab_size": 16,
+      "ple_model_config": null,
+      "embedding_norm_config": null
+    }
+  }
+}

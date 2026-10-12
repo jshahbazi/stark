@@ -106,13 +106,13 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     if config.get("hidden_act", "silu") != "silu":
         raise UnsupportedConversion("Qwen3 streaming requires SiLU")
     if any(config.get(key) is not None for key in ("quantization_config", "rope_scaling", "rope_parameters")):
-        raise UnsupportedConversion("Quantization or scaled/custom RoPE requires Lalamo")
+        raise UnsupportedConversion("Quantization or scaled/custom RoPE is outside implemented coverage")
     if config.get("attention_dropout", 0.0) != 0.0:
-        raise UnsupportedConversion("Non-default Qwen3 attention dropout requires Lalamo")
+        raise UnsupportedConversion("Non-default Qwen3 attention dropout is outside implemented coverage")
     if any(config.get(key, False) for key in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder")):
-        raise UnsupportedConversion("Encoder/cross-attention settings require Lalamo")
+        raise UnsupportedConversion("Encoder/cross-attention settings are outside implemented coverage")
     if config.get("pruned_heads", {}):
-        raise UnsupportedConversion("Pruned attention heads require Lalamo")
+        raise UnsupportedConversion("Pruned attention heads are outside implemented coverage")
     model_dim = _positive_int(config, "hidden_size")
     hidden_dim = _positive_int(config, "intermediate_size")
     layers = _positive_int(config, "num_hidden_layers")
@@ -324,9 +324,9 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     if set(tensors) != expected:
         raise ConversionError("Qwen3 checkpoint has unexpected tensors")
     if unsupported_source_dtype:
-        raise UnsupportedConversion("Qwen3 checkpoint dtype requires Lalamo")
+        raise UnsupportedConversion("Unsupported Qwen3 checkpoint dtype")
     if needs_dense_dtype_change:
-        raise UnsupportedConversion("Changing dense tensor dtype requires Lalamo")
+        raise UnsupportedConversion("Qwen3 dense dtype conversion is not implemented")
     return ConversionPlan(
         decoder_config,
         tuple(operations),

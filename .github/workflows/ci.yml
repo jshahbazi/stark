@@ -39,6 +39,15 @@ jobs:
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
       - name: Test dependency-report gate
         run: uv run --no-project --python 3.12.13 python -m unittest discover -s scripts/ci -p 'test_*.py'
+      - name: Test model-free converter contracts
+        env:
+          HF_HUB_OFFLINE: '1'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
+      - name: Lint converter source and tests
+        run: |
+          uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
       - name: Check Rust formatting
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
@@ -48,8 +57,9 @@ jobs:
           cargo metadata --locked --format-version=1 > /dev/null
           cargo metadata --locked --manifest-path crates/legacy/download-manager/examples/wasm/Cargo.toml --format-version=1 > /dev/null
           uv lock --check --directory tools
+          uv lock --check --directory tools/converter
           uv lock --check --directory crates/legacy/stark/bindings/python
-          git diff --exit-code -- Cargo.lock crates/legacy/download-manager/examples/wasm/Cargo.lock tools/uv.lock crates/legacy/stark/bindings/python/uv.lock
+          git diff --exit-code -- Cargo.lock crates/legacy/download-manager/examples/wasm/Cargo.lock tools/uv.lock tools/converter/uv.lock crates/legacy/stark/bindings/python/uv.lock
       - name: Validate workflow syntax
         run: |
           archive="$RUNNER_TEMP/actionlint.tar.gz"

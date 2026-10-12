@@ -3,7 +3,6 @@
 import io
 import json
 import struct
-import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -202,10 +201,10 @@ def test_unknown_tensors_are_rejected_before_writing(tmp_path):
         build_qwen3_plan(source)
 
 
-def test_requested_dense_dtype_change_selects_fallback(tmp_path):
+def test_requested_qwen3_dtype_change_is_unsupported(tmp_path):
     source = tmp_path / "source"
     qwen_fixture(source, dtype="F32")
-    with pytest.raises(UnsupportedConversion, match="Changing dense tensor dtype"):
+    with pytest.raises(UnsupportedConversion, match="dense dtype conversion"):
         build_qwen3_plan(source, dtype="bfloat16")
 
 
@@ -356,38 +355,9 @@ def test_duplicate_config_keys_rejected(tmp_path):
 
 
 @pytest.mark.parametrize("tied,attention_bias", [(True, False), (False, True)])
-def test_decoder_config_matches_pinned_lalamo_metadata_baseline(tmp_path, tied, attention_bias):
-    project = Path(__file__).resolve().parents[1]
-    interpreter = project / "lalamo" / ".venv" / "bin" / "python"
-    if not interpreter.is_file():
-        pytest.skip("Separately locked Lalamo environment is not installed")
-    from tokenizers import Tokenizer, models
-
-    source, baseline = tmp_path / "source", tmp_path / "baseline"
+def test_decoder_config_matches_frozen_reference(tmp_path, tied, attention_bias):
+    source = tmp_path / "source"
     qwen_fixture(source, tied=tied, attention_bias=attention_bias)
-    tokenizer = Tokenizer(models.WordLevel({"<unk>": 0, "</s>": 1, "word": 2}, unk_token="<unk>"))
-    tokenizer.save(str(source / "tokenizer.json"))
-    (source / "tokenizer_config.json").write_text(
-        json.dumps({"chat_template": "{{ messages }}", "eos_token": "</s>", "bos_token": None})
-    )
-    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": 1}))
-    process = subprocess.run(
-        [
-            str(interpreter),
-            str(project / "stark_convert" / "lalamo_runner.py"),
-            "--source",
-            str(source),
-            "--output",
-            str(baseline),
-            "--repo",
-            "Qwen/Qwen3-0.6B",
-            "--metadata-only",
-        ],
-        capture_output=True,
-        check=False,
-    )
-    assert process.returncode == 0, "Pinned Lalamo metadata baseline failed"
-    upstream_decoder = json.loads((baseline / "config.json").read_text())["decoder_config"]
-    planned_decoder = build_qwen3_plan(source).decoder_config
-    matches = planned_decoder == upstream_decoder
-    assert matches, "Streaming decoder config differs from pinned Lalamo"
+    baseline = json.loads((Path(__file__).parent / "fixtures" / "qwen3_decoder_configs.json").read_text())
+    assert baseline["reference_revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
+    assert build_qwen3_plan(source).decoder_config == baseline["cases"][str(tied)]

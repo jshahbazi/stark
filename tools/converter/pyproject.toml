@@ -1,11 +1,12 @@
 [project]
 name = "stark-convert"
-version = "0.1.0"
-description = "Streaming Stark model conversion prototype with a pinned Lalamo fallback"
+version = "0.2.0"
+description = "Independent streaming model conversion for the Stark engine"
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "huggingface-hub>=1.4.1",
     "numpy>=2.4.0",
+    "ml-dtypes>=0.6.0",
     "psutil>=7.2.0",
     "tokenizers>=0.22.2",
 ]
@@ -23,6 +24,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["stark_convert*"]
+
+[tool.setuptools.package-data]
+stark_convert = ["catalog.json", "native_qualifications.json"]
 
 [tool.uv]
 python-preference = "only-managed"

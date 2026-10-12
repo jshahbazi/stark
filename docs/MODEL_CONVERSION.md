@@ -2,6 +2,8 @@
 
 Validation date: 2026-10-11. This evidence applies to the implementation and dependency hashes below. Native builds used Rust 1.98.1 and the optimized `stark-score` worker. Models and detailed benchmark artifacts remain private in ignored storage; this document publishes aggregates and hashes only.
 
+Historical record: this document describes the prototype committed at `77e9a425`, including its Lalamo fallback and original timing/lock hashes. The current replacement policy removes that runtime fallback and expands independent conversion. See the [replacement plan](MODEL_CONVERSION_PLAN.md) and [first milestone evidence](MODEL_CONVERSION_MILESTONE_1.md) for current implementation and qualification. The results below remain unchanged and apply to their recorded source state.
+
 ## Implementation
 
 The [conversion tool](../tools/converter/README.md) streams verified dense Qwen3 full-precision checkpoints into Stark's existing model format. Other registered models, quantized weights, unsupported metadata profiles, and dense dtype changes use the separately locked Lalamo backend. The fallback preserves upstream origin behavior and resolves cross-repository tokenizer and generation files from their own immutable revisions.
