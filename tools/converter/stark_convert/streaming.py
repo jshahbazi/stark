@@ -541,6 +541,12 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
         for op in operations
     ):
         raise ConversionError("invalid_scalar_transform")
+    if any(op.kind in {"mlx_repack", "mlx_params"} for op in operations):
+        from .compressed import validate_mlx_operation
+
+        for op in operations:
+            if op.kind in {"mlx_repack", "mlx_params"}:
+                validate_mlx_operation(op)
     header = {"__metadata__": plan.metadata} if plan.metadata else {}
     offset = 0
     for op in operations:
@@ -560,7 +566,7 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
             output.write(encoded)
             for op in operations:
                 before = output.tell()
-                if op.kind in {"copy", "fuse"}:
+                if op.kind in {"copy", "fuse", "mlx_repack"}:
                     for source in op.sources:
                         peak = max(peak, _copy(source, output, chunk_bytes))
                 elif op.kind == "cast_f32" and len(op.sources) == 1:
@@ -574,6 +580,10 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
                     )
                 elif op.kind == "transpose" and len(op.sources) == 1:
                     peak = max(peak, transpose_tensor(op.sources[0], output, chunk_bytes))
+                elif op.kind == "mlx_params":
+                    from .compressed import write_mlx_params
+
+                    peak = max(peak, write_mlx_params(op, output, chunk_bytes))
                 else:
                     raise ConversionError("Conversion plan has an invalid operation")
                 if output.tell() - before != op.nbytes:

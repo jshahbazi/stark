@@ -42,8 +42,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 37
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 33
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 49
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 45
 
 
 def test_extensions_are_separate_from_builtin_inventory():
@@ -51,6 +51,18 @@ def test_extensions_are_separate_from_builtin_inventory():
     assert all(entry["catalog_origin"] == "stark_extension" for entry in load_catalog()["extensions"])
     assert adapter_for_model("unsloth/Llama-3.2-1B-Instruct", "llama") == "llama"
     assert adapter_for_model("mistralai/Mistral-7B-Instruct-v0.3", "mistral") == "mistral"
+
+
+def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
+    packed = [entry for entry in models() if entry.get("compressed_format") is not None]
+    assert len(packed) == 12
+    assert {entry["compressed_format"]["bits"] for entry in packed} == {4, 8}
+    for entry in packed:
+        assert entry["adapter"] == entry["metadata_profile"] == "qwen3"
+        assert entry["compressed_format"]["scheme"] == "mlx_affine"
+        assert entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
+        assert entry["status"]["qualification"] == "pending"
+    assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] is None
 
 
 def test_external_files_and_field_selection_are_retained():
@@ -63,8 +75,10 @@ def test_external_files_and_field_selection_are_retained():
 
 def test_dispatch_requires_an_implemented_specific_tuple():
     assert adapter_for_model("Qwen/Qwen2.5-Coder-0.5B-Instruct", "qwen2") == "qwen2"
+    assert adapter_for_model("Qwen/Qwen3-0.6B-MLX-4bit", "qwen3") == "qwen3"
+    assert adapter_for_model("Qwen/Qwen3-0.6B-MLX-8bit", "qwen3") == "qwen3"
     with pytest.raises(UnsupportedConversion):
-        adapter_for_model("Qwen/Qwen3-0.6B-MLX-4bit")
+        adapter_for_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("google/gemma-4-E2B-it")
     with pytest.raises(UnsupportedConversion):

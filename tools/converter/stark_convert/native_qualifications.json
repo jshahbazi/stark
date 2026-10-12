@@ -242,6 +242,50 @@
           "optimized"
         ]
       }
+    },
+    {
+      "repo": "Qwen/Qwen3-0.6B-MLX-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "9b868e70c1cf5d09bf845fd267c1aff071b6bb2d43e935702d2f7fd3eed8d9e7",
+      "output_sha256": "cbd6d43eb6a40e56066c5498a72fee0c8e8c7aa316a29da7c6cdc79284611337",
+      "config_sha256": "713e0ad35c89bfdb8bc28eb5bfffecbc223ecd52256756f466e89fa9de585269",
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "Qwen/Qwen3-0.6B-MLX-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "86f32a8bc00e0943aa92dca65fccd1d556be0c6e7c40c2c688ac92336b20020d",
+      "output_sha256": "c279f5ca586407745d1faa75ecd35de67dac93d692bea9d00f08025ba80989f0",
+      "config_sha256": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
     }
   ]
 }

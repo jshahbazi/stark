@@ -116,7 +116,7 @@ def test_stop_ids_merge_without_losing_sampling_defaults(
     assert all(value is None for name, value in defaults.items() if name != "stop_token_ids")
 
 
-@pytest.mark.parametrize("repo", [None, "unregistered/model", "Qwen/Qwen3-4B-MLX-4bit"])
+@pytest.mark.parametrize("repo", [None, "unregistered/model", "mlx-community/Qwen3.5-4B-MLX-4bit"])
 def test_unverified_profile_leaves_no_output(
     metadata_source: tuple[Path, dict[str, Any]], tmp_path: Path, repo: str | None
 ) -> None:

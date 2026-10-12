@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 2 evidence](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and its [independent review](../../docs/MODEL_CONVERSION_MILESTONE_2_REVIEW.md) record current dense coverage, exact qualification, and latency results. [Milestone 1 evidence](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retains its original source versions and results.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 3 evidence](../../docs/MODEL_CONVERSION_MILESTONE_3.md) records MLX compressed conversion, exact qualification, and performance. [Milestone 2 evidence](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1 evidence](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Convert a model
 
@@ -29,11 +29,12 @@ The command emits aggregate timings, hashes, and capability status. Its private 
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented dense adapters and metadata profiles cover **33 built-ins plus four extensions**, or 37 identities:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **45 built-ins plus four extensions**, or 49 identities. This includes 33 dense built-ins and 12 MLX Qwen3 built-ins:
 
 | Adapter | Implemented identities |
 | --- | --- |
 | Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, `POLARIS-Project/Polaris-4B-Preview` |
+| Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128, divisible logical input widths |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
 | Llama | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `HuggingFaceTB/SmolLM2-1.7B-Instruct`, `Nanbeige/Nanbeige4.1-3B`, `RekaAI/reka-flash-3.1`; extension `unsloth/Llama-3.2-1B-Instruct` |
 | Mistral | `mistralai/Codestral-22B-v0.1`, `mistralai/Devstral-Small-2505`; extensions `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}` |
@@ -43,7 +44,18 @@ The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 
-This is implementation coverage. Exact checkpoint/dtype/config qualification remains per tuple and is recorded in the milestone evidence. A passing small checkpoint does not qualify every size or config variant in its family. Other catalog entries, quantized layouts, custom architectures/RoPE variants, and unsupported metadata representations fail with a sanitized unsupported category. Arbitrary Hugging Face repositories are outside the current catalog.
+This is implementation coverage. Exact checkpoint/dtype/config qualification remains per tuple and is recorded in the milestone evidence. A passing small checkpoint does not qualify every size or config variant in its family. Other catalog entries, compressed schemes, custom architectures/RoPE variants, and unsupported metadata representations fail with a sanitized unsupported category. Arbitrary Hugging Face repositories are outside the current catalog.
+
+MLX conversion repacks existing affine checkpoints without computing new quantization. Little-endian packed I32/U32 words become U8 tensors with identical payload bytes. Projection scales and affine biases are cast, fused, transposed, and padded to Stark's group/output layout; input and tied embedding planes retain their input/output layout. A complete plane triplet is required for every compressed matrix. Fused groups must share representation and coefficient dtype. The catalog binds each compressed identity to its declared 4-bit or 8-bit format, and contradictory declarations or layouts fail.
+
+```sh
+uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B-MLX-4bit \
+  --revision 173234aa840d113125e9f2271100ddbaf16c9620 \
+  --write-source-manifest runtime/converter-sources/qwen3-06b-mlx4.json \
+  --output models/qwen3-06b-mlx4-stark
+```
+
+MLX profiles resolve tokenizer and generation metadata from the original registered Qwen3 repository at an independently pinned revision. The 0.6B 4-bit and 8-bit group-128 BF16 tuples have exact artifact parity and named-build load-only qualifications. Other sizes and groups remain unqualified; no compressed inference-speed or quality claim is made.
 
 Probe the catalog without reading or downloading a checkpoint:
 
@@ -52,7 +64,7 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
   --capabilities
 ```
 
-The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Current implemented adapters emit language-model root configs. Classifier, TTS, specialized state-space/hybrid, MoE, and compressed conversion remain later workstreams.
+The probe reports catalog implementation, model kind, and runtime status with `source_validation=not_performed`. Successful conversion validates the complete accepted source layout. Current implemented adapters emit language-model root configs. Classifier, TTS, specialized state-space/hybrid, MoE, and other compressed conversion remain later workstreams.
 
 Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. The catalog probe remains unverified because it does not inspect source or output artifacts. A BF16 conversion reports `supported_layout_unverified_tuple` unless its registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash exactly match a stored native qualification.
 
@@ -101,6 +113,6 @@ Models and permitted native aggregate/hash validation artifacts remain in ignore
 
 Lalamo serves as a pinned design and qualification reference at [`831accb8252a6b6606c378048caeb44178f1a050`](https://github.com/trymirai/lalamo/tree/831accb8252a6b6606c378048caeb44178f1a050). The catalog exporter reads that source in a separate developer environment. Runtime conversion reads the checked-in declarative catalog and uses Stark implementations. [Lalamo's MIT license](LICENSE.lalamo) and Mirai Tech Inc. copyright are preserved. Stark retains Uzu base revision `8d01581474760bd1fc7f4a547ff1d02f7dada437`.
 
-Adapted source paths include `model_import/model_spec.py`, `model_import/model_specs/`, `model_import/origins.py`, `model_import/loaders/huggingface.py`, `model_import/model_configs/huggingface/{qwen2,qwen3,llama,mistral,gemma2,gemma3,phi3,granite,smollm3}.py`, `model_import/common.py`, tokenizer/generation configuration, normalization/linear/embedding/RoPE contracts, `weight_matrix.py`, and `safetensors.py`. The catalog records the registry-code revision and hashes of inline metadata fragments. Source receipts record checkpoint-file revisions and content hashes. Converter receipts recursively hash conversion-affecting package resources and the exporter, with the dependency lock recorded separately.
+Adapted source paths include `model_import/model_spec.py`, `model_import/model_specs/`, `model_import/origins.py`, `model_import/loaders/huggingface.py`, `model_import/model_configs/huggingface/{qwen2,qwen3,llama,mistral,gemma2,gemma3,phi3,granite,smollm3}.py`, `model_import/common.py`, tokenizer/generation configuration, normalization/linear/embedding/RoPE contracts, `weight_matrix.py`, `compressed/{mlx,quant_params}.py`, `compressed/utils/packing.py`, and `safetensors.py`. The catalog records the registry-code revision and hashes of inline metadata fragments. Source receipts record checkpoint-file revisions and content hashes. Converter receipts recursively hash conversion-affecting package resources and the exporter, with the dependency lock recorded separately.
 
 The replacement target is independently qualified support for every in-scope pinned inventory row. There is no permanent fallback. Unsupported rows remain visible until their implementation and acceptance gates pass. Public package publication and release infrastructure require a separate scoped task.
