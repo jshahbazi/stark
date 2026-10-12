@@ -18,7 +18,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .registry import get_model, required_files
+from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
+from .registry import architecture_for_config, get_model, required_files
 from .streaming import ConversionError, UnsupportedConversion, read_json
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
@@ -137,6 +138,10 @@ class SourceSnapshot:
     manifest: dict
 
     @property
+    def conversion_profile(self) -> dict | None:
+        return self.manifest.get("conversion_profile")
+
+    @property
     def checkpoint(self) -> Path:
         return self.root
 
@@ -153,6 +158,29 @@ class SourceSnapshot:
         names = tuple(
             sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file())
         )
+        profile = self.conversion_profile
+        if profile is not None:
+            if (
+                entry is not None
+                or not isinstance(profile, dict)
+                or set(profile) != {"architecture", "metadata_profile"}
+                or profile["metadata_profile"] != GENERIC_PROFILE
+                or architecture_for_config(read_json(self.root / "config.json")) != profile["architecture"]
+            ):
+                raise ConversionError("Generic source profile disagrees with its checkpoint")
+            rules = generic_files(self.repo, names)
+            roles = set(GENERIC_REQUIRED) | set(GENERIC_OPTIONAL)
+            actual = {
+                (record["role"], record["filename"]) for record in self.manifest["files"] if record["role"] in roles
+            }
+            if actual != {(rule["role"], rule["filename"]) for rule in rules} or any(
+                record["repo"] != self.repo or record["role"] not in roles | {"weights", "weight_index"}
+                for record in self.manifest["files"]
+            ):
+                raise ConversionError("Generic metadata selection changed during conversion")
+            for rule in rules:
+                if self.resolve_file(rule["filename"]).resolve() != (self.root / rule["filename"]).resolve():
+                    raise ConversionError("Generic metadata is outside its checkpoint source")
         selected, index_name = _weights(
             names, entry["container"] if entry else ".safetensors", lambda filename: self.root / _relative(filename)
         )
@@ -215,13 +243,21 @@ class SourceSnapshot:
             }
             for record in self.manifest["files"]
         ]
-        return {
+        result = {
             "sources": sources,
             "source_files": files,
             "source_manifest_sha256": hashlib.sha256(
                 json.dumps({"sources": sources, "files": files}, sort_keys=True).encode()
             ).hexdigest(),
         }
+        if self.conversion_profile is not None:
+            result["conversion_profile"] = self.conversion_profile
+            result["source_manifest_sha256"] = hashlib.sha256(
+                json.dumps(
+                    {"sources": sources, "files": files, "conversion_profile": self.conversion_profile}, sort_keys=True
+                ).encode()
+            ).hexdigest()
+        return result
 
     def write_manifest(self, path: Path) -> None:
         """Create a private replay manifest atomically without overwriting."""
@@ -240,10 +276,26 @@ class SourceSnapshot:
             temporary.unlink(missing_ok=True)
 
 
-def _replay(path: Path, *, repo: str | None, revision: str | None) -> SourceSnapshot:
+def _replay(
+    path: Path, *, repo: str | None, revision: str | None, metadata_profile: str | None, architecture: str | None
+) -> SourceSnapshot:
     manifest = read_json(path)
     try:
-        if manifest["schema_version"] != 1 or not isinstance(manifest["root"], str):
+        schema = manifest["schema_version"]
+        profile = manifest.get("conversion_profile")
+        if type(schema) is not int or schema not in {1, 2} or not isinstance(manifest["root"], str):
+            raise ValueError()
+        if schema == 1 and (profile is not None or metadata_profile is not None):
+            raise ValueError()
+        if schema == 2 and (
+            not isinstance(profile, dict)
+            or set(profile) != {"architecture", "metadata_profile"}
+            or profile["metadata_profile"] != GENERIC_PROFILE
+            or metadata_profile is not None
+            and metadata_profile != profile["metadata_profile"]
+            or architecture is not None
+            and architecture != profile["architecture"]
+        ):
             raise ValueError()
         primary = manifest["primary_repo"]
         if repo is not None and repo != primary or revision is not None and revision != manifest["primary_revision"]:
@@ -284,8 +336,15 @@ def _replay(path: Path, *, repo: str | None, revision: str | None) -> SourceSnap
             ):
                 raise ValueError()
         entry = get_model(primary) if primary else None
+        if schema == 2 and entry is not None:
+            raise ValueError()
+        names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         rules = (
-            required_files(entry)
+            generic_files(
+                primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+            )
+            if schema == 2
+            else required_files(entry)
             if entry is not None
             else (
                 {"repo": primary, "filename": name}
@@ -295,7 +354,6 @@ def _replay(path: Path, *, repo: str | None, revision: str | None) -> SourceSnap
         if any((rule["repo"], rule["filename"]) not in known for rule in rules):
             raise ValueError()
         snapshot = SourceSnapshot(root, primary, manifest["primary_revision"], manifest)
-        names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", snapshot.resolve_file)
         if any((primary, name) not in known for name in selected):
             raise ValueError()
@@ -321,10 +379,18 @@ def resolve_source(
     source_manifest: Path | None = None,
     offline: bool = False,
     hub: Any = None,
+    metadata_profile: str | None = None,
+    architecture: str | None = None,
 ) -> SourceSnapshot:
     """Resolve all repositories before any file downloads or conversion starts."""
     if source_manifest is not None:
-        return _replay(Path(source_manifest), repo=repo, revision=revision)
+        return _replay(
+            Path(source_manifest),
+            repo=repo,
+            revision=revision,
+            metadata_profile=metadata_profile,
+            architecture=architecture,
+        )
     if revision is not None and not isinstance(revision, str):
         raise ConversionError("Invalid source revision")
     path = Path(value).expanduser()
@@ -336,7 +402,9 @@ def resolve_source(
             raise ValueError("conflicting_repository")
         repo = str(value)
     entry = get_model(repo) if repo else None
-    if repo is not None and entry is None:
+    if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
+        raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
+    if repo is not None and entry is None and metadata_profile is None:
         raise UnsupportedConversion("Repository is outside the pinned conversion catalog")
     if not local and offline:
         raise ConversionError("Offline resolution requires a source manifest")
@@ -394,6 +462,11 @@ def resolve_source(
         root = config_path
         for _ in _relative(config_rule["filename"]).parts:
             root = root.parent
+    profile = None
+    if metadata_profile == GENERIC_PROFILE:
+        rules = generic_files(repo, names)
+        detected = architecture_for_config(read_json(loader("config.json")), architecture)
+        profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
     selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     descriptors = list(rules)
     if index_name:
@@ -430,7 +503,7 @@ def resolve_source(
     for record, signature, digest in zip(records, signatures, hashes, strict=True):
         record.update(size=signature[2], sha256=digest, signature=list(signature))
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2 if profile is not None else 1,
         "root": str(root.absolute()),
         "primary_repo": repo,
         "primary_revision": revisions[repo],
@@ -440,4 +513,9 @@ def resolve_source(
         ],
         "files": records,
     }
-    return SourceSnapshot(root, repo, revisions[repo], manifest)
+    if profile is not None:
+        manifest["conversion_profile"] = profile
+    snapshot = SourceSnapshot(root, repo, revisions[repo], manifest)
+    if profile is not None:
+        snapshot.assert_unchanged(verify_content=False)
+    return snapshot

@@ -392,7 +392,7 @@
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFLFM2Config",
@@ -435,7 +435,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-1.2B",
       "origin": "HuggingFaceOrigin",
@@ -443,14 +443,14 @@
       "size": "1.2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFLFM2Config",
@@ -493,7 +493,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-2.6B",
       "origin": "HuggingFaceOrigin",
@@ -501,14 +501,14 @@
       "size": "2.6B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFLFM2Config",
@@ -551,7 +551,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-350M",
       "origin": "HuggingFaceOrigin",
@@ -559,14 +559,14 @@
       "size": "350M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "lfm2",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFLFM2Config",
@@ -609,7 +609,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "lfm2",
       "model_kind": "LanguageModelSpec",
       "name": "LFM2-700M",
       "origin": "HuggingFaceOrigin",
@@ -617,7 +617,7 @@
       "size": "700M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2466,7 +2466,7 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
@@ -2509,7 +2509,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-0.8B",
       "origin": "HuggingFaceOrigin",
@@ -2517,14 +2517,14 @@
       "size": "0.8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
@@ -2563,7 +2563,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-27B",
       "origin": "HuggingFaceOrigin",
@@ -2571,14 +2571,14 @@
       "size": "27B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
@@ -2621,7 +2621,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-2B",
       "origin": "HuggingFaceOrigin",
@@ -2629,7 +2629,7 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2690,7 +2690,7 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
@@ -2733,7 +2733,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-4B",
       "origin": "HuggingFaceOrigin",
@@ -2741,14 +2741,14 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3_5",
       "catalog_origin": "pinned_builtin",
       "compressed_format": null,
       "config_class": "HFQwen35Config",
@@ -2787,7 +2787,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3_5",
       "model_kind": "LanguageModelSpec",
       "name": "Qwen3.5-9B",
       "origin": "HuggingFaceOrigin",
@@ -2795,7 +2795,7 @@
       "size": "9B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

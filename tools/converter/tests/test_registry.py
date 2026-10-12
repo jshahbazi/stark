@@ -42,8 +42,21 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 58
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 54
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 67
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 63
+
+
+def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
+    assert {entry["repo"] for entry in models() if entry["adapter"] == "qwen3_5"} == {
+        f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")
+    }
+    assert {entry["repo"] for entry in models() if entry["adapter"] == "lfm2"} == {
+        f"LiquidAI/LFM2-{size}" for size in ("350M", "700M", "1.2B", "2.6B")
+    }
+    for repo in ("Qwen/Qwen3.5-35B-A3B", "Qwen/Qwen3.6-27B", "LiquidAI/LFM2.5-1.2B-Instruct"):
+        entry = get_model(repo)
+        assert entry is not None and entry["adapter"] is None
+        assert entry["metadata_profile"] is None and entry["status"]["conversion"] == "planned"
 
 
 def test_extensions_are_separate_from_builtin_inventory():
