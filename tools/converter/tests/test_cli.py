@@ -6,6 +6,9 @@ from pathlib import Path
 
 import pytest
 from test_dense_adapters import dense_fixture
+from test_gemma import gemma_fixture
+from test_granite_smollm import fixture as scalar_family_fixture
+from test_phi import phi_fixture
 from test_qualifications import evidence_record
 from test_streaming import qwen_fixture
 from tokenizers import Tokenizer, models
@@ -23,19 +26,34 @@ REPOS = {
     "qwen2": "Qwen/Qwen2.5-Coder-0.5B-Instruct",
     "llama": "meta-llama/Llama-3.2-1B-Instruct",
     "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "gemma2": "google/gemma-2-2b-it",
+    "gemma3_text": "google/gemma-3-1b-it",
+    "phi3": "microsoft/Phi-4-mini-instruct",
+    "granite": "ibm-granite/granite-3.3-2b-instruct",
+    "smollm3": "HuggingFaceTB/SmolLM3-3B",
 }
 
 
 def source_fixture(path: Path, family: str = "qwen3", *, sharded=False):
     if family == "qwen3":
         qwen_fixture(path, sharded=sharded)
+    elif family in {"gemma2", "gemma3_text"}:
+        gemma_fixture(path, family, sharded=sharded)
+    elif family == "phi3":
+        phi_fixture(path, sharded=sharded)
+    elif family in {"granite", "smollm3"}:
+        scalar_family_fixture(path, case=family, sharded=sharded)
     else:
         dense_fixture(path, family, sharded=sharded)
     tokenizer = Tokenizer(
         models.WordLevel({f"[SYNTHETIC_{index}]": index for index in range(16)}, unk_token="[SYNTHETIC_0]")
     )
     tokenizer.save(str(path / "tokenizer.json"))
-    (path / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
+    (path / "tokenizer_config.json").write_text(
+        json.dumps({"chat_template": None if family == "smollm3" else "{{ messages }}"})
+    )
+    if family == "smollm3":
+        (path / "chat_template.jinja").write_text("{{ messages }}")
     (path / "generation_config.json").write_text(json.dumps({"eos_token_id": 1, "temperature": 0.6}))
     return path
 

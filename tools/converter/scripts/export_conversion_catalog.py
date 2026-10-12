@@ -33,7 +33,10 @@ def export(reference: Path) -> dict:
         raise ValueError("Reference checkout must be clean")
     sys.path.insert(0, str(reference))
     from lalamo.model_import.model_spec import JSONFieldSpec
-    from lalamo.model_import.model_specs.output_parser_regexes import OPTIONAL_THINKING_OUTPUT_PARSER_REGEX
+    from lalamo.model_import.model_specs.output_parser_regexes import (
+        GRANITE_THINKING_OUTPUT_PARSER_REGEX,
+        OPTIONAL_THINKING_OUTPUT_PARSER_REGEX,
+    )
     from lalamo.model_import.model_specs.reasoning_configs import (
         BOOLEAN_REASONING_DEFAULT_OFF_CONFIG,
         BOOLEAN_REASONING_DEFAULT_ON_CONFIG,
@@ -47,6 +50,10 @@ def export(reference: Path) -> dict:
         "HFQwen2Config": "qwen2",
         "HFLlamaConfig": "llama",
         "HFMistralConfig": "mistral",
+        "HFGemma3TextConfig": "gemma3_text",
+        "HFPhi3Config": "phi3",
+        "HFGraniteConfig": "granite",
+        "HFSmolLM3Config": "smollm3",
     }
     for spec in ModelRegistry.build(allow_third_party_plugins=False).models:
         repo = spec.origin.description
@@ -71,29 +78,35 @@ def export(reference: Path) -> dict:
                     "sha256": _digest(dataclasses.asdict(value) if dataclasses.is_dataclass(value) else value)
                 }
         parser = getattr(spec, "output_parser_regex", None)
-        parser_id = (
-            "optional_thinking"
-            if parser == OPTIONAL_THINKING_OUTPUT_PARSER_REGEX
-            else ("sha256:" + _digest(parser) if parser is not None else None)
-        )
+        parsers = {
+            OPTIONAL_THINKING_OUTPUT_PARSER_REGEX: "optional_thinking",
+            GRANITE_THINKING_OUTPUT_PARSER_REGEX: "granite_thinking",
+        }
+        parser_id = parsers.get(parser, "sha256:" + _digest(parser) if parser is not None else None)
         reasoning = getattr(spec, "reasoning_config", None)
         if reasoning == BOOLEAN_REASONING_DEFAULT_ON_CONFIG:
             reasoning_id = "boolean_default_on"
         elif reasoning == BOOLEAN_REASONING_DEFAULT_OFF_CONFIG:
             reasoning_id = "boolean_default_off"
+        elif class_name == "HFGraniteConfig" and spec.family == "Granite" and spec.name.startswith("granite-3.3-"):
+            # Bind the special field-name profile to the exact upstream value.
+            expected = {
+                "default_reasoning_effort": "no_reasoning",
+                "field_name": "thinking",
+                "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
+            }
+            if reasoning is None or dataclasses.asdict(reasoning) != expected:
+                raise ValueError("Unrecognized Granite reasoning profile")
+            reasoning_id = "granite_boolean_default_off"
         else:
             reasoning_id = "sha256:" + _digest(reasoning) if reasoning is not None else None
         thinking_end = getattr(spec, "end_of_thinking_tag", None)
-        end_id = (
-            "qwen_think_end"
-            if thinking_end == "\n</think>"
-            else ("sha256:" + _digest(thinking_end) if thinking_end is not None else None)
-        )
+        end_ids = {"\n</think>": "qwen_think_end", "\n\n</think>": "double_newline_think_end", "</think>": "think_end"}
+        end_id = end_ids.get(thinking_end, "sha256:" + _digest(thinking_end) if thinking_end is not None else None)
         grammar = getattr(spec, "grammar_start_tokens", ())
         roles = {role: getattr(spec, role + "_role_name", role) for role in ("system", "user", "assistant")}
         dense = container == ".safetensors" and not any(word in spec.name.lower() for word in ("mlx", "4bit", "8bit"))
-        milestone_family = spec.family in {"Qwen3", "Qwen2.5-Coder", "Llama-3.1", "Llama-3.2", "Codestral", "Devstral"}
-        adapter = profiles.get(class_name) if dense and milestone_family else None
+        adapter = profiles.get(class_name) if dense else None
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,
@@ -147,6 +160,23 @@ def export(reference: Path) -> dict:
         for file in entry["files"].values():
             file["repo"] = repository
         extensions.append(entry)
+    # The pinned config/loader supports Gemma2 but the builtin registry has no
+    # Gemma2 row. This explicit extension uses standard LanguageModelSpec files.
+    gemma2 = copy.deepcopy(next(entry for entry in entries if entry["repo"] == "google/gemma-3-1b-it"))
+    gemma2.update(
+        repo="google/gemma-2-2b-it",
+        catalog_origin="stark_extension",
+        profile_reference="HFGemma2Config / standard LanguageModelSpec",
+        family="Gemma-2",
+        name="gemma-2-2b-it",
+        size="2B",
+        config_class="HFGemma2Config",
+        adapter="gemma2",
+        metadata_profile="gemma2",
+    )
+    for file in gemma2["files"].values():
+        file["repo"] = gemma2["repo"]
+    extensions.append(gemma2)
     return {
         "schema_version": 1,
         "reference": {

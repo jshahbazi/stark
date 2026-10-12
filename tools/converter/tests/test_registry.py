@@ -15,10 +15,10 @@ from stark_convert.streaming import UnsupportedConversion
 def test_complete_pinned_builtin_inventory():
     catalog = load_catalog()
     assert catalog["entry_count"] == 110 == len(catalog["models"])
-    assert catalog["extension_count"] == 3 == len(catalog["extensions"])
+    assert catalog["extension_count"] == 4 == len(catalog["extensions"])
     assert catalog["reference"]["plugins"] is False
     assert catalog["reference"]["revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
-    assert len({entry["repo"] for entry in models()}) == 113
+    assert len({entry["repo"] for entry in models()}) == 114
     assert sum(entry["model_kind"] == "LanguageModelSpec" for entry in catalog["models"]) == 107
     assert sum(entry["model_kind"] == "ClassifierModelSpec" for entry in models()) == 2
     assert sum(entry["model_kind"] == "TTSModelSpec" for entry in models()) == 1
@@ -27,7 +27,7 @@ def test_complete_pinned_builtin_inventory():
 
 def test_catalog_is_independent_of_reference_and_framework_imports():
     code = (
-        "import sys; from stark_convert.registry import models; assert len(models()) == 113; "
+        "import sys; from stark_convert.registry import models; assert len(models()) == 114; "
         "assert not any(name.split('.')[0] in {'lalamo','jax','torch'} for name in sys.modules)"
     )
     env = os.environ.copy()
@@ -42,7 +42,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 22
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 37
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 33
 
 
 def test_extensions_are_separate_from_builtin_inventory():
@@ -65,7 +66,7 @@ def test_dispatch_requires_an_implemented_specific_tuple():
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("Qwen/Qwen3-0.6B-MLX-4bit")
     with pytest.raises(UnsupportedConversion):
-        adapter_for_model("Nanbeige/Nanbeige4.1-3B")
+        adapter_for_model("google/gemma-4-E2B-it")
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("Qwen/Qwen3-0.6B", "llama")
     assert get_model("unregistered/model") is None

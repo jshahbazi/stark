@@ -1,5 +1,6 @@
 """Synthetic fixtures exercise format validation and bit-preserving transforms."""
 
+import hashlib
 import io
 import json
 import struct
@@ -201,11 +202,17 @@ def test_unknown_tensors_are_rejected_before_writing(tmp_path):
         build_qwen3_plan(source)
 
 
-def test_requested_qwen3_dtype_change_is_unsupported(tmp_path):
+def test_requested_qwen3_dtype_change_is_planned_and_written(tmp_path):
     source = tmp_path / "source"
     qwen_fixture(source, dtype="F32")
-    with pytest.raises(UnsupportedConversion, match="dense dtype conversion"):
-        build_qwen3_plan(source, dtype="bfloat16")
+    plan = build_qwen3_plan(source, dtype="bfloat16")
+    assert any(operation.kind == "cast" for operation in plan.operations)
+    output = tmp_path / "converted.safetensors"
+    streaming.write_plan(plan, output)
+    assert all(
+        tensor.dtype == ("F32" if name.endswith(".scales") else "BF16")
+        for name, tensor in read_safetensors_header(output)[1].items()
+    )
 
 
 @pytest.mark.parametrize("malformation", ["extra", "shape", "missing"])
@@ -361,3 +368,73 @@ def test_decoder_config_matches_frozen_reference(tmp_path, tied, attention_bias)
     baseline = json.loads((Path(__file__).parent / "fixtures" / "qwen3_decoder_configs.json").read_text())
     assert baseline["reference_revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
     assert build_qwen3_plan(source).decoder_config == baseline["cases"][str(tied)]
+
+
+SCALAR_REFERENCE = json.loads((Path(__file__).parent / "fixtures" / "granite_smollm_configs.json").read_text())[
+    "scalar_reference"
+]
+
+
+def scalar_reference_bits(dtype):
+    if dtype != "F32":
+        return np.arange(65536, dtype="<u2")
+    reference = SCALAR_REFERENCE
+    permutation = np.arange(reference["f32_permutation_count"], dtype="<u4")
+    permutation = (permutation * np.uint32(reference["f32_multiplier"])) ^ np.uint32(reference["f32_xor"])
+    return np.concatenate([np.array(reference["f32_edge_bits"], dtype="<u4"), permutation])
+
+
+@pytest.mark.parametrize("dtype", ["BF16", "F16", "F32"])
+@pytest.mark.parametrize("target", ["BF16", "F16", "F32"])
+@pytest.mark.parametrize("kind", ["scalar_multiply", "scalar_divide"])
+@pytest.mark.parametrize("scalar", SCALAR_REFERENCE["scalars"])
+def test_scalar_source_rounding_matches_frozen_jax_reference(tmp_path, dtype, target, kind, scalar):
+    bits = scalar_reference_bits(dtype)
+    case = SCALAR_REFERENCE["cases"][dtype]
+    assert len(bits) == case["count"]
+    assert hashlib.sha256(bits.tobytes()).hexdigest() == case["source_sha256"]
+    path = tmp_path / "synthetic.safetensors"
+    save_tensors(path, {"source": (dtype, bits)})
+    tensor = read_safetensors_header(path)[1]["source"]
+    operation = streaming.TensorOperation("scaled", (tensor,), target, tensor.shape, kind, scalar)
+    plan = streaming.ConversionPlan({}, (operation,), {}, tensor.nbytes, 1, (tensor,))
+    result = tmp_path / "converted.safetensors"
+    stats = streaming.write_plan(plan, result, chunk_bytes=4096)
+    converted = read_safetensors_header(result)[1]["scaled"]
+    digest = hashlib.sha256(tensor_bytes(converted)).hexdigest()
+    assert digest == case["output_sha256"][f"{kind}:{scalar}:{target}"]
+    assert stats["peak_buffer_bytes"] <= 4096
+    assert stats["output_sha256"] == hashlib.sha256(result.read_bytes()).hexdigest()
+
+
+def test_scalar_transform_bounds_smallest_writer_workspace(tmp_path):
+    path = tmp_path / "synthetic.safetensors"
+    bits = scalar_reference_bits("F32")
+    save_tensors(path, {"source": ("F32", bits)})
+    tensor = read_safetensors_header(path)[1]["source"]
+    operation = streaming.TensorOperation("scaled", (tensor,), "F32", tensor.shape, "scalar_multiply", 0.22)
+    plan = streaming.ConversionPlan({}, (operation,), {}, tensor.nbytes, 1, (tensor,))
+    output = tmp_path / "converted.safetensors"
+    stats = streaming.write_plan(plan, output, chunk_bytes=16)
+    converted = read_safetensors_header(output)[1]["scaled"]
+    assert (
+        hashlib.sha256(tensor_bytes(converted)).hexdigest()
+        == SCALAR_REFERENCE["cases"]["F32"]["output_sha256"]["scalar_multiply:0.22:F32"]
+    )
+    assert stats["peak_buffer_bytes"] <= 16
+
+
+@pytest.mark.parametrize(
+    "kind,scalar",
+    [("scalar_multiply", None), ("scalar_multiply", True), ("scalar_multiply", float("nan")), ("scalar_divide", 0)],
+)
+def test_invalid_scalar_plan_fails_before_writing(tmp_path, kind, scalar):
+    path = tmp_path / "source.safetensors"
+    save_tensors(path, {"source": ("F32", np.ones(4, dtype="<f4"))})
+    tensor = read_safetensors_header(path)[1]["source"]
+    operation = streaming.TensorOperation("scaled", (tensor,), "F32", tensor.shape, kind, scalar)
+    plan = streaming.ConversionPlan({}, (operation,), {}, tensor.nbytes, 1, (tensor,))
+    output = tmp_path / "converted.safetensors"
+    with pytest.raises(ConversionError, match="invalid_scalar_transform"):
+        streaming.write_plan(plan, output)
+    assert not output.exists()

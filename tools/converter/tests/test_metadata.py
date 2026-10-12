@@ -371,6 +371,86 @@ def test_source_resolver_errors_never_expose_exception_content(
     assert not (tmp_path / "output").exists()
 
 
+@pytest.mark.parametrize(
+    ("repo", "model_type", "end", "parser", "reasoning_field"),
+    [
+        ("HuggingFaceTB/SmolLM2-1.7B-Instruct", "llama", None, False, None),
+        ("microsoft/Phi-4-mini-instruct", "phi3", None, False, None),
+        ("google/gemma-3-1b-it", "gemma3_text", None, False, None),
+        ("google/gemma-2-2b-it", "gemma2", None, False, None),
+        ("ibm-granite/granite-3.1-2b-instruct", "granite", None, False, None),
+        ("ibm-granite/granite-3.3-2b-instruct", "granite", "</think>", True, "thinking"),
+        ("Nanbeige/Nanbeige4.1-3B", "llama", "</think>", True, None),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", "qwen2", "\n\n</think>", True, None),
+    ],
+)
+def test_additional_dense_profile_codec_defaults(
+    metadata_source, tmp_path, repo, model_type, end, parser, reasoning_field
+):
+    source, config = metadata_source
+    codec = write_metadata(
+        source, tmp_path / "output", {**config, "_stark_model_repo": repo, "model_type": model_type}
+    )["token_codec_config"]
+    assert codec["end_of_thinking_tag"] == end
+    assert (codec["output_parser_regex"] is not None) == parser
+    if reasoning_field is None:
+        assert codec["reasoning_config"] is None
+    else:
+        assert codec["reasoning_config"] == {
+            "default_reasoning_effort": "no_reasoning",
+            "field_name": reasoning_field,
+            "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
+        }
+
+
+def test_functiongemma_static_inline_identity_and_roles(metadata_source, tmp_path):
+    import hashlib
+
+    source, config = metadata_source
+    repo = "google/functiongemma-270m-it"
+    _update_json(source / "tokenizer_config.json", {"chat_template": None})
+    (source / "chat_template.jinja").write_text("{{ messages }}")
+    codec = write_metadata(
+        source, tmp_path / "output", {**config, "_stark_model_repo": repo, "model_type": "gemma3_text"}
+    )["token_codec_config"]
+    assert codec["system_role_name"] == "developer"
+    assert codec["prompt_template"] == "{{ messages }}"
+    assert (
+        hashlib.sha256(json.dumps(codec["default_system_prompt"]).encode()).hexdigest()
+        == get_model(repo)["metadata"]["inline_sources"]["system_prompt"]["sha256"]
+    )
+
+
+def test_unknown_inline_profile_is_rejected_before_output(metadata_source, tmp_path):
+    source, config = metadata_source
+    entry = deepcopy(get_model(config["_stark_model_repo"]))
+    entry["metadata"]["inline_sources"]["system_prompt"] = {"sha256": "0" * 64}
+    with pytest.raises(UnsupportedMetadata, match="Unsupported inline metadata profile"):
+        write_metadata(source, tmp_path / "output", config, model_entry=entry)
+    assert not (tmp_path / "output").exists()
+
+
+def test_inline_template_requires_reviewed_role_hash_pair(metadata_source, tmp_path):
+    source, config = metadata_source
+    _update_json(source / "tokenizer_config.json", {"chat_template": None})
+    entry = deepcopy(get_model(config["_stark_model_repo"]))
+    entry["metadata"]["inline_sources"]["chat_template"] = {
+        "sha256": "61f8687f0fca06cb9702de0a3e029cdb9cc90208fd3e7f24e57577b877bf2678"
+    }
+    assert isinstance(
+        write_metadata(source, tmp_path / "output", config, model_entry=entry)["token_codec_config"][
+            "prompt_template"
+        ],
+        str,
+    )
+    entry["metadata"]["inline_sources"]["chat_template"] = get_model("google/functiongemma-270m-it")["metadata"][
+        "inline_sources"
+    ]["system_prompt"]
+    with pytest.raises(UnsupportedMetadata):
+        write_metadata(source, tmp_path / "wrong_role", config, model_entry=entry)
+    assert not (tmp_path / "wrong_role").exists()
+
+
 @pytest.mark.skipif(
     not os.environ.get("STARK_CONVERT_REFERENCE_ARTIFACTS"),
     reason="Set STARK_CONVERT_REFERENCE_ARTIFACTS to independently generated private reference artifacts.",

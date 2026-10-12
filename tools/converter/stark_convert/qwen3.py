@@ -225,10 +225,10 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     expected = set()
     metadata = {}
     unsupported_source_dtype = False
-    needs_dense_dtype_change = False
+    mixed_fusion_dtype = False
 
     def tensor(name: str, shape: tuple[int, ...], *, norm_scale: bool = False):
-        nonlocal unsupported_source_dtype, needs_dense_dtype_change
+        nonlocal unsupported_source_dtype
         expected.add(name)
         if name not in tensors:
             raise ConversionError("Qwen3 checkpoint is missing a required tensor")
@@ -237,17 +237,18 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
             raise ConversionError("Qwen3 checkpoint tensor shape disagrees with its config")
         if info.dtype not in {"BF16", "F16", "F32"}:
             unsupported_source_dtype = True
-        if not norm_scale and info.dtype != target_dtype:
-            needs_dense_dtype_change = True
         return info
 
     def matrix(
         out: str, names: tuple[str, ...], shapes: tuple[tuple[int, ...], ...], shape: tuple[int, ...], layout: str
     ):
+        nonlocal mixed_fusion_dtype
         sources = tuple(tensor(name, source_shape) for name, source_shape in zip(names, shapes, strict=True))
-        operations.append(
-            TensorOperation(out + ".weights", sources, target_dtype, shape, "fuse" if len(sources) > 1 else "copy")
-        )
+        mixed_fusion_dtype |= len({info.dtype for info in sources}) > 1
+        kind = "fuse" if len(sources) > 1 else "copy"
+        if any(info.dtype != target_dtype for info in sources):
+            kind = "fuse_cast" if len(sources) > 1 else "cast"
+        operations.append(TensorOperation(out + ".weights", sources, target_dtype, shape, kind))
         metadata[out + ".spec"] = json.dumps({"type": "FullPrecisionSpec", "layout": layout})
 
     def scale(out: str, name: str, width: int):
@@ -311,22 +312,30 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
                 tensor(src + f".self_attn.{name}_proj.bias", (width,))
                 for name, width in (("q", q_width), ("k", kv_width), ("v", kv_width))
             )
+            mixed_fusion_dtype |= len({info.dtype for info in sources}) > 1
+            kind = "fuse" if all(info.dtype == target_dtype for info in sources) else "fuse_cast"
             operations.append(
                 TensorOperation(
-                    out + ".mixer.qkvg_projection.biases", sources, target_dtype, (q_width + 2 * kv_width,), "fuse"
+                    out + ".mixer.qkvg_projection.biases", sources, target_dtype, (q_width + 2 * kv_width,), kind
                 )
             )
             info = tensor(src + ".self_attn.o_proj.bias", (model_dim,))
             operations.append(
-                TensorOperation(out + ".mixer.out_projection.biases", (info,), target_dtype, (model_dim,))
+                TensorOperation(
+                    out + ".mixer.out_projection.biases",
+                    (info,),
+                    target_dtype,
+                    (model_dim,),
+                    "copy" if info.dtype == target_dtype else "cast",
+                )
             )
     scale("decoder.transformer.output_norm", "model.norm.weight", model_dim)
     if set(tensors) != expected:
         raise ConversionError("Qwen3 checkpoint has unexpected tensors")
     if unsupported_source_dtype:
         raise UnsupportedConversion("Unsupported Qwen3 checkpoint dtype")
-    if needs_dense_dtype_change:
-        raise UnsupportedConversion("Qwen3 dense dtype conversion is not implemented")
+    if mixed_fusion_dtype:
+        raise UnsupportedConversion("Mixed-dtype Qwen3 fusion promotion is outside implemented coverage")
     return ConversionPlan(
         decoder_config,
         tuple(operations),

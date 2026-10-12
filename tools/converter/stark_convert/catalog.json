@@ -1,8 +1,62 @@
 {
   "entry_count": 110,
   "exporter": "tools/converter/scripts/export_conversion_catalog.py",
-  "extension_count": 3,
+  "extension_count": 4,
   "extensions": [
+    {
+      "adapter": "gemma2",
+      "catalog_origin": "stark_extension",
+      "config_class": "HFGemma2Config",
+      "container": ".safetensors",
+      "family": "Gemma-2",
+      "files": {
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "google/gemma-2-2b-it"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "google/gemma-2-2b-it"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "google/gemma-2-2b-it"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "google/gemma-2-2b-it"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": null,
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": null,
+        "reasoning_id": null,
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "gemma2",
+      "model_kind": "LanguageModelSpec",
+      "name": "gemma-2-2b-it",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "HFGemma2Config / standard LanguageModelSpec",
+      "repo": "google/gemma-2-2b-it",
+      "size": "2B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Google"
+    },
     {
       "adapter": "mistral",
       "catalog_origin": "stark_extension",
@@ -168,7 +222,7 @@
   ],
   "models": [
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
@@ -206,7 +260,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "rnj-1-instruct",
       "origin": "HuggingFaceOrigin",
@@ -214,14 +268,14 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "EssentialAI"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
@@ -259,7 +313,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM2-1.7B-Instruct",
       "origin": "HuggingFaceOrigin",
@@ -267,14 +321,14 @@
       "size": "1.7B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
@@ -316,7 +370,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "smollm3",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM3-3B",
       "origin": "HuggingFaceOrigin",
@@ -324,7 +378,7 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -844,7 +898,7 @@
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
@@ -868,7 +922,7 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:8c6961eefa46f4c1e7af976252132efbfef78c7610e02d5c1f3a6907978cebae",
+        "end_of_thinking_id": "think_end",
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
@@ -882,7 +936,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Nanbeige4.1-3B",
       "origin": "HuggingFaceOrigin",
@@ -890,14 +944,14 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Nanbeige"
     },
     {
-      "adapter": null,
+      "adapter": "qwen3",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFQwen3Config",
       "container": ".safetensors",
@@ -925,7 +979,7 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:7d4703a73254437fbab5e492f7a4de3a925658098b458b946307cb922c6c3a43",
+        "end_of_thinking_id": "double_newline_think_end",
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
@@ -939,7 +993,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen3",
       "model_kind": "LanguageModelSpec",
       "name": "Polaris-4B-Preview",
       "origin": "HuggingFaceOrigin",
@@ -947,7 +1001,7 @@
       "size": "4B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2825,7 +2879,7 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
@@ -2863,7 +2917,7 @@
           "user": "human"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Reka-Flash-3.1",
       "origin": "HuggingFaceOrigin",
@@ -2871,7 +2925,7 @@
       "size": "21B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -2984,7 +3038,7 @@
       "vendor": "Cartesia"
     },
     {
-      "adapter": null,
+      "adapter": "qwen2",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFQwen2Config",
       "container": ".safetensors",
@@ -3008,7 +3062,7 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:7d4703a73254437fbab5e492f7a4de3a925658098b458b946307cb922c6c3a43",
+        "end_of_thinking_id": "double_newline_think_end",
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
@@ -3022,7 +3076,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "qwen2",
       "model_kind": "LanguageModelSpec",
       "name": "DeepSeek-R1-Distill-Qwen-1.5B",
       "origin": "HuggingFaceOrigin",
@@ -3030,7 +3084,7 @@
       "size": "1.5B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -3090,7 +3144,7 @@
       "vendor": "FishAudio"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
@@ -3136,7 +3190,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "FunctionGemma-270M-IT",
       "origin": "HuggingFaceOrigin",
@@ -3144,14 +3198,14 @@
       "size": "270M",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
@@ -3189,7 +3243,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "gemma-3-1b-it",
       "origin": "HuggingFaceOrigin",
@@ -3197,7 +3251,7 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -3538,7 +3592,7 @@
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "granite",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
@@ -3576,7 +3630,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "granite",
       "model_kind": "LanguageModelSpec",
       "name": "granite-3.1-2b-instruct",
       "origin": "HuggingFaceOrigin",
@@ -3584,14 +3638,14 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "IBM"
     },
     {
-      "adapter": null,
+      "adapter": "granite",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
@@ -3629,7 +3683,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "granite",
       "model_kind": "LanguageModelSpec",
       "name": "granite-3.1-8b-instruct",
       "origin": "HuggingFaceOrigin",
@@ -3637,14 +3691,14 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "IBM"
     },
     {
-      "adapter": null,
+      "adapter": "granite",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
@@ -3668,21 +3722,21 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:8c6961eefa46f4c1e7af976252132efbfef78c7610e02d5c1f3a6907978cebae",
+        "end_of_thinking_id": "think_end",
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
         "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "inline_sources": {},
-        "parser_id": "sha256:8b2fc9dafcc9ad0bc52d1bc52f1bce8db5ff063bafc7be9517290eed67e711b2",
-        "reasoning_id": "sha256:bfccae4449514e55a5fc53128917f1ed33bcd034ee5b264ca57339494d3c45ba",
+        "parser_id": "granite_thinking",
+        "reasoning_id": "granite_boolean_default_off",
         "roles": {
           "assistant": "assistant",
           "system": "system",
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "granite",
       "model_kind": "LanguageModelSpec",
       "name": "granite-3.3-2b-instruct",
       "origin": "HuggingFaceOrigin",
@@ -3690,14 +3744,14 @@
       "size": "2B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "IBM"
     },
     {
-      "adapter": null,
+      "adapter": "granite",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFGraniteConfig",
       "container": ".safetensors",
@@ -3721,21 +3775,21 @@
         }
       },
       "metadata": {
-        "end_of_thinking_id": "sha256:8c6961eefa46f4c1e7af976252132efbfef78c7610e02d5c1f3a6907978cebae",
+        "end_of_thinking_id": "think_end",
         "generation_config": null,
         "generation_params_overrides": null,
         "grammar_start_tokens_count": 0,
         "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "inline_sources": {},
-        "parser_id": "sha256:8b2fc9dafcc9ad0bc52d1bc52f1bce8db5ff063bafc7be9517290eed67e711b2",
-        "reasoning_id": "sha256:bfccae4449514e55a5fc53128917f1ed33bcd034ee5b264ca57339494d3c45ba",
+        "parser_id": "granite_thinking",
+        "reasoning_id": "granite_boolean_default_off",
         "roles": {
           "assistant": "assistant",
           "system": "system",
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "granite",
       "model_kind": "LanguageModelSpec",
       "name": "granite-3.3-8b-instruct",
       "origin": "HuggingFaceOrigin",
@@ -3743,7 +3797,7 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -3970,7 +4024,7 @@
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "phi3",
       "catalog_origin": "pinned_builtin",
       "config_class": "HFPhi3Config",
       "container": ".safetensors",
@@ -4008,7 +4062,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "phi3",
       "model_kind": "LanguageModelSpec",
       "name": "Phi-4-mini-instruct",
       "origin": "HuggingFaceOrigin",
@@ -4016,7 +4070,7 @@
       "size": "3.8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 from dataclasses import asdict, replace
+from functools import partial
 from pathlib import Path
 
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
@@ -59,7 +60,15 @@ def _validate_request(request: ConversionRequest) -> None:
 
 def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> PlannedConversion:
     """Validate a complete supported layout and build its single tensor/config plan."""
-    from .adapters import build_llama_plan, build_mistral_plan, build_qwen2_plan
+    from .adapters import (
+        build_gemma_plan,
+        build_granite_plan,
+        build_llama_plan,
+        build_mistral_plan,
+        build_phi_plan,
+        build_qwen2_plan,
+        build_smollm3_plan,
+    )
     from .qwen3 import build_qwen3_plan
 
     _validate_request(request)
@@ -75,6 +84,11 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "qwen2": build_qwen2_plan,
         "llama": build_llama_plan,
         "mistral": build_mistral_plan,
+        "gemma2": partial(build_gemma_plan, family="gemma2"),
+        "gemma3_text": partial(build_gemma_plan, family="gemma3_text"),
+        "phi3": build_phi_plan,
+        "granite": build_granite_plan,
+        "smollm3": build_smollm3_plan,
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     # Metadata and final content verification are still pending. Only a
