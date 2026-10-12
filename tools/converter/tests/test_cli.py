@@ -20,7 +20,7 @@ from tokenizers import Tokenizer, models
 
 from stark_convert import cli, metadata, qualifications
 from stark_convert.contracts import ConversionRequest
-from stark_convert.provenance import toolchain_provenance
+from stark_convert.provenance import SOURCE_INPUTS, toolchain_provenance
 from stark_convert.registry import get_model
 from stark_convert.registry import models as catalog_models
 from stark_convert.sources import resolve_source
@@ -77,6 +77,11 @@ def source_tooling(tmp_path, monkeypatch):
     (project / "stark_convert" / "adapters" / "fixture.py").write_text("# synthetic source\n")
     (project / "uv.lock").write_text("# synthetic lock\n")
     (project / "pyproject.toml").write_text("# synthetic project\n")
+    for name in SOURCE_INPUTS:
+        path = project / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_text("# synthetic build input\n")
     (project / "stark_convert" / "native_qualifications.json").write_text(
         json.dumps({"schema_version": 1, "records": []})
     )
@@ -450,3 +455,49 @@ def test_offline_replay_publishes_identical_model_artifacts(source, tmp_path):
     for field in ("output_sha256", "config_sha256", "tokenizer_sha256", "source_manifest_sha256"):
         assert first[field] == second[field]
     assert get_model(replay.repo)["metadata_profile"] == "qwen3"
+
+
+@pytest.mark.parametrize("generic", [False, True])
+def test_local_cli_conversion_is_offline_and_needs_no_hub_account(source, tmp_path, monkeypatch, capsys, generic):
+    import huggingface_hub
+
+    def reject_network(*args, **kwargs):
+        pytest.fail("Local self-contained conversion attempted a Hub operation")
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", reject_network)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", reject_network)
+    output = tmp_path / "converted folder"
+    options = ["--metadata-profile", "hf-generic"] if generic else ["--repo", REPOS["qwen3"]]
+    monkeypatch.setattr("sys.argv", ["stark-convert", str(source), "--offline", "--output", str(output), *options])
+    assert cli.main() == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["status"] == "ok"
+    assert receipt["catalogued"] is not generic
+    assert (output / "model.safetensors").is_file()
+
+
+def test_local_cli_requires_an_explicit_metadata_policy(source, tmp_path, monkeypatch, capsys):
+    output = tmp_path / "converted"
+    monkeypatch.setattr("sys.argv", ["stark-convert", str(source), "--output", str(output), "--offline"])
+    assert cli.main() == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["error_category"] == "local_profile_required"
+    assert "--metadata-profile hf-generic" in error["hint"]
+    assert str(source) not in json.dumps(error)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("missing", ["config.json", "tokenizer.json", "tokenizer_config.json", "model.safetensors"])
+def test_incomplete_local_download_never_publishes(source, tmp_path, monkeypatch, capsys, missing):
+    (source / missing).unlink()
+    output = tmp_path / "converted"
+    monkeypatch.setattr(
+        "sys.argv",
+        ["stark-convert", str(source), "--output", str(output), "--offline", "--metadata-profile", "hf-generic"],
+    )
+    assert cli.main() == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error["status"] == "error"
+    assert str(source) not in json.dumps(error)
+    assert not output.exists()
+    assert not list(tmp_path.glob(".stark-convert-*"))
