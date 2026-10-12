@@ -22,7 +22,15 @@ CONFIG_ADAPTERS = {
     "HFQwen35Config": "qwen3_5",
     "HFLFM2Config": "lfm2",
     "HFLlambaConfig": "llamba",
+    "ModernBERTConfig": "modernbert",
 }
+
+
+def model_kind_for_architecture(architecture: str) -> str:
+    """Architecture dispatch also binds the accepted root model kind."""
+    if architecture not in CONFIG_ADAPTERS.values():
+        raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
+    return "classifier" if architecture == "modernbert" else "language"
 
 
 def architecture_for_config(config: dict, expected: str | None = None) -> str:

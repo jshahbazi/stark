@@ -32,7 +32,7 @@ def generic_entry(repo: str | None, architecture: str, names: tuple[str, ...]) -
     config_class = next((key for key, value in CONFIG_ADAPTERS.items() if value == architecture), None)
     if config_class is None:
         raise ConversionError("Generic metadata architecture is unsupported")
-    return {
+    entry = {
         "repo": repo,
         "config_class": config_class,
         "metadata_profile": GENERIC_PROFILE,
@@ -44,3 +44,6 @@ def generic_entry(repo: str | None, architecture: str, names: tuple[str, ...]) -
             "roles": {"system": "system", "user": "user", "assistant": "assistant"},
         },
     }
+    if architecture == "modernbert":
+        entry["model_kind"] = "ClassifierModelSpec"
+    return entry

@@ -8,6 +8,8 @@ The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`,
 
 Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2 and LLaMBA profiles, including Qwen3.5 text/DeltaNet, plus affine MLX 4/8-bit Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma text, LFM2 and LLaMBA checkpoints. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
 
+ModernBERT sequence classifiers use the converter's explicit `--model-kind classifier` path. Classifier conversion, native loading and classification execution have separate evidence and status.
+
 ```sh
 cargo build --release --locked -p stark-score --features optimized
 cargo test --release --locked -p stark-score --features optimized -- --test-threads=1
@@ -18,7 +20,9 @@ The worker uses a private JSON-lines stdin/stdout protocol. Request and response
 
 ## Model conversion and Lalamo comparison
 
-`stark-convert` implements 83 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 40 MLX profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. Conversion uses an 8 MiB transformation workspace and preserves exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled. Twenty-seven exact BF16 tuples have named-build load-only qualifications. [Milestone 5](docs/MODEL_CONVERSION_MILESTONE_5.md) adds dense and 4-bit MLX LLaMBA with its Mamba2 mixer, declared external-config resolution and reusable future-checkpoint dispatch.
+The [milestone 6 classifier benchmarks](docs/MODEL_CONVERSION_MILESTONE_6.md) measured public real-weight ModernBERT fixtures with explicitly recorded synthetic chat templates. BF16-source conversion took **0.562 s versus Lalamo's 1.137 s**; F32-source conversion took **0.861 s versus 1.312 s**, with overlapping F32 ranges. Median times were **34–51% lower**, with **85–90% less sampled process-tree RSS**. All twenty outputs pass full parity; private native checks prove loading only. These fixtures do not qualify the inaccessible catalog routers or establish classification quality.
+
+`stark-convert` implements 85 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 40 MLX profiles and two ModernBERT classifier profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. Conversion uses an 8 MiB transformation workspace and preserves exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled. Twenty-seven exact BF16 tuples have named-build load-only qualifications. [Milestone 6](docs/MODEL_CONVERSION_MILESTONE_6.md) adds classifier output configurations, tokenizer/label validation and future-checkpoint conversion with `--model-kind classifier`. Both pinned classifier repositories are inaccessible to the current account and remain unqualified; public classifier validation fixtures have separate evidence. [Milestone 5](docs/MODEL_CONVERSION_MILESTONE_5.md) retains its LLaMBA/Mamba2 qualifications.
 
 Conversion adapters are tracked by architecture and weight format. Checkpoint metadata, source revisions and exact qualifications are tracked separately. The new explicit [`hf-generic` path](tools/converter/README.md#future-checkpoints-and-architecture-tracking) lets a future Hugging Face checkpoint reuse a supported adapter with its own self-contained metadata, without adding a catalog entry. Its complete config/layout still must pass validation, and it starts native-unqualified.
 

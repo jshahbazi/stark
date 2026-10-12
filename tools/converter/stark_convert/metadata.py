@@ -53,7 +53,11 @@ _INLINE_TEXT = {
         "61f8687f0fca06cb9702de0a3e029cdb9cc90208fd3e7f24e57577b877bf2678",
     ): "{{ bos_token or '' }}{% for message in messages %}{{ message.content }}{% endfor %}",
 }
-SUPPORTED_METADATA_REPOS = frozenset(entry["repo"] for entry in models() if entry.get("metadata_profile") is not None)
+SUPPORTED_METADATA_REPOS = frozenset(
+    entry["repo"]
+    for entry in models()
+    if entry.get("metadata_profile") is not None and entry["model_kind"] == "LanguageModelSpec"
+)
 _INLINE_GENERATION = {
     ("generation_config", "2a5490399d96986a6555fe8bfa2562b8740ae444c6158f1dcfaa2cf97626da92"): {
         "temperature": 0.3,
