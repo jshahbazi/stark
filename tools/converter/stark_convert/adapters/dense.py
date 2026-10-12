@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 
+from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -244,17 +245,19 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         expected_types = ["sliding_attention" if window is not None else "full_attention" for window in windows]
         if layer_types != expected_types:
             unsupported.append("Layer attention types disagree with qualified sliding-window semantics")
+    quantization = parse_mlx_quantization(config) if family == "llama" else None
     tensors = load_checkpoint(source)
-    # Packed layouts have different tensor names and require later adapters.
-    for key in ("quantization", "quantization_config"):
-        if config.get(key) is not None:
-            if not isinstance(config[key], dict) or not config[key]:
-                raise ConversionError("Dense config has malformed quantization parameters")
-            raise UnsupportedConversion("Quantized checkpoint is outside qualified dense coverage")
+    if family != "llama":
+        for key in ("quantization", "quantization_config"):
+            if config.get(key) is not None:
+                if not isinstance(config[key], dict) or not config[key]:
+                    raise ConversionError("Dense config has malformed quantization parameters")
+                raise UnsupportedConversion("Quantized checkpoint is outside qualified dense coverage")
     operations: list[TensorOperation] = []
     expected: set[str] = set()
     metadata: dict[str, str] = {}
     unsupported_dtype = False
+    used_mlx = False
 
     def tensor(name: str, shape: tuple[int, ...]):
         nonlocal unsupported_dtype
@@ -271,6 +274,37 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     def matrix(
         out: str, names: tuple[str, ...], shapes: tuple[tuple[int, ...], ...], shape: tuple[int, ...], layout: str
     ):
+        nonlocal used_mlx
+        representations = [
+            any(name.removesuffix(".weight") + suffix in tensors for suffix in (".scales", ".biases"))
+            or (name in tensors and tensors[name].dtype in {"I32", "U32"})
+            for name in names
+        ]
+        if family == "llama" and any(representations):
+            if quantization is None:
+                raise UnsupportedConversion("MLX checkpoint requires explicit quantization configuration")
+            if not all(representations):
+                raise UnsupportedConversion("Mixed full-precision/MLX fusion is outside implemented coverage")
+            sources = tuple(
+                read_mlx_matrix(tensors, name, source_shape, quantization)
+                for name, source_shape in zip(names, shapes, strict=True)
+            )
+            for name in names:
+                prefix = name.removesuffix(".weight")
+                expected.update((name, prefix + ".scales", prefix + ".biases"))
+            operations.extend(
+                plan_mlx_matrix(out, sources, dtype=target_dtype, layout=layout, quantization=quantization)
+            )
+            metadata[out + ".spec"] = json.dumps(
+                {
+                    "type": "MLXSpec",
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "layout": layout,
+                }
+            )
+            used_mlx = True
+            return
         sources = tuple(tensor(name, source_shape) for name, source_shape in zip(names, shapes, strict=True))
         if len({info.dtype for info in sources}) > 1:
             unsupported.append("Mixed-dtype fusion promotion is outside qualified dense coverage")
@@ -287,11 +321,21 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     embedding_out = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
     matrix(embedding_out, ("model.embed_tokens.weight",), ((vocab, model_dim),), (vocab, model_dim), "input_output")
     if tied:
-        if "lm_head.weight" in tensors:
-            head = tensor("lm_head.weight", (vocab, model_dim))
-            embedding = tensors["model.embed_tokens.weight"]
-            if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
-                raise ConversionError("Tied lm_head differs from the input embedding")
+        if any("lm_head" + suffix in tensors for suffix in (".weight", ".scales", ".biases")):
+            if json.loads(metadata[embedding_out + ".spec"])["type"] == "MLXSpec":
+                head = read_mlx_matrix(tensors, "lm_head.weight", (vocab, model_dim), quantization)
+                embedding = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
+                expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
+                if any(
+                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    for left, right in zip(head.planes, embedding.planes, strict=True)
+                ):
+                    raise ConversionError("Tied MLX lm_head differs from the input embedding")
+            else:
+                head = tensor("lm_head.weight", (vocab, model_dim))
+                embedding = tensors["model.embed_tokens.weight"]
+                if head.dtype != embedding.dtype or tensor_sha256(head) != tensor_sha256(embedding):
+                    raise ConversionError("Tied lm_head differs from the input embedding")
     else:
         matrix(
             "decoder.embedding.output_embedding",
@@ -352,6 +396,8 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         raise ConversionError("Dense checkpoint has unexpected tensors")
     if unsupported_dtype:
         unsupported.append("Checkpoint dtype is outside qualified dense coverage")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
     norm = {

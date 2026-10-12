@@ -286,6 +286,138 @@
           "optimized"
         ]
       }
+    },
+    {
+      "repo": "mlx-community/SmolLM3-3B-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "f538b54a9d71585790d9297496e8fa1a34c59c571adf27ee3ec4aa5ab36b48ed",
+      "output_sha256": "4443b5fcc4e23fd332e88100607331887384c25d6b316a0c23f7cf3089e20359",
+      "config_sha256": "d4b1431e11dedecc8eb548335c432bcf4d1dc1d2362e4931e2d26d15d236a661",
+      "tokenizer_sha256": "7b6a500b662a34eb3f0374db856ba4ad7de4c81040571d78dc0d357238930005",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/SmolLM3-3B-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "a42431a32cf7945ca9297d65f272197cc8e3dde328173e0178faf42d097e9921",
+      "output_sha256": "131d2d5f13de1d4f492650060292ef4353a0d0997d12c3c73340e2914f54281a",
+      "config_sha256": "d4b1431e11dedecc8eb548335c432bcf4d1dc1d2362e4931e2d26d15d236a661",
+      "tokenizer_sha256": "7b6a500b662a34eb3f0374db856ba4ad7de4c81040571d78dc0d357238930005",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/gemma-3-1b-it-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "3f2803561bb4102d937f5e3636296181611861acdfebadc1d4290cd8ca706a03",
+      "output_sha256": "6b93d1b97b051a89c8829b839b426d4420408ebc9e5a0c0812d35e13b1bcf5d2",
+      "config_sha256": "3d69ed169b69074a7f43df4400fa8628b04e7279c321e8cd513c4e09b9b9535d",
+      "tokenizer_sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/gemma-3-1b-it-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "86506df2023629bd2ef2451ee8163dc0756143e1917f37630b52316273a67979",
+      "output_sha256": "ab46b52985cd9905fa22767f9f03534d29ce4047f3808120241be67bfe30b580",
+      "config_sha256": "3d69ed169b69074a7f43df4400fa8628b04e7279c321e8cd513c4e09b9b9535d",
+      "tokenizer_sha256": "4667f2089529e8e7657cfb6d1c19910ae71ff5f28aa7ab2ff2763330affad795",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/Llama-3.2-1B-Instruct-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "fc1e0ea40e3be5215713246c14defb01397f545aec76256af309984a69459a5c",
+      "output_sha256": "ca2bd8deb42db16298c617061e94515f1d5219a0846eaf0c394ef5d2cc7c23d5",
+      "config_sha256": "d5416876ca5f2f5b0e22b063e05af652e44f939bd5e18b89f0e8aa158de6e2c7",
+      "tokenizer_sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/Llama-3.2-1B-Instruct-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "06a870ca226c3204b62ff1edf0c631d84790e576a0dc347bf54cad76a3b8c325",
+      "output_sha256": "7b7818d8aea8beda2c546f5504caafcf8508234f8e68a1946088c790b04c7d5f",
+      "config_sha256": "d5416876ca5f2f5b0e22b063e05af652e44f939bd5e18b89f0e8aa158de6e2c7",
+      "tokenizer_sha256": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
     }
   ]
 }

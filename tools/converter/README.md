@@ -2,7 +2,7 @@
 
 `stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 3 evidence](../../docs/MODEL_CONVERSION_MILESTONE_3.md) records MLX compressed conversion, exact qualification, and performance. [Milestone 2 evidence](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1 evidence](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 3 dense MLX evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md) records Llama, SmolLM3 and Gemma text conversion and performance. The [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Convert a model
 
@@ -29,7 +29,7 @@ The command emits aggregate timings, hashes, and capability status. Its private 
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **45 built-ins plus four extensions**, or 49 identities. This includes 33 dense built-ins and 12 MLX Qwen3 built-ins:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **54 built-ins plus four extensions**, or 58 identities. This includes 33 dense built-ins and 21 MLX built-ins:
 
 | Adapter | Implemented identities |
 | --- | --- |
@@ -37,12 +37,15 @@ The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128, divisible logical input widths |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
 | Llama | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `HuggingFaceTB/SmolLM2-1.7B-Instruct`, `Nanbeige/Nanbeige4.1-3B`, `RekaAI/reka-flash-3.1`; extension `unsloth/Llama-3.2-1B-Instruct` |
+| Llama MLX | `mlx-community/Llama-3.1-8B-Instruct-4bit`, `mlx-community/Llama-3.2-{1B,3B}-Instruct-{4bit,8bit}` |
 | Mistral | `mistralai/Codestral-22B-v0.1`, `mistralai/Devstral-Small-2505`; extensions `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}` |
 | Gemma 2 | Extension `google/gemma-2-2b-it`, using the pinned Gemma2 config and standard LanguageModelSpec |
 | Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it`, `EssentialAI/rnj-1-instruct` |
+| Gemma 3 text MLX | `mlx-community/gemma-3-1b-it-{4bit,8bit}`; multimodal 4B/27B variants remain unsupported |
 | Phi | `microsoft/Phi-4-mini-instruct`, the pinned tied Phi3 layout with LongRoPE; untied Phi3 is unsupported |
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
+| SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 
 This is implementation coverage. Exact checkpoint/dtype/config qualification remains per tuple and is recorded in the milestone evidence. A passing small checkpoint does not qualify every size or config variant in its family. Other catalog entries, compressed schemes, custom architectures/RoPE variants, and unsupported metadata representations fail with a sanitized unsupported category. Arbitrary Hugging Face repositories are outside the current catalog.
 
@@ -55,7 +58,11 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B-MLX-4bit
   --output models/qwen3-06b-mlx4-stark
 ```
 
-MLX profiles resolve tokenizer and generation metadata from the original registered Qwen3 repository at an independently pinned revision. The 0.6B 4-bit and 8-bit group-128 BF16 tuples have exact artifact parity and named-build load-only qualifications. Other sizes and groups remain unqualified; no compressed inference-speed or quality claim is made.
+All MLX families use affine groups 16/32/64/128 and the same bounded coefficient operations. Llama preserves its accepted Llama 3 RoPE; SmolLM3 preserves its per-layer RoPE mask, omitted tied-head default and accepted projection biases. Gemma text retains runtime embedding scaling, normalization offsets and local/global attention/RoPE semantics. Quantized Qwen2, Mistral, Granite and Gemma2 retain their unsupported status.
+
+MLX metadata follows each registered source rule: Qwen3 uses its original repository's tokenizer/generation files; Llama uses the MLX tokenizer and official generation file; SmolLM3 uses its MLX tokenizer and original chat-template/generation files; Gemma text uses its MLX tokenizer and official generation file. External sources are independently pinned. Missing or gated dependencies fail rather than silently replacing metadata. An explicit private offline manifest can reference verified local content; the separate qualification evidence records any public mirror transport and its exact canonical Git-blob match.
+
+The Qwen3-0.6B group-128 BF16 tuples and selected Llama-3.2-1B, SmolLM3-3B and Gemma3-1B group-64 BF16 tuples have exact artifact parity and named-build load-only qualifications at both bit widths. Other sizes and groups remain unqualified. No compressed inference-speed or quality claim is made.
 
 Probe the catalog without reading or downloading a checkpoint:
 
@@ -69,6 +76,23 @@ The probe reports catalog implementation, model kind, and runtime status with `s
 Stark's supported dense loader selects BF16 weights. F16/F32 outputs are conversion-only and are marked runtime-blocked. The catalog probe remains unverified because it does not inspect source or output artifacts. A BF16 conversion reports `supported_layout_unverified_tuple` unless its registered identity, source-manifest hash, weights hash, config hash, and tokenizer hash exactly match a stored native qualification.
 
 `--require-native-support` requires that exact stored match before publication; unmatched artifacts fail cleanly. A match reports `native_loading=qualified_tuple` and emits the full `native_qualification` record, including the named build's worker/source/Cargo-lock/toolchain hashes, Rust 1.98.1, release profile, features, and load-only result. That result applies to the recorded build and exact artifacts. It provides no guarantee for another current or future engine binary. Execution remains unverified: readiness and EOF do not establish scoring, generation, classification, or TTS correctness. Stark currently rejects MoE construction.
+
+## Measured improvements over Lalamo
+
+The current Llama/SmolLM3/Gemma MLX packet passed exact parity and BF16 native load-only checks for six group-64 tuples. It reduced median sampled process-tree RSS by **90.7–96.6%**. The bounded writer copies packed codes directly and exports coefficient tiles without allocating complete unpacked weight matrices. The installed runtime has no Lalamo, JAX or PyTorch dependency. Source/content verification remains complete.
+
+| MLX checkpoint | Stark complete median | Lalamo complete median | Sampled RSS reduction |
+| --- | ---: | ---: | ---: |
+| Llama3.2-1B 4-bit | 1.845 s | 2.292 s | 94.1% |
+| Llama3.2-1B 8-bit | 2.233 s | 2.137 s | 96.6% |
+| SmolLM3-3B 4-bit | 3.979 s | 2.809 s | 95.4% |
+| SmolLM3-3B 8-bit | 6.019 s | 3.544 s | 96.2% |
+| Gemma3-1B 4-bit | 1.991 s | 2.444 s | 90.7% |
+| Gemma3-1B 8-bit | 2.655 s | 2.171 s | 92.5% |
+
+Llama 4-bit and Gemma 4-bit measured 1.24× and 1.23× complete-command speedups. The other four median timings are slower, and Llama 8-bit timing ranges overlap. Broad latency parity is still open. The earlier Qwen3-0.6B 4/8-bit packet measured 1.78×/1.21× at its own source state. Ratios are conversion measurements only and grant no inference or quality qualification.
+
+Each backend ran three serial fresh processes per tuple with warm selected files and alternating order. Setup/download, warming and parity comparisons were excluded. Complete commands include verification, metadata, writing, hashes and receipts; Lalamo performs weaker source/receipt verification. RSS was sampled every 10 ms and is not a total-memory ceiling. Exact sources, timing ranges, host versions, failed hypotheses and independent review are in the [current evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md).
 
 ## Offline replay and source manifests
 

@@ -106,10 +106,14 @@ def export(reference: Path) -> dict:
         grammar = getattr(spec, "grammar_start_tokens", ())
         roles = {role: getattr(spec, role + "_role_name", role) for role in ("system", "user", "assistant")}
         dense = container == ".safetensors" and not any(word in spec.name.lower() for word in ("mlx", "4bit", "8bit"))
-        # Only the inspected affine MLX Qwen3 layout is independently planned.
+        # Only inspected affine MLX decoder layouts are independently planned.
         # Other packed formats/config classes keep their explicit planned state.
-        mlx_qwen3 = container == ".safetensors" and class_name == "HFQwen3Config" and "mlx" in spec.name.lower()
-        adapter = profiles.get(class_name) if dense or mlx_qwen3 else None
+        mlx = (
+            container == ".safetensors"
+            and class_name in {"HFQwen3Config", "HFLlamaConfig", "HFSmolLM3Config", "HFGemma3TextConfig"}
+            and any(width in spec.name.lower() for width in ("4bit", "8bit"))
+        )
+        adapter = profiles.get(class_name) if dense or mlx else None
         metadata = {
             "parser_id": parser_id,
             "reasoning_id": reasoning_id,
@@ -141,7 +145,7 @@ def export(reference: Path) -> dict:
                     "scheme": "mlx_affine",
                     "bits": 4 if "4bit" in spec.name.lower() else 8,
                 }
-                if mlx_qwen3
+                if mlx
                 else None,
                 "status": {
                     "conversion": "implemented" if adapter else "planned",
