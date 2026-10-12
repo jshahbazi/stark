@@ -462,6 +462,94 @@
           "optimized"
         ]
       }
+    },
+    {
+      "repo": "mlx-community/LFM2-350M-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "c26912c3f4fc1d5ddef5fdc82e3cede6d6571a6e4cce95acfcf194f20254a2b7",
+      "output_sha256": "a78799a70acc00b06b9054a7402448b786d45393c54558137145985774b2c67f",
+      "config_sha256": "8a9e0600e1c8d4d5afc503bdec0a7d662eeec7febda62ad85b130e1ecea6871f",
+      "tokenizer_sha256": "98cff83b4f6d7e9d8929bebc62b07e92cf1b3f99c80d16bafe8b84a75448f40b",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/LFM2-350M-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "d61aefdc2f77a7d29c40fb935132fdae04edae1bda5179968bdf18f2c62f5a3e",
+      "output_sha256": "5a03d57468ed1318bdc0134e280702eb2d8b33f88c7cb85875fcb4c987c773a5",
+      "config_sha256": "8a9e0600e1c8d4d5afc503bdec0a7d662eeec7febda62ad85b130e1ecea6871f",
+      "tokenizer_sha256": "98cff83b4f6d7e9d8929bebc62b07e92cf1b3f99c80d16bafe8b84a75448f40b",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/Qwen3.5-0.8B-MLX-4bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "e71eec7c6849a003f53678bfea91acfb02ccf1d8ba55dae0ccc8f8ea4dc97c97",
+      "output_sha256": "14f934854fc5a95b9a639d646b6321006324c0bcf1e07e9e01bd0fcd853fc1c3",
+      "config_sha256": "43317953b7a38ed4d908ecbdb912a5be25b0ca55f794acfdd817a747c3965077",
+      "tokenizer_sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
+    },
+    {
+      "repo": "mlx-community/Qwen3.5-0.8B-MLX-8bit",
+      "dtype": "bfloat16",
+      "source_manifest_sha256": "4b5905088cfc093b0d1ab031033ecd57f26c41f3bf41569f03f84f5cf8ed387a",
+      "output_sha256": "7cee9fc6db65ef73a5a9e9fb0a67bd5c7121bcc570572555580752ec9ed64758",
+      "config_sha256": "43317953b7a38ed4d908ecbdb912a5be25b0ca55f794acfdd817a747c3965077",
+      "tokenizer_sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+      "native_build": {
+        "passed": true,
+        "native_score_calls": 0,
+        "worker_sha256": "61bb81a83fa368b7c8f647469ac468048cf6868d973ed74e7d9d62633bfba96d",
+        "native_source_manifest_sha256": "0cc926bcf73db3921eab03f127185626b7f4311b73c62dad79b407c642d0c9af",
+        "cargo_lock_sha256": "65444f3e0e0707c43521539e43c95365cfc6a51ec6f9e90180bc43bc8fb4603e",
+        "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+        "rust": "1.98.1",
+        "profile": "release",
+        "features": [
+          "default",
+          "optimized"
+        ]
+      }
     }
   ]
 }

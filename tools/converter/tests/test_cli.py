@@ -131,7 +131,7 @@ def test_unsupported_layout_never_invokes_an_external_backend(source, tmp_path, 
     assert not hasattr(cli, "_lalamo")
 
 
-@pytest.mark.parametrize("repo", ["unknown/model", "mlx-community/Qwen3.5-0.8B-MLX-4bit"])
+@pytest.mark.parametrize("repo", ["unknown/model", "Qwen/Qwen3.5-35B-A3B"])
 def test_unsupported_catalog_tuple_is_rejected_before_resolution(tmp_path, monkeypatch, repo):
     monkeypatch.setattr(cli, "resolve_source", lambda *args, **kwargs: pytest.fail("source resolution occurred"))
     with pytest.raises(UnsupportedConversion):

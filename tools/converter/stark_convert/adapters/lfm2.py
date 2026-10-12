@@ -1,4 +1,4 @@
-"""Independent dense LFM2 short-convolution/attention planner.
+"""Independent dense and affine MLX LFM2 short-convolution/attention planner.
 
 Config and tensor conventions are adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
@@ -12,6 +12,7 @@ import json
 import math
 from pathlib import Path
 
+from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from ..streaming import (
     ConversionError,
     ConversionPlan,
@@ -72,7 +73,7 @@ _KEYS = {
 
 
 def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
-    """Validate an explicit dense LFM2 topology and consume every input tensor."""
+    """Validate an explicit LFM2 topology and consume every input tensor."""
     config = read_json(source / "config.json")
     if config.get("model_type") != "lfm2":
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")
@@ -185,15 +186,12 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
         _positive_float(config, "theta", 10000.0)
     if config.get("architectures", ["Lfm2ForCausalLM"]) != ["Lfm2ForCausalLM"] or set(config) - _KEYS:
         unsupported.append("LFM2 config options are outside implemented coverage")
-    for key in ("quantization", "quantization_config"):
-        if config.get(key) is not None:
-            if not isinstance(config[key], dict) or not config[key]:
-                raise ConversionError("LFM2 quantization parameters are malformed")
-            raise UnsupportedConversion("LFM2 compressed checkpoints are outside implemented coverage")
+    quantization = parse_mlx_quantization(config)
     tensors = load_checkpoint(source)
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}
+    used_mlx = False
 
     def tensor(name: str, shapes: tuple[tuple[int, ...], ...]):
         expected.add(name)
@@ -213,6 +211,32 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
         return present[0]
 
     def matrix(out, names, shapes, shape, *, layout="output_input"):
+        nonlocal used_mlx
+        representations = [
+            any(name.removesuffix(".weight") + suffix in tensors for suffix in (".scales", ".biases"))
+            or (name in tensors and tensors[name].dtype in {"I32", "U32"})
+            for name in names
+        ]
+        if any(representations):
+            if quantization is None:
+                raise UnsupportedConversion("MLX checkpoint requires explicit quantization configuration")
+            if not all(representations):
+                raise UnsupportedConversion("Mixed full-precision/MLX fusion is outside implemented LFM2 coverage")
+            inputs = tuple(
+                read_mlx_matrix(tensors, name, required, quantization)
+                for name, required in zip(names, shapes, strict=True)
+            )
+            for name in names:
+                prefix = name.removesuffix(".weight")
+                expected.update((name, prefix + ".scales", prefix + ".biases"))
+            operations.extend(
+                plan_mlx_matrix(out, inputs, dtype=target_dtype, layout=layout, quantization=quantization)
+            )
+            metadata[out + ".spec"] = json.dumps(
+                {"type": "MLXSpec", "bits": quantization.bits, "group_size": quantization.group_size, "layout": layout}
+            )
+            used_mlx = True
+            return
         inputs = tuple(tensor(name, (required,)) for name, required in zip(names, shapes, strict=True))
         if len({info.dtype for info in inputs}) > 1:
             unsupported.append("Mixed-dtype fusion promotion is outside implemented LFM2 coverage")
@@ -228,12 +252,26 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
 
     embedding = "decoder.embedding.embedding" if tied else "decoder.embedding.input_embedding"
     matrix(embedding, ("model.embed_tokens.weight",), ((vocab, model_dim),), (vocab, model_dim), layout="input_output")
+    # The reference selects convolution permutation from the actual embedding
+    # planes, rather than a global quantization annotation. Other projections
+    # can independently remain dense in an affine checkpoint.
+    permute_conv = "model.embed_tokens.scales" in tensors
     if tied:
-        if "lm_head.weight" in tensors:
-            head = tensor("lm_head.weight", ((vocab, model_dim),))
-            inputs = tensors["model.embed_tokens.weight"]
-            if head.dtype != inputs.dtype or tensor_sha256(head) != tensor_sha256(inputs):
-                raise ConversionError("Tied LFM2 lm_head differs from the input embedding")
+        if any("lm_head" + suffix in tensors for suffix in (".weight", ".scales", ".biases")):
+            if permute_conv:
+                head = read_mlx_matrix(tensors, "lm_head.weight", (vocab, model_dim), quantization)
+                inputs = read_mlx_matrix(tensors, "model.embed_tokens.weight", (vocab, model_dim), quantization)
+                expected.update(("lm_head.weight", "lm_head.scales", "lm_head.biases"))
+                if any(
+                    left.dtype != right.dtype or tensor_sha256(left) != tensor_sha256(right)
+                    for left, right in zip(head.planes, inputs.planes, strict=True)
+                ):
+                    raise ConversionError("Tied MLX LFM2 lm_head differs from the input embedding")
+            else:
+                head = tensor("lm_head.weight", ((vocab, model_dim),))
+                inputs = tensors["model.embed_tokens.weight"]
+                if head.dtype != inputs.dtype or tensor_sha256(head) != tensor_sha256(inputs):
+                    raise ConversionError("Tied LFM2 lm_head differs from the input embedding")
     else:
         matrix("decoder.embedding.output_embedding", ("lm_head.weight",), ((vocab, model_dim),), (vocab, model_dim))
     q_width, kv_width = heads * head_dim, groups * head_dim
@@ -257,12 +295,22 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
             conv_name = select(
                 tuple(src + suffix for suffix in (".conv.conv1d.weight", ".conv.conv_weight", ".conv.conv.weight"))
             )
-            f32(
-                out + ".mixer.conv.weights",
-                conv_name,
-                (model_dim, kernel),
-                source_shapes=((model_dim, kernel), (model_dim, 1, kernel), (model_dim, kernel, 1)),
-            )
+            if permute_conv and tensors[conv_name].shape == (kernel, model_dim):
+                info = tensor(conv_name, ((kernel, model_dim),))
+                operations.append(
+                    TensorOperation(out + ".mixer.conv.weights", (info,), "F32", (model_dim, kernel), "transpose_f32")
+                )
+            else:
+                f32(
+                    out + ".mixer.conv.weights",
+                    conv_name,
+                    (model_dim, kernel),
+                    source_shapes=(
+                        ((model_dim, 1, kernel), (model_dim, kernel, 1))
+                        if permute_conv
+                        else ((model_dim, kernel), (model_dim, 1, kernel), (model_dim, kernel, 1))
+                    ),
+                )
             if conv_bias:
                 bias_name = select(
                     tuple(src + suffix for suffix in (".conv.conv1d.bias", ".conv.conv_bias", ".conv.conv.bias"))
@@ -295,6 +343,8 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
     f32("decoder.transformer.output_norm.scales", "model.embedding_norm.weight", (model_dim,))
     if set(tensors) != expected:
         raise ConversionError("LFM2 checkpoint has unexpected tensors")
+    if quantization is not None and not used_mlx:
+        raise ConversionError("MLX quantization configuration has no packed checkpoint matrices")
     if unsupported:
         raise UnsupportedConversion(unsupported[0])
 

@@ -42,15 +42,15 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 67
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 63
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 85
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 81
 
 
 def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
-    assert {entry["repo"] for entry in models() if entry["adapter"] == "qwen3_5"} == {
-        f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")
-    }
-    assert {entry["repo"] for entry in models() if entry["adapter"] == "lfm2"} == {
+    assert {
+        entry["repo"] for entry in models() if entry["adapter"] == "qwen3_5" and not entry["compressed_format"]
+    } == {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")}
+    assert {entry["repo"] for entry in models() if entry["adapter"] == "lfm2" and not entry["compressed_format"]} == {
         f"LiquidAI/LFM2-{size}" for size in ("350M", "700M", "1.2B", "2.6B")
     }
     for repo in ("Qwen/Qwen3.5-35B-A3B", "Qwen/Qwen3.6-27B", "LiquidAI/LFM2.5-1.2B-Instruct"):
@@ -68,18 +68,18 @@ def test_extensions_are_separate_from_builtin_inventory():
 
 def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
     packed = [entry for entry in models() if entry.get("compressed_format") is not None]
-    assert len(packed) == 21
+    assert len(packed) == 39
     assert {
         adapter: sum(entry["adapter"] == adapter for entry in packed)
-        for adapter in {"qwen3", "llama", "smollm3", "gemma3_text"}
-    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2}
+        for adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}
+    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2, "qwen3_5": 10, "lfm2": 8}
     assert {entry["compressed_format"]["bits"] for entry in packed} == {4, 8}
     for entry in packed:
         assert entry["adapter"] == entry["metadata_profile"]
         assert entry["compressed_format"]["scheme"] == "mlx_affine"
         assert entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
         assert entry["status"]["qualification"] == "pending"
-    assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] is None
+    assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] == "qwen3_5"
     assert get_model("mlx-community/gemma-3-4b-it-4bit")["adapter"] is None
     assert get_model("mlx-community/gemma-3-27b-it-8bit")["adapter"] is None
 
@@ -96,13 +96,28 @@ def test_dispatch_requires_an_implemented_specific_tuple():
     assert adapter_for_model("Qwen/Qwen2.5-Coder-0.5B-Instruct", "qwen2") == "qwen2"
     assert adapter_for_model("Qwen/Qwen3-0.6B-MLX-4bit", "qwen3") == "qwen3"
     assert adapter_for_model("Qwen/Qwen3-0.6B-MLX-8bit", "qwen3") == "qwen3"
-    with pytest.raises(UnsupportedConversion):
-        adapter_for_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")
+    assert adapter_for_model("mlx-community/Qwen3.5-0.8B-MLX-4bit") == "qwen3_5"
+    assert adapter_for_model("mlx-community/LFM2-350M-8bit") == "lfm2"
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("google/gemma-4-E2B-it")
     with pytest.raises(UnsupportedConversion):
         adapter_for_model("Qwen/Qwen3-0.6B", "llama")
     assert get_model("unregistered/model") is None
+
+
+def test_hybrid_mlx_promotions_use_exact_pinned_checkpoint_names():
+    qwen = {
+        f"mlx-community/Qwen3.5-{size}-MLX-{bits}bit" for size in ("0.8B", "2B", "4B", "9B") for bits in (4, 8)
+    } | {f"mlx-community/Qwen3.5-27B-{bits}bit" for bits in (4, 8)}
+    lfm = {f"mlx-community/LFM2-{size}-{bits}bit" for size in ("350M", "700M", "1.2B", "2.6B") for bits in (4, 8)}
+    for architecture, expected in (("qwen3_5", qwen), ("lfm2", lfm)):
+        assert {
+            entry["repo"] for entry in models() if entry["adapter"] == architecture and entry["compressed_format"]
+        } == expected
+    for entry in models():
+        if entry["config_class"] in {"HFQwen35Config", "HFLFM2Config"} and entry["adapter"] is None:
+            assert entry["compressed_format"] is None
+            assert entry["status"]["conversion"] == "planned"
 
 
 def test_catalog_callers_cannot_mutate_later_dispatch():

@@ -1,6 +1,6 @@
 [project]
 name = "stark-convert"
-version = "0.6.0"
+version = "0.7.0"
 description = "Independent streaming model conversion for the Stark engine"
 requires-python = ">=3.13,<3.14"
 dependencies = [
