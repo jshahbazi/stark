@@ -64,14 +64,14 @@ jobs:
             "$DISCORD_WEBHOOK_URL" |
           jq -er '"message_id=" + (.id | strings | select(test("^[0-9]+$")))' >> "$GITHUB_OUTPUT"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: ./.github/actions/setup
         with:
           metal: true
           bindings: true
 
       - name: "Release: Checkout main"
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: main
           fetch-depth: 0
@@ -318,12 +318,12 @@ jobs:
       # Publish Platform
       # ---------------------------------------------------------------
       - name: "Publish Platform: Authenticate to GCS"
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           credentials_json: ${{ secrets.PLATFORM_BUCKET_JSON_CREDENTIALS }}
 
       - name: "Publish Platform: Setup gcloud"
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: "Publish Platform: Upload snippets"
         run: |
@@ -335,12 +335,12 @@ jobs:
       # Publish Swift
       # ---------------------------------------------------------------
       - name: "Publish Swift: Authenticate to GCS"
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           credentials_json: ${{ secrets.ARTIFACTS_BUCKET_JSON_CREDENTIALS }}
 
       - name: "Publish Swift: Setup gcloud"
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: "Publish Swift: Upload xcframework"
         run: |
@@ -375,7 +375,7 @@ jobs:
       # ---------------------------------------------------------------
       - name: "Release: Generate GitHub App token"
         id: release-token
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
         with:
           app-id: ${{ vars.GH_APP_ID }}
           private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
@@ -392,7 +392,7 @@ jobs:
           git push origin "${VERSION}"
 
       - name: "Release: Attach binaries"
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           token: ${{ steps.release-token.outputs.token }}
           tag_name: ${{ env.VERSION }}

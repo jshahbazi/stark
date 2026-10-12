@@ -1,0 +1,133 @@
+name: Security
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '23 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  dependencies:
+    name: Rust dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal
+      - name: Install verified cargo-deny
+        run: |
+          archive="$RUNNER_TEMP/cargo-deny.tar.gz"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz \
+            --output "$archive"
+          printf '%s  %s\n' '9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f' "$archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cargo-deny-0.20.2-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
+      - name: Check advisories, licenses and sources
+        # Maintenance notices remain visible; vulnerability advisories still fail.
+        run: cargo deny --locked --all-features check --warn unmaintained advisories licenses bans sources
+
+  lockfiles:
+    name: All ecosystem lockfiles
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Install verified OSV Scanner
+        run: |
+          binary="$RUNNER_TEMP/osv-scanner"
+          curl --fail --silent --show-error --location --retry 3 \
+            https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64 \
+            --output "$binary"
+          printf '%s  %s\n' 'ca69b3d3cd08f889a49dc0a383122f71cc528b83803671df5fd874d97485b108' "$binary" | sha256sum --check
+          chmod +x "$binary"
+      - name: Scan locked Rust, Python and TypeScript dependencies
+        run: |
+          report="$RUNNER_TEMP/osv-report.json"
+          export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$RUNNER_TEMP/osv-db"
+          if "$RUNNER_TEMP/osv-scanner" scan source \
+            --offline --download-offline-databases --no-resolve \
+            --no-call-analysis=go --no-call-analysis=rust \
+            --all-packages --all-vulns --format=json --output-file "$report" \
+            -L Cargo.lock \
+            -L crates/legacy/download-manager/examples/wasm/Cargo.lock \
+            -L tools/uv.lock \
+            -L tools/converter/uv.lock \
+            -L crates/legacy/stark/bindings/python/uv.lock \
+            -L crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \
+            -L uv.lock:scripts/ci/check_repository.py.lock; then
+            scan_status=0
+          else
+            scan_status=$?
+          fi
+          if test "$scan_status" -gt 1; then
+            echo 'OSV Scanner failed; the dependency gate cannot be evaluated.' >&2
+            exit 1
+          fi
+          uv run --no-project --python 3.12.13 python scripts/ci/check_osv_report.py "$report" \
+            --lockfile Cargo.lock \
+            --lockfile crates/legacy/download-manager/examples/wasm/Cargo.lock \
+            --lockfile tools/uv.lock \
+            --lockfile tools/converter/uv.lock \
+            --lockfile crates/legacy/stark/bindings/python/uv.lock \
+            --lockfile crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \
+            --lockfile scripts/ci/check_repository.py.lock
+
+  review:
+    name: Dependency review
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: low
+          fail-on-scopes: runtime, development, unknown
+          comment-summary-in-pr: never
+
+  completed:
+    name: Security completed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs: [dependencies, lockfiles, review]
+    env:
+      DEPENDENCIES_RESULT: ${{ needs.dependencies.result }}
+      LOCKFILES_RESULT: ${{ needs.lockfiles.result }}
+      REVIEW_RESULT: ${{ needs.review.result }}
+      EVENT_NAME: ${{ github.event_name }}
+    steps:
+      - run: |
+          test "$DEPENDENCIES_RESULT" = success
+          test "$LOCKFILES_RESULT" = success
+          if test "$EVENT_NAME" = pull_request; then
+            test "$REVIEW_RESULT" = success
+          else
+            test "$REVIEW_RESULT" = skipped
+          fi

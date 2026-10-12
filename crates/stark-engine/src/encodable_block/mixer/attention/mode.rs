@@ -1,3 +1,5 @@
+#[cfg(feature = "attention-kv-only")]
+use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
 use crate::{
     backends::common::{
         Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
@@ -13,9 +15,6 @@ use crate::{
     },
     utils::maybe_mut::MaybeMut,
 };
-
-#[cfg(feature = "attention-kv-only")]
-use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
 
 pub(super) struct LinearProjection<B: Backend> {
     pub(super) lin: Box<dyn Linear<B>>,

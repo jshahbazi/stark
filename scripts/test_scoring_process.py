@@ -12,6 +12,15 @@ from pathlib import Path
 
 from scoring_process import ProcessError, ProcessOwner
 
+CURRENT_STAGE = "startup"
+PROCESS_ERROR_CODES = frozenset({
+    "short_lived_exit_invalid", "short_lived_ownership_unsettled", "pipe_transfer_invalid",
+    "clean_eof_ownership_unsettled", "explicit_stop_ownership_unsettled", "concurrent_launch_not_rejected",
+    "concurrent_instance_count_invalid", "launch_cancellation_not_delivered", "cancelled_launch_ownership_unsettled",
+    "cancelled_close_ownership_unsettled", "exec_failure_not_reported", "exec_failure_ownership_unsettled",
+    "wrapper_loss_not_reported", "wrapper_loss_settlement_claimed", "wrapper_loss_close_claimed",
+})
+
 
 def require(condition, code):
     if not condition:
@@ -23,7 +32,9 @@ async def launch(owner, executable, arguments=()):
 
 
 async def checks(reaper):
+    global CURRENT_STAGE
     passed = []
+    CURRENT_STAGE = "short_lived_exit"
     for executable, expected in (("/usr/bin/true", 0), ("/usr/bin/false", 1)):
         owner = ProcessOwner(reaper)
         try:
@@ -34,6 +45,7 @@ async def checks(reaper):
         finally:
             await owner.close()
     passed.append("short_lived_exit")
+    CURRENT_STAGE = "pipes_and_clean_eof"
     owner = ProcessOwner(reaper)
     try:
         process = await launch(owner, "/bin/cat")
@@ -47,6 +59,7 @@ async def checks(reaper):
     finally:
         await owner.close()
     passed.append("pipes_and_clean_eof")
+    CURRENT_STAGE = "explicit_stop"
     owner = ProcessOwner(reaper)
     try:
         process = await launch(owner, "/bin/sleep", ("60",))
@@ -54,6 +67,7 @@ async def checks(reaper):
     finally:
         await owner.close()
     passed.append("explicit_stop")
+    CURRENT_STAGE = "concurrent_launch_rejected"
     owner = ProcessOwner(reaper)
     try:
         first = asyncio.create_task(launch(owner, "/bin/sleep", ("60",)))
@@ -70,6 +84,7 @@ async def checks(reaper):
     finally:
         await owner.close()
     passed.append("concurrent_launch_rejected")
+    CURRENT_STAGE = "launch_cancellation"
     owner = ProcessOwner(reaper)
     try:
         task = asyncio.create_task(launch(owner, "/bin/sleep", ("60",)))
@@ -85,6 +100,7 @@ async def checks(reaper):
     finally:
         await owner.close()
     passed.append("launch_cancellation")
+    CURRENT_STAGE = "cleanup_cancellation"
     owner = ProcessOwner(reaper)
     await launch(owner, "/bin/sleep", ("60",))
     task = asyncio.create_task(owner.close())
@@ -93,6 +109,7 @@ async def checks(reaper):
     await task
     require(not owner.instances and not owner.launches, "cancelled_close_ownership_unsettled")
     passed.append("cleanup_cancellation")
+    CURRENT_STAGE = "exec_failure"
     owner = ProcessOwner(reaper)
     try:
         try:
@@ -105,6 +122,7 @@ async def checks(reaper):
     finally:
         await owner.close()
     passed.append("exec_failure")
+    CURRENT_STAGE = "wrapper_loss_retained"
     owner = ProcessOwner(Path("/usr/bin/false"))
     try:
         await launch(owner, "/usr/bin/true")
@@ -132,8 +150,14 @@ def main():
         results = asyncio.run(asyncio.wait_for(checks(args.reaper.absolute()), 30))
         print(json.dumps({"status": "passed", "checks": results, "model_free": True}), flush=True)
         return 0
+    except ProcessError as failure:
+        code = str(failure)
+        error = code if code in PROCESS_ERROR_CODES else "process_lifecycle_check_failed"
+        print(json.dumps({"status": "failed", "error": error, "check": CURRENT_STAGE, "model_free": True}), flush=True)
+        return 1
     except (Exception, KeyboardInterrupt):
-        print(json.dumps({"status": "failed", "error": "process_lifecycle_check_failed", "model_free": True}), flush=True)
+        print(json.dumps({"status": "failed", "error": "process_lifecycle_check_failed", "check": CURRENT_STAGE,
+                          "model_free": True}), flush=True)
         return 1
 
 

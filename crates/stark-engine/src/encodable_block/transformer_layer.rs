@@ -344,8 +344,9 @@ impl<B: Backend> TransformerLayer<B> {
     /// or ring KV caches. Other mixers continue through their ordinary encoder.
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn supports_scoring_cache_only(&self) -> bool {
-        use crate::encodable_block::mixer::attention::Attention;
         use std::any::Any;
+
+        use crate::encodable_block::mixer::attention::Attention;
 
         self.mixer_conv.is_none()
             && self.kv_source_layer_index.is_none()
@@ -364,8 +365,9 @@ impl<B: Backend> TransformerLayer<B> {
         state: &mut dyn MixerState<B>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<(), B::Error> {
-        use crate::encodable_block::mixer::attention::{Attention, AttentionState};
         use std::any::Any;
+
+        use crate::encodable_block::mixer::attention::{Attention, AttentionState};
 
         assert!(self.supports_scoring_cache_only(), "unsupported scoring cache-only layer");
         assert!(batch_dim.is_flat(), "scoring cache-only requires flat topology");

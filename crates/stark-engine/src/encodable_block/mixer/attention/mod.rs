@@ -3,7 +3,6 @@ use thiserror::Error;
 
 #[cfg(feature = "attention-kv-only")]
 use crate::backends::common::kernel::AttentionPrepareKVOnlyKernel;
-
 use crate::{
     backends::common::{
         Backend, CommandBuffer, CommandBufferEncoding, Kernels,

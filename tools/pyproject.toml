@@ -7,14 +7,14 @@ dependencies = [
     "huggingface-hub>=1.4.1",
     "rich>=14.3.2",
     "tokenizers>=0.22.2",
-    "torch>=2.10.0",
-    "transformers>=5.5.0",
+    "torch>=2.13.0",
+    "transformers>=5.10.0",
     "typer>=0.21.1",
     "cattrs>=24.1.0",
 ]
 
 [dependency-groups]
-dev = ["pytest>=9.0.2", "pytest-env>=1.2.0", "ruff>=0.15.0"]
+dev = ["pytest>=9.0.3", "pytest-env>=1.2.0", "ruff>=0.15.0"]
 
 [project.scripts]
 export = "data_exporter.main:app"
@@ -22,7 +22,7 @@ model-compare = "model_compare.main:cli"
 gpu-trace = "gpu_trace.main:cli"
 
 [build-system]
-requires = ["setuptools>=65.5.0", "wheel"]
+requires = ["setuptools>=83.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -36,6 +36,13 @@ version = { attr = "data_exporter.__version__" }
 [tool.uv]
 package = true
 python-preference = "only-managed"
+constraint-dependencies = [
+    "anyio>=4.14.2",
+    "fsspec>=2026.6.0",
+    "idna>=3.15",
+    "pygments>=2.20.0",
+    "setuptools>=83.0.0",
+]
 
 [tool.pyright]
 venvPath = "."

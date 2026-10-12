@@ -6,7 +6,7 @@ The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`,
 
 ## Build the scoring engine
 
-Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must already be converted to the Uzu model format; model weights are not included.
+Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite, and SmolLM profiles. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
 
 ```sh
 cargo build --release --locked -p stark-score --features optimized
@@ -32,3 +32,7 @@ The `optimized` feature selects the six accepted optional engine optimizations. 
 The supported path for this experimental fork is the native Rust/Metal scoring worker. Inherited Python, TypeScript, Swift, CLI, and playground sources have been renamed, but their binary distributions and general generation behavior have not been qualified for Stark. No Stark packages or Swift XCFramework are published. Inherited cloud release and benchmark workflows are disabled.
 
 See [rename compatibility](docs/RENAMING.md), [upstream provenance](provenance/UPSTREAM.md), and [LICENSE](LICENSE). Uzu and Mirai attribution and external provider identities remain where required by licensing, model compatibility, or historical evidence.
+
+## Security and contribution checks
+
+Report vulnerabilities through [private reporting](SECURITY.md). [CI and security checks](docs/CI.md) cover synthetic scoring tests, process ownership, dependency advisories, and static analysis. Model-dependent validation remains private and separate from public CI.
