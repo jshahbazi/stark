@@ -42,8 +42,8 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 49
-    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 45
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 58
+    assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 54
 
 
 def test_extensions_are_separate_from_builtin_inventory():
@@ -55,14 +55,20 @@ def test_extensions_are_separate_from_builtin_inventory():
 
 def test_mlx_profiles_bind_bit_width_without_promoting_other_packed_families():
     packed = [entry for entry in models() if entry.get("compressed_format") is not None]
-    assert len(packed) == 12
+    assert len(packed) == 21
+    assert {
+        adapter: sum(entry["adapter"] == adapter for entry in packed)
+        for adapter in {"qwen3", "llama", "smollm3", "gemma3_text"}
+    } == {"qwen3": 12, "llama": 5, "smollm3": 2, "gemma3_text": 2}
     assert {entry["compressed_format"]["bits"] for entry in packed} == {4, 8}
     for entry in packed:
-        assert entry["adapter"] == entry["metadata_profile"] == "qwen3"
+        assert entry["adapter"] == entry["metadata_profile"]
         assert entry["compressed_format"]["scheme"] == "mlx_affine"
         assert entry["repo"].endswith(f"-{entry['compressed_format']['bits']}bit")
         assert entry["status"]["qualification"] == "pending"
     assert get_model("mlx-community/Qwen3.5-0.8B-MLX-4bit")["adapter"] is None
+    assert get_model("mlx-community/gemma-3-4b-it-4bit")["adapter"] is None
+    assert get_model("mlx-community/gemma-3-27b-it-8bit")["adapter"] is None
 
 
 def test_external_files_and_field_selection_are_retained():

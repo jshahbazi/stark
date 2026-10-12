@@ -10,6 +10,8 @@ from test_dense_adapters import dense_fixture
 from test_gemma import gemma_fixture
 from test_granite_smollm import fixture as scalar_family_fixture
 from test_mlx import mlx_qwen_fixture
+from test_mlx_dense import mlx_dense_fixture
+from test_mlx_gemma import mlx_gemma_fixture
 from test_phi import phi_fixture
 from test_qualifications import evidence_record
 from test_sources import Hub
@@ -137,20 +139,42 @@ def test_unsupported_catalog_tuple_is_rejected_before_resolution(tmp_path, monke
     assert not (tmp_path / "output").exists()
 
 
-def mlx_snapshot(tmp_path, *, bits=4, profile_bits=None):
+MLX_PROFILES = {
+    "qwen3": "Qwen/Qwen3-0.6B-MLX",
+    "llama": "mlx-community/Llama-3.2-1B-Instruct",
+    "smollm3": "mlx-community/SmolLM3-3B",
+    "gemma3_text": "mlx-community/gemma-3-1b-it",
+}
+
+
+def mlx_snapshot(tmp_path, *, bits=4, profile_bits=None, family="qwen3"):
     primary = tmp_path / "primary"
-    mlx_qwen_fixture(primary, bits=bits, sharded=True)
+    if family == "qwen3":
+        mlx_qwen_fixture(primary, bits=bits, sharded=True)
+    elif family == "gemma3_text":
+        mlx_gemma_fixture(primary, bits=bits, sharded=True)
+    else:
+        mlx_dense_fixture(primary, family, bits=bits, sharded=True)
     external = source_fixture(tmp_path / "external")
-    repo = f"Qwen/Qwen3-0.6B-MLX-{bits if profile_bits is None else profile_bits}bit"
-    hub = Hub({repo: primary, REPOS["qwen3"]: external})
+    (external / "chat_template.jinja").write_text("{{ messages }}")
+    for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+        shutil.copyfile(external / name, primary / name)
+    if family == "smollm3":
+        (primary / "tokenizer_config.json").write_text(json.dumps({"chat_template": None}))
+    repo = f"{MLX_PROFILES[family]}-{bits if profile_bits is None else profile_bits}bit"
+    repositories = {rule["repo"]: external for rule in get_model(repo)["files"].values() if rule["repo"] != repo}
+    hub = Hub({**repositories, repo: primary})
     return resolve_source(repo, hub=hub), hub
 
 
 @pytest.mark.parametrize("bits", [4, 8])
 @pytest.mark.parametrize("backend", ["auto", "streaming"])
-def test_mlx_profile_complete_conversion_and_offline_external_replay(tmp_path, bits, backend):
-    snapshot, hub = mlx_snapshot(tmp_path, bits=bits)
-    assert {event[1] for event in hub.events if event[0] == "pin"} == {snapshot.repo, REPOS["qwen3"]}
+@pytest.mark.parametrize("family", MLX_PROFILES)
+def test_mlx_profile_complete_conversion_and_offline_external_replay(tmp_path, bits, backend, family):
+    snapshot, hub = mlx_snapshot(tmp_path, bits=bits, family=family)
+    assert {event[1] for event in hub.events if event[0] == "pin"} == {snapshot.repo} | {
+        rule["repo"] for rule in get_model(snapshot.repo)["files"].values()
+    }
     manifest = tmp_path / "source-manifest.json"
     snapshot.write_manifest(manifest)
     replay = resolve_source(snapshot.repo, source_manifest=manifest, offline=True, hub=object())
@@ -166,8 +190,9 @@ def test_mlx_profile_complete_conversion_and_offline_external_replay(tmp_path, b
 
 
 @pytest.mark.parametrize("bits,profile_bits", [(4, 8), (8, 4)])
-def test_mlx_catalog_bit_mismatch_fails_before_staging(tmp_path, bits, profile_bits):
-    snapshot, _ = mlx_snapshot(tmp_path, bits=bits, profile_bits=profile_bits)
+@pytest.mark.parametrize("family", MLX_PROFILES)
+def test_mlx_catalog_bit_mismatch_fails_before_staging(tmp_path, bits, profile_bits, family):
+    snapshot, _ = mlx_snapshot(tmp_path, bits=bits, profile_bits=profile_bits, family=family)
     with pytest.raises(ConversionError, match="packing disagrees"):
         run(snapshot, tmp_path / "output", repo=snapshot.repo)
     assert not (tmp_path / "output").exists() and not list(tmp_path.glob(".stark-convert-*"))

@@ -6,7 +6,7 @@ The fork starts at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`,
 
 ## Build the scoring engine
 
-Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite, and SmolLM profiles, plus affine MLX 4/8-bit Qwen3 checkpoints. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
+Use an Apple silicon Mac with Xcode's Metal tools available. Rust 1.98.1 is pinned. Model files must be converted to the Uzu model format; model weights are not included. The [model converter](tools/converter/README.md) provides independent streaming conversion for selected dense Qwen, Llama, Mistral, Gemma text, Phi-4-mini, Granite and SmolLM profiles, plus affine MLX 4/8-bit Qwen3, Llama, SmolLM3 and Gemma text checkpoints. Exact checkpoint qualification and runtime status are recorded separately; unsupported combinations fail explicitly.
 
 ```sh
 cargo build --release --locked -p stark-score --features optimized
@@ -15,6 +15,23 @@ cargo test --release --locked -p stark-score --features optimized -- --test-thre
 ```
 
 The worker uses a private JSON-lines stdin/stdout protocol. Request and response content belongs in private pipes or files. It suppresses native diagnostic output and capture variables. [Scoring protocol](docs/SCORING.md) describes probabilities, calibration, and optional consecutive caching.
+
+## Model conversion and Lalamo comparison
+
+`stark-convert` implements 54 of the 110 pinned Lalamo built-ins plus four Stark extensions, including 21 MLX profiles. Its runtime dependencies exclude Lalamo, JAX and PyTorch. MLX conversion streams existing packed weights and transforms affine coefficients within an 8 MiB workspace, preserving exact tensor/spec/config/tokenizer parity for qualified tuples. Full initial and final source verification remain enabled.
+
+The six newly measured MLX tuples used **90.7–96.6% less sampled process-tree RSS** than pinned Lalamo. Llama3.2-1B 4-bit and Gemma3-1B 4-bit conversion were **1.24× and 1.23× faster**, respectively. All six passed exact parity and named-build BF16 load-only checks.
+
+| MLX checkpoint, BF16 output | Stark median | Lalamo median | Lower sampled RSS |
+| --- | ---: | ---: | ---: |
+| Llama3.2-1B 4-bit | 1.845 s | 2.292 s | 94.1% |
+| Llama3.2-1B 8-bit | 2.233 s | 2.137 s | 96.6% |
+| SmolLM3-3B 4-bit | 3.979 s | 2.809 s | 95.4% |
+| SmolLM3-3B 8-bit | 6.019 s | 3.544 s | 96.2% |
+| Gemma3-1B 4-bit | 1.991 s | 2.444 s | 90.7% |
+| Gemma3-1B 8-bit | 2.655 s | 2.171 s | 92.5% |
+
+These are three-repeat, warm-cache complete-command measurements on one Apple silicon host. Stark performs stronger source verification and receipt work. Four of the six tuples have slower median conversion times, so broad latency parity remains open. The earlier Qwen3-0.6B MLX packet measured 1.78×/1.21× speedups at its separately recorded source state. Conversion results do not qualify inference speed or quality. See [current evidence and protocol](docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [earlier Qwen3 results](docs/MODEL_CONVERSION_MILESTONE_3.md), and [converter usage](tools/converter/README.md).
 
 ## Changes from Uzu
 

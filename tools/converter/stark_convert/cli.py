@@ -79,7 +79,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     snapshot.assert_unchanged(verify_content=False)
     config = read_json(snapshot.resolve_file("config.json"))
     adapter = adapter_for_model(request.repo, config.get("model_type"))
-    if adapter == "qwen3":
+    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text"}:
         from .compressed import parse_mlx_quantization
 
         packing = get_model(request.repo).get("compressed_format")

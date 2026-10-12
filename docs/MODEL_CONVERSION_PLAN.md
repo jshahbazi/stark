@@ -1,6 +1,6 @@
 # Independent model conversion replacement plan
 
-Updated: 2026-10-11. Milestone 1's G0/G1/selected G2 acceptance and milestone 2's scoped G3 conversion/load/memory remain preserved. Independent review accepts milestone 3's first scoped G4 packet: Qwen3 MLX 4/8-bit conversion, two exact load-only tuples, bounded workspace and their measured performance. Full G4 and the broad latency objective remain open; see [milestone 3 evidence](MODEL_CONVERSION_MILESTONE_3.md) and [review](MODEL_CONVERSION_MILESTONE_3_REVIEW.md), with [milestone 2 results](MODEL_CONVERSION_MILESTONE_2.md) retained unchanged.
+Updated: 2026-10-12. Milestone 1's G0/G1/selected G2, milestone 2's scoped G3 and the first Qwen3 MLX packet remain preserved. Milestone 3 now includes independent MLX Llama/SmolLM3/Gemma text conversion and six additional exact BF16 load-only qualifications. The [continuation evidence](MODEL_CONVERSION_MILESTONE_3_DENSE.md) and [review](MODEL_CONVERSION_MILESTONE_3_DENSE_REVIEW.md) separate conversion/load/workspace/memory acceptance from the four failed latency hypotheses. Full G4 and broad latency parity remain open; [first MLX results](MODEL_CONVERSION_MILESTONE_3.md) and [milestone 2 results](MODEL_CONVERSION_MILESTONE_2.md) retain their original source bindings.
 
 Keep `stark-convert` in this repository as a first-class companion to the Stark engine. The user-directed target is to supplant Lalamo with independently implemented conversion and remove the runtime fallback. Lalamo remains an attributed, pinned reference for registry inventory, format semantics, and externally generated qualification artifacts. The installed converter must neither import nor invoke Lalamo, JAX, or PyTorch.
 
@@ -10,7 +10,7 @@ This policy supersedes the permanent-fallback policy in the plan committed at `e
 
 The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **four explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct`, `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`, and `google/gemma-2-2b-it`. Gemma2 uses the pinned config/loader with a standard LanguageModelSpec; the registry has no Gemma2 built-in. Extensions do not alter the built-in denominator or imply upstream registration.
 
-The current implementation covers **45 built-in profiles and four extensions**, including 33 dense built-ins for Qwen, Llama, Mistral, Gemma3 text, Phi-4-mini, Granite and SmolLM, plus 12 MLX 4/8-bit Qwen3 built-ins. Gemma2 remains separately counted as a Stark extension. Thirteen exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 65 built-ins need independent adapters; other implemented profiles remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
+The current implementation covers **54 built-in profiles and four extensions**, including 33 dense built-ins for Qwen, Llama, Mistral, Gemma3 text, Phi-4-mini, Granite and SmolLM, plus 21 MLX 4/8-bit Qwen3/Llama/SmolLM3/Gemma text built-ins. Gemma2 remains separately counted as a Stark extension. Nineteen exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 56 built-ins need independent adapters; 39 implemented identities remain unqualified. Qualification remains per exact source revision, config variant, dtype, and metadata source set. The target does not include arbitrary Hugging Face repositories, third-party Lalamo plugins, or a moving upstream branch.
 
 Conversion, native loading, execution, and performance are separate dimensions. Current Stark dense loading selects BF16; F16/F32 conversion-only outputs remain runtime-blocked. MoE construction is currently rejected. Existing kernel/config enums do not establish acceptance for every model using them. Language scoring, generation, classification, and TTS each require the corresponding execution evidence.
 
@@ -125,7 +125,10 @@ Dependencies: inspected native matrix/kernel/embedding contracts, source metadat
 - [x] Qualify the exact 0.6B 4-bit and 8-bit group-128 BF16 tuples with full reference parity, named-build load-only evidence and source-bound performance; keep other profiles/groups unqualified.
 - [x] Freeze 288 external packed/spec/dequantized synthetic cases, exceptional coefficient casts and 12 complete synthetic artifact variants; enforce workspace and malformed-input/publication/source gates.
 - [ ] Inventory remaining packed schemes from actual reference loaders rather than quantization enums.
-- [ ] Extend MLX helper use to other independently inspected dense families and qualify every additionally claimed format/family tuple.
+- [x] Extend the unchanged MLX helper to five Llama, two SmolLM3 and two Gemma3 text profiles; qualify the selected six group-64 BF16 tuples with exact artifact parity, named-build load-only and source-bound benchmark evidence. Keep other variants unqualified.
+- [x] Freeze additional actual-loader decoder exports and complete synthetic CLI metadata/artifact comparisons; preserve family RoPE/norm/embedding semantics and reject mixed/malformed representations.
+- [x] Record explicit canonical/transport provenance for Llama's exact public metadata copy, authenticated against the official pinned Git blob; keep direct gated resolution and automatic substitution policies unchanged.
+- [ ] Extend independent compressed conversion to remaining families/schemes and qualify each additionally claimed tuple.
 - [ ] Define bit order, packing divisor, group axis, scales/zero points, padding, fusion, and cross-chunk/shard boundaries for every additional scheme.
 - [ ] Keep repacking an existing compressed checkpoint separate from computing new quantization and its quality acceptance.
 - [ ] Assess low-rank/hybrid/D4S4/microfloat outputs against their exact native targets.
@@ -135,7 +138,7 @@ Dependencies: inspected native matrix/kernel/embedding contracts, source metadat
 
 Gate G4: qualification is per scheme, bit width, group size, layout, model variant, and native target. Unsupported formats have no delegated execution route.
 
-The **third milestone is the first Qwen3 MLX compressed-format packet under scoped G4**. Its exact two-tuple conversion/load-only/workspace/performance acceptance does not close full Phase 4. Llama/SmolLM/Gemma compressed profiles, specialized compressed architectures, other schemes, and execution quality retain separate gates. The [milestone 3 evidence](MODEL_CONVERSION_MILESTONE_3.md) records the precise qualified, implemented-unqualified and unsupported boundaries.
+The **third milestone comprises the initial Qwen3 MLX packet and the Llama/SmolLM3/Gemma text continuation under scoped G4**. Its exact tuple conversion/load-only/workspace/memory acceptance does not close full Phase 4. The continuation records six raw complete-command latency hypotheses: two pass and four fail. Specialized/multimodal compressed architectures, other schemes, unmeasured variants and execution quality retain separate gates. The [first packet](MODEL_CONVERSION_MILESTONE_3.md) and [continuation evidence](MODEL_CONVERSION_MILESTONE_3_DENSE.md) preserve the precise source-bound qualified, implemented-unqualified and unsupported boundaries.
 
 ## Phase 5 — Specialized models and complete replacement accounting
 

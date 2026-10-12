@@ -271,5 +271,7 @@ def test_unsupported_semantics_and_quantized_sources_fail_closed(tmp_path, case)
     config["rope_scaling"] = None
     config["quantization_config"] = {"bits": 4, "group_size": 64}
     (source / "config.json").write_text(json.dumps(config))
-    with pytest.raises(UnsupportedConversion, match="Quantized"):
+    error = ConversionError if case == "smollm3" else UnsupportedConversion
+    message = "no packed checkpoint matrices" if case == "smollm3" else "Quantized"
+    with pytest.raises(error, match=message):
         PLANNERS[case](source)

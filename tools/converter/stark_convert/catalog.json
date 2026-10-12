@@ -4885,9 +4885,12 @@
       "vendor": "LiquidAI"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.1",
@@ -4924,7 +4927,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.1-8B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4932,16 +4935,19 @@
       "size": "8B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -4978,7 +4984,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-1B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -4986,16 +4992,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -5032,7 +5041,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-1B-Instruct-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5040,16 +5049,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -5086,7 +5098,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-3B-Instruct-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5094,16 +5106,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Meta"
     },
     {
-      "adapter": null,
+      "adapter": "llama",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFLlamaConfig",
       "container": ".safetensors",
       "family": "Llama-3.2",
@@ -5140,7 +5155,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "llama",
       "model_kind": "LanguageModelSpec",
       "name": "Llama-3.2-3B-Instruct-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5148,7 +5163,7 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
@@ -5719,9 +5734,12 @@
       "vendor": "Alibaba"
     },
     {
-      "adapter": null,
+      "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
       "family": "SmolLM3",
@@ -5762,7 +5780,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "smollm3",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM3-3B-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5770,16 +5788,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "smollm3",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFSmolLM3Config",
       "container": ".safetensors",
       "family": "SmolLM3",
@@ -5820,7 +5841,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "smollm3",
       "model_kind": "LanguageModelSpec",
       "name": "SmolLM3-3B-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5828,16 +5849,19 @@
       "size": "3B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "HuggingFace"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 4,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5874,7 +5898,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "gemma-3-1b-it-4bit",
       "origin": "HuggingFaceOrigin",
@@ -5882,16 +5906,19 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
       "vendor": "Google"
     },
     {
-      "adapter": null,
+      "adapter": "gemma3_text",
       "catalog_origin": "pinned_builtin",
-      "compressed_format": null,
+      "compressed_format": {
+        "bits": 8,
+        "scheme": "mlx_affine"
+      },
       "config_class": "HFGemma3TextConfig",
       "container": ".safetensors",
       "family": "Gemma-3",
@@ -5928,7 +5955,7 @@
           "user": "user"
         }
       },
-      "metadata_profile": null,
+      "metadata_profile": "gemma3_text",
       "model_kind": "LanguageModelSpec",
       "name": "gemma-3-1b-it-8bit",
       "origin": "HuggingFaceOrigin",
@@ -5936,7 +5963,7 @@
       "size": "1B",
       "status": {
         "access": "not_assessed",
-        "conversion": "planned",
+        "conversion": "implemented",
         "qualification": "pending",
         "runtime": "not_assessed"
       },
