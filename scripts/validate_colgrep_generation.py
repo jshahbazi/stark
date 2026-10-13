@@ -512,6 +512,11 @@ def main():
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception:
-        print("generation_validation_failed", flush=True)
+    except Exception as error:
+        code = (
+            str(error)
+            if isinstance(error, RuntimeError) and re.fullmatch(r"[a-z_]+", str(error))
+            else "generation_validation_failed"
+        )
+        print(code, flush=True)
         raise SystemExit(1) from None
