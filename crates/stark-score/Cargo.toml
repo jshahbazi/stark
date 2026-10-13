@@ -14,6 +14,10 @@ path = "src/main.rs"
 name = "stark-score-digest"
 path = "probes/score_digest.rs"
 
+[[bin]]
+name = "stark-gguf-experiment"
+path = "probes/gguf_experiment.rs"
+
 [features]
 default = ["probability-scoring"]
 probability-scoring = []
