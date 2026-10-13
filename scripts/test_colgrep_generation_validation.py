@@ -39,6 +39,41 @@ class ValidationHelpersTest(unittest.TestCase):
         self.assertFalse(validation.finish_valid([("finish", {"locations": "['src/retry.py:7-7']"})]))
         self.assertFalse(validation.finish_valid([("finish", {"locations": "['src/retry.py:1-16']"})]))
 
+    def test_stops_match_requires_the_reference_eos_and_eos_finish(self):
+        self.assertTrue(
+            validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 1})
+        )
+        self.assertFalse(
+            validation.stops_match(None, {"finish_reason": "length", "stop_token_id": None})
+        )
+        self.assertFalse(
+            validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 130073})
+        )
+        self.assertFalse(
+            validation.stops_match(130073, {"finish_reason": "eos", "stop_token_id": 1})
+        )
+
+    def test_source_seal_rejects_missing_or_invalid_etag_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "model.safetensors").write_bytes(b"weights")
+            metadata = source / ".cache/huggingface/download"
+            metadata.mkdir(parents=True)
+            path = metadata / "model.safetensors.metadata"
+            for identity in [
+                validation.REVISION + "\nnot-an-etag\n",
+                validation.REVISION + "\n" + "0" * 39 + "\n",
+                validation.REVISION + "\n" + "0" * 65 + "\n",
+                validation.REVISION + "\n",
+            ]:
+                path.write_text(identity)
+                with self.subTest(identity=identity):
+                    with self.assertRaisesRegex(RuntimeError, "source_metadata_invalid"):
+                        validation.seal_source(source)
+            path.unlink()
+            with self.assertRaises((FileNotFoundError, RuntimeError)):
+                validation.seal_source(source)
+
     def test_source_seal_checks_revision_and_content(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory)

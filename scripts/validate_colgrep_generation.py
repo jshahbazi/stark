@@ -58,6 +58,14 @@ def digest_ids(ids):
     return digest_bytes(b"".join(value.to_bytes(4, "little") for value in ids))
 
 
+def stops_match(reference_eos, response):
+    return (
+        reference_eos in EOS
+        and response.get("finish_reason") == "eos"
+        and response.get("stop_token_id") == reference_eos
+    )
+
+
 class Worker:
     def __init__(self, executable, model):
         self.process = subprocess.Popen(
@@ -271,7 +279,9 @@ def seal_source(source):
             continue
         metadata = source / ".cache/huggingface/download" / (path.name + ".metadata")
         identity = metadata.read_text().splitlines()
-        if not identity or identity[0] != REVISION:
+        if len(identity) < 2 or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", identity[1]):
+            raise RuntimeError("source_metadata_invalid")
+        if identity[0] != REVISION:
             raise RuntimeError("source_revision_mismatch")
         sha256 = digest_file(path)
         if len(identity[1]) == 64 and identity[1] != sha256:
@@ -375,7 +385,7 @@ def main():
                     "reference_ids_sha256": digest_ids(case["reference"]),
                     "finish_reason": response["finish_reason"],
                     "stop_token_id": response["stop_token_id"],
-                    "stop_exact": response["stop_token_id"] == case["reference_eos"],
+                    "stop_exact": stops_match(case["reference_eos"], response),
                     "tool_contract": any(name == case["expected"] for name, _ in parsed),
                     "verified_location": finish_valid(parsed) if case["expected"] == "finish" else None,
                     "generation_seconds": response["generation_seconds"],
