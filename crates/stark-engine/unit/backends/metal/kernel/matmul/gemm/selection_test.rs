@@ -205,12 +205,7 @@ fn paired_staged_w8_group32_plans_preserve_split_when_retiling() {
             plan.tiling.block_n() / plan.tiling.simdgroups_n(),
             reference.tiling.block_n() / reference.tiling.simdgroups_n()
         );
-        let expected_stage_k = if plan.tiling == policy::MXU_DEFAULT_TILE {
-            128
-        } else {
-            64
-        };
-        assert_eq!(outer_block_k(paired, Mxu, plan.tiling), Some(expected_stage_k));
+        assert_eq!(outer_block_k(paired, Mxu, plan.tiling), Some(64));
         assert_eq!(outer_block_k(group64, Mxu, plan.tiling), Some(64));
 
         let mut integer = paired;
@@ -235,7 +230,7 @@ fn paired_staged_w8_group32_plans_preserve_split_when_retiling() {
 fn paired_staged_w8_group32_rejects_incomplete_forced_pairs() {
     use GemmEngine::*;
 
-    for k in [32, 64, 96] {
+    for k in [32, 96] {
         let mut paired = quant(shape(64, 128, k));
         paired.b_bits = Some(8);
         paired.b_group_size = Some(32);
@@ -243,8 +238,7 @@ fn paired_staged_w8_group32_rejects_incomplete_forced_pairs() {
         assert_eq!(
             problem(paired, DataType::BF16).select_plan_for_engine(Mxu),
             Err(GemmPlanError::IncompleteStagedPair {
-                k,
-                block_k: 128,
+                k
             })
         );
         let mut integer = paired;
@@ -258,18 +252,12 @@ fn paired_staged_w8_group32_rejects_incomplete_forced_pairs() {
         assert!(problem(w4, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
     }
 
-    for (k, group_size) in [(128, 32), (256, 32), (64, 64), (128, 128)] {
+    for (k, group_size) in [(64, 32), (128, 32), (64, 64), (128, 128)] {
         let mut complete = quant(shape(64, 128, k));
         complete.b_bits = Some(8);
         complete.b_group_size = Some(group_size);
         assert!(problem(complete, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
     }
-
-    let mut narrow = quant(shape(24, 128, 64));
-    narrow.b_bits = Some(8);
-    narrow.b_group_size = Some(32);
-    let narrow_plan = problem(narrow, DataType::BF16).select_plan_for_engine(Mxu).expect("narrow group32 staging");
-    assert_eq!(outer_block_k(narrow, Mxu, narrow_plan.tiling), Some(64));
 }
 
 #[stark_test]

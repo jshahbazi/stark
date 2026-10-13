@@ -15,8 +15,7 @@ using namespace stark::gemm;
 #define GEMM_MXU_QUANT (USE_MXU && B_PROLOGUE != GemmBPrologueKind::FullPrecision && !A_IS_INT8)
 #define GEMM_PAIRED_STAGED_GROUPS \
   (GEMM_MXU_QUANT && BITS == 8 && B_PROLOGUE == GemmBPrologueKind::ScaleSymmetricDequant && GROUP_SIZE == 32)
-#define GEMM_STAGED_BLOCK_K \
-  (GEMM_PAIRED_STAGED_GROUPS ? (GEMM_TILING == GemmTiling::Tile64x64x256_Simdgroups2x2 ? 128 : 64) : int(GROUP_SIZE))
+#define GEMM_STAGED_BLOCK_K (GEMM_PAIRED_STAGED_GROUPS ? 64 : int(GROUP_SIZE))
 #define GEMM_TGA_ELEMENTS                                                                                              \
   ((USE_MXU) ? 1 : (gemm_tiling_block_m(GEMM_TILING) * (gemm_tiling_block_k(GEMM_TILING) + 16 / int(sizeof(AT)))))
 // The A8 MXU route reads its scales into registers, so it asks for no
