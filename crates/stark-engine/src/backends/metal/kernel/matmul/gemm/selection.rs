@@ -87,12 +87,23 @@ impl GemmProblem {
     fn finish_plan(
         &self,
         engine: GemmEngine,
-        tiling: GemmTiling,
+        partition_tiling: GemmTiling,
     ) -> GemmPlan {
+        // Retile the staged group-32 W8 route without changing its K partitions.
+        // Both geometries have the same 32x32 per-simdgroup MMA shape, so keeping
+        // the original split count also keeps their accumulation boundaries.
+        let tiling = if engine == GemmEngine::Mxu
+            && uses_paired_staging(self.shape)
+            && partition_tiling == GemmTiling::Tile128x128x256_Simdgroups4x4
+        {
+            policy::MXU_DEFAULT_TILE
+        } else {
+            partition_tiling
+        };
         GemmPlan {
             engine,
             tiling,
-            split_k: self.select_split_k(engine, tiling),
+            split_k: self.select_split_k(engine, partition_tiling),
         }
     }
 

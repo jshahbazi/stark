@@ -164,10 +164,19 @@ fn selection_fallbacks_and_split_k_are_preserved() {
 }
 
 #[stark_test]
-fn paired_staged_w8_group32_plans_preserve_tile_and_split() {
+fn paired_staged_w8_group32_plans_preserve_split_when_retiling() {
     use GemmEngine::*;
+    use GemmTiling::*;
 
-    for (m, n, k) in [(24, 4096, 1024), (128, 6144, 1024), (512, 1024, 2048), (513, 1024, 3072)] {
+    for (m, n, k, expected_split) in [
+        (24, 4096, 1024, 8),
+        (128, 6144, 1024, 2),
+        (512, 4096, 1024, 4),
+        (512, 1024, 2048, 16),
+        (512, 6144, 1024, 2),
+        (513, 1024, 3072, 12),
+        (1024, 1024, 3072, 8),
+    ] {
         let mut paired = quant(shape(m, n, k));
         paired.b_bits = Some(8);
         paired.b_group_size = Some(32);
@@ -176,23 +185,44 @@ fn paired_staged_w8_group32_plans_preserve_tile_and_split() {
         let mut group64 = paired;
         group64.b_group_size = Some(64);
         let plan = problem(paired, DataType::BF16).select_plan();
+        // Group64 has the same original dispatch/partition policy as group32.
+        // It is excluded from the staged group32 tuning and anchors that policy.
         let reference = problem(group64, DataType::BF16).select_plan();
         assert_eq!(plan.engine, Mxu);
-        assert_eq!(plan.tiling, reference.tiling);
+        let expected_tiling = if reference.tiling == Tile128x128x256_Simdgroups4x4 {
+            Tile64x64x256_Simdgroups2x2
+        } else {
+            reference.tiling
+        };
+        assert_eq!(plan.tiling, expected_tiling);
         assert_eq!(plan.split_k, reference.split_k);
+        assert_eq!(plan.split_k, expected_split);
+        assert_eq!(
+            plan.tiling.block_m() / plan.tiling.simdgroups_m(),
+            reference.tiling.block_m() / reference.tiling.simdgroups_m()
+        );
+        assert_eq!(
+            plan.tiling.block_n() / plan.tiling.simdgroups_n(),
+            reference.tiling.block_n() / reference.tiling.simdgroups_n()
+        );
         assert_eq!(outer_block_k(paired, Mxu, plan.tiling), Some(64));
         assert_eq!(outer_block_k(group64, Mxu, plan.tiling), Some(64));
 
         let mut integer = paired;
         integer.a_full_precision = false;
         assert_eq!(outer_block_k(integer, Mxu, plan.tiling), Some(32));
+        assert_eq!(problem(integer, DataType::BF16).select_plan().tiling, policy::mxu_mn_tile(true, m, n));
         let mut mlx = paired;
         mlx.b_prologue = GemmBPrologueKind::ScaleBiasDequant;
         assert_eq!(outer_block_k(mlx, Mxu, plan.tiling), Some(32));
+        assert_eq!(problem(mlx, DataType::BF16).select_plan().tiling, reference.tiling);
         let mut w4 = paired;
         w4.b_bits = Some(4);
         assert_eq!(outer_block_k(w4, Mxu, plan.tiling), Some(32));
-        assert_eq!(outer_block_k(paired, Simdgroup, plan.tiling), Some(plan.tiling.block_k()));
+        assert_eq!(problem(w4, DataType::BF16).select_plan().tiling, reference.tiling);
+        let simdgroup = problem(paired, DataType::BF16).select_plan_for_engine(Simdgroup).expect("simdgroup plan");
+        assert_eq!(simdgroup.tiling, policy::simdgroup_quant_tile(m, n, 32, MTLGPUFamily::Apple7));
+        assert_eq!(outer_block_k(paired, Simdgroup, simdgroup.tiling), Some(simdgroup.tiling.block_k()));
     }
 }
 
