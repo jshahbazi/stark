@@ -37,10 +37,12 @@ struct QuantizedBlockLoaderScaleZeroPoint {
   STARK_CONST short GROUP_STEPS_PER_BLOCK = GROUP_SIZE / THREADGROUP_TILE_COLS;
   STARK_CONST short PARAM_GROUPS_PER_BLOCK =
       THREADGROUP_TILE_COLS > GROUP_SIZE ? THREADGROUP_TILE_COLS / GROUP_SIZE : 1;
+  STARK_CONST short READS_PER_SCALE =
+      READS_PER_THREAD * PACK_FACTOR > GROUP_SIZE ? GROUP_SIZE / PACK_FACTOR : READS_PER_THREAD;
   STARK_CONST bool TILE_HAS_IDLE_THREADS = THREADGROUP_TILE_COLS_PACKED * THREADGROUP_TILE_ROWS < THREADGROUP_SIZE;
   static_assert(
-      GROUP_SIZE % (READS_PER_THREAD * PACK_FACTOR) == 0,
-      "each thread's contiguous reads must stay within one coefficient group"
+      GROUP_SIZE % (READS_PER_THREAD * PACK_FACTOR) == 0 || (READS_PER_THREAD * PACK_FACTOR) % GROUP_SIZE == 0,
+      "thread read segments and coefficient groups must contain whole multiples of each other"
   );
 
   const int src_leading_dim;
@@ -122,15 +124,16 @@ struct QuantizedBlockLoaderScaleZeroPoint {
     static_assert(SCALE_SYMMETRIC, "zero-point-free loader construction requires symmetric quantization");
   }
 
-  inline void current_scale_bias(thread T& out_scale, thread T& out_bias) const {
+  inline void current_scale_bias(thread T& out_scale, thread T& out_bias, const uint group_offset = 0) const {
     uint zero_point_value;
     T scale_value;
-    scale_value = *scales;
+    scale_value = scales[group_offset * uint(group_stride)];
     if constexpr (SCALE_SYMMETRIC) {
       zero_point_value = symmetric_zero_point<ushort(BITS)>();
     } else {
-      const uint byte_index = zero_point_index / uint(PACK_FACTOR);
-      const uint packed_index = zero_point_index % uint(PACK_FACTOR);
+      const uint absolute_group_index = zero_point_index + group_offset * zero_point_group_stride;
+      const uint byte_index = absolute_group_index / uint(PACK_FACTOR);
+      const uint packed_index = absolute_group_index % uint(PACK_FACTOR);
       zero_point_value = decode_zero_point<ushort(BITS)>(zero_points_row_start[byte_index], packed_index);
     }
     out_scale = scale_value;
@@ -144,11 +147,13 @@ struct QuantizedBlockLoaderScaleZeroPoint {
       }
     }
 
-    T scale;
-    T bias;
-    current_scale_bias(scale, bias);
-    for (int i = 0; i < READS_PER_THREAD; i++) {
-      dequantize<T, PACK_FACTOR, BITS>(src + i * BYTES_PER_PACK, scale, bias, dst + i * PACK_FACTOR, signed_codes);
+    for (int read_base = 0; read_base < READS_PER_THREAD; read_base += READS_PER_SCALE) {
+      T scale;
+      T bias;
+      current_scale_bias(scale, bias, uint(read_base * PACK_FACTOR / GROUP_SIZE));
+      for (int i = read_base; i < read_base + READS_PER_SCALE; i++) {
+        dequantize<T, PACK_FACTOR, BITS>(src + i * BYTES_PER_PACK, scale, bias, dst + i * PACK_FACTOR, signed_codes);
+      }
     }
   }
 
@@ -168,22 +173,24 @@ struct QuantizedBlockLoaderScaleZeroPoint {
 
     const int valid_cols = src_tile_dim.x;
     const int valid_packs = (valid_cols + PACK_FACTOR - 1) / PACK_FACTOR;
-    T scale;
-    T bias;
-    current_scale_bias(scale, bias);
-    for (int i = 0; i < READS_PER_THREAD; i++) {
-      const int pack_index = tile_col_index + i;
-      if (pack_index < valid_packs) {
-        dequantize<T, PACK_FACTOR, BITS>(src + i * BYTES_PER_PACK, scale, bias, dst + i * PACK_FACTOR, signed_codes);
-        if (pack_index == valid_packs - 1) {
-          const int remaining = valid_cols - pack_index * PACK_FACTOR;
-          for (int lane = remaining; lane < PACK_FACTOR; ++lane) {
+    for (int read_base = 0; read_base < READS_PER_THREAD; read_base += READS_PER_SCALE) {
+      T scale;
+      T bias;
+      current_scale_bias(scale, bias, uint(read_base * PACK_FACTOR / GROUP_SIZE));
+      for (int i = read_base; i < read_base + READS_PER_SCALE; i++) {
+        const int pack_index = tile_col_index + i;
+        if (pack_index < valid_packs) {
+          dequantize<T, PACK_FACTOR, BITS>(src + i * BYTES_PER_PACK, scale, bias, dst + i * PACK_FACTOR, signed_codes);
+          if (pack_index == valid_packs - 1) {
+            const int remaining = valid_cols - pack_index * PACK_FACTOR;
+            for (int lane = remaining; lane < PACK_FACTOR; ++lane) {
+              dst[i * PACK_FACTOR + lane] = T(0);
+            }
+          }
+        } else {
+          for (int lane = 0; lane < PACK_FACTOR; ++lane) {
             dst[i * PACK_FACTOR + lane] = T(0);
           }
-        }
-      } else {
-        for (int lane = 0; lane < PACK_FACTOR; ++lane) {
-          dst[i * PACK_FACTOR + lane] = T(0);
         }
       }
     }
