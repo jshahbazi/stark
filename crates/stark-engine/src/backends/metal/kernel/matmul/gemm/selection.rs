@@ -25,10 +25,9 @@ pub(super) enum GemmPlanError {
     MxuUnavailable,
     #[error("quantized GEMM requires transposed contiguous B")]
     UnsupportedQuantLayout,
-    #[error("group-32 staging requires K divisible by {block_k}, got {k}")]
+    #[error("paired group-32 staging requires K divisible by 64, got {k}")]
     IncompleteStagedPair {
         k: u32,
-        block_k: u32,
     },
 }
 
@@ -77,16 +76,10 @@ impl GemmProblem {
         if self.shape.is_quant() && (!self.shape.b_transpose || self.shape.b_leading_dimension.is_some()) {
             return Err(GemmPlanError::UnsupportedQuantLayout);
         }
-        if engine == GemmEngine::Mxu && uses_paired_staging(self.shape) {
-            let policy_tiling = select_tiling(self.shape, engine, self.apple_gpu_family);
-            let tiling = staged_dispatch_tiling(self.shape, engine, policy_tiling);
-            let block_k = outer_block_k(self.shape, engine, tiling).expect("group-32 staging has a K step");
-            if !self.shape.k.is_multiple_of(block_k) {
-                return Err(GemmPlanError::IncompleteStagedPair {
-                    k: self.shape.k,
-                    block_k,
-                });
-            }
+        if engine == GemmEngine::Mxu && uses_paired_staging(self.shape) && !self.shape.k.is_multiple_of(64) {
+            return Err(GemmPlanError::IncompleteStagedPair {
+                k: self.shape.k,
+            });
         }
         Ok(())
     }
@@ -99,7 +92,14 @@ impl GemmProblem {
         // Retile the staged group-32 W8 route without changing its K partitions.
         // Both geometries have the same 32x32 per-simdgroup MMA shape, so keeping
         // the original split count also keeps their accumulation boundaries.
-        let tiling = staged_dispatch_tiling(self.shape, engine, partition_tiling);
+        let tiling = if engine == GemmEngine::Mxu
+            && uses_paired_staging(self.shape)
+            && partition_tiling == GemmTiling::Tile128x128x256_Simdgroups4x4
+        {
+            policy::MXU_DEFAULT_TILE
+        } else {
+            partition_tiling
+        };
         GemmPlan {
             engine,
             tiling,
@@ -167,35 +167,16 @@ pub(super) fn outer_block_k(
 ) -> Option<u32> {
     if engine == GemmEngine::Mxu && shape.is_quant() {
         shape.b_group_size.filter(|&group_size| group_size != 0).map(|group_size| {
-            // The staged W8 symmetric route keeps independent group-32
-            // coefficients in a wider tile without regrouping weights.
+            // The staged W8 symmetric route keeps two independent group-32
+            // coefficient planes in one tile, halving its barrier frequency.
             if uses_paired_staging(shape) {
-                if tiling == policy::MXU_DEFAULT_TILE {
-                    128
-                } else {
-                    64
-                }
+                64
             } else {
                 group_size
             }
         })
     } else {
         Some(tiling.block_k()).filter(|&block_k| block_k != 0)
-    }
-}
-
-fn staged_dispatch_tiling(
-    shape: MatmulShape,
-    engine: GemmEngine,
-    policy_tiling: GemmTiling,
-) -> GemmTiling {
-    if engine == GemmEngine::Mxu
-        && uses_paired_staging(shape)
-        && policy_tiling == GemmTiling::Tile128x128x256_Simdgroups4x4
-    {
-        policy::MXU_DEFAULT_TILE
-    } else {
-        policy_tiling
     }
 }
 
