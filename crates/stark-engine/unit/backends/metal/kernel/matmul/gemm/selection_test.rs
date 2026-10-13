@@ -164,6 +164,73 @@ fn selection_fallbacks_and_split_k_are_preserved() {
 }
 
 #[stark_test]
+fn paired_staged_w8_group32_plans_preserve_tile_and_split() {
+    use GemmEngine::*;
+
+    for (m, n, k) in [(24, 4096, 1024), (128, 6144, 1024), (512, 1024, 2048), (513, 1024, 3072)] {
+        let mut paired = quant(shape(m, n, k));
+        paired.b_bits = Some(8);
+        paired.b_group_size = Some(32);
+        paired.signed_codes = false;
+        paired.params_layout = Some(QuantParamsLayout::GroupOutput);
+        let mut group64 = paired;
+        group64.b_group_size = Some(64);
+        let plan = problem(paired, DataType::BF16).select_plan();
+        let reference = problem(group64, DataType::BF16).select_plan();
+        assert_eq!(plan.engine, Mxu);
+        assert_eq!(plan.tiling, reference.tiling);
+        assert_eq!(plan.split_k, reference.split_k);
+        assert_eq!(outer_block_k(paired, Mxu, plan.tiling), Some(64));
+        assert_eq!(outer_block_k(group64, Mxu, plan.tiling), Some(64));
+
+        let mut integer = paired;
+        integer.a_full_precision = false;
+        assert_eq!(outer_block_k(integer, Mxu, plan.tiling), Some(32));
+        let mut mlx = paired;
+        mlx.b_prologue = GemmBPrologueKind::ScaleBiasDequant;
+        assert_eq!(outer_block_k(mlx, Mxu, plan.tiling), Some(32));
+        let mut w4 = paired;
+        w4.b_bits = Some(4);
+        assert_eq!(outer_block_k(w4, Mxu, plan.tiling), Some(32));
+        assert_eq!(outer_block_k(paired, Simdgroup, plan.tiling), Some(plan.tiling.block_k()));
+    }
+}
+
+#[stark_test]
+fn paired_staged_w8_group32_rejects_incomplete_forced_pairs() {
+    use GemmEngine::*;
+
+    for k in [32, 96] {
+        let mut paired = quant(shape(64, 128, k));
+        paired.b_bits = Some(8);
+        paired.b_group_size = Some(32);
+        assert_eq!(problem(paired, DataType::BF16).select_plan().engine, Simdgroup);
+        assert_eq!(
+            problem(paired, DataType::BF16).select_plan_for_engine(Mxu),
+            Err(GemmPlanError::IncompleteStagedPair {
+                k
+            })
+        );
+        let mut integer = paired;
+        integer.a_full_precision = false;
+        assert!(problem(integer, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
+        let mut mlx = paired;
+        mlx.b_prologue = GemmBPrologueKind::ScaleBiasDequant;
+        assert!(problem(mlx, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
+        let mut w4 = paired;
+        w4.b_bits = Some(4);
+        assert!(problem(w4, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
+    }
+
+    for (k, group_size) in [(64, 32), (128, 32), (64, 64), (128, 128)] {
+        let mut complete = quant(shape(64, 128, k));
+        complete.b_bits = Some(8);
+        complete.b_group_size = Some(group_size);
+        assert!(problem(complete, DataType::BF16).select_plan_for_engine(Mxu).is_ok());
+    }
+}
+
+#[stark_test]
 fn forced_engine_errors_are_preserved() {
     let huge = shape(u32::MAX, u32::MAX, u32::MAX);
     assert_eq!(

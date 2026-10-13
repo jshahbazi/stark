@@ -25,6 +25,10 @@ pub(super) enum GemmPlanError {
     MxuUnavailable,
     #[error("quantized GEMM requires transposed contiguous B")]
     UnsupportedQuantLayout,
+    #[error("paired group-32 staging requires K divisible by 64, got {k}")]
+    IncompleteStagedPair {
+        k: u32,
+    },
 }
 
 impl GemmProblem {
@@ -71,6 +75,11 @@ impl GemmProblem {
         }
         if self.shape.is_quant() && (!self.shape.b_transpose || self.shape.b_leading_dimension.is_some()) {
             return Err(GemmPlanError::UnsupportedQuantLayout);
+        }
+        if engine == GemmEngine::Mxu && uses_paired_staging(self.shape) && !self.shape.k.is_multiple_of(64) {
+            return Err(GemmPlanError::IncompleteStagedPair {
+                k: self.shape.k,
+            });
         }
         Ok(())
     }
@@ -146,10 +155,25 @@ pub(super) fn outer_block_k(
     tiling: GemmTiling,
 ) -> Option<u32> {
     if engine == GemmEngine::Mxu && shape.is_quant() {
-        shape.b_group_size.filter(|&group_size| group_size != 0)
+        shape.b_group_size.filter(|&group_size| group_size != 0).map(|group_size| {
+            // The staged W8 symmetric route keeps two independent group-32
+            // coefficient planes in one tile, halving its barrier frequency.
+            if uses_paired_staging(shape) {
+                64
+            } else {
+                group_size
+            }
+        })
     } else {
         Some(tiling.block_k()).filter(|&block_k| block_k != 0)
     }
+}
+
+fn uses_paired_staging(shape: MatmulShape) -> bool {
+    shape.a_full_precision
+        && shape.b_bits == Some(8)
+        && shape.b_prologue == GemmBPrologueKind::ScaleSymmetricDequant
+        && shape.b_group_size == Some(32)
 }
 
 fn mxu_is_eligible(shape: MatmulShape) -> bool {
