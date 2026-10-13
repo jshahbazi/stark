@@ -138,7 +138,7 @@ cargo build --release --locked -p stark-generate
 
 `stark-generate` exposes `tokenize`, `decode` and `generate` over private JSON-lines pipes. Each generation request uses fresh native state and returns generated token IDs, decoded text and a finish reason. The caller renders the model's exact chat template and owns tool execution. [Generation protocol and ColGrep setup](docs/GENERATION.md).
 
-The `lightonai/colgrep-agent-2B` checkpoint at revision `f798a61129c6decb5166864e0a3c98373e62c764` has a pinned conversion and controlled generation validation workflow. Native reference and tool-protocol acceptance are pending. Live ColGrep search and application integration require separate validation.
+The `lightonai/colgrep-agent-2B` checkpoint at revision `f798a61129c6decb5166864e0a3c98373e62c764` has controlled functional acceptance on the named build, including a three-turn generated search/read/finish fixture. Three of four greedy reference cases match exactly; the remaining finish case returns the same valid locations with a documented token divergence. [Acceptance and limits](docs/GENERATION.md#validation-status-and-replay). Live ColGrep search and application integration require separate validation.
 
 ## Scoring engine and validation
 

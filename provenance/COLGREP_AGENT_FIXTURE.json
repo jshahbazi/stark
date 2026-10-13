@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "passed": true,
+  "scope": "controlled_agent_loop",
+  "live_search_or_app_integration": false,
+  "arbitrary_shell_execution": false,
+  "forced_finish": false,
+  "context_tokens": 4096,
+  "max_new_tokens": 512,
+  "model_revision": "f798a61129c6decb5166864e0a3c98373e62c764",
+  "upstream_revision": "c6c091d7ee14c81206bb28af90d8ff506fd0235e",
+  "worker_sha256": "8a945373ee155998a274d9d4bb876f4389c0123c25d89aeb53d09680d2fe36ff",
+  "source_files": {
+    "chat_template.jinja": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+    "config.json": "4329e012eb71be025875b362aad9a3cdb7c09a1fd62628f9f35ce63a3a0053b1",
+    "generation_config.json": "8643a6f784ffacefd3441fe1225237ea2123f107709be2bbcb36bf461892a042",
+    "model-00001-of-00002.safetensors": "19c22d8e7c3d1f3276889b5277c4bd9d1d7631687b8797285f56809d1de18f36",
+    "model-00002-of-00002.safetensors": "22be60355777581fe0ded99c7bf1b0d72d3a4ae863c069f5fbb4ff36549c483f",
+    "model.safetensors.index.json": "58a788415aad8027fdea0c07f00d65c0144b57a905a0a15c5c1b549d25e9bf77",
+    "tokenizer.json": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "tokenizer_config.json": "5378dcce33a455cfa6a7cd4a5ab54511e787b84b7334ec2d04e54b1d5a1a3cb4"
+  },
+  "model_files": {
+    "model.safetensors": "86325c4d8191aa39275f68cd417dabbb51ead1d719be4e7eba1133644b06cd5b",
+    "config.json": "b21e82eea954b868d707eebb4a859aefb54f84da9d9282b01debfae8d60cd8f1",
+    "tokenizer.json": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "conversion.json": "70b199047fffd0a05c21e3cb797e5a4554c1ea7b25975441ff11eb43201b01f1"
+  },
+  "reference_report_sha256": "c8ac00f49bd5687946ee431ac3d638899763df0066167b8100a6f3c6f1dd3b82",
+  "script_sha256": "f11a069eb249d0f3065be3e9ee354d59326a1eae515f1e71716b58d6f1030bba",
+  "validator_sha256": "7b284817446e68f656023247c1c4f4472f160dccc0d017631d7c90e8ba92126c",
+  "counts": {
+    "colgrep": 1,
+    "terminal": 1,
+    "finish": 1
+  },
+  "verified_calculation_and_application": true,
+  "turns": [
+    {
+      "turn": 1,
+      "generated_tokens": 19,
+      "generated_ids_sha256": "24e3175de7bd96fed5a1497be305e83f6b52e125e0801a0cf5dae2e079ae423f",
+      "finish_reason": "eos",
+      "stop_token_id": 130073,
+      "valid_xml": true,
+      "calls": 1,
+      "call_sequence": [
+        "colgrep"
+      ]
+    },
+    {
+      "turn": 2,
+      "generated_tokens": 84,
+      "generated_ids_sha256": "007e259ca04527a7994d1e72ae4396505f181072d1e0a9a9f5d34d100487d414",
+      "finish_reason": "eos",
+      "stop_token_id": 130073,
+      "valid_xml": true,
+      "calls": 1,
+      "call_sequence": [
+        "terminal"
+      ]
+    },
+    {
+      "turn": 3,
+      "generated_tokens": 99,
+      "generated_ids_sha256": "1211f9a873f9da1ca005c868b3774189bd97fa2717f253905794a07fec842432",
+      "finish_reason": "eos",
+      "stop_token_id": 130073,
+      "valid_xml": true,
+      "calls": 1,
+      "call_sequence": [
+        "finish"
+      ]
+    }
+  ]
+}
