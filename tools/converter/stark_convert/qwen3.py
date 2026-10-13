@@ -15,6 +15,7 @@ from .compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matrix
 from .streaming import (
     ConversionError,
     ConversionPlan,
+    TensorInfo,
     TensorOperation,
     UnsupportedConversion,
     load_checkpoint,
@@ -95,7 +96,9 @@ def _positive_float(config: dict, key: str, default: float) -> float:
     return float(value)
 
 
-def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_qwen3_plan(
+    source: Path, *, dtype: str = "bfloat16", tensors: dict[str, TensorInfo] | None = None
+) -> ConversionPlan:
     """Plan all output tensors from strict checkpoint headers before writing."""
     config = read_json(source / "config.json")
     if config.get("model_type") != "qwen3":
@@ -229,7 +232,7 @@ def build_qwen3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
         "ple_model_config": None,
         "embedding_norm_config": None,
     }
-    tensors = load_checkpoint(source)
+    tensors = load_checkpoint(source) if tensors is None else tensors
     operations = []
     expected = set()
     metadata = {}
