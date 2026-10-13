@@ -75,7 +75,7 @@ _FAMILY_KEYS = {
     "qwen2": {"use_sliding_window", "sliding_window", "max_window_layers"},
     # Unsloth's mirror records a packaging annotation ignored by HFLlamaConfig;
     # it changes neither the decoder nor tensor interpretation.
-    "llama": {"unsloth_fixed", "transformers.js_config"},
+    "llama": {"unsloth_fixed", "transformers.js_config", "fp8", "use_grouped_mm"},
     "mistral": {"sliding_window"},
 }
 
@@ -101,26 +101,54 @@ def _bool(config: dict, key: str, default: bool) -> bool:
     return value
 
 
+def _canonical_rope_scaling(value: object) -> dict:
+    if not isinstance(value, dict) or not value:
+        raise ConversionError("Dense config has malformed RoPE parameters")
+    rope_type = value.get("rope_type", value.get("type"))
+    if not isinstance(rope_type, str) or not rope_type:
+        raise ConversionError("Dense config has malformed RoPE type")
+    if "type" in value and "rope_type" in value and value["type"] != value["rope_type"]:
+        raise ConversionError("Dense config has contradictory RoPE types")
+    return {**{key: item for key, item in value.items() if key != "type"}, "rope_type": rope_type}
+
+
 def _rope(config: dict, family: str, head_dim: int, sequence_length: int, unsupported: list[str]) -> dict:
+    base = _positive_float(config, "rope_theta", 10000.0)
+    scaling = config.get("rope_scaling")
+    if scaling is not None:
+        scaling = _canonical_rope_scaling(scaling)
+    parameters = config.get("rope_parameters")
+    if parameters is not None:
+        # Modern Llama configs move both theta and the scaling declaration into
+        # one flat object. Never let a missing/conflicting nested declaration
+        # fall back to the legacy 10000 theta or silently override scaling.
+        parameters = _canonical_rope_scaling(parameters)
+        if "rope_theta" not in parameters:
+            raise ConversionError("Dense config is missing nested RoPE theta")
+        nested_base = _positive_float(parameters, "rope_theta", 10000.0)
+        if "rope_theta" in config and base != nested_base:
+            raise ConversionError("Dense config has contradictory RoPE theta")
+        nested_scaling = {key: value for key, value in parameters.items() if key != "rope_theta"}
+        if scaling is not None and scaling != nested_scaling:
+            raise ConversionError("Dense config has contradictory RoPE declarations")
+        base, scaling = nested_base, nested_scaling
+        if family != "llama":
+            unsupported.append("Nested RoPE parameters are outside qualified dense coverage")
     rope = {
         "type": "UnscaledRoPEConfig",
-        "base": _positive_float(config, "rope_theta", 10000.0),
+        "base": base,
         "max_sequence_length": sequence_length,
         "head_dim": head_dim,
     }
-    scaling = config.get("rope_scaling")
     if scaling is None:
         return rope
-    if not isinstance(scaling, dict) or not scaling:
-        raise ConversionError("Dense config has malformed rope_scaling")
-    rope_type = scaling.get("rope_type", scaling.get("type"))
-    if not isinstance(rope_type, str) or not rope_type:
-        raise ConversionError("Dense config has malformed RoPE type")
-    if "type" in scaling and "rope_type" in scaling and scaling["type"] != scaling["rope_type"]:
-        raise ConversionError("Dense config has contradictory RoPE types")
+    rope_type = scaling["rope_type"]
     if "factor" in scaling:
         _positive_float(scaling, "factor", 1.0)
-    if rope_type == "llama3":
+    if rope_type == "default":
+        if set(scaling) != {"rope_type"}:
+            unsupported.append("Unscaled RoPE options are outside qualified dense coverage")
+    elif rope_type == "llama3":
         factor = _positive_float(scaling, "factor", 1.0)
         low = _positive_float(scaling, "low_freq_factor", 1.0)
         high = _positive_float(scaling, "high_freq_factor", 4.0)
@@ -197,6 +225,13 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         raise ConversionError("Dense config has malformed browser-export metadata")
     if tp != 1:
         unsupported.append("Tensor-parallel pretraining config is outside qualified dense coverage")
+    if family == "llama":
+        # These training/backend annotations are not consumed by the declared
+        # dense LlamaForCausalLM in Transformers 5.6.2. FP8 payloads still have
+        # no supported decoder representation; tensor dtypes are checked below.
+        if _bool(config, "fp8", False):
+            unsupported.append("FP8 checkpoint is outside qualified dense coverage")
+        _bool(config, "use_grouped_mm", False)
     if (family == "qwen2" and not attention_bias) or (family != "qwen2" and attention_bias) or mlp_bias:
         unsupported.append("Projection bias variant is outside qualified dense coverage")
     if dropout != 0.0:
@@ -215,10 +250,6 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         raise ConversionError("Dense config has malformed pruned_heads")
     if pruned:
         unsupported.append("Pruned attention heads are outside qualified dense coverage")
-    if config.get("rope_parameters") is not None:
-        if not isinstance(config["rope_parameters"], dict):
-            raise ConversionError("Dense config has malformed rope_parameters")
-        unsupported.append("Custom RoPE parameters are outside qualified dense coverage")
     rope = _rope(config, family, head_dim, sequence_length, unsupported)
     windows: list[int | None] = [None] * layers
     if family == "qwen2":
