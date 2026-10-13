@@ -18,8 +18,8 @@ namespace stark {
 namespace gemm {
 namespace schedules {
 
-template <typename Core, typename RightOperand>
-static METAL_FUNC auto make_staged_loader(
+template <typename Core, typename RightOperand, ushort STAGING_COLS>
+static METAL_FUNC auto make_staged_group_loader(
     const typename Core::RightStorage right,
     const constant stark::matmul::GemmParams* params,
     const size_t block_col,
@@ -42,7 +42,7 @@ static METAL_FUNC auto make_staged_loader(
     using Loader = QuantizedBlockLoaderScaleBias<
         Element,
         Core::THREADGROUP_BLOCK_N,
-        Core::THREADGROUP_BLOCK_K,
+        STAGING_COLS,
         Core::SHARED_STRIDE_B,
         Core::THREADGROUP_THREADS,
         RightOperand::GROUP_SIZE,
@@ -63,7 +63,7 @@ static METAL_FUNC auto make_staged_loader(
     using Loader = QuantizedBlockLoaderScaleZeroPoint<
         Element,
         Core::THREADGROUP_BLOCK_N,
-        Core::THREADGROUP_BLOCK_K,
+        STAGING_COLS,
         Core::SHARED_STRIDE_B,
         Core::THREADGROUP_THREADS,
         RightOperand::GROUP_SIZE,
@@ -92,7 +92,7 @@ static METAL_FUNC auto make_staged_loader(
     using Loader = QuantizedBlockLoaderScaleZeroPoint<
         Element,
         Core::THREADGROUP_BLOCK_N,
-        Core::THREADGROUP_BLOCK_K,
+        STAGING_COLS,
         Core::SHARED_STRIDE_B,
         Core::THREADGROUP_THREADS,
         RightOperand::GROUP_SIZE,
@@ -108,6 +108,61 @@ static METAL_FUNC auto make_staged_loader(
         staging,
         thread_context.simdgroup_index,
         thread_context.simd_lane_id
+    );
+  }
+}
+
+// Stage independent quantization groups together without changing their
+// coefficients, unpack arithmetic, or the order of the MMA operations.
+template <typename Loader, ushort GROUP_SIZE>
+struct PairedStagedLoader {
+  Loader first;
+  Loader second;
+
+  void load_unsafe() const {
+    first.load_unsafe();
+    second.load_unsafe();
+  }
+
+  void load_safe(short2 dimensions) const {
+    first.load_safe(short2(min(dimensions.x, short(GROUP_SIZE)), dimensions.y));
+    second.load_safe(short2(max(short(dimensions.x - GROUP_SIZE), short(0)), dimensions.y));
+  }
+
+  void next() {
+    first.next();
+    first.next();
+    second.next();
+    second.next();
+  }
+};
+
+template <typename Core, typename RightOperand>
+static METAL_FUNC auto make_staged_loader(
+    const typename Core::RightStorage right,
+    const constant stark::matmul::GemmParams* params,
+    const size_t block_col,
+    const uint k_offset,
+    threadgroup typename Core::RightElementType* staging,
+    const thread ThreadContext& thread_context
+) {
+  if constexpr (Core::THREADGROUP_BLOCK_K > RightOperand::GROUP_SIZE) {
+    static_assert(Core::THREADGROUP_BLOCK_K == 2 * RightOperand::GROUP_SIZE, "paired staging holds exactly two groups");
+    auto first = make_staged_group_loader<Core, RightOperand, RightOperand::GROUP_SIZE>(
+        right, params, block_col, k_offset, staging, thread_context
+    );
+    auto second = make_staged_group_loader<Core, RightOperand, RightOperand::GROUP_SIZE>(
+        right,
+        params,
+        block_col,
+        k_offset + RightOperand::GROUP_SIZE,
+        staging + RightOperand::GROUP_SIZE,
+        thread_context
+    );
+    return PairedStagedLoader<decltype(first), RightOperand::GROUP_SIZE>{first, second};
+  } else {
+    return make_staged_group_loader<Core, RightOperand, Core::THREADGROUP_BLOCK_K>(
+        right, params, block_col, k_offset, staging, thread_context
     );
   }
 }
