@@ -1,0 +1,20 @@
+[package]
+name = "stark-generate"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license.workspace = true
+
+[features]
+default = ["metal"]
+metal = ["dep:stark-engine", "stark-engine/metal"]
+
+[dependencies]
+stark-engine = { path = "../stark-engine", default-features = false, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[lints]
+workspace = true

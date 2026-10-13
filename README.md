@@ -1,8 +1,8 @@
 # Stark
 
-**Fast model preparation and exact probability scoring on Apple silicon.**
+**Model preparation, exact probability scoring and native text generation on Apple silicon.**
 
-Stark combines a Rust and Metal inference engine with an independent streaming converter for Hugging Face models. Prepare dense and existing MLX 4/8-bit checkpoints locally, then use direct probability scoring for decision models such as JevK5.
+Stark combines a Rust and Metal inference engine with an independent streaming converter for Hugging Face models. Prepare dense and existing MLX 4/8-bit checkpoints locally, then use direct probability scoring for decision models such as JevK5 or the standalone text generation worker.
 
 Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), starting at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`. Upstream Git history, copyright and MIT licensing are preserved.
 
@@ -125,7 +125,20 @@ cargo test --release --locked -p stark-score --features optimized -- --test-thre
 ./target/release/stark-score --score-model-path /absolute/path/to/model
 ```
 
-The worker uses a private JSON-lines stdin/stdout protocol for tokenization and scoring. The supported standalone engine path is the scoring worker; host application integration belongs in separate repositories. [Scoring protocol](docs/SCORING.md).
+The worker uses a private JSON-lines stdin/stdout protocol for tokenization and scoring. Host application integration belongs in separate repositories. [Scoring protocol](docs/SCORING.md).
+
+### Run the generation worker
+
+Build the default Metal worker with Rust 1.98.1 and Xcode's Metal tools:
+
+```sh
+cargo build --release --locked -p stark-generate
+./target/release/stark-generate --model-path /absolute/path/to/converted-model
+```
+
+`stark-generate` exposes `tokenize`, `decode` and `generate` over private JSON-lines pipes. Each generation request uses fresh native state and returns generated token IDs, decoded text and a finish reason. The caller renders the model's exact chat template and owns tool execution. [Generation protocol and ColGrep setup](docs/GENERATION.md).
+
+The `lightonai/colgrep-agent-2B` checkpoint at revision `f798a61129c6decb5166864e0a3c98373e62c764` has a pinned conversion and controlled generation validation workflow. Native reference and tool-protocol acceptance are pending. Live ColGrep search and application integration require separate validation.
 
 ## Scoring engine and validation
 
