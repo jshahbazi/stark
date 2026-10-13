@@ -198,6 +198,95 @@ def test_llama31_and_32_rope_semantics(tmp_path, factor):
     }
 
 
+@pytest.mark.parametrize("rope_type", ["default", "llama3"])
+@pytest.mark.parametrize("duplicate_legacy", [False, True])
+def test_modern_llama_rope_matches_complete_legacy_plan(tmp_path, rope_type, duplicate_legacy):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    scaling = {"type": rope_type}
+    if rope_type == "llama3":
+        scaling.update(factor=8.0, low_freq_factor=1.0, high_freq_factor=4.0, original_max_position_embeddings=16)
+    update_config(source, config, rope_theta=5000000.0, rope_scaling=scaling)
+    legacy = build_llama_plan(source)
+    if not duplicate_legacy:
+        del config["rope_theta"]
+        del config["rope_scaling"]
+    update_config(
+        source,
+        config,
+        rope_parameters={
+            "rope_theta": 5000000,
+            **{key: value for key, value in scaling.items() if key != "type"},
+            "rope_type": rope_type,
+        },
+    )
+    modern = build_llama_plan(source)
+    assert modern.decoder_config == legacy.decoder_config
+    assert modern.operations == legacy.operations
+    assert all(
+        layer["rope_config"]["base"] == 5000000.0
+        for layer in modern.decoder_config["transformer_config"]["layer_configs"]
+    )
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        [],
+        {},
+        {"rope_type": "default"},
+        {"rope_type": "default", "rope_theta": True},
+        {"rope_type": "default", "rope_theta": -1},
+        {"rope_type": "default", "rope_theta": float("inf")},
+        {"rope_type": "default", "rope_theta": "5000000"},
+        {"rope_type": True, "rope_theta": 5000000},
+        {"rope_type": "default", "type": "llama3", "rope_theta": 5000000},
+        {"full_attention": {"rope_type": "default", "rope_theta": 5000000}},
+    ],
+)
+def test_modern_llama_rope_malformed_metadata_fails_closed(tmp_path, parameters):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    del config["rope_theta"]
+    update_config(source, config, rope_parameters=parameters)
+    with pytest.raises(ConversionError):
+        build_llama_plan(source)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"rope_theta": 10000.0},
+        {"rope_scaling": {"rope_type": "llama3", "factor": 8.0}},
+        {"rope_scaling": {"rope_type": "default", "factor": 1.0}},
+    ],
+)
+def test_modern_llama_rope_contradictory_legacy_metadata_rejected(tmp_path, changes):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    del config["rope_theta"]
+    update_config(source, config, rope_parameters={"rope_type": "default", "rope_theta": 5000000}, **changes)
+    with pytest.raises(ConversionError, match="contradictory RoPE"):
+        build_llama_plan(source)
+
+
+@pytest.mark.parametrize(
+    "parameters",
+    [
+        {"rope_type": "default", "rope_theta": 5000000, "partial_rotary_factor": 0.5},
+        {"rope_type": "default", "rope_theta": 5000000, "factor": 1.0},
+        {"rope_type": "dynamic", "rope_theta": 5000000, "factor": 2.0},
+    ],
+)
+def test_modern_llama_rope_unimplemented_layouts_rejected(tmp_path, parameters):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    del config["rope_theta"]
+    update_config(source, config, rope_parameters=parameters)
+    with pytest.raises(UnsupportedConversion):
+        build_llama_plan(source)
+
+
 def test_llama_mirror_packaging_annotation_does_not_change_plan(tmp_path):
     source = tmp_path / "source"
     config, _ = dense_fixture(source, "llama")
@@ -206,6 +295,35 @@ def test_llama_mirror_packaging_annotation_does_not_change_plan(tmp_path):
     after = build_llama_plan(source)
     assert before.decoder_config == after.decoder_config
     assert before.operations == after.operations
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_llama_training_annotations_preserve_dense_plan(tmp_path, grouped):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    before = build_llama_plan(source)
+    update_config(source, config, fp8=False, use_grouped_mm=grouped)
+    after = build_llama_plan(source)
+    assert before.decoder_config == after.decoder_config
+    assert before.operations == after.operations
+
+
+@pytest.mark.parametrize("field", ["fp8", "use_grouped_mm"])
+@pytest.mark.parametrize("value", [None, 0, "false"])
+def test_llama_training_annotations_require_booleans(tmp_path, field, value):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    update_config(source, config, **{field: value})
+    with pytest.raises(ConversionError):
+        build_llama_plan(source)
+
+
+def test_llama_fp8_annotation_refuses_unsupported_representation(tmp_path):
+    source = tmp_path / "source"
+    config, _ = dense_fixture(source, "llama")
+    update_config(source, config, fp8=True)
+    with pytest.raises(UnsupportedConversion, match="^FP8 checkpoint"):
+        build_llama_plan(source)
 
 
 @pytest.mark.parametrize("window", [None, 16])

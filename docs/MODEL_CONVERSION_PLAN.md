@@ -22,6 +22,8 @@ Conversion, native loading, execution, and performance are separate dimensions. 
 
 Host application integration belongs in separate repositories. Package publication, model redistribution, signing, binary distribution, release automation, and hosting are separate scoped work. Keep inherited release/cloud infrastructure disabled.
 
+The separate [ColGrep generation work](GENERATION.md) adds a native worker and controlled functional execution evidence for one generic Llama checkpoint. It preserves the converter coverage denominator and catalog load-only ledger. Exact generation token parity, stochastic backend equivalence, broad context quality and live app integration retain their separate open status.
+
 ## Contracts and status semantics
 
 | Implemented contract | Required meaning |

@@ -209,6 +209,31 @@ def test_generic_can_use_model_eos_without_generation_sidecar(tmp_path):
     assert receipt["capability"]["source_validation"] == "complete"
 
 
+def test_generic_modern_llama_preserves_nested_rope_xml_template_and_multiple_stops(tmp_path):
+    source = future_source(tmp_path / "source", "llama")
+    config = json.loads((source / "config.json").read_text())
+    config.pop("rope_theta")
+    config.update(
+        rope_parameters={"rope_theta": 5000000, "rope_type": "default"},
+        eos_token_id=[1, 3],
+        fp8=False,
+        use_grouped_mm=True,
+    )
+    (source / "config.json").write_text(json.dumps(config))
+    template = (
+        "{% for message in messages %}<{{ message.role }}>{{ message.content }}</{{ message.role }}>{% endfor %}"
+    )
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": template}))
+    cli.convert(snapshot(source), tmp_path / "output", repo=FUTURE)
+    output = json.loads((tmp_path / "output/config.json").read_text())
+    assert output["token_codec_config"]["prompt_template"] == template
+    assert output["generation_config"]["stop_token_ids"] == [1, 3]
+    assert all(
+        layer["rope_config"]["type"] == "UnscaledRoPEConfig" and layer["rope_config"]["base"] == 5000000.0
+        for layer in output["decoder_config"]["transformer_config"]["layer_configs"]
+    )
+
+
 @pytest.mark.parametrize("template", ["{{ messages }}", "different synthetic template"])
 def test_generic_duplicate_templates_must_match(tmp_path, template):
     source = future_source(tmp_path / "source")
