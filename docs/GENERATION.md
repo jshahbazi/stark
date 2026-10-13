@@ -12,12 +12,22 @@ cargo build --release --locked -p stark-generate
 
 This package uses its default generation build; the scoring worker's `optimized` feature bundle is outside this build.
 
-Convert the pinned checkpoint into a new output folder:
+Acquire the complete pinned Hugging Face source for conversion and validation:
 
 ```sh
-uv run --project tools/converter --locked stark-convert lightonai/colgrep-agent-2B \
-  --revision f798a61129c6decb5166864e0a3c98373e62c764 \
-  --metadata-profile hf-generic \
+uv run --project tools/converter --locked python -c \
+  "from huggingface_hub import snapshot_download; snapshot_download('lightonai/colgrep-agent-2B', revision='f798a61129c6decb5166864e0a3c98373e62c764', local_dir='runtime/colgrep-agent-2B-source', allow_patterns=['*.json', '*.jinja', '*.safetensors', 'README.md'])"
+```
+
+Keep the downloaded folder's `.cache/huggingface/download` metadata. The validation harness uses its immutable commit and Git/LFS content hashes to verify each source file. An ordinary copy of a cached snapshot without that metadata cannot pass source sealing.
+
+The checkpoint is licensed under Apache-2.0; preserve its attribution and license obligations when distributing weights. See the [pinned model card](https://huggingface.co/lightonai/colgrep-agent-2B/blob/f798a61129c6decb5166864e0a3c98373e62c764/README.md).
+
+Convert this source folder into a new output folder:
+
+```sh
+uv run --project tools/converter --locked stark-convert runtime/colgrep-agent-2B-source \
+  --metadata-profile hf-generic --offline \
   --write-source-manifest runtime/converter-sources/colgrep-agent-2B.json \
   --output models/colgrep-agent-2B-stark
 ./target/release/stark-generate --model-path /absolute/path/to/models/colgrep-agent-2B-stark
@@ -111,7 +121,14 @@ uv run --project tools --locked python scripts/test_generation_process.py \
   --binary target/release/stark-generate
 ```
 
-The native replay requires the complete pinned Hugging Face source snapshot, the converted model and an upstream agent checkout at the revision above:
+The native replay requires the complete pinned Hugging Face source snapshot, the converted model and an upstream agent checkout. Acquire the latter at the exact harness revision:
+
+```sh
+git clone https://github.com/lightonai/next-plaid.git runtime/colgrep-agent-upstream
+git -C runtime/colgrep-agent-upstream checkout --detach c6c091d7ee14c81206bb28af90d8ff506fd0235e
+```
+
+Then run:
 
 ```sh
 uv run --project tools --locked python scripts/validate_colgrep_generation.py \
