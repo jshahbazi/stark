@@ -16,7 +16,7 @@ import pytest
 from tokenizers import Tokenizer, models
 
 from stark_convert.metadata import SUPPORTED_METADATA_REPOS, UnsupportedMetadata, write_metadata
-from stark_convert.registry import get_model
+from stark_convert.registry import get_model, load_catalog
 from stark_convert.streaming import ConversionError
 
 
@@ -116,7 +116,7 @@ def test_stop_ids_merge_without_losing_sampling_defaults(
     assert all(value is None for name, value in defaults.items() if name != "stop_token_ids")
 
 
-@pytest.mark.parametrize("repo", [None, "unregistered/model", "Qwen/Qwen3.5-35B-A3B"])
+@pytest.mark.parametrize("repo", [None, "unregistered/model", "google/gemma-4-E2B"])
 def test_unverified_profile_leaves_no_output(
     metadata_source: tuple[Path, dict[str, Any]], tmp_path: Path, repo: str | None
 ) -> None:
@@ -419,6 +419,52 @@ def test_functiongemma_static_inline_identity_and_roles(metadata_source, tmp_pat
         hashlib.sha256(json.dumps(codec["default_system_prompt"]).encode()).hexdigest()
         == get_model(repo)["metadata"]["inline_sources"]["system_prompt"]["sha256"]
     )
+
+
+@pytest.mark.parametrize("repo", [entry["repo"] for entry in load_catalog()["models"] if entry["family"] == "LFM2.5"])
+def test_lfm25_profiles_preserve_sampling_and_reasoning(metadata_source, tmp_path, repo):
+    source, config = metadata_source
+    _update_json(source / "tokenizer_config.json", {"chat_template": None})
+    (source / "chat_template.jinja").write_text("{{ messages }}")
+    result = write_metadata(source, tmp_path / "output", {**config, "_stark_model_repo": repo, "model_type": "lfm2"})
+    generation = result["generation_config"]
+    assert generation["temperature"] == 0.1
+    assert generation["top_k"] == 50
+    assert generation["top_p"] == 0.1
+    assert generation["min_p"] is None
+    codec = result["token_codec_config"]
+    assert codec["end_of_thinking_tag"] == "\n</think>"
+    assert codec["reasoning_config"] is None
+    assert (codec["output_parser_regex"] is not None) == ("Thinking" in repo)
+
+
+def test_lfm25_inline_generation_hash_cannot_be_forged(metadata_source, tmp_path):
+    source, config = metadata_source
+    _update_json(source / "tokenizer_config.json", {"chat_template": None})
+    (source / "chat_template.jinja").write_text("{{ messages }}")
+    entry = deepcopy(get_model("LiquidAI/LFM2.5-350M"))
+    entry["metadata"]["inline_sources"]["generation_config"]["sha256"] = "0" * 64
+    with pytest.raises(UnsupportedMetadata, match="Unsupported inline generation profile"):
+        write_metadata(
+            source,
+            tmp_path / "output",
+            {**config, "model_type": "lfm2", "_stark_model_repo": entry["repo"]},
+            model_entry=entry,
+        )
+    assert not (tmp_path / "output").exists()
+
+
+def test_qwen38_profile_preserves_three_level_reasoning(metadata_source, tmp_path):
+    source, config = metadata_source
+    result = write_metadata(
+        source, tmp_path / "output", {**config, "_stark_model_repo": "Qwen/Qwen3.8-27B", "model_type": "qwen3_5"}
+    )
+    assert result["token_codec_config"]["reasoning_config"] == {
+        "default_reasoning_effort": "xhigh",
+        "field_name": "reasoning_effort",
+        "reasoning_effort_to_field_value": {"xhigh": "xhigh", "medium": "medium", "low": "low"},
+    }
+    assert result["token_codec_config"]["end_of_thinking_tag"] == "\n</think>"
 
 
 def test_unknown_inline_profile_is_rejected_before_output(metadata_source, tmp_path):

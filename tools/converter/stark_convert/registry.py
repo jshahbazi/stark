@@ -16,6 +16,7 @@ CONFIG_ADAPTERS = {
     "HFMistralConfig": "mistral",
     "HFGemma2Config": "gemma2",
     "HFGemma3TextConfig": "gemma3_text",
+    "HFGemma3Config": "gemma3",
     "HFPhi3Config": "phi3",
     "HFGraniteConfig": "granite",
     "HFSmolLM3Config": "smollm3",
@@ -24,11 +25,14 @@ CONFIG_ADAPTERS = {
     "HFLlambaConfig": "llamba",
     "ModernBERTConfig": "modernbert",
 }
+ARCHITECTURE_CONFIGS = {adapter: config for config, adapter in CONFIG_ADAPTERS.items()}
+# The upstream config class selects distinct dense and MoE tensor contracts.
+ARCHITECTURE_CONFIGS["qwen3_5_moe"] = "HFQwen35Config"
 
 
 def model_kind_for_architecture(architecture: str) -> str:
     """Architecture dispatch also binds the accepted root model kind."""
-    if architecture not in CONFIG_ADAPTERS.values():
+    if architecture not in ARCHITECTURE_CONFIGS:
         raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
     return "classifier" if architecture == "modernbert" else "language"
 
@@ -36,7 +40,7 @@ def model_kind_for_architecture(architecture: str) -> str:
 def architecture_for_config(config: dict, expected: str | None = None) -> str:
     """Select a reusable adapter; its planner still validates every semantic field."""
     architecture = config.get("model_type")
-    if not isinstance(architecture, str) or architecture not in CONFIG_ADAPTERS.values():
+    if not isinstance(architecture, str) or architecture not in ARCHITECTURE_CONFIGS:
         raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
     if expected is not None and architecture != expected:
         raise ConversionError("Checkpoint architecture disagrees with the requested architecture")

@@ -4,7 +4,7 @@ Architecture support does not determine reasoning, parser, system-prompt or
 external metadata defaults. Generic conversion reads only the chosen source.
 """
 
-from .registry import CONFIG_ADAPTERS
+from .registry import ARCHITECTURE_CONFIGS
 from .streaming import ConversionError
 
 GENERIC_PROFILE = "hf-generic"
@@ -29,12 +29,13 @@ def generic_files(repo: str | None, names: tuple[str, ...]) -> tuple[dict, ...]:
 
 def generic_entry(repo: str | None, architecture: str, names: tuple[str, ...]) -> dict:
     """Describe plain metadata without inheriting a registered model's defaults."""
-    config_class = next((key for key, value in CONFIG_ADAPTERS.items() if value == architecture), None)
+    config_class = ARCHITECTURE_CONFIGS.get(architecture)
     if config_class is None:
         raise ConversionError("Generic metadata architecture is unsupported")
     entry = {
         "repo": repo,
         "config_class": config_class,
+        "adapter": architecture,
         "metadata_profile": GENERIC_PROFILE,
         "files": {rule["role"]: {"repo": repo, "filename": rule["filename"]} for rule in generic_files(repo, names)},
         "metadata": {

@@ -1,6 +1,6 @@
 [project]
 name = "stark-convert"
-version = "0.9.1"
+version = "0.10.0"
 description = "Independent streaming model conversion for the Stark engine"
 readme = "README.md"
 license = "MIT"

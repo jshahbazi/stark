@@ -10,7 +10,7 @@ Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), startin
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
 - **92–95% less sampled conversion memory across Qwen3.5 and LFM2 MLX tests.** LFM2 4-bit used 113.0 MiB versus 1,411.4 MiB; Qwen3.5 8-bit used 203.5 MiB versus 4,155.3 MiB. These are sampled process-tree RSS measurements. [Memory evidence](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
-- **85 of 110 pinned Lalamo profiles implemented, plus four Stark extensions.** Coverage includes 40 MLX profiles, hybrid/state-space models and ModernBERT sequence classifiers. Future compatible checkpoints can reuse architecture adapters.
+- **102 of 110 pinned Lalamo profiles implemented, plus four Stark extensions.** Coverage includes 48 MLX profiles, hybrid/state-space models and ModernBERT sequence classifiers. Future compatible checkpoints can reuse architecture adapters.
 - **Lightweight conversion tooling.** The installed converter needs no Lalamo, JAX or PyTorch. Transformations default to a bounded 8 MiB workspace, with full initial and final source verification.
 - **Reference-checked exports.** Validated conversion tuples match pinned Lalamo tensor payloads, specifications, logical config and tokenizer metadata. Immutable source revisions and content hashes make each result traceable.
 - **Exact probability readouts.** The scoring worker exposes raw candidate logits, log probabilities normalized over the full vocabulary, and temperature-calibrated probabilities over requested candidates.
@@ -18,6 +18,18 @@ Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), startin
 ## Recorded conversion benchmarks
 
 All rows below target BF16 output and compare complete conversion commands against pinned Lalamo. Speed ratio is Lalamo median divided by Stark median; values above 1 favor Stark. Ratios are rounded from the displayed medians. Each row links to its source-bound checkpoint, converter revision, full ranges and independent review.
+
+### Latest LFM2.5 and Gemma3 text packet
+
+| Checkpoint / input | Stark median | Lalamo median | Speed ratio | Lower sampled RSS |
+| --- | ---: | ---: | ---: | ---: |
+| [LFM2.5-350M](docs/MODEL_CONVERSION_MILESTONE_7.md#corrected-lalamo-benchmark) | 0.944 s | 1.137 s | 1.21× | 90.3% |
+| [LFM2.5 Instruct MLX 4-bit](docs/MODEL_CONVERSION_MILESTONE_7.md#corrected-lalamo-benchmark) | 0.953 s | 2.061 s | 2.16× | 96.2% |
+| [LFM2.5 Thinking MLX 8-bit](docs/MODEL_CONVERSION_MILESTONE_7.md#corrected-lalamo-benchmark) | 1.533 s | 1.809 s | 1.18× | 96.8% |
+| [Gemma3 4B full-precision](docs/MODEL_CONVERSION_MILESTONE_7.md#corrected-lalamo-benchmark) | 6.909 s | 2.993 s | **0.43× (slower)** | 95.1% |
+| [Gemma3 4B MLX 8-bit](docs/MODEL_CONVERSION_MILESTONE_7.md#corrected-lalamo-benchmark) | 5.975 s | 3.198 s | **0.54× (slower)** | 96.4% |
+
+All five exact outputs passed complete reference parity and named-build load-only checks. LFM2.5 medians are 15–54% lower; Gemma takes 2.31× and 1.87× as long, so its latency objective remains open. The corrected fifty-command run passed every conversion/source/memory gate. An earlier failed run is retained separately with its serialization-check correction and independent audit.
 
 ### Existing MLX 4/8-bit checkpoints
 
@@ -61,8 +73,8 @@ RSS sampling can miss peaks or double-count shared pages. The benchmarked 8 MiB 
 
 | Supported area | Current implementation |
 | --- | --- |
-| Dense language models | 43 built-in profiles: Qwen2/Qwen3/Qwen3.5 text, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2 and LLaMBA/Mamba2; four separately counted extensions include Gemma2 |
-| Affine MLX 4/8-bit | 40 built-in profiles across Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma text, LFM2 and LLaMBA; supported bit widths and layouts remain profile-specific |
+| Full-precision language models | 52 built-in profiles: Qwen2/Qwen3/Qwen3.5/3.6/3.8 text, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2/LFM2.5 and LLaMBA/Mamba2; includes two Qwen MoE profiles with native loading blocked; four separately counted extensions include Gemma2 |
+| Affine MLX 4/8-bit | 48 built-in profiles across Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma text, LFM2/LFM2.5 and LLaMBA; supported bit widths and layouts remain profile-specific |
 | Sequence classifiers | Two ModernBERT profiles, plus self-contained generic ModernBERT checkpoints using mean pooling and the supported GELU layout |
 | Future checkpoints | `hf-generic` dispatches by architecture and input format, validates complete config/layout/metadata, and supports private offline source replay |
 
@@ -77,9 +89,9 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
 
 A generic checkpoint needs self-contained config/tokenizer metadata and a supported chat template. ModernBERT additionally requires `--model-kind classifier`; optional `--architecture` asserts the expected architecture. Known catalog identities retain their authoritative metadata and packing rules. See [supported families, formats and examples](tools/converter/README.md#future-checkpoints-and-architecture-tracking).
 
-The catalog tracks **implementation**, while qualification tracks exact source/config/dtype/output/build tuples. **27 exact BF16 catalog tuples have named-build load-only qualifications; 62 implemented identities remain unqualified.** Generic outputs start native-unverified, and `--require-native-support` requires an exact stored catalog match. Classifier fixtures have separate private load-only proofs; both Mirai catalog repositories remain inaccessible to the current account and unqualified.
+The catalog tracks **implementation**, while qualification tracks exact source/config/dtype/output/build tuples. **32 exact BF16 catalog tuples have named-build load-only qualifications; 74 implemented identities remain unqualified.** Generic outputs start native-unverified, and `--require-native-support` requires an exact stored catalog match. Classifier fixtures have separate private load-only proofs; fresh Mirai access probes remain blocked and both catalog identities are unqualified.
 
-Twenty-five pinned built-ins remain planned, including specialized/MoE/multimodal and later-generation variants. Unsupported combinations fail explicitly. Complete Lalamo replacement remains an open goal. [Coverage and replacement plan](docs/MODEL_CONVERSION_PLAN.md).
+Eight pinned built-ins remain planned: Gemma4 (four), Muse-Glimmer, Bonsai 1-bit, GPT-OSS MXFP4 and FishAudio TTS. Unsupported combinations fail explicitly. Complete Lalamo replacement remains an open goal. [Coverage and replacement plan](docs/MODEL_CONVERSION_PLAN.md).
 
 The proposed [Pi-assisted adapter builder](docs/PI_ADAPTER_BUILDER_PLAN.md) would generate missing conversion adapters through an optional developer tool, with host-owned verification and reviewable source patches. The plan covers architecture preflight, process confinement, resource budgets, independent parity checks and staged acceptance. Implementation and new model qualifications remain pending.
 
@@ -135,7 +147,7 @@ An opt-in `--consecutive-cache` reuses one completed internal vocabulary-logit e
 
 Recorded JevK5 BF16 validation passed **243 evaluation cases / 486 cold-and-cache-hit replies**, with exact raw logits, log probabilities, calibrated candidate probabilities and tokenizations against frozen accepted Uzu scorer references. Calibration boundaries, full-vocabulary digests and process ownership have separate checks. This is source-bound scoring correctness evidence; precise engine latency benchmarking remains open. [Validation and build receipts](docs/VALIDATION.md).
 
-The latest converter packet passed **3,672 tests**, with 60 private-reference checks skipped, plus formatting, locked dependency and repository-policy checks. Architecture packets have independent technical reviews and exact tensor/spec/config/tokenizer comparisons. Real model weights and operational artifacts remain ignored/private. Completed benchmark model files are removed after review; small receipts, observations, manifests, recipes and hashes are retained. [Classifier validation and cleanup](docs/MODEL_CONVERSION_MILESTONE_6.md).
+The latest converter packet passed **4,000 tests**, with 104 opt-in private-reference checks skipped, plus installed wheel validation, formatting, locked dependency and repository-policy checks. Architecture packets have independent technical reviews and exact tensor/spec/config/tokenizer comparisons. Real model weights and operational artifacts remain ignored/private. Completed benchmark model files are removed after review; small receipts, observations, manifests, recipes and hashes are retained. [Current conversion evidence](docs/MODEL_CONVERSION_MILESTONE_7.md).
 
 ## Scope, security and attribution
 

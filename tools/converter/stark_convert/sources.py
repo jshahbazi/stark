@@ -20,7 +20,7 @@ from typing import Any
 
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
 from .registry import architecture_for_config, get_model, required_files
-from .streaming import ConversionError, UnsupportedConversion, read_json
+from .streaming import ConversionError, UnsupportedConversion, read_json, select_safetensors_index
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -95,7 +95,9 @@ def _verified_hashes(
         raise ConversionError(unavailable) from None
 
 
-def _weights(names: tuple[str, ...], container: str, load: Any) -> tuple[tuple[str, ...], str | None]:
+def _weights(
+    names: tuple[str, ...], container: str, load: Any, *, compatibility: dict | None = None
+) -> tuple[tuple[str, ...], str | None]:
     """Use the declared container and checkpoint index, never mix alternatives."""
     if container == ".safetensors":
         index_name, extensions = "model.safetensors.index.json", (".safetensors",)
@@ -106,6 +108,9 @@ def _weights(names: tuple[str, ...], container: str, load: Any) -> tuple[tuple[s
     else:
         raise UnsupportedConversion("Unsupported catalog checkpoint container")
     if index_name in names:
+        if container == ".safetensors":
+            selected, _, _ = select_safetensors_index(load(index_name), names, compatibility=compatibility)
+            return selected, index_name
         index = read_json(load(index_name))
         mapping = index.get("weight_map")
         if not isinstance(mapping, dict) or not mapping or any(not isinstance(key, str) for key in mapping):
@@ -189,7 +194,10 @@ class SourceSnapshot:
                 if self.resolve_file(rule["filename"]).resolve() != (self.root / rule["filename"]).resolve():
                     raise ConversionError("Generic metadata is outside its checkpoint source")
         selected, index_name = _weights(
-            names, entry["container"] if entry else ".safetensors", lambda filename: self.root / _relative(filename)
+            names,
+            entry["container"] if entry else ".safetensors",
+            lambda filename: self.root / _relative(filename),
+            compatibility=entry.get("weight_index_compatibility") if entry else None,
         )
         expected_weights = tuple(
             sorted(
@@ -386,7 +394,12 @@ def _replay(
         if any((rule["repo"], rule["filename"]) not in known for rule in rules):
             raise ValueError()
         snapshot = SourceSnapshot(root, primary, manifest["primary_revision"], manifest)
-        selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", snapshot.resolve_file)
+        selected, index_name = _weights(
+            names,
+            entry["container"] if entry else ".safetensors",
+            snapshot.resolve_file,
+            compatibility=entry.get("weight_index_compatibility") if entry else None,
+        )
         if any((primary, name) not in known for name in selected):
             raise ValueError()
         # Weights consumed by the planner must be the pinned files under root.
@@ -494,7 +507,12 @@ def resolve_source(
         if config_rule["repo"] != repo:
             # Config-less checkpoint repositories must derive their physical
             # root from a selected primary weight, never an external sidecar.
-            selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+            selected, index_name = _weights(
+                names,
+                entry["container"] if entry else ".safetensors",
+                loader,
+                compatibility=entry.get("weight_index_compatibility") if entry else None,
+            )
             root_filename = selected[0]
         config_path = loader(root_filename)
         # snapshot files preserve repository-relative placement in the hub cache.
@@ -507,7 +525,12 @@ def resolve_source(
         detected = architecture_for_config(read_json(loader("config.json")), architecture)
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
     if selected is None:
-        selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+        selected, index_name = _weights(
+            names,
+            entry["container"] if entry else ".safetensors",
+            loader,
+            compatibility=entry.get("weight_index_compatibility") if entry else None,
+        )
     descriptors = list(rules)
     if index_name:
         descriptors.append({"role": "weight_index", "repo": repo, "filename": index_name})
@@ -556,6 +579,6 @@ def resolve_source(
     if profile is not None:
         manifest["conversion_profile"] = profile
     snapshot = SourceSnapshot(root, repo, revisions[repo], manifest)
-    if profile is not None:
+    if profile is not None or entry is not None and entry.get("weight_index_compatibility") is not None:
         snapshot.assert_unchanged(verify_content=False)
     return snapshot

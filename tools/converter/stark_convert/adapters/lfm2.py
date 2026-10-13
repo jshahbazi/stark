@@ -1,4 +1,4 @@
-"""Independent dense and affine MLX LFM2 short-convolution/attention planner.
+"""Independent dense and affine MLX LFM2/LFM2.5 short-convolution planner.
 
 Config and tensor conventions are adapted from Lalamo revision
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
@@ -73,7 +73,12 @@ _KEYS = {
 
 
 def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
-    """Validate an explicit LFM2 topology and consume every input tensor."""
+    """Validate the shared LFM2/LFM2.5 topology and consume every input tensor.
+
+    LFM2.5 retains ``model_type=lfm2`` and the LFM2 parameter schema. Its
+    catalog generation and thinking settings belong to model metadata;
+    decoder planning depends on the explicit checkpoint structure alone.
+    """
     config = read_json(source / "config.json")
     if config.get("model_type") != "lfm2":
         raise UnsupportedConversion("Checkpoint model_type does not match selected adapter")

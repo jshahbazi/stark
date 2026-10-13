@@ -11,8 +11,10 @@ import hashlib
 import json
 import math
 import os
+import re
 import struct
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -173,32 +175,108 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
     return metadata, tensors
 
 
-def load_checkpoint(source: Path) -> dict[str, TensorInfo]:
+def checkpoint_tensor_names_sha256(names: Iterable[str]) -> str:
+    """Hash an unambiguous canonical tensor-name inventory, without values."""
+    return hashlib.sha256(json.dumps(sorted(names), separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+
+
+def select_safetensors_index(
+    index_path: Path, names: tuple[str, ...], *, compatibility: dict | None = None
+) -> tuple[tuple[str, ...], dict[str, str], str | None]:
+    """Select an index's shards, with only an explicitly pinned stale-index exception.
+
+    The exception preserves the published index, rejects every invalid index
+    path before fallback, and binds both the complete actual filenames and
+    eventual header inventory. Unknown index contents retain strict indexed
+    loading; an exact known pin also covers stale maps whose paths still exist.
+    """
+    try:
+        with index_path.open("rb") as stream:
+            raw = stream.read(MAX_HEADER_BYTES + 1)
+        if len(raw) > MAX_HEADER_BYTES:
+            raise ConversionError("Checkpoint shard index exceeds its size limit")
+        index = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda _: (_ for _ in ()).throw(ConversionError("Nonfinite JSON number")),
+        )
+    except (OSError, ValueError, UnicodeError):
+        raise ConversionError("Cannot read checkpoint shard index") from None
+    mapping = index.get("weight_map") if isinstance(index, dict) else None
+    if (
+        not isinstance(mapping, dict)
+        or not mapping
+        or any(
+            not isinstance(key, str) or not key or not isinstance(value, str) or not value
+            for key, value in mapping.items()
+        )
+    ):
+        raise ConversionError("Invalid checkpoint shard index")
+    selected = tuple(sorted(set(mapping.values())))
+    for filename in selected:
+        relative = Path(filename)
+        if (
+            "\\" in filename
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.as_posix() != filename
+            or relative.suffix != ".safetensors"
+        ):
+            raise ConversionError("Invalid checkpoint shard path")
+    indexed_available = all(filename in names for filename in selected)
+    if compatibility is None:
+        if indexed_available:
+            return selected, mapping, None
+        raise ConversionError("Checkpoint index references an unavailable shard")
+    if not isinstance(compatibility, dict) or set(compatibility) != {
+        "index_sha256",
+        "weight_filenames",
+        "tensor_names_sha256",
+    }:
+        raise ConversionError("Invalid checkpoint index compatibility policy")
+    for key in ("index_sha256", "tensor_names_sha256"):
+        if not isinstance(compatibility[key], str) or re.fullmatch(r"[0-9a-f]{64}", compatibility[key]) is None:
+            raise ConversionError("Invalid checkpoint index compatibility hash")
+    declared = compatibility["weight_filenames"]
+    if (
+        not isinstance(declared, list)
+        or not declared
+        or any(
+            not isinstance(filename, str)
+            or not filename
+            or "\\" in filename
+            or len(Path(filename).parts) != 1
+            or Path(filename).as_posix() != filename
+            or Path(filename).suffix != ".safetensors"
+            for filename in declared
+        )
+        or declared != sorted(set(declared))
+    ):
+        raise ConversionError("Invalid checkpoint index compatibility filenames")
+    if hashlib.sha256(raw).hexdigest() != compatibility["index_sha256"]:
+        if indexed_available:
+            return selected, mapping, None
+        raise ConversionError("Checkpoint shard index differs from its compatibility pin")
+    actual = sorted(name for name in names if name.endswith(".safetensors"))
+    if actual != declared:
+        raise ConversionError("Checkpoint files differ from their index compatibility pin")
+    return tuple(declared), mapping, compatibility["tensor_names_sha256"]
+
+
+def load_checkpoint(source: Path, *, index_compatibility: dict | None = None) -> dict[str, TensorInfo]:
     """Load one safetensors checkpoint or its explicitly indexed shards."""
     source = source.resolve()
     index_path = source / "model.safetensors.index.json"
     weight_map = None
+    compatible_inventory = None
     if index_path.exists():
-        index = read_json(index_path)
-        weight_map = index.get("weight_map")
-        if (
-            not isinstance(weight_map, dict)
-            or not weight_map
-            or any(
-                not isinstance(key, str) or not key or not isinstance(value, str) or not value
-                for key, value in weight_map.items()
-            )
-        ):
-            raise ConversionError("Invalid checkpoint shard index")
-        files = []
-        for filename in sorted(set(weight_map.values())):
-            relative = Path(filename)
-            path = source / relative
-            if relative.is_absolute() or ".." in relative.parts or path.suffix != ".safetensors":
-                raise ConversionError("Invalid checkpoint shard path")
-            # HF snapshot files commonly point to blobs outside the snapshot.
-            # Restrict the index's lexical path; permit those regular symlinks.
-            files.append(path)
+        names = tuple(path.relative_to(source).as_posix() for path in source.rglob("*") if path.is_file())
+        selected, weight_map, compatible_inventory = select_safetensors_index(
+            index_path, names, compatibility=index_compatibility
+        )
+        # HF snapshot files commonly point to blobs outside the snapshot.
+        # Restrict the index's lexical path; permit those regular symlinks.
+        files = [source / filename for filename in selected]
     elif (source / "model.safetensors").exists():
         files = [source / "model.safetensors"]
     else:
@@ -211,10 +289,17 @@ def load_checkpoint(source: Path) -> dict[str, TensorInfo]:
         for name, tensor in tensors.items():
             if name in result:
                 raise ConversionError("Tensor occurs in more than one shard")
-            if weight_map is not None and weight_map.get(name) != str(path.relative_to(source)):
+            if (
+                weight_map is not None
+                and compatible_inventory is None
+                and weight_map.get(name) != str(path.relative_to(source))
+            ):
                 raise ConversionError("Checkpoint shard index disagrees with its tensor headers")
             result[name] = tensor
-    if weight_map is not None and set(result) != set(weight_map):
+    if compatible_inventory is not None:
+        if not set(weight_map).issubset(result) or checkpoint_tensor_names_sha256(result) != compatible_inventory:
+            raise ConversionError("Checkpoint tensor inventory differs from its index compatibility pin")
+    elif weight_map is not None and set(result) != set(weight_map):
         raise ConversionError("Checkpoint shard index references missing tensors")
     return result
 

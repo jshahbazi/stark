@@ -1,4 +1,4 @@
-"""Dense Qwen3.5 text/DeltaNet checkpoint planner.
+"""Qwen3.5 dense and full-precision MoE text/DeltaNet checkpoint planner.
 
 Config, projection order and loader conventions are adapted from Lalamo
 831accb8252a6b6606c378048caeb44178f1a050, MIT License.
@@ -51,6 +51,10 @@ _KEYS = _COMMON_KEYS | {
     "mamba_ssm_dtype",
     "mlp_only_layers",
     "mtp_use_dedicated_embeddings",
+    "language_model_only",
+    "output_gate_type",
+    "shared_expert_intermediate_size",
+    "partial_rotary_factor",
 }
 
 
@@ -82,7 +86,17 @@ def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int
 
 
 def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
-    """Plan dense or existing affine MLX text weights from checkpoint dimensions.
+    """Plan dense or existing affine MLX text weights from checkpoint dimensions."""
+    return _build_qwen35_plan(source, dtype=dtype, moe=False)
+
+
+def build_qwen35_moe_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+    """Plan full-precision routed/shared experts with bounded expert row views."""
+    return _build_qwen35_plan(source, dtype=dtype, moe=True)
+
+
+def _build_qwen35_plan(source: Path, *, dtype: str, moe: bool) -> ConversionPlan:
+    """Plan text weights using the pinned importer's decoder/export contract.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
     adapter. Vision weights are omitted only from an explicitly declared wrapper;
@@ -91,10 +105,11 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     outer = read_json(source / "config.json")
     text = outer.get("text_config", {})
     config = normalize_qwen35_config(outer)
-    if text and text.get("model_type", "qwen3_5_text") not in {"qwen3_5", "qwen3_5_text"}:
-        raise UnsupportedConversion("Qwen3.5 dense adapter does not support a different nested text architecture")
-    if config.get("model_type") != "qwen3_5":
-        raise UnsupportedConversion("Qwen3.5 dense adapter requires model_type qwen3_5")
+    model_type = "qwen3_5_moe" if moe else "qwen3_5"
+    if text and text.get("model_type", model_type + "_text") not in {model_type, model_type + "_text"}:
+        raise UnsupportedConversion("Qwen3.5 adapter does not support a different nested text architecture")
+    if config.get("model_type") != model_type:
+        raise UnsupportedConversion(f"Qwen3.5 adapter requires model_type {model_type}")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
     target = _DTYPES[dtype]
@@ -103,9 +118,17 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     if config.get("quantization_config") is not None and config.get("quantization") is None:
         raise UnsupportedConversion("Qwen3.5 MLX requires the quantization field for baked normalization weights")
     quantization = parse_mlx_quantization(config)
+    if moe and quantization is not None:
+        raise UnsupportedConversion("Qwen3.5 packed MoE is outside implemented full-precision coverage")
     unsupported: list[str] = []
     dim = _positive_int(config, "hidden_size")
-    hidden = _positive_int(config, "intermediate_size")
+    hidden = _positive_int(config, "moe_intermediate_size" if moe else "intermediate_size")
+    experts = _positive_int(config, "num_experts") if moe else 0
+    active_experts = _positive_int(config, "num_experts_per_tok") if moe else 0
+    if moe and active_experts > experts:
+        raise ConversionError("Qwen3.5 active expert count exceeds its routed expert count")
+    if moe and _positive_int(config, "shared_expert_intermediate_size", hidden) != hidden:
+        raise UnsupportedConversion("Qwen3.5 shared/routed expert widths must match the pinned export contract")
     count = _positive_int(config, "num_hidden_layers")
     vocab = _positive_int(config, "vocab_size")
     heads = _positive_int(config, "num_attention_heads")
@@ -139,6 +162,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     rotary = int(head_dim * partial)
     if partial > 1 or rotary < 2 or rotary % 2:
         raise ConversionError("Qwen3.5 rotary dimension must be positive and even")
+    if "partial_rotary_factor" in config and _positive_float(config, "partial_rotary_factor", partial) != partial:
+        unsupported.append("Qwen3.5 rotary factor aliases disagree")
     if set(rope_parameters) - {
         "rope_theta",
         "partial_rotary_factor",
@@ -158,9 +183,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         _bool(rope_parameters, "mrope_interleaved", False)
     if set(config) - _KEYS:
         unsupported.append("Qwen3.5 config options are outside implemented coverage")
-    if config.get("architectures", ["Qwen3_5ForConditionalGeneration"]) not in (
-        ["Qwen3_5ForConditionalGeneration"],
-        ["Qwen3_5ForCausalLM"],
+    class_prefix = "Qwen3_5Moe" if moe else "Qwen3_5"
+    if config.get("architectures", [class_prefix + "ForConditionalGeneration"]) not in (
+        [class_prefix + "ForConditionalGeneration"],
+        [class_prefix + "ForCausalLM"],
     ):
         unsupported.append("Qwen3.5 architecture is outside implemented text coverage")
     if config.get("hidden_act", "silu") != "silu" or _bool(config, "mlp_bias", False):
@@ -185,15 +211,30 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         unsupported.append("Qwen3.5 pruned heads are outside implemented coverage")
     if not _bool(config, "attn_output_gate", True):
         unsupported.append("Qwen3.5 requires gated full attention")
+    _bool(config, "language_model_only", False)
+    # The pinned importer accepts the later swish metadata but exports its
+    # existing sigmoid-gated AttentionConfig. Native qualification must reject
+    # this upstream semantic mismatch independently of conversion parity.
+    gate_type = config.get("output_gate_type", "sigmoid")
+    if not isinstance(gate_type, str) or gate_type not in {"sigmoid", "swish"}:
+        unsupported.append("Qwen3.5 output gate type is outside the pinned export contract")
     if config.get("mamba_ssm_dtype", "float32") != "float32":
         unsupported.append("Qwen3.5 requires F32 recurrent state parameters")
     if config.get("mlp_only_layers", []) != []:
         unsupported.append("Qwen3.5 MLP-only layers are outside implemented coverage")
     if config.get("rope_scaling") is not None:
         unsupported.append("Qwen3.5 scaled RoPE is outside implemented coverage")
-    for field in ("num_experts", "num_experts_per_tok", "moe_intermediate_size"):
-        if config.get(field) not in (None, 0):
-            unsupported.append("Qwen3.5 MoE/MTP variants are outside implemented dense coverage")
+    if not moe:
+        for field in (
+            "num_experts",
+            "num_experts_per_tok",
+            "moe_intermediate_size",
+            "shared_expert_intermediate_size",
+        ):
+            if config.get(field) not in (None, 0):
+                unsupported.append("Qwen3.5 MoE/MTP variants are outside implemented dense coverage")
+    elif config.get("intermediate_size") not in (None, 0):
+        unsupported.append("Qwen3.5 MoE cannot declare a separate dense MLP width")
     if "mtp_num_hidden_layers" in config and (
         type(config["mtp_num_hidden_layers"]) is not int or config["mtp_num_hidden_layers"] < 0
     ):
@@ -399,16 +440,61 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 operations.append(
                     TensorOperation(out + ".mixer." + output_name, (info,), "F32", (linear_heads,), "cast_f32")
                 )
-        matrix(
-            out + ".mlp.up_projection.weights",
-            tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
-            (2 * hidden, dim),
-        )
-        matrix(
-            out + ".mlp.down_projection.weights",
-            (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
-            (dim, hidden),
-        )
+        if moe:
+            mlp_src = src + ".mlp"
+            mlp_out = out + ".mlp"
+            matrix(
+                mlp_out + ".router.weights",
+                (matrix_source(mlp_src + ".gate.weight", (experts, dim)),),
+                (experts, dim),
+            )
+            matrix(
+                mlp_out + ".gate.weights",
+                (matrix_source(mlp_src + ".shared_expert_gate.weight", (1, dim)),),
+                (1, dim),
+            )
+            # Batched HF experts are [expert, gate/up, input]. A row view for
+            # each expert gives the canonical [up, gate] order without loading
+            # an entire expert tensor or allocating the combined mixture.
+            names = [
+                name
+                for name in (mlp_src + ".experts.gate_up_proj", mlp_src + ".experts.gate_up_proj.weight")
+                if name in tensors
+            ]
+            if len(names) != 1:
+                raise ConversionError("Qwen3.5 MoE batched expert weights are missing or ambiguous")
+            up = tensor(names[0], (experts, 2 * hidden, dim))
+            down_name = mlp_src + ".experts.down_proj" + (".weight" if names[0].endswith(".weight") else "")
+            down = tensor(down_name, (experts, dim, hidden))
+            up_parts = []
+            for expert in range(experts):
+                view = replace(
+                    up,
+                    shape=(2 * hidden, dim),
+                    offset=up.offset + expert * 2 * hidden * dim * up.itemsize,
+                    nbytes=2 * hidden * dim * up.itemsize,
+                )
+                up_parts.extend((_row_range(view, hidden, hidden), _row_range(view, 0, hidden)))
+            up_parts.extend(
+                tensor(mlp_src + f".shared_expert.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")
+            )
+            matrix(mlp_out + ".experts.up_projection.weights", tuple(up_parts), (experts + 1, 2 * hidden, dim))
+            matrix(
+                mlp_out + ".experts.down_projection.weights",
+                (down, tensor(mlp_src + ".shared_expert.down_proj.weight", (dim, hidden))),
+                (experts + 1, dim, hidden),
+            )
+        else:
+            matrix(
+                out + ".mlp.up_projection.weights",
+                tuple(matrix_source(src + f".mlp.{branch}_proj.weight", (hidden, dim)) for branch in ("up", "gate")),
+                (2 * hidden, dim),
+            )
+            matrix(
+                out + ".mlp.down_projection.weights",
+                (matrix_source(src + ".mlp.down_proj.weight", (dim, hidden)),),
+                (dim, hidden),
+            )
     norm("decoder.transformer.output_norm", prefix + ".norm.weight", dim)
     vision = outer.get("vision_config")
     if vision is not None and not isinstance(vision, dict):
@@ -446,6 +532,19 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         "up_clipping": None,
         "gate_clipping": None,
     }
+    if moe:
+        mlp = {
+            "type": "MixtureOfExpertsConfig",
+            "expert_config": mlp,
+            "router_config": {},
+            "routing_function": {"type": "SoftmaxRouting"},
+            "num_routed_experts": experts,
+            "num_active_routed_experts": active_experts,
+            "router_has_biases": False,
+            "num_shared_experts": 1,
+            "expert_hidden_dim": hidden,
+            "gate_config": {},
+        }
     rope = {"type": "UnscaledRoPEConfig", "base": base, "max_sequence_length": context, "head_dim": rotary}
     layer_configs = []
     for layer in layers:
