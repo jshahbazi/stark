@@ -1,0 +1,4421 @@
+{
+  "schema_version": 1,
+  "experiment": "qwen3_06b_gguf_q8_0_import",
+  "date": "2026-10-13",
+  "code_commit": "2642d705f63e8080b434d7ec835749d5c71ad77c",
+  "disposition": {
+    "compression_preserved": true,
+    "scoped_native_load_and_execution_passed": true,
+    "source_runtime_bit_exact": false,
+    "general_generation_quality_qualified": false,
+    "broad_gguf_support": false,
+    "default_native_format_changed": false
+  },
+  "source_repositories": [
+    {
+      "repo": "Qwen/Qwen3-0.6B-GGUF",
+      "revision": "23749fefcc72300e3a2ad315e1317431b06b590a",
+      "filename": "Qwen3-0.6B-Q8_0.gguf",
+      "sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "bytes": 639446688
+    },
+    {
+      "repo": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca",
+      "source_manifest_sha256": "5914de60ee300a6e206328c56b965d3c70ac9871f7e2481f413401f37f369edd"
+    },
+    {
+      "repo": "Qwen/Qwen3-0.6B-MLX-8bit",
+      "revision": "e53d3ae02ebc79eac17f1fa9e23a2b65ce227893",
+      "source_manifest_sha256": "11a37b3bef5392a6f2cc50e9d26abb12daa8eff7c89a8c9ed535030cc6645dba"
+    }
+  ],
+  "build": {
+    "rust": "1.98.1",
+    "profile": "release",
+    "features": [
+      "default",
+      "optimized"
+    ],
+    "cargo_lock_sha256": "49a27c8d8b2eebc3bdf47d6957f5b2c8dbbb822ddd66090589a33bcbf1f35ec1",
+    "rust_toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+    "worker_sha256": "0cb4e1fcc02286af21213cf9c9b4871c758143839d570069d70baa56f4f5fc80"
+  },
+  "host": {
+    "chip": "Apple M5 Max",
+    "physical_cpu_cores": 18,
+    "memory_bytes": 137438953472,
+    "system": "Darwin",
+    "machine": "arm64",
+    "release": "25.6.0"
+  },
+  "import": {
+    "toolchain": {
+      "converter_sources_sha256": "4a3b4f16437072d92c0809c586c3ad147d1ea9ed661413e723e9d051755f2e63",
+      "converter_lock_sha256": "1354c36a99cdc0b27bb3ff3f1d12c54aafb9fb8620a6ed7d633f6552b3d72c65",
+      "reference_source_revision": "831accb8252a6b6606c378048caeb44178f1a050",
+      "engine_upstream_revision": "8d01581474760bd1fc7f4a547ff1d02f7dada437"
+    },
+    "ggml_contract_revision": "1b70350c92563449576bcbbf552994b1d1ed847d",
+    "stats": {
+      "output_sha256": "d866fa25264aa5244de920525c747d6be8d9afbdb78624f2e09a762750178725",
+      "output_bytes": 633562928,
+      "output_tensor_bytes": 633495552,
+      "tensors": 339,
+      "peak_buffer_bytes": 6920704,
+      "chunk_bytes": 8388608,
+      "write_seconds": 1.0793183339992538,
+      "scale_f16_to_bf16": {
+        "count": 18624512,
+        "changed": 16355897,
+        "max_absolute_error": 3.0517578125e-05,
+        "max_relative_error": 0.0038910505836575876,
+        "weight_max_absolute_error": 0.003875732421875,
+        "weight_count": 595984384,
+        "rms_absolute_error": 9.411685631472931e-07,
+        "weight_relative_rms_error": 0.0016954798412006054,
+        "weight_rms_absolute_error": 4.859700192258441e-05
+      },
+      "code_preservation": {
+        "compared_codes": 595984384,
+        "mismatched_codes": 0,
+        "compared_scales": 18624512,
+        "mismatched_scale_bits": 0,
+        "compared_padding_scales": 0
+      }
+    },
+    "outputs": {
+      "config.json": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+      "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "model.safetensors": "d866fa25264aa5244de920525c747d6be8d9afbdb78624f2e09a762750178725"
+    },
+    "original_metadata_hashes": {
+      "config.json": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd",
+      "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+      "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+      "generation_config.json": "2325da0f15bb848e018c5ae071b7943332e9f871d6b60e2ed22ca97d4cb993d2"
+    },
+    "private_receipt_sha256": "0a6d1ec6576f12061b83fb997396ccb9863c75f5192d7ad8047157abd115f726"
+  },
+  "reference": {
+    "version": "llama.cpp 0.5.0",
+    "build": 11146,
+    "commit": "7fe450e19",
+    "binary_sha256": "394e92af2078e58808cd06dcf81285027831e9206227231beb249316292249fd",
+    "library_hashes_recorded_after_run": {
+      "libllama-server-impl.dylib": "b9712aa75e6525c71ae3c86013b1bdf9f89f139af872a5e0307badf6df8d13ef",
+      "libllama-common.0.5.0.dylib": "07579e3ed51f1068f5d7ac14c3eb075c2e084a1e3c3e0f9105dd6daa7337ed2f",
+      "libllama.0.5.0.dylib": "0e90ae71dd8aab14d8d21a960c74d858526f030c811e61ef05cb0001a41b0e96",
+      "libggml.0.25.3.dylib": "2fcb5f1afadc4530688826c0a450eb65f253dfcacdab03b22fb16776bbd28838",
+      "libggml-base.0.25.3.dylib": "a20ea4ff60d01db0b0cb88dde5fda9a20bcbccde6b03b7ebd4d7eb47b054f263"
+    }
+  },
+  "summary": {
+    "dense": {
+      "model_package_bytes": 1203801962,
+      "weights_bytes": 1192276800,
+      "peak_process_rss_bytes": 1377124352,
+      "peak_tracked_metal_bytes": 1370521600,
+      "load_seconds_by_round": [
+        0.248649208,
+        0.246137917
+      ],
+      "completed_decode_tokens_per_second": 340.64301090303803,
+      "completed_decode_tokens": 1116,
+      "completed_decode_seconds": 3.276157045,
+      "prefill_512_tokens_per_second_median_by_round": [
+        32640.485894433143,
+        34119.49674008867
+      ]
+    },
+    "mlx8": {
+      "model_package_bytes": 626477162,
+      "weights_bytes": 614952000,
+      "peak_process_rss_bytes": 811728896,
+      "peak_tracked_metal_bytes": 780615680,
+      "load_seconds_by_round": [
+        0.199402791,
+        0.193190708
+      ],
+      "completed_decode_tokens_per_second": 502.07915544671414,
+      "completed_decode_tokens": 1116,
+      "completed_decode_seconds": 2.2227570849999996,
+      "prefill_512_tokens_per_second_median_by_round": [
+        33478.00145485456,
+        34747.200542925006
+      ]
+    },
+    "gguf_q8": {
+      "model_package_bytes": 645088090,
+      "weights_bytes": 633562928,
+      "peak_process_rss_bytes": 814252032,
+      "peak_tracked_metal_bytes": 811794432,
+      "load_seconds_by_round": [
+        0.233653459,
+        0.195061375
+      ],
+      "completed_decode_tokens_per_second": 492.9973355287535,
+      "completed_decode_tokens": 1116,
+      "completed_decode_seconds": 2.263703918,
+      "prefill_512_tokens_per_second_median_by_round": [
+        28963.98594228417,
+        27714.625960809786
+      ]
+    }
+  },
+  "native_runtime": {
+    "schema_version": 1,
+    "status": "complete",
+    "worker_sha256": "0cb4e1fcc02286af21213cf9c9b4871c758143839d570069d70baa56f4f5fc80",
+    "harness_sha256": "37b7d46a3ffa0744891d112cfe4b5c9ed1f13440eb9680611d65297521330dc7",
+    "worker_source_sha256": "1e0dd7d36b844aff2d0e3fea7b1b39d3abf63b8518c74197e62cbca79e0521af",
+    "host": {
+      "system": "Darwin",
+      "machine": "arm64",
+      "release": "25.6.0"
+    },
+    "configuration": {
+      "rounds": 2,
+      "warmups": 1,
+      "repeats": 3,
+      "context_tokens": 1024,
+      "output_tokens": 32,
+      "order_seed": 1729
+    },
+    "measurement_notes": [
+      "Fresh process per model round; fixed-seed shuffled model order; warm filesystem cache is uncontrolled.",
+      "Score timing excludes JSON/pipe overhead; prefill uses fresh KV state. No decision cache exists in the experiment worker.",
+      "Completed decode throughput counts returned tokens after the first and includes final stream drain. Buffered iterator throughput excludes drain and is separately labelled.",
+      "Peak RSS is native getrusage ru_maxrss in bytes; resident snapshots use ps RSS after load and inference.",
+      "Engine peak measures tracked Metal allocation bytes. Apple unified memory shares pages; RSS and engine allocation peaks are not additive or total physical-memory accounting.",
+      "Fixed-count greedy generation ignores stopping tokens, uses seed zero, and retains only hashes. No quality benchmark or general GGUF support is claimed."
+    ],
+    "models": {
+      "dense": {
+        "binding": {
+          "files": {
+            "config.json": {
+              "sha256": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+              "bytes": 102508
+            },
+            "tokenizer.json": {
+              "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+              "bytes": 11422654
+            },
+            "model.safetensors": {
+              "sha256": "87c3344a80b7376392cc5c44d5369680b68936e6930bb8ac476ca65a136f64c7",
+              "bytes": 1192276800
+            }
+          },
+          "total_bytes": 1203801962
+        },
+        "runs": [
+          {
+            "round": 1,
+            "load_seconds": 0.248649208,
+            "rss_after_load_bytes": 1339228160,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.004083708,
+                "median": 0.004897958,
+                "maximum": 0.015689541,
+                "mean": 0.006729409666666667
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.3916e-05,
+                "median": 4.44795e-05,
+                "maximum": 8.0042e-05,
+                "mean": 4.7812555555555555e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000397292,
+                "median": 0.000567646,
+                "maximum": 0.000909542,
+                "mean": 0.0005846343333333333
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.005032041,
+                "median": 0.00575225,
+                "maximum": 0.017063375,
+                "mean": 0.007646430555555556
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4275.722374000039,
+                "median": 5507.845208913791,
+                "maximum": 34897.39314428443,
+                "mean": 12480.45575667089
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.08626225,
+                "median": 0.08662354150000001,
+                "maximum": 0.095427,
+                "mean": 0.08799932177777778
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.002759125,
+                "median": 0.002813229,
+                "maximum": 0.003069042,
+                "mean": 0.0028397895555555557
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000413083,
+                "median": 0.000463417,
+                "maximum": 0.000686042,
+                "mean": 0.00047396311111111113
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004823416,
+                "median": 0.0053258335,
+                "maximum": 0.016633667,
+                "mean": 0.007159592555555556
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.094410459,
+                "median": 0.0951939805,
+                "maximum": 0.115815751,
+                "mean": 0.098472667
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 314.73345903584635,
+                "median": 346.70944146346676,
+                "maximum": 348.05600894840774,
+                "mean": 341.555323948201
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 324.8556488205644,
+                "median": 357.87054605838546,
+                "maximum": 359.36924900521376,
+                "mean": 352.5790540896435
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 276.30093250442246,
+                "median": 336.1557199856007,
+                "maximum": 338.94549755340137,
+                "mean": 326.295845425512
+              }
+            },
+            "process_peak_rss_bytes": 1377124352,
+            "engine_peak_allocated_bytes": 1370521600,
+            "rss_after_inference_bytes": 1377124352,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.0041445,
+                    "median": 0.004897958,
+                    "maximum": 0.005379208,
+                    "mean": 0.004827506833333333
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.425e-05,
+                    "median": 4.4417000000000005e-05,
+                    "maximum": 4.525e-05,
+                    "mean": 4.459033333333333e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000403125,
+                    "median": 0.0005563125,
+                    "maximum": 0.000820792,
+                    "mean": 0.0005828611666666666
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.005133292,
+                    "median": 0.00575225,
+                    "maximum": 0.006213209,
+                    "mean": 0.0057233959999999995
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4275.722374000039,
+                    "median": 4696.07426360621,
+                    "maximum": 5549.5234648329115,
+                    "mean": 4807.615336435337
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.086445833,
+                    "median": 0.086545125,
+                    "maximum": 0.087195375,
+                    "mean": 0.08668190283333332
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.002759125,
+                    "median": 0.0028068959999999997,
+                    "maximum": 0.002821458,
+                    "mean": 0.002801736166666667
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000443292,
+                    "median": 0.000453479,
+                    "maximum": 0.000484167,
+                    "mean": 0.00045893766666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004969209,
+                    "median": 0.005188542,
+                    "maximum": 0.00547375,
+                    "mean": 0.0052128405
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.094850041,
+                    "median": 0.0951939805,
+                    "maximum": 0.095417917,
+                    "mean": 0.09515541716666666
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 344.4353551781272,
+                    "median": 346.9487598898472,
+                    "maximum": 347.51431641277156,
+                    "mean": 346.43524334902924
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 355.52344376063525,
+                    "median": 358.19466036391816,
+                    "maximum": 358.6060649100345,
+                    "mean": 357.6327237644095
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 335.36678441639003,
+                    "median": 336.1557199856007,
+                    "maximum": 337.37465648538836,
+                    "mean": 336.2933214860656
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004083708,
+                    "median": 0.004716208,
+                    "maximum": 0.004742625,
+                    "mean": 0.004514180333333334
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.3916e-05,
+                    "median": 4.4416e-05,
+                    "maximum": 4.5041e-05,
+                    "mean": 4.4457666666666666e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000509667,
+                    "median": 0.000551208,
+                    "maximum": 0.000673708,
+                    "mean": 0.0005781943333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005032041,
+                    "median": 0.005505541,
+                    "maximum": 0.005604375,
+                    "mean": 0.005380652333333333
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5060.488653435597,
+                    "median": 5088.834080261091,
+                    "maximum": 5877.01177459309,
+                    "mean": 5342.1115027632595
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.08626225,
+                    "median": 0.086267417,
+                    "maximum": 0.086343208,
+                    "mean": 0.08629095833333333
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002787667,
+                    "median": 0.002803875,
+                    "maximum": 0.002847584,
+                    "mean": 0.002813042
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000413083,
+                    "median": 0.000434917,
+                    "maximum": 0.000479167,
+                    "mean": 0.000442389
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004823416,
+                    "median": 0.004844667,
+                    "maximum": 0.005248791,
+                    "mean": 0.004972291333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.094410459,
+                    "median": 0.094417584,
+                    "maximum": 0.094727999,
+                    "mean": 0.09451868066666667
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 347.80316024048904,
+                    "median": 347.86511420226543,
+                    "maximum": 348.05600894840774,
+                    "mean": 347.9080944637208
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 359.03229354183827,
+                    "median": 359.34772452964484,
+                    "maximum": 359.36924900521376,
+                    "mean": 359.2497556922323
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 337.8093102124959,
+                    "median": 338.91991983188217,
+                    "maximum": 338.94549755340137,
+                    "mean": 338.55824253259317
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004717,
+                    "median": 0.004724084,
+                    "maximum": 0.004741125,
+                    "mean": 0.004727403
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4417e-05,
+                    "median": 4.4667e-05,
+                    "maximum": 6.85e-05,
+                    "mean": 5.2528e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000397292,
+                    "median": 0.000416208,
+                    "maximum": 0.000633,
+                    "mean": 0.0004821666666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005417042,
+                    "median": 0.005450333,
+                    "maximum": 0.005652834,
+                    "mean": 0.005506736333333334
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5483.930501726911,
+                    "median": 5503.71246573939,
+                    "maximum": 5511.977952088192,
+                    "mean": 5499.873639851498
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.08638025,
+                    "median": 0.086485042,
+                    "maximum": 0.086681958,
+                    "mean": 0.08651575
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002768458,
+                    "median": 0.00277025,
+                    "maximum": 0.002793917,
+                    "mean": 0.0027775416666666664
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.0004335,
+                    "median": 0.000438,
+                    "maximum": 0.000466209,
+                    "mean": 0.00044590300000000004
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.005213792,
+                    "median": 0.005271291,
+                    "maximum": 0.005329625,
+                    "mean": 0.005271569333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.094905292,
+                    "median": 0.094970001,
+                    "maximum": 0.095156999,
+                    "mean": 0.09501076400000001
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 346.55377092536384,
+                    "median": 347.3253149736425,
+                    "maximum": 347.63430983325026,
+                    "mean": 347.1711319107522
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 357.6292081450214,
+                    "median": 358.44348667830906,
+                    "maximum": 358.8783315630598,
+                    "mean": 358.31700879546344
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 336.28635135918904,
+                    "median": 336.9485065078603,
+                    "maximum": 337.1782471308344,
+                    "mean": 336.8043683326279
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.005462917,
+                    "median": 0.006182917,
+                    "maximum": 0.006746584,
+                    "mean": 0.006130806
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4167e-05,
+                    "median": 4.4542e-05,
+                    "maximum": 4.5084e-05,
+                    "mean": 4.459766666666667e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000500417,
+                    "median": 0.000584208,
+                    "maximum": 0.000909542,
+                    "mean": 0.0006647223333333332
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.00668025,
+                    "median": 0.006969458,
+                    "maximum": 0.007685125,
+                    "mean": 0.007111611
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 18972.56448596801,
+                    "median": 20702.202536440327,
+                    "maximum": 23430.70561020788,
+                    "mean": 21035.157544205405
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.087937375,
+                    "median": 0.088260791,
+                    "maximum": 0.088415541,
+                    "mean": 0.088204569
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002827834,
+                    "median": 0.002839625,
+                    "maximum": 0.002840292,
+                    "mean": 0.0028359170000000003
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000460542,
+                    "median": 0.000483625,
+                    "maximum": 0.000486958,
+                    "mean": 0.0004770416666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.006230833,
+                    "median": 0.006408292,
+                    "maximum": 0.006794,
+                    "mean": 0.006477708333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.097456584,
+                    "median": 0.09799566600000001,
+                    "maximum": 0.09853345799999999,
+                    "mean": 0.097995236
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 339.7043123807768,
+                    "median": 340.28384678287307,
+                    "maximum": 341.5405565804404,
+                    "mean": 340.5095719146968
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 350.61709343609624,
+                    "median": 351.23183974183956,
+                    "maximum": 352.5235998914,
+                    "mean": 351.4575110231119
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 324.76278260730487,
+                    "median": 326.5450535332858,
+                    "maximum": 328.35134053128724,
+                    "mean": 326.553058890626
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.014671583,
+                    "median": 0.015686041,
+                    "maximum": 0.015689541,
+                    "mean": 0.015349055
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4125e-05,
+                    "median": 4.4167e-05,
+                    "maximum": 8.0042e-05,
+                    "mean": 5.611133333333334e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.00049225,
+                    "median": 0.000591459,
+                    "maximum": 0.000767292,
+                    "mean": 0.0006170003333333334
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.01574025,
+                    "median": 0.01649475,
+                    "maximum": 0.017063375,
+                    "mean": 0.016432791666666665
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 32633.204502285946,
+                    "median": 32640.485894433143,
+                    "maximum": 34897.39314428443,
+                    "mean": 33390.361180334505
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.092550084,
+                    "median": 0.092885459,
+                    "maximum": 0.095427,
+                    "mean": 0.09362084766666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002968542,
+                    "median": 0.002988709,
+                    "maximum": 0.003069042,
+                    "mean": 0.0030087643333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000485417,
+                    "median": 0.00051025,
+                    "maximum": 0.000686042,
+                    "mean": 0.0005605696666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.015296833,
+                    "median": 0.015500416,
+                    "maximum": 0.016633667,
+                    "mean": 0.015810305333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.111300876,
+                    "median": 0.11188483400000002,
+                    "maximum": 0.115815751,
+                    "mean": 0.113000487
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 314.73345903584635,
+                    "median": 323.3404852076526,
+                    "maximum": 324.54403186243485,
+                    "mean": 320.87265870197797
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 324.8556488205644,
+                    "median": 333.7443808077645,
+                    "maximum": 334.953774866374,
+                    "mean": 331.1846014982343
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 276.30093250442246,
+                    "median": 286.00837893722036,
+                    "maximum": 287.50896803363884,
+                    "mean": 283.2727598250939
+                  }
+                }
+              }
+            }
+          },
+          {
+            "round": 2,
+            "load_seconds": 0.246137917,
+            "rss_after_load_bytes": 1339195392,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.004080125,
+                "median": 0.004830770999999999,
+                "maximum": 0.015178916,
+                "mean": 0.006537601888888889
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.3667e-05,
+                "median": 4.4458499999999995e-05,
+                "maximum": 5.0542e-05,
+                "mean": 4.4965333333333335e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000424042,
+                "median": 0.0004892294999999999,
+                "maximum": 0.000865958,
+                "mean": 0.0005675834444444444
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.005068167,
+                "median": 0.005668271000000001,
+                "maximum": 0.015980708,
+                "mean": 0.007420689833333333
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4403.029871622325,
+                "median": 5576.519676097705,
+                "maximum": 35596.241565272416,
+                "mean": 12924.807422392578
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.086578,
+                "median": 0.087335687,
+                "maximum": 0.093832,
+                "mean": 0.08831570355555557
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.002776209,
+                "median": 0.002841396,
+                "maximum": 0.003050333,
+                "mean": 0.0028539098333333333
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000433458,
+                "median": 0.00047954149999999995,
+                "maximum": 0.000558167,
+                "mean": 0.00048152555555555556
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004914625,
+                "median": 0.005237354499999999,
+                "maximum": 0.01568325,
+                "mean": 0.0070560115555555565
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.094841417,
+                "median": 0.095824041,
+                "maximum": 0.113033291,
+                "mean": 0.0987071505
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 319.97577927856054,
+                "median": 343.81081056735195,
+                "maximum": 346.6424154141908,
+                "mean": 340.2318716503386
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 330.3776963082957,
+                "median": 354.95242806828696,
+                "maximum": 358.05862921296404,
+                "mean": 351.22897030003895
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 283.10243572400276,
+                "median": 333.94576794674254,
+                "maximum": 337.40533421174,
+                "mean": 325.31638173672434
+              }
+            },
+            "process_peak_rss_bytes": 1375567872,
+            "engine_peak_allocated_bytes": 1370521600,
+            "rss_after_inference_bytes": 1375567872,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.004103708,
+                    "median": 0.0047374375,
+                    "maximum": 0.005163334,
+                    "mean": 0.004611118166666667
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.3667e-05,
+                    "median": 4.4271e-05,
+                    "maximum": 4.6e-05,
+                    "mean": 4.44515e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000442334,
+                    "median": 0.0005945835,
+                    "maximum": 0.000714166,
+                    "mean": 0.0005864306666666666
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.005092583,
+                    "median": 0.005539229,
+                    "maximum": 0.006038708,
+                    "mean": 0.005501110833333333
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4454.48619051179,
+                    "median": 4855.274707471194,
+                    "maximum": 5604.687273071086,
+                    "mean": 5021.729563105874
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.086578,
+                    "median": 0.08668079149999999,
+                    "maximum": 0.087276666,
+                    "mean": 0.08679838866666667
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.002802542,
+                    "median": 0.0028241250000000002,
+                    "maximum": 0.002854625,
+                    "mean": 0.0028273263333333334
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000436042,
+                    "median": 0.0004765625,
+                    "maximum": 0.000527459,
+                    "mean": 0.00047475716666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004916667,
+                    "median": 0.005000145500000001,
+                    "maximum": 0.005391083,
+                    "mean": 0.005061486166666667
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.094841417,
+                    "median": 0.0950452085,
+                    "maximum": 0.09592129099999999,
+                    "mean": 0.09516195833333334
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 344.1126013690509,
+                    "median": 346.4203247218162,
+                    "maximum": 346.6424154141908,
+                    "mean": 345.88552210221866
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 355.1923030607058,
+                    "median": 357.6340209453018,
+                    "maximum": 358.05862921296404,
+                    "mean": 357.15256782068394
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 333.6068527267841,
+                    "median": 336.6820412960073,
+                    "maximum": 337.40533421174,
+                    "mean": 336.2735514228181
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004123,
+                    "median": 0.004799042,
+                    "maximum": 0.005450792,
+                    "mean": 0.004790944666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4e-05,
+                    "median": 4.4625e-05,
+                    "maximum": 4.5958e-05,
+                    "mean": 4.4860999999999996e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000424042,
+                    "median": 0.000470416,
+                    "maximum": 0.000722042,
+                    "mean": 0.0005388333333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005170375,
+                    "median": 0.005585709,
+                    "maximum": 0.00628425,
+                    "mean": 0.005680111333333334
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 4403.029871622325,
+                    "median": 5000.99811587396,
+                    "maximum": 5821.004123211254,
+                    "mean": 5075.01070356918
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.086933834,
+                    "median": 0.087394708,
+                    "maximum": 0.087679792,
+                    "mean": 0.08733611133333334
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002785667,
+                    "median": 0.002804917,
+                    "maximum": 0.002850375,
+                    "mean": 0.0028136529999999997
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.0004595,
+                    "median": 0.0004975,
+                    "maximum": 0.000558167,
+                    "mean": 0.0005050556666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004914625,
+                    "median": 0.004984208,
+                    "maximum": 0.00542175,
+                    "mean": 0.005106861
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.09562000100000001,
+                    "median": 0.095726791,
+                    "maximum": 0.09593825100000002,
+                    "mean": 0.095761681
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 342.67222366052437,
+                    "median": 343.509019765653,
+                    "maximum": 345.4471970531437,
+                    "mean": 343.8761468264404
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 353.5592328959904,
+                    "median": 354.71255307586813,
+                    "maximum": 356.5930383330384,
+                    "mean": 354.95494143496563
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 333.54787758221687,
+                    "median": 334.2846831667009,
+                    "maximum": 334.65801783457414,
+                    "mean": 334.1635261944973
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004080125,
+                    "median": 0.004817625,
+                    "maximum": 0.004843917,
+                    "mean": 0.004580555666666666
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.3959e-05,
+                    "median": 4.5291e-05,
+                    "maximum": 4.6041e-05,
+                    "mean": 4.5097e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000449834,
+                    "median": 0.000490459,
+                    "maximum": 0.00066025,
+                    "mean": 0.0005335143333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005068167,
+                    "median": 0.005603708,
+                    "maximum": 0.005635209,
+                    "mean": 0.005435694666666667
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5367.556875974547,
+                    "median": 5396.850107677538,
+                    "maximum": 6372.353788180509,
+                    "mean": 5712.253590610865
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.087102583,
+                    "median": 0.087257416,
+                    "maximum": 0.088066792,
+                    "mean": 0.087475597
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002776209,
+                    "median": 0.00281775,
+                    "maximum": 0.002903041,
+                    "mean": 0.002832333333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000468042,
+                    "median": 0.000485917,
+                    "maximum": 0.00049175,
+                    "mean": 0.00048190299999999994
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.00496275,
+                    "median": 0.004976208,
+                    "maximum": 0.005337417,
+                    "mean": 0.005092125
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.095369,
+                    "median": 0.095501583,
+                    "maximum": 0.096775292,
+                    "mean": 0.09588195833333334
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 340.772308552001,
+                    "median": 344.31580423425135,
+                    "maximum": 344.7496129712954,
+                    "mean": 343.2792419191826
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 352.0055550564394,
+                    "median": 355.27066261049947,
+                    "maximum": 355.90218949075256,
+                    "mean": 354.39280238589714
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 330.6629134221574,
+                    "median": 335.0729798897679,
+                    "maximum": 335.5388019167654,
+                    "mean": 333.7582317428969
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.005314084,
+                    "median": 0.005993625,
+                    "maximum": 0.006019375,
+                    "mean": 0.005775694666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4e-05,
+                    "median": 4.4625e-05,
+                    "maximum": 4.4959e-05,
+                    "mean": 4.4528000000000005e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.0004275,
+                    "median": 0.00046225,
+                    "maximum": 0.000865958,
+                    "mean": 0.0005852359999999999
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.00651325,
+                    "median": 0.006709375,
+                    "maximum": 0.006776042,
+                    "mean": 0.0066662223333333335
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 21264.666182120236,
+                    "median": 21356.024108949092,
+                    "maximum": 24086.93577293848,
+                    "mean": 22235.87535466927
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.088045917,
+                    "median": 0.088239041,
+                    "maximum": 0.0889245,
+                    "mean": 0.08840315266666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002840292,
+                    "median": 0.0028425,
+                    "maximum": 0.002846292,
+                    "mean": 0.0028430279999999996
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.0004575,
+                    "median": 0.000477333,
+                    "maximum": 0.000534917,
+                    "mean": 0.0004899166666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.006192417,
+                    "median": 0.006543708,
+                    "maximum": 0.006558916,
+                    "mean": 0.006431680333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.097806667,
+                    "median": 0.097889625,
+                    "maximum": 0.098807041,
+                    "mean": 0.09816777766666666
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 337.7981090105444,
+                    "median": 340.36261552332627,
+                    "maximum": 341.07756547239677,
+                    "mean": 339.7460966687558
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 348.6103379833454,
+                    "median": 351.31841471395865,
+                    "maximum": 352.08901282725014,
+                    "mean": 350.6725885081848
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 323.86355948054353,
+                    "median": 326.8987903467809,
+                    "maximum": 327.1760605031148,
+                    "mean": 325.9794701101464
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.014383541,
+                    "median": 0.015006083,
+                    "maximum": 0.015178916,
+                    "mean": 0.014856180000000002
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.425e-05,
+                    "median": 4.4417e-05,
+                    "maximum": 5.0542e-05,
+                    "mean": 4.6403e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000463084,
+                    "median": 0.000488,
+                    "maximum": 0.000774083,
+                    "mean": 0.0005750556666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.015453417,
+                    "median": 0.015785542,
+                    "maximum": 0.015980708,
+                    "mean": 0.015739889
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 33730.998972522146,
+                    "median": 34119.49674008867,
+                    "maximum": 35596.241565272416,
+                    "mean": 34482.245759294405
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.092696333,
+                    "median": 0.092719416,
+                    "maximum": 0.093832,
+                    "mean": 0.093082583
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002943834,
+                    "median": 0.002945209,
+                    "maximum": 0.003050333,
+                    "mean": 0.002979792
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000433458,
+                    "median": 0.000467708,
+                    "maximum": 0.000487125,
+                    "mean": 0.0004627636666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.0154775,
+                    "median": 0.015586542,
+                    "maximum": 0.01568325,
+                    "mean": 0.015582430666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.11155250000000001,
+                    "median": 0.111736917,
+                    "maximum": 0.113033291,
+                    "mean": 0.11210756933333334
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 319.97577927856054,
+                    "median": 324.05338518187494,
+                    "maximum": 324.1269363892104,
+                    "mean": 322.7187002832153
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 330.3776963082957,
+                    "median": 334.3420540957678,
+                    "maximum": 334.425311085391,
+                    "mean": 333.04835382981815
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 283.10243572400276,
+                    "median": 286.38699598271535,
+                    "maximum": 286.8604468747899,
+                    "mean": 285.4499595271693
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "score_hashes": [
+          "e0d8f7dd89c4dbd1fc85874459be69adceb796f31074ddc353dce91ea6fdfbe6",
+          "9233561c6ef95b75c2e2ff5e20ad67b2dcf709f328fa9756b2d7ae3c83b2294a",
+          "2353a799710956a48d2b94acef10120a0630e63abf538d361c7b9d65b0d606bb",
+          "8f74a5475a36a741611e716a5931232c8cc72ca234df04a9e3117f7ac3f453bb",
+          "35c5f9c73e7327948a2f1e294a94e556f8ccf6b81aed45d7abe589290aa20adb",
+          "e8a30e6fe5157b69286b0f086b19d2cd357d1f9f9584afaa6434bd8c987760cf"
+        ],
+        "generation_hashes": [
+          "274ee9e0df1413c8640de989114e4560644b44d3a1a58300408ad66e826c3d4a",
+          "0b276d025d1befaeb52bf2ecf0d067e30b3d0082339aea181cd3fdb57eebbcea",
+          "436a954f76d43d5c1187da4048f4b5c81bf725b441fe87dca477f109a2b87d7b",
+          "d0f63030b76f93d2e6c3ccd3e50fda9b6ac16e5f06d3ac8690522a5690080269",
+          "335fb415f545820fe8f2280c09790e36391d2ea2449b60a1b986ce6de55cd181",
+          "89949eb2527a2c145c2e091eb398605628314060e93f85e358296e90147a0e79"
+        ]
+      },
+      "mlx8": {
+        "binding": {
+          "files": {
+            "config.json": {
+              "sha256": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+              "bytes": 102508
+            },
+            "tokenizer.json": {
+              "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+              "bytes": 11422654
+            },
+            "model.safetensors": {
+              "sha256": "c279f5ca586407745d1faa75ecd35de67dac93d692bea9d00f08025ba80989f0",
+              "bytes": 614952000
+            }
+          },
+          "total_bytes": 626477162
+        },
+        "runs": [
+          {
+            "round": 1,
+            "load_seconds": 0.199402791,
+            "rss_after_load_bytes": 774209536,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.003960458,
+                "median": 0.004879979,
+                "maximum": 0.015775209,
+                "mean": 0.006716935055555555
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.45e-05,
+                "median": 4.5459e-05,
+                "maximum": 0.000105125,
+                "mean": 4.972922222222222e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000444042,
+                "median": 0.000568542,
+                "maximum": 0.0008905,
+                "mean": 0.0005867199444444444
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.004934542,
+                "median": 0.005805479,
+                "maximum": 0.016778833,
+                "mean": 0.007679425888888889
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4457.580309123504,
+                "median": 5790.909257697276,
+                "maximum": 35067.39068956668,
+                "mean": 12288.056343599721
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.057937625,
+                "median": 0.059204271,
+                "maximum": 0.064548,
+                "mean": 0.059860511666666665
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.001854042,
+                "median": 0.0019129375,
+                "maximum": 0.002081083,
+                "mean": 0.0019336018888888888
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000393042,
+                "median": 0.00048256199999999996,
+                "maximum": 0.000594541,
+                "mean": 0.00048676377777777776
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004593125,
+                "median": 0.005225583,
+                "maximum": 0.015935209,
+                "mean": 0.007117780055555555
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.06501820999999999,
+                "median": 0.066735792,
+                "maximum": 0.08305650099999999,
+                "mean": 0.0693986573888889
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 465.3629807982078,
+                "median": 507.0496898577611,
+                "maximum": 517.9247923079815,
+                "mean": 502.30297619064214
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 480.26275020140054,
+                "median": 523.6108736792726,
+                "maximum": 535.0581767892626,
+                "mean": 518.5383782787414
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 385.2798951884574,
+                "median": 479.5028676284129,
+                "maximum": 492.1698090427282,
+                "mean": 464.33809816244906
+              }
+            },
+            "process_peak_rss_bytes": 811728896,
+            "engine_peak_allocated_bytes": 780599296,
+            "rss_after_inference_bytes": 811728896,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.003960458,
+                    "median": 0.004592895499999999,
+                    "maximum": 0.00515975,
+                    "mean": 0.0045785345
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.45e-05,
+                    "median": 4.5459e-05,
+                    "maximum": 4.7333e-05,
+                    "mean": 4.556266666666666e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000444042,
+                    "median": 0.0005810629999999999,
+                    "maximum": 0.000705375,
+                    "mean": 0.0005678959999999999
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.004934542,
+                    "median": 0.005504521,
+                    "maximum": 0.006180625,
+                    "mean": 0.005522277833333333
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4457.580309123504,
+                    "median": 5016.4077041980645,
+                    "maximum": 5807.409143083956,
+                    "mean": 5068.386827757192
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.058174375,
+                    "median": 0.059011479500000005,
+                    "maximum": 0.06099525,
+                    "mean": 0.05920065283333333
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.001890334,
+                    "median": 0.001915271,
+                    "maximum": 0.001958208,
+                    "mean": 0.0019177778333333334
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000466,
+                    "median": 0.0004847705,
+                    "maximum": 0.00053975,
+                    "mean": 0.0004910068333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004799958,
+                    "median": 0.0051580205,
+                    "maximum": 0.005354084,
+                    "mean": 0.0051190485
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.065374041,
+                    "median": 0.066658959,
+                    "maximum": 0.068692959,
+                    "mean": 0.06672848599999999
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 492.9587677837261,
+                    "median": 508.70754738302423,
+                    "maximum": 515.8860279292041,
+                    "mean": 507.3412810474162
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 508.2362970887077,
+                    "median": 525.326969982976,
+                    "maximum": 532.8806712577488,
+                    "mean": 523.786942445204
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 465.8410478430548,
+                    "median": 480.0565676297323,
+                    "maximum": 489.49092805812637,
+                    "mean": 479.6767783654656
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004093708,
+                    "median": 0.004519291,
+                    "maximum": 0.005311708,
+                    "mean": 0.004641569
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5167e-05,
+                    "median": 4.9458e-05,
+                    "maximum": 5.6583e-05,
+                    "mean": 5.040266666666667e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000456458,
+                    "median": 0.000511291,
+                    "maximum": 0.000691792,
+                    "mean": 0.0005531803333333334
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005126875,
+                    "median": 0.005264708,
+                    "maximum": 0.006129958,
+                    "mean": 0.0055071803333333336
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 4518.320660698969,
+                    "median": 5310.567520436281,
+                    "maximum": 5862.655568008271,
+                    "mean": 5230.5145830478405
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.057937625,
+                    "median": 0.058064709,
+                    "maximum": 0.05832325,
+                    "mean": 0.058108528
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001854042,
+                    "median": 0.0019035,
+                    "maximum": 0.001916625,
+                    "mean": 0.001891389
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000455417,
+                    "median": 0.000481833,
+                    "maximum": 0.000527291,
+                    "mean": 0.0004881803333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004593125,
+                    "median": 0.004644042,
+                    "maximum": 0.004681625,
+                    "mean": 0.004639597333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.06501820999999999,
+                    "median": 0.065063166,
+                    "maximum": 0.065301708,
+                    "mean": 0.06512769466666667
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 514.7214485257797,
+                    "median": 517.3672595411743,
+                    "maximum": 517.9247923079815,
+                    "mean": 516.6711667916452
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 531.5204485346753,
+                    "median": 533.8871154938536,
+                    "maximum": 535.0581767892626,
+                    "mean": 533.4885802725971
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 490.0331244015853,
+                    "median": 491.8297397332309,
+                    "maximum": 492.1698090427282,
+                    "mean": 491.34422439251483
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004361208,
+                    "median": 0.004502625,
+                    "maximum": 0.004634541,
+                    "mean": 0.0044994580000000005
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5166e-05,
+                    "median": 4.6083e-05,
+                    "maximum": 0.000105125,
+                    "mean": 6.5458e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000481125,
+                    "median": 0.000484292,
+                    "maximum": 0.000726292,
+                    "mean": 0.000563903
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005172917,
+                    "median": 0.005442209,
+                    "maximum": 0.005782208,
+                    "mean": 0.005465778
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5610.048546339325,
+                    "median": 5774.409372310597,
+                    "maximum": 5961.6509921104425,
+                    "mean": 5782.036303586789
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.058177917,
+                    "median": 0.058192292,
+                    "maximum": 0.059206958,
+                    "mean": 0.058525722333333335
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001889625,
+                    "median": 0.001894,
+                    "maximum": 0.00190925,
+                    "mean": 0.001897625
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000393042,
+                    "median": 0.00042325,
+                    "maximum": 0.000466,
+                    "mean": 0.00042743066666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004895041,
+                    "median": 0.005131084,
+                    "maximum": 0.005270417,
+                    "mean": 0.005098847333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.065400208,
+                    "median": 0.06573537600000001,
+                    "maximum": 0.066713292,
+                    "mean": 0.06594962533333333
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 507.23042241102394,
+                    "median": 515.9622320306457,
+                    "maximum": 516.0481227858934,
+                    "mean": 513.0802590758543
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 523.5871094745318,
+                    "median": 532.7166010233796,
+                    "maximum": 532.8482283062833,
+                    "mean": 529.7173129347316
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 479.6645322194564,
+                    "median": 486.80028847785087,
+                    "maximum": 489.29507991778866,
+                    "mean": 485.25330020503196
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.006398167,
+                    "median": 0.006861125,
+                    "maximum": 0.007081958,
+                    "mean": 0.006780416666666666
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4792e-05,
+                    "median": 4.4917e-05,
+                    "maximum": 4.5667e-05,
+                    "mean": 4.5125333333333326e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000458375,
+                    "median": 0.000474917,
+                    "maximum": 0.000734166,
+                    "mean": 0.0005558193333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.007447083,
+                    "median": 0.007818583,
+                    "maximum": 0.007908625,
+                    "mean": 0.007724763666666666
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 18074.097587136213,
+                    "median": 18655.832680500647,
+                    "maximum": 20005.729766040808,
+                    "mean": 18911.886677892555
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.059567417,
+                    "median": 0.059698041,
+                    "maximum": 0.059773875,
+                    "mean": 0.05967977766666666
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.00190525,
+                    "median": 0.001922333,
+                    "maximum": 0.0019285,
+                    "mean": 0.0019186943333333335
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000474708,
+                    "median": 0.000481,
+                    "maximum": 0.000522417,
+                    "mean": 0.0004927083333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.006475625,
+                    "median": 0.00704175,
+                    "maximum": 0.007067958,
+                    "mean": 0.006861777666666667
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.068624583,
+                    "median": 0.069015333,
+                    "maximum": 0.069218958,
+                    "mean": 0.068952958
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 502.4619989611031,
+                    "median": 503.03001753741137,
+                    "maximum": 504.2891664355477,
+                    "mean": 503.26039431135405
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 518.6212203910153,
+                    "median": 519.2800212656895,
+                    "maximum": 520.4187383179634,
+                    "mean": 519.4399933248893
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 462.3010938708439,
+                    "median": 463.66508149717976,
+                    "maximum": 466.3052014465428,
+                    "mean": 464.09045893818876
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.014600459,
+                    "median": 0.015293625,
+                    "maximum": 0.015775209,
+                    "mean": 0.015223097666666666
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5e-05,
+                    "median": 4.5083e-05,
+                    "maximum": 4.8709e-05,
+                    "mean": 4.6263999999999996e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000577,
+                    "median": 0.000667375,
+                    "maximum": 0.0008905,
+                    "mean": 0.000711625
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.01600775,
+                    "median": 0.01621625,
+                    "maximum": 0.016778833,
+                    "mean": 0.016334277666666668
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 32455.988380249037,
+                    "median": 33478.00145485456,
+                    "maximum": 35067.39068956668,
+                    "mean": 33667.126841556754
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.064390125,
+                    "median": 0.064405084,
+                    "maximum": 0.064548,
+                    "mean": 0.06444773633333334
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002027292,
+                    "median": 0.002066667,
+                    "maximum": 0.002081083,
+                    "mean": 0.0020583473333333335
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000489583,
+                    "median": 0.000506625,
+                    "maximum": 0.000594541,
+                    "mean": 0.0005302496666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.015756833,
+                    "median": 0.015913041,
+                    "maximum": 0.015935209,
+                    "mean": 0.015868361
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.082663833,
+                    "median": 0.08299374899999999,
+                    "maximum": 0.08305650099999999,
+                    "mean": 0.08290469433333332
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 465.3629807982078,
+                    "median": 466.2624031251493,
+                    "maximum": 466.7450406871438,
+                    "mean": 466.12347487016694
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 480.26275020140054,
+                    "median": 481.3284615854239,
+                    "maximum": 481.44028296264366,
+                    "mean": 481.01049824982266
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 385.2798951884574,
+                    "median": 385.5712072965881,
+                    "maximum": 387.1100436390362,
+                    "mean": 385.9870487080272
+                  }
+                }
+              }
+            }
+          },
+          {
+            "round": 2,
+            "load_seconds": 0.193190708,
+            "rss_after_load_bytes": 762822656,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.003637875,
+                "median": 0.004713166499999999,
+                "maximum": 0.014774708,
+                "mean": 0.006463851944444444
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.3958e-05,
+                "median": 4.5146000000000004e-05,
+                "maximum": 8.7917e-05,
+                "mean": 4.858333333333334e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.00041625,
+                "median": 0.0004786875,
+                "maximum": 0.000890333,
+                "mean": 0.0005525185000000001
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.004581875,
+                "median": 0.0056218125,
+                "maximum": 0.015741083,
+                "mean": 0.007383435111111111
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4650.496956148644,
+                "median": 5967.869037846484,
+                "maximum": 36240.195770670056,
+                "mean": 12865.81804386821
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.058249458,
+                "median": 0.058769979,
+                "maximum": 0.06445025,
+                "mean": 0.05975583333333333
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.001862084,
+                "median": 0.0019149165000000002,
+                "maximum": 0.002077208,
+                "mean": 0.0019365578333333333
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000440042,
+                "median": 0.000471333,
+                "maximum": 0.000640875,
+                "mean": 0.0004878125
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004466958,
+                "median": 0.0050478745,
+                "maximum": 0.015535667,
+                "mean": 0.006840875
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.065291375,
+                "median": 0.06600091599999999,
+                "maximum": 0.08253737600000001,
+                "mean": 0.06902107866666667
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 466.0518160317885,
+                "median": 511.02972233528016,
+                "maximum": 515.2376036491853,
+                "mean": 503.0536970815796
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 480.9911520901781,
+                "median": 527.4802258487802,
+                "maximum": 532.1937931164956,
+                "mean": 519.3621194040347
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 387.70314190749167,
+                "median": 484.8417858266297,
+                "maximum": 490.1106769462276,
+                "mean": 466.57903613548905
+              }
+            },
+            "process_peak_rss_bytes": 796459008,
+            "engine_peak_allocated_bytes": 780615680,
+            "rss_after_inference_bytes": 796459008,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.003637875,
+                    "median": 0.0045312289999999995,
+                    "maximum": 0.004945708,
+                    "mean": 0.004501986166666667
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.3958e-05,
+                    "median": 4.5396e-05,
+                    "maximum": 8.7917e-05,
+                    "mean": 5.2277833333333336e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.00041625,
+                    "median": 0.0005351665,
+                    "maximum": 0.00066675,
+                    "mean": 0.0005321528333333334
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.004581875,
+                    "median": 0.005578395999999999,
+                    "maximum": 0.005689625,
+                    "mean": 0.005415132
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4650.496956148644,
+                    "median": 5076.361080354777,
+                    "maximum": 6322.372264027764,
+                    "mean": 5162.630276914071
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.05850575,
+                    "median": 0.058579707999999994,
+                    "maximum": 0.0588575,
+                    "mean": 0.05860903466666667
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.0018635,
+                    "median": 0.0019105205,
+                    "maximum": 0.001966167,
+                    "mean": 0.0019157011666666665
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000440042,
+                    "median": 0.0004676455,
+                    "maximum": 0.000640875,
+                    "mean": 0.0005109028333333334
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004522834,
+                    "median": 0.004828937,
+                    "maximum": 0.005056666,
+                    "mean": 0.0048014165
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.06543541800000001,
+                    "median": 0.0658939375,
+                    "maximum": 0.06604154000000001,
+                    "mean": 0.06583705516666667
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 510.2348754326565,
+                    "median": 512.4561909361912,
+                    "maximum": 513.1338852546228,
+                    "mean": 512.1889403688001
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 526.6958331563523,
+                    "median": 529.1934914978411,
+                    "maximum": 529.8624494173649,
+                    "mean": 528.9308131113024
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 484.54351609608125,
+                    "median": 485.6288951532957,
+                    "maximum": 489.031796205535,
+                    "mean": 486.053185945377
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.00431925,
+                    "median": 0.004482125,
+                    "maximum": 0.00485125,
+                    "mean": 0.004550875
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4125e-05,
+                    "median": 4.4583e-05,
+                    "maximum": 4.5e-05,
+                    "mean": 4.456933333333334e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000450375,
+                    "median": 0.000452,
+                    "maximum": 0.00071475,
+                    "mean": 0.0005390416666666667
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005079875,
+                    "median": 0.005618541,
+                    "maximum": 0.005625084,
+                    "mean": 0.005441166666666667
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 4947.1785622262305,
+                    "median": 5354.60300638648,
+                    "maximum": 5556.52022920646,
+                    "mean": 5286.100599273057
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.058447959,
+                    "median": 0.058755833,
+                    "maximum": 0.059100875,
+                    "mean": 0.058768222333333335
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001862084,
+                    "median": 0.001870875,
+                    "maximum": 0.001911333,
+                    "mean": 0.0018814306666666669
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000463583,
+                    "median": 0.000465125,
+                    "maximum": 0.000475333,
+                    "mean": 0.0004680136666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004466958,
+                    "median": 0.004553667,
+                    "maximum": 0.005065459,
+                    "mean": 0.004695361333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.065291375,
+                    "median": 0.065655708,
+                    "maximum": 0.066492001,
+                    "mean": 0.065813028
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 508.50550085667595,
+                    "median": 511.3258005036328,
+                    "maximum": 513.5911799628134,
+                    "mean": 511.14082710770737
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 524.5269211327244,
+                    "median": 527.607190932005,
+                    "maximum": 530.386356177125,
+                    "mean": 527.5068227472848
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 481.2608963294698,
+                    "median": 487.3909820605393,
+                    "maximum": 490.1106769462276,
+                    "mean": 486.2541851120789
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.004329625,
+                    "median": 0.004337334,
+                    "maximum": 0.004376167,
+                    "mean": 0.004347708666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5167e-05,
+                    "median": 4.5417e-05,
+                    "maximum": 6.2625e-05,
+                    "mean": 5.106966666666667e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000420542,
+                    "median": 0.000449833,
+                    "maximum": 0.000595916,
+                    "mean": 0.0004887636666666667
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005072125,
+                    "median": 0.005219792,
+                    "maximum": 0.005297416,
+                    "mean": 0.005196444333333334
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5941.272350895201,
+                    "median": 5994.4657247977675,
+                    "maximum": 6005.139013193983,
+                    "mean": 5980.292362962317
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.058249458,
+                    "median": 0.058448292,
+                    "maximum": 0.058784125,
+                    "mean": 0.05849395833333334
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001898542,
+                    "median": 0.001912875,
+                    "maximum": 0.001916958,
+                    "mean": 0.0019094583333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000467333,
+                    "median": 0.000477584,
+                    "maximum": 0.000480417,
+                    "mean": 0.0004751113333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004820167,
+                    "median": 0.00503,
+                    "maximum": 0.005070583,
+                    "mean": 0.004973583333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.06567683299999999,
+                    "median": 0.06589500100000001,
+                    "maximum": 0.06598449999999999,
+                    "mean": 0.06585211133333334
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 510.7336441669275,
+                    "median": 513.6972057225073,
+                    "maximum": 515.2376036491853,
+                    "mean": 513.2228178462067
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 527.3532607655553,
+                    "median": 530.3833343838345,
+                    "maximum": 532.1937931164956,
+                    "mean": 529.9767960886285
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 484.9623775280559,
+                    "median": 485.6210564440237,
+                    "maximum": 487.2342124048522,
+                    "mean": 485.9392154589773
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.005514375,
+                    "median": 0.006703875,
+                    "maximum": 0.00678575,
+                    "mean": 0.006334666666666666
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5167e-05,
+                    "median": 4.6958e-05,
+                    "maximum": 4.775e-05,
+                    "mean": 4.6625e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000452,
+                    "median": 0.00045825,
+                    "maximum": 0.000766292,
+                    "mean": 0.0005588473333333334
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.0067175,
+                    "median": 0.00754775,
+                    "maximum": 0.007630666,
+                    "mean": 0.007298638666666667
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 18863.05861548097,
+                    "median": 19093.434767205534,
+                    "maximum": 23212.05939023008,
+                    "mean": 20389.517590972195
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.059747666,
+                    "median": 0.059781792,
+                    "maximum": 0.059937458,
+                    "mean": 0.05982230533333333
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.00187975,
+                    "median": 0.001951125,
+                    "maximum": 0.001967583,
+                    "mean": 0.0019328193333333335
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000458,
+                    "median": 0.000464625,
+                    "maximum": 0.000533208,
+                    "mean": 0.00048527766666666664
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.006566209,
+                    "median": 0.006668833,
+                    "maximum": 0.00684175,
+                    "mean": 0.006692264
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.06872962499999999,
+                    "median": 0.068951416,
+                    "maximum": 0.06911695799999999,
+                    "mean": 0.06893266633333332
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 501.4784879964168,
+                    "median": 502.0293727669308,
+                    "maximum": 502.4409635514576,
+                    "mean": 501.9829414382684
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 517.2057847364831,
+                    "median": 518.5525385388247,
+                    "maximum": 518.8487195466347,
+                    "mean": 518.2023476073142
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 462.98333905262444,
+                    "median": 464.0948925544908,
+                    "maximum": 465.5925301498445,
+                    "mean": 464.22358725231993
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.014127959,
+                    "median": 0.014735,
+                    "maximum": 0.014774708,
+                    "mean": 0.014545889
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.45e-05,
+                    "median": 4.4541e-05,
+                    "maximum": 4.5e-05,
+                    "mean": 4.468033333333333e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.00048325,
+                    "median": 0.000618875,
+                    "maximum": 0.000890333,
+                    "mean": 0.0006641526666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.015311833,
+                    "median": 0.015549375,
+                    "maximum": 0.015741083,
+                    "mean": 0.015534097000000002
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 34653.81515492557,
+                    "median": 34747.200542925006,
+                    "maximum": 36240.195770670056,
+                    "mean": 35213.73715617354
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.0640715,
+                    "median": 0.064175584,
+                    "maximum": 0.06445025,
+                    "mean": 0.06423244466666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002049542,
+                    "median": 0.002065959,
+                    "maximum": 0.002077208,
+                    "mean": 0.0020642363333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000453792,
+                    "median": 0.0004855,
+                    "maximum": 0.000490708,
+                    "mean": 0.00047666666666666663
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.0148,
+                    "median": 0.014907958,
+                    "maximum": 0.015535667,
+                    "mean": 0.015081208333333334
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.08151045800000001,
+                    "median": 0.081515834,
+                    "maximum": 0.08253737600000001,
+                    "mean": 0.08185455600000001
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 466.0518160317885,
+                    "median": 468.1002796431071,
+                    "maximum": 468.6410504041893,
+                    "mean": 467.597715359695
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 480.9911520901781,
+                    "median": 483.0497530026373,
+                    "maximum": 483.8344661823119,
+                    "mean": 482.62512375837576
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 387.70314190749167,
+                    "median": 392.5617690423189,
+                    "maximum": 392.5876603466024,
+                    "mean": 390.9508570988043
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "score_hashes": [
+          "f7e0e2958cabbd01fdb7fe6f7cc3dec501e84b1a43e19de09bb6955ae45ffce0",
+          "d7ddc6979833e05bc9d7752d24f48e7a0ca9e02cf9520bb326d04510d05ccb99",
+          "3d247489f91b57ab8d0967bfdde051abd2eea4549419f52d75fb263dbf8041a3",
+          "14817f7f164db5a1a6cb8731391fe203607bdc80d3c5ba91554f58a3e582ad49",
+          "eb80f498afe728185b31b4fd94ff8fa0b2f81c4d911ce320741717a93ae23dab",
+          "eb5a155c3f357811e8d45396fa0d901dabceb396fc1445d46e416091331f0c75"
+        ],
+        "generation_hashes": [
+          "274ee9e0df1413c8640de989114e4560644b44d3a1a58300408ad66e826c3d4a",
+          "0b276d025d1befaeb52bf2ecf0d067e30b3d0082339aea181cd3fdb57eebbcea",
+          "436a954f76d43d5c1187da4048f4b5c81bf725b441fe87dca477f109a2b87d7b",
+          "7835494be84c1209ec847cda79c21c70ad767f55bc351eb1228db922a0071004",
+          "335fb415f545820fe8f2280c09790e36391d2ea2449b60a1b986ce6de55cd181",
+          "89949eb2527a2c145c2e091eb398605628314060e93f85e358296e90147a0e79"
+        ]
+      },
+      "gguf_q8": {
+        "binding": {
+          "files": {
+            "config.json": {
+              "sha256": "dfa5763dc220e871b86a6119536f5c1c2862a5137a473eaf9d812be3cc53924e",
+              "bytes": 102508
+            },
+            "tokenizer.json": {
+              "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+              "bytes": 11422654
+            },
+            "model.safetensors": {
+              "sha256": "d866fa25264aa5244de920525c747d6be8d9afbdb78624f2e09a762750178725",
+              "bytes": 633562928
+            }
+          },
+          "total_bytes": 645088090
+        },
+        "runs": [
+          {
+            "round": 1,
+            "load_seconds": 0.233653459,
+            "rss_after_load_bytes": 780550144,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.003463167,
+                "median": 0.0044322705,
+                "maximum": 0.017860875,
+                "mean": 0.006661300944444445
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.4291e-05,
+                "median": 4.5125e-05,
+                "maximum": 0.000133542,
+                "mean": 5.0525444444444445e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000450834,
+                "median": 0.0005567495,
+                "maximum": 0.000988541,
+                "mean": 0.0006116921666666666
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.004431792,
+                "median": 0.005591125,
+                "maximum": 0.018917833,
+                "mean": 0.007625967611111111
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4826.946618377613,
+                "median": 6491.292420428825,
+                "maximum": 28992.688123332173,
+                "mean": 12447.310791353231
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.059144291,
+                "median": 0.0595125005,
+                "maximum": 0.065484125,
+                "mean": 0.06079400922222222
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.00189025,
+                "median": 0.0019424585,
+                "maximum": 0.002091542,
+                "mean": 0.001965183
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000416708,
+                "median": 0.0004691875,
+                "maximum": 0.000552917,
+                "mean": 0.0004787756111111111
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004237917,
+                "median": 0.004789229000000001,
+                "maximum": 0.019008959,
+                "mean": 0.007133398166666666
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.065890999,
+                "median": 0.0666847925,
+                "maximum": 0.08696775,
+                "mean": 0.07037136599999999
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 458.91734204372267,
+                "median": 504.7877267786623,
+                "maximum": 507.49753114729265,
+                "mean": 494.5918035112279
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 473.397178323754,
+                "median": 520.8989997031741,
+                "maximum": 524.1418820964478,
+                "mean": 510.58949104149747
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 367.9524881349696,
+                "median": 479.8698945766073,
+                "maximum": 485.65055145088934,
+                "mean": 459.163971415014
+              }
+            },
+            "process_peak_rss_bytes": 814252032,
+            "engine_peak_allocated_bytes": 811794432,
+            "rss_after_inference_bytes": 814252032,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.003463167,
+                    "median": 0.004143,
+                    "maximum": 0.004764917,
+                    "mean": 0.004032257
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.5e-05,
+                    "median": 4.5291500000000005e-05,
+                    "maximum": 4.6416e-05,
+                    "mean": 4.55695e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000450834,
+                    "median": 0.0004975,
+                    "maximum": 0.000671,
+                    "mean": 0.0005403681666666667
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.004431792,
+                    "median": 0.0049165625,
+                    "maximum": 0.00561025,
+                    "mean": 0.0048977571666666666
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4826.946618377613,
+                    "median": 5551.823809865897,
+                    "maximum": 6641.319924797158,
+                    "mean": 5777.58785945391
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.059144291,
+                    "median": 0.059307521,
+                    "maximum": 0.059448792,
+                    "mean": 0.059307492999999996
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.00190975,
+                    "median": 0.0019347919999999998,
+                    "maximum": 0.001944292,
+                    "mean": 0.0019293266666666666
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000416708,
+                    "median": 0.000451667,
+                    "maximum": 0.000472292,
+                    "mean": 0.0004514168333333334
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004237917,
+                    "median": 0.0043580415,
+                    "maximum": 0.004793875,
+                    "mean": 0.004478083333333333
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.065890999,
+                    "median": 0.066087126,
+                    "maximum": 0.066626626,
+                    "mean": 0.06616631983333333
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 504.94286946067086,
+                    "median": 506.28500921298337,
+                    "maximum": 507.49753114729265,
+                    "mean": 506.23339349569216
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 521.4571895758622,
+                    "median": 522.7008101780709,
+                    "maximum": 524.1418820964478,
+                    "mean": 522.7019840932044
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 480.28846605559767,
+                    "median": 484.20933443916965,
+                    "maximum": 485.65055145088934,
+                    "mean": 483.63675113687447
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.00419425,
+                    "median": 0.004267208,
+                    "maximum": 0.004597333,
+                    "mean": 0.004352930333333334
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4458e-05,
+                    "median": 4.4916e-05,
+                    "maximum": 0.000133542,
+                    "mean": 7.430533333333333e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000551416,
+                    "median": 0.000649,
+                    "maximum": 0.00096875,
+                    "mean": 0.0007230553333333334
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.005203167,
+                    "median": 0.005572,
+                    "maximum": 0.005944333,
+                    "mean": 0.005573166666666666
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5220.418011921259,
+                    "median": 5624.286418660633,
+                    "maximum": 5722.119568456816,
+                    "mean": 5522.274666346236
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.059269833,
+                    "median": 0.059527542,
+                    "maximum": 0.063026292,
+                    "mean": 0.060607889
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001903291,
+                    "median": 0.001940625,
+                    "maximum": 0.001980542,
+                    "mean": 0.001941486
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000502417,
+                    "median": 0.000505958,
+                    "maximum": 0.0005135,
+                    "mean": 0.0005072916666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004310792,
+                    "median": 0.004343291,
+                    "maximum": 0.004476167,
+                    "mean": 0.0043767499999999996
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.066056166,
+                    "median": 0.066255125,
+                    "maximum": 0.069988959,
+                    "mean": 0.06743341666666668
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 476.87293923589635,
+                    "median": 504.63258409665383,
+                    "maximum": 506.4494044465408,
+                    "mean": 495.9849759263637
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 491.8582232316634,
+                    "median": 520.7673449711732,
+                    "maximum": 523.0316744776386,
+                    "mean": 511.88574756015834
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 457.2149730073853,
+                    "median": 482.9815052043144,
+                    "maximum": 484.4362296170807,
+                    "mean": 474.87756927626015
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.003477875,
+                    "median": 0.004094667,
+                    "maximum": 0.004616125,
+                    "mean": 0.004062889
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4291e-05,
+                    "median": 4.5959e-05,
+                    "maximum": 5.0666e-05,
+                    "mean": 4.6972e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000489917,
+                    "median": 0.0006065,
+                    "maximum": 0.000988541,
+                    "mean": 0.000694986
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.004444875,
+                    "median": 0.004882542,
+                    "maximum": 0.006003291,
+                    "mean": 0.005110236
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5632.429797719949,
+                    "median": 6349.722700283076,
+                    "maximum": 7475.829349818496,
+                    "mean": 6485.99394927384
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.059326791,
+                    "median": 0.059497459,
+                    "maximum": 0.059587084,
+                    "mean": 0.05947044466666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.00189025,
+                    "median": 0.001934209,
+                    "maximum": 0.001945875,
+                    "mean": 0.0019234446666666668
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.00046325,
+                    "median": 0.000469,
+                    "maximum": 0.000478917,
+                    "mean": 0.00047038900000000004
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004257625,
+                    "median": 0.004807166,
+                    "maximum": 0.004892,
+                    "mean": 0.0046522636666666665
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.06598762500000001,
+                    "median": 0.066742959,
+                    "maximum": 0.066819042,
+                    "mean": 0.066516542
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 503.7950474639128,
+                    "median": 504.9870813716146,
+                    "maximum": 506.03156984051844,
+                    "mean": 504.9378995586819
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 520.2469716423781,
+                    "median": 521.030654435175,
+                    "maximum": 522.5295263315355,
+                    "mean": 521.2690508030296
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 478.9053994518509,
+                    "median": 479.4513230976169,
+                    "maximum": 484.93941098804504,
+                    "mean": 481.09871117917095
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.00567975,
+                    "median": 0.005717292,
+                    "maximum": 0.00586775,
+                    "mean": 0.005754930666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.45e-05,
+                    "median": 4.5292e-05,
+                    "maximum": 4.8625e-05,
+                    "mean": 4.6139e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000467375,
+                    "median": 0.000506667,
+                    "maximum": 0.000736167,
+                    "mean": 0.0005700696666666667
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.006469708,
+                    "median": 0.006491917,
+                    "maximum": 0.006947208,
+                    "mean": 0.006636277666666667
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 21814.15363640237,
+                    "median": 22388.221556639055,
+                    "maximum": 22536.203177956777,
+                    "mean": 22246.192790332734
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.060459833,
+                    "median": 0.06075575,
+                    "maximum": 0.060760208,
+                    "mean": 0.060658597
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.00197175,
+                    "median": 0.001984292,
+                    "maximum": 0.0019985,
+                    "mean": 0.0019848473333333332
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000514917,
+                    "median": 0.000539,
+                    "maximum": 0.000552917,
+                    "mean": 0.0005356113333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.005814541,
+                    "median": 0.005868417,
+                    "maximum": 0.005879042,
+                    "mean": 0.005854000000000001
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.068852292,
+                    "median": 0.069093583,
+                    "maximum": 0.06915329199999999,
+                    "mean": 0.06903305566666666
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 494.1023150733626,
+                    "median": 494.165987932339,
+                    "maximum": 496.3308899070361,
+                    "mean": 494.8663976375792
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 510.2023350545475,
+                    "median": 510.23977154425717,
+                    "maximum": 512.7371092804706,
+                    "mean": 511.0597386264251
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 462.7400818459952,
+                    "median": 463.1399706105848,
+                    "maximum": 464.7630321442313,
+                    "mean": 463.5476948669371
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.017659625,
+                    "median": 0.017677125,
+                    "maximum": 0.017860875,
+                    "mean": 0.017732541666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4333e-05,
+                    "median": 4.4584e-05,
+                    "maximum": 4.4875e-05,
+                    "mean": 4.459733333333333e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000475667,
+                    "median": 0.000562083,
+                    "maximum": 0.000766167,
+                    "mean": 0.0006013056666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.018473208,
+                    "median": 0.018530792,
+                    "maximum": 0.018917833,
+                    "mean": 0.018640611
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 28666.008804159934,
+                    "median": 28963.98594228417,
+                    "maximum": 28992.688123332173,
+                    "mean": 28874.227623258757
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.065374,
+                    "median": 0.065378291,
+                    "maximum": 0.065484125,
+                    "mean": 0.06541213866666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002066166,
+                    "median": 0.002090292,
+                    "maximum": 0.002091542,
+                    "mean": 0.0020826666666666667
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000449709,
+                    "median": 0.000453458,
+                    "maximum": 0.000466417,
+                    "mean": 0.00045652800000000004
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.018906917,
+                    "median": 0.01896775,
+                    "maximum": 0.019008959,
+                    "mean": 0.018961208666666663
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.08684191699999999,
+                    "median": 0.086927959,
+                    "maximum": 0.08696775,
+                    "mean": 0.086912542
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 458.91734204372267,
+                    "median": 459.4731150645331,
+                    "maximum": 459.4938257518186,
+                    "mean": 459.2947609533581
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 473.397178323754,
+                    "median": 474.163510942799,
+                    "maximum": 474.1946339523358,
+                    "mean": 473.91844107296293
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 367.9524881349696,
+                    "median": 368.1209172298639,
+                    "maximum": 368.485647317067,
+                    "mean": 368.18635089396685
+                  }
+                }
+              }
+            }
+          },
+          {
+            "round": 2,
+            "load_seconds": 0.195061375,
+            "rss_after_load_bytes": 780599296,
+            "score": {
+              "prefill_seconds": {
+                "count": 18,
+                "minimum": 0.003525375,
+                "median": 0.00416475,
+                "maximum": 0.018763667,
+                "mean": 0.006688391333333333
+              },
+              "readout_seconds": {
+                "count": 18,
+                "minimum": 4.4208e-05,
+                "median": 4.5104e-05,
+                "maximum": 5.9208e-05,
+                "mean": 4.603688888888889e-05
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000405959,
+                "median": 0.000515667,
+                "maximum": 0.000830792,
+                "mean": 0.0005668589444444445
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.004492959,
+                "median": 0.0049402495000000005,
+                "maximum": 0.019836917,
+                "mean": 0.0076189629444444445
+              },
+              "prefill_tokens_per_second": {
+                "count": 18,
+                "minimum": 4902.0046641508725,
+                "median": 6338.829339468837,
+                "maximum": 28763.438972493557,
+                "mean": 12460.316175070755
+              }
+            },
+            "generate": {
+              "decode_seconds": {
+                "count": 18,
+                "minimum": 0.05931725,
+                "median": 0.059921896,
+                "maximum": 0.065794167,
+                "mean": 0.06103476861111111
+              },
+              "decode_tokens": {
+                "count": 18,
+                "minimum": 31,
+                "median": 31.0,
+                "maximum": 31,
+                "mean": 31.0
+              },
+              "drain_seconds": {
+                "count": 18,
+                "minimum": 0.001897375,
+                "median": 0.0019495625,
+                "maximum": 0.002122541,
+                "mean": 0.0019673679444444443
+              },
+              "state_creation_seconds": {
+                "count": 18,
+                "minimum": 0.000423292,
+                "median": 0.000474479,
+                "maximum": 0.000831666,
+                "mean": 0.0005080207777777778
+              },
+              "time_to_first_token_seconds": {
+                "count": 18,
+                "minimum": 0.004277708,
+                "median": 0.004788375,
+                "maximum": 0.018967542,
+                "mean": 0.007238789277777778
+              },
+              "total_seconds": {
+                "count": 18,
+                "minimum": 0.066085333,
+                "median": 0.06702835399999998,
+                "maximum": 0.087167709,
+                "mean": 0.07074894661111111
+              },
+              "decode_completed_tokens_per_second": {
+                "count": 18,
+                "minimum": 456.77575257488917,
+                "median": 501.3052461933944,
+                "maximum": 506.38839176159667,
+                "mean": 492.65308933845813
+              },
+              "decode_buffered_iterator_tokens_per_second": {
+                "count": 18,
+                "minimum": 471.1663877437646,
+                "median": 517.3401317037342,
+                "maximum": 522.6135736231872,
+                "mean": 508.5377130664492
+              },
+              "end_to_end_tokens_per_second": {
+                "count": 18,
+                "minimum": 367.10842084882603,
+                "median": 477.41112888580295,
+                "maximum": 484.2224219404327,
+                "mean": 456.58935818481706
+              }
+            },
+            "process_peak_rss_bytes": 813678592,
+            "engine_peak_allocated_bytes": 811794432,
+            "rss_after_inference_bytes": 813678592,
+            "score_repeat_hash_agreements": 18,
+            "generation_repeat_hash_agreements": 18,
+            "generation_first_token_score_agreements": 18,
+            "by_input_length": {
+              "23": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 6,
+                    "minimum": 0.003713417,
+                    "median": 0.0041623125,
+                    "maximum": 0.004691958,
+                    "mean": 0.0041665625
+                  },
+                  "readout_seconds": {
+                    "count": 6,
+                    "minimum": 4.4208e-05,
+                    "median": 4.5e-05,
+                    "maximum": 4.5875e-05,
+                    "mean": 4.5020833333333334e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000428208,
+                    "median": 0.000445604,
+                    "maximum": 0.000823209,
+                    "mean": 0.0005536666666666666
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.004791084,
+                    "median": 0.004927958,
+                    "maximum": 0.00550675,
+                    "mean": 0.0050689445
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 4902.0046641508725,
+                    "median": 5525.851682522576,
+                    "maximum": 6193.756316621591,
+                    "mean": 5546.05444846726
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 6,
+                    "minimum": 0.059578416,
+                    "median": 0.059921896,
+                    "maximum": 0.061034917,
+                    "mean": 0.06014824999999999
+                  },
+                  "decode_tokens": {
+                    "count": 6,
+                    "minimum": 31,
+                    "median": 31.0,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 6,
+                    "minimum": 0.001902791,
+                    "median": 0.0019594165,
+                    "maximum": 0.002008459,
+                    "mean": 0.0019580833333333334
+                  },
+                  "state_creation_seconds": {
+                    "count": 6,
+                    "minimum": 0.000454792,
+                    "median": 0.00047158300000000003,
+                    "maximum": 0.000831666,
+                    "mean": 0.0005365066666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 6,
+                    "minimum": 0.004277708,
+                    "median": 0.0046703125,
+                    "maximum": 0.004815,
+                    "mean": 0.0046248055
+                  },
+                  "total_seconds": {
+                    "count": 6,
+                    "minimum": 0.066619249,
+                    "median": 0.06702835399999998,
+                    "maximum": 0.06838641699999999,
+                    "mean": 0.0672676455
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 491.88585880676646,
+                    "median": 501.3052461933944,
+                    "maximum": 503.73025251477577,
+                    "mean": 499.1837894264982
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 507.90599092647244,
+                    "median": 517.3401317037342,
+                    "maximum": 520.3226618176623,
+                    "mean": 515.4335300124079
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 6,
+                    "minimum": 467.92917956207594,
+                    "median": 477.41112888580295,
+                    "maximum": 480.3416502038322,
+                    "mean": 475.7513987781803
+                  }
+                }
+              },
+              "24": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.003525375,
+                    "median": 0.004132875,
+                    "maximum": 0.004151625,
+                    "mean": 0.003936625
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4375e-05,
+                    "median": 4.4583e-05,
+                    "maximum": 4.475e-05,
+                    "mean": 4.456933333333334e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000452,
+                    "median": 0.00048075,
+                    "maximum": 0.000674667,
+                    "mean": 0.0005358056666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.004492959,
+                    "median": 0.004895459,
+                    "maximum": 0.004897333,
+                    "mean": 0.004761917
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 5780.868936862073,
+                    "median": 5807.0955448688865,
+                    "maximum": 6807.786405701521,
+                    "mean": 6131.916962477494
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.05931725,
+                    "median": 0.0594125,
+                    "maximum": 0.059534875,
+                    "mean": 0.05942154166666667
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001897375,
+                    "median": 0.001900583,
+                    "maximum": 0.0019045,
+                    "mean": 0.0019008193333333331
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000458292,
+                    "median": 0.0004825,
+                    "maximum": 0.000696583,
+                    "mean": 0.0005457916666666666
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.0043205,
+                    "median": 0.004331083,
+                    "maximum": 0.004830834,
+                    "mean": 0.004494139
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.06612,
+                    "median": 0.066245499,
+                    "maximum": 0.06672137600000001,
+                    "mean": 0.06636229166666667
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 504.620944210899,
+                    "median": 505.56941794282176,
+                    "maximum": 506.38839176159667,
+                    "mean": 505.52625130510586
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 520.703201274883,
+                    "median": 521.7757205975173,
+                    "maximum": 522.6135736231872,
+                    "mean": 521.6974984985292
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 479.6064157909452,
+                    "median": 483.0516862738101,
+                    "maximum": 483.9685420447671,
+                    "mean": 482.2088813698408
+                  }
+                }
+              },
+              "26": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.003554709,
+                    "median": 0.004064792,
+                    "maximum": 0.004139292,
+                    "mean": 0.003919597666666667
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.4208e-05,
+                    "median": 4.4416e-05,
+                    "maximum": 4.8208e-05,
+                    "mean": 4.561066666666667e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000405959,
+                    "median": 0.000492917,
+                    "maximum": 0.000624959,
+                    "mean": 0.000507945
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.004572958,
+                    "median": 0.004828917,
+                    "maximum": 0.004886208,
+                    "mean": 0.004762694333333334
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 6281.2674244774225,
+                    "median": 6396.391254460253,
+                    "maximum": 7314.241475181231,
+                    "mean": 6663.966718039635
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.05937575,
+                    "median": 0.059389167,
+                    "maximum": 0.059522083,
+                    "mean": 0.059429
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001918042,
+                    "median": 0.00193575,
+                    "maximum": 0.001950708,
+                    "mean": 0.0019348333333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000423292,
+                    "median": 0.000466709,
+                    "maximum": 0.000494666,
+                    "mean": 0.0004615556666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.004322166,
+                    "median": 0.004326833,
+                    "maximum": 0.00479325,
+                    "mean": 0.004480749666666666
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.066085333,
+                    "median": 0.066233667,
+                    "maximum": 0.066599416,
+                    "mean": 0.06630613866666667
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 504.5562651443173,
+                    "median": 505.3808798925658,
+                    "maximum": 505.6147704753595,
+                    "mean": 505.1839718374142
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 520.8151065546547,
+                    "median": 521.980717459802,
+                    "maximum": 522.0986682273488,
+                    "mean": 521.6314974139351
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 480.48469373965685,
+                    "median": 483.13797875633253,
+                    "maximum": 484.2224219404327,
+                    "mean": 482.6150314788074
+                  }
+                }
+              },
+              "128": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.005152917,
+                    "median": 0.005802875,
+                    "maximum": 0.005829167,
+                    "mean": 0.005594986333333333
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.5208e-05,
+                    "median": 4.55e-05,
+                    "maximum": 4.55e-05,
+                    "mean": 4.5402666666666665e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000454416,
+                    "median": 0.000538417,
+                    "maximum": 0.000660834,
+                    "mean": 0.0005512223333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.006317458,
+                    "median": 0.006639375,
+                    "maximum": 0.007009583,
+                    "mean": 0.006655472
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 21958.540559911908,
+                    "median": 22058.031579174116,
+                    "maximum": 24840.299193641193,
+                    "mean": 22952.290444242404
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.061242375,
+                    "median": 0.061355917,
+                    "maximum": 0.061533375,
+                    "mean": 0.061377222333333335
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.001910666,
+                    "median": 0.001948417,
+                    "maximum": 0.00199125,
+                    "mean": 0.001950111
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000468333,
+                    "median": 0.000470625,
+                    "maximum": 0.000502292,
+                    "mean": 0.0004804166666666667
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.00592725,
+                    "median": 0.0065125,
+                    "maximum": 0.006852666,
+                    "mean": 0.0064308053333333335
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.069733876,
+                    "median": 0.07013387400000001,
+                    "maximum": 0.070847916,
+                    "mean": 0.07023855533333334
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 487.9997323872435,
+                    "median": 489.6979091510543,
+                    "maximum": 490.871057183137,
+                    "mean": 489.5228995738116
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 503.79164152787,
+                    "median": 505.2487439801445,
+                    "maximum": 506.18546390469015,
+                    "mean": 505.07528313756825
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 451.6717188971374,
+                    "median": 456.2702468139717,
+                    "maximum": 458.8874423099614,
+                    "mean": 455.6098026736902
+                  }
+                }
+              },
+              "512": {
+                "score": {
+                  "prefill_seconds": {
+                    "count": 3,
+                    "minimum": 0.017800375,
+                    "median": 0.018474,
+                    "maximum": 0.018763667,
+                    "mean": 0.018346014
+                  },
+                  "readout_seconds": {
+                    "count": 3,
+                    "minimum": 4.525e-05,
+                    "median": 4.7333e-05,
+                    "maximum": 5.9208e-05,
+                    "mean": 5.0597e-05
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000551459,
+                    "median": 0.000714291,
+                    "maximum": 0.000830792,
+                    "mean": 0.0006988473333333333
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.018993083,
+                    "median": 0.019357416,
+                    "maximum": 0.019836917,
+                    "mean": 0.019395805333333332
+                  },
+                  "prefill_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 27286.777152888077,
+                    "median": 27714.625960809786,
+                    "maximum": 28763.438972493557,
+                    "mean": 27921.614028730473
+                  }
+                },
+                "generate": {
+                  "decode_seconds": {
+                    "count": 3,
+                    "minimum": 0.065586084,
+                    "median": 0.065672792,
+                    "maximum": 0.065794167,
+                    "mean": 0.06568434766666666
+                  },
+                  "decode_tokens": {
+                    "count": 3,
+                    "minimum": 31,
+                    "median": 31,
+                    "maximum": 31,
+                    "mean": 31.0
+                  },
+                  "drain_seconds": {
+                    "count": 3,
+                    "minimum": 0.002072833,
+                    "median": 0.002111458,
+                    "maximum": 0.002122541,
+                    "mean": 0.002102277333333333
+                  },
+                  "state_creation_seconds": {
+                    "count": 3,
+                    "minimum": 0.000476625,
+                    "median": 0.000482792,
+                    "maximum": 0.000502625,
+                    "mean": 0.00048734733333333333
+                  },
+                  "time_to_first_token_seconds": {
+                    "count": 3,
+                    "minimum": 0.018602916,
+                    "median": 0.018761834,
+                    "maximum": 0.018967542,
+                    "mean": 0.018777430666666668
+                  },
+                  "total_seconds": {
+                    "count": 3,
+                    "minimum": 0.08688104099999999,
+                    "median": 0.087105459,
+                    "maximum": 0.087167709,
+                    "mean": 0.08705140299999999
+                  },
+                  "decode_completed_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 456.77575257488917,
+                    "median": 457.25861395208426,
+                    "maximum": 457.919136857288,
+                    "mean": 457.3178344614205
+                  },
+                  "decode_buffered_iterator_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 471.1663877437646,
+                    "median": 472.03718702868616,
+                    "maximum": 472.6612431990908,
+                    "mean": 471.95493932384716
+                  },
+                  "end_to_end_tokens_per_second": {
+                    "count": 3,
+                    "minimum": 367.10842084882603,
+                    "median": 367.3707752346498,
+                    "maximum": 368.319712007134,
+                    "mean": 367.59963603020327
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "score_hashes": [
+          "fb8508eac4a1cfd32287f85381b25890124ab6d1393de009ab13820fb92929a3",
+          "2f47803fa306b7d13dbb9de4e1c86436ce9a2860a1c8b68f22ff8efdb80c4a6f",
+          "0fc66cd21d9760522aed0f896264f34e604182baf59bdfcead2512d44057d479",
+          "5a25ed3a5f2b68b3902d8a3f5b147d6f066bd5bfe15e8ca0319dd4619772d97f",
+          "af9012f8b73bf3ee402031f8e1c3e611b1476c7c17fd7449f798ac7cca3af780",
+          "b394fcc6e7dda6baece651192ec75f18fd7abb9f9d711143fbff67e2caba8a23"
+        ],
+        "generation_hashes": [
+          "274ee9e0df1413c8640de989114e4560644b44d3a1a58300408ad66e826c3d4a",
+          "0b276d025d1befaeb52bf2ecf0d067e30b3d0082339aea181cd3fdb57eebbcea",
+          "c292bfe59e594b0a64841bfaf1f2c97ce01bec3062208224337966af0be177d3",
+          "d0f63030b76f93d2e6c3ccd3e50fda9b6ac16e5f06d3ac8690522a5690080269",
+          "335fb415f545820fe8f2280c09790e36391d2ea2449b60a1b986ce6de55cd181",
+          "89949eb2527a2c145c2e091eb398605628314060e93f85e358296e90147a0e79"
+        ]
+      }
+    },
+    "model_order_by_round": [
+      [
+        "mlx8",
+        "dense",
+        "gguf_q8"
+      ],
+      [
+        "dense",
+        "gguf_q8",
+        "mlx8"
+      ]
+    ],
+    "fixture": {
+      "cases": 6,
+      "input_lengths": [
+        26,
+        24,
+        23,
+        23,
+        128,
+        512
+      ],
+      "input_token_hashes": [
+        "1245bd904ef7454901e959c965a93e84db5d3f65677f1954dc2c8aaa87a78bd9",
+        "1aa498a0940e7d411ee960a56f35d4ac989ba133251cd90850b8ecbd6f2e8f5d",
+        "b6b2e0b26f450063832b7d6de1f3af3342587df058716b50b203ad75b134ffee",
+        "cf02caf8d664dee5daee2f1362ca73bee4c632a3547369ee2338b1391a76aba4",
+        "d2e3143593f7ac095fcf804a117e2129c5a0a3709254302ee85da69e9e24acd1",
+        "bdeb06c8b5acad3476bdcc24afefd9e4243105759e892ac4c17cb3342807d28c"
+      ],
+      "recipe_sha256": "1b65a58d9cba3ec4a21dcd96c086b21e964472e2c9495eaa59c6bdc6295bdae7"
+    },
+    "comparisons": {
+      "mlx8_versus_dense": {
+        "interpretation": "Different source quantizers or revisions can affect this baseline comparison; this is not an importer equality oracle.",
+        "cases": 6,
+        "logits": {
+          "values": {
+            "count": 6,
+            "minimum": 151936,
+            "median": 151936.0,
+            "maximum": 151936,
+            "mean": 151936.0
+          },
+          "mean_absolute_error": {
+            "count": 6,
+            "minimum": 0.0804578816810844,
+            "median": 0.12168127573161952,
+            "maximum": 0.1688753840338561,
+            "mean": 0.12535425381858148
+          },
+          "root_mean_square_error": {
+            "count": 6,
+            "minimum": 0.10072890818016146,
+            "median": 0.15229463769054125,
+            "maximum": 0.20666809994401797,
+            "mean": 0.1561613449301266
+          },
+          "maximum_absolute_error": {
+            "count": 6,
+            "minimum": 0.5,
+            "median": 0.703125,
+            "maximum": 0.8125,
+            "mean": 0.6790364583333334
+          },
+          "cosine_similarity": {
+            "count": 6,
+            "minimum": 0.9990483132459621,
+            "median": 0.9992204638695787,
+            "maximum": 0.9997905694555775,
+            "mean": 0.9992912050860255
+          },
+          "reference_to_candidate_kl": {
+            "count": 6,
+            "minimum": 3.4108314161656945e-06,
+            "median": 0.00034958582824948356,
+            "maximum": 0.00783413896279181,
+            "mean": 0.0016103596624173124
+          },
+          "top1_agreement": {
+            "count": 6,
+            "minimum": 1,
+            "median": 1.0,
+            "maximum": 1,
+            "mean": 1.0
+          },
+          "top_k_overlap": {
+            "count": 6,
+            "minimum": 0.9375,
+            "median": 0.984375,
+            "maximum": 1.0,
+            "mean": 0.9791666666666666
+          }
+        },
+        "generation_hash_agreements": 5
+      },
+      "gguf_q8_versus_dense": {
+        "interpretation": "Different source quantizers or revisions can affect this baseline comparison; this is not an importer equality oracle.",
+        "cases": 6,
+        "logits": {
+          "values": {
+            "count": 6,
+            "minimum": 151936,
+            "median": 151936.0,
+            "maximum": 151936,
+            "mean": 151936.0
+          },
+          "mean_absolute_error": {
+            "count": 6,
+            "minimum": 0.08315943785972121,
+            "median": 0.11846711887489994,
+            "maximum": 0.160965666323963,
+            "mean": 0.12252368118342748
+          },
+          "root_mean_square_error": {
+            "count": 6,
+            "minimum": 0.10558769192464905,
+            "median": 0.14728631165443928,
+            "maximum": 0.2012269987488082,
+            "mean": 0.15324896363688112
+          },
+          "maximum_absolute_error": {
+            "count": 6,
+            "minimum": 0.5,
+            "median": 0.75,
+            "maximum": 1.0625,
+            "mean": 0.7415364583333334
+          },
+          "cosine_similarity": {
+            "count": 6,
+            "minimum": 0.9982524244669565,
+            "median": 0.9993931338843407,
+            "maximum": 0.9997444661688756,
+            "mean": 0.9992236433534858
+          },
+          "reference_to_candidate_kl": {
+            "count": 6,
+            "minimum": 1.5885727681713506e-06,
+            "median": 0.00028074820886164043,
+            "maximum": 0.003788378555969284,
+            "mean": 0.001184168105418159
+          },
+          "top1_agreement": {
+            "count": 6,
+            "minimum": 1,
+            "median": 1.0,
+            "maximum": 1,
+            "mean": 1.0
+          },
+          "top_k_overlap": {
+            "count": 6,
+            "minimum": 0.9375,
+            "median": 0.984375,
+            "maximum": 1.0,
+            "mean": 0.9739583333333334
+          }
+        },
+        "generation_hash_agreements": 5
+      }
+    },
+    "source_runtime_reference": {
+      "binary_sha256": "394e92af2078e58808cd06dcf81285027831e9206227231beb249316292249fd",
+      "gguf_sha256": "9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031",
+      "purpose": "Independent source-GGUF inference correctness; reference timing is not a Stark performance baseline.",
+      "tokenizer_hash_agreements": 6,
+      "cases": 6,
+      "models": {
+        "mlx8": {
+          "top32_comparison": {
+            "top1_agreement": {
+              "count": 6,
+              "minimum": 1,
+              "median": 1.0,
+              "maximum": 1,
+              "mean": 1.0
+            },
+            "top32_overlap": {
+              "count": 6,
+              "minimum": 0.90625,
+              "median": 0.96875,
+              "maximum": 1.0,
+              "mean": 0.9635416666666666
+            },
+            "reference_top32_logprob_mae": {
+              "count": 6,
+              "minimum": 0.0808635582590318,
+              "median": 0.1476577816012684,
+              "maximum": 0.6399121117044286,
+              "mean": 0.22327328559045448
+            },
+            "reference_top32_logprob_rmse": {
+              "count": 6,
+              "minimum": 0.10184317366144978,
+              "median": 0.18565504947740272,
+              "maximum": 0.6819699422817631,
+              "mean": 0.2588655524656104
+            },
+            "reference_top32_logprob_max_absolute_error": {
+              "count": 6,
+              "minimum": 0.25642592760934946,
+              "median": 0.5244686205665001,
+              "maximum": 1.1158962167699684,
+              "mean": 0.5603563105345533
+            }
+          },
+          "generation_hash_agreements": 3
+        },
+        "dense": {
+          "top32_comparison": {
+            "top1_agreement": {
+              "count": 6,
+              "minimum": 1,
+              "median": 1.0,
+              "maximum": 1,
+              "mean": 1.0
+            },
+            "top32_overlap": {
+              "count": 6,
+              "minimum": 0.90625,
+              "median": 0.984375,
+              "maximum": 1.0,
+              "mean": 0.96875
+            },
+            "reference_top32_logprob_mae": {
+              "count": 6,
+              "minimum": 0.07278854132653256,
+              "median": 0.1389261360060876,
+              "maximum": 0.3511816678965647,
+              "mean": 0.1703944916744602
+            },
+            "reference_top32_logprob_rmse": {
+              "count": 6,
+              "minimum": 0.08836503888341059,
+              "median": 0.16946027490111765,
+              "maximum": 0.38374915529711395,
+              "mean": 0.20241609995440843
+            },
+            "reference_top32_logprob_max_absolute_error": {
+              "count": 6,
+              "minimum": 0.17514679561265467,
+              "median": 0.38461405442285823,
+              "maximum": 0.7084315114060153,
+              "mean": 0.42202931907552294
+            }
+          },
+          "generation_hash_agreements": 4
+        },
+        "gguf_q8": {
+          "top32_comparison": {
+            "top1_agreement": {
+              "count": 6,
+              "minimum": 1,
+              "median": 1.0,
+              "maximum": 1,
+              "mean": 1.0
+            },
+            "top32_overlap": {
+              "count": 6,
+              "minimum": 0.9375,
+              "median": 0.96875,
+              "maximum": 1.0,
+              "mean": 0.9739583333333334
+            },
+            "reference_top32_logprob_mae": {
+              "count": 6,
+              "minimum": 0.03857806931602181,
+              "median": 0.05231128810429142,
+              "maximum": 0.179471715954592,
+              "mean": 0.07740340430037163
+            },
+            "reference_top32_logprob_rmse": {
+              "count": 6,
+              "minimum": 0.04721484362391261,
+              "median": 0.06962595184310105,
+              "maximum": 0.21186641099789333,
+              "mean": 0.09474689485899207
+            },
+            "reference_top32_logprob_max_absolute_error": {
+              "count": 6,
+              "minimum": 0.11536268654329618,
+              "median": 0.17947593918924376,
+              "maximum": 0.491426461303476,
+              "mean": 0.22945519835889705
+            }
+          },
+          "generation_hash_agreements": 5
+        }
+      }
+    },
+    "ownership_settled": true
+  },
+  "private_runtime_aggregate_sha256": "169be4b916a0c4bc1b49997ba6332ce477ac48aab98c8a3e180842e45108fc21",
+  "validation": {
+    "converter_tests": {
+      "passed": 3665,
+      "skipped": 87
+    },
+    "experiment_math_protocol_tests_passed": 7,
+    "rust_score_tests_passed": 39,
+    "repository_policy": "passed",
+    "python_lint_and_format": "passed",
+    "experiment_rust_format": "passed",
+    "workspace_rust_format": "fails_on_existing_vendor_and_workspace_differences",
+    "build_warning": "Installed rust-objcopy cannot load libLLVM.dylib; optimized builds and tests completed."
+  }
+}
