@@ -112,7 +112,15 @@ For cancellation, terminate and reap the worker process, then start a fresh work
 
 ## Validation status and replay
 
-Native ColGrep reference and controlled tool-protocol acceptance are pending. Model-free tests and process smoke checks cover protocol parsing, bounds, stop handling, UTF-8 decoding, stream cleanup, serial fresh state, seeded option dispatch, sanitized startup errors and failure fencing. These checks do not qualify the checkpoint's generated content.
+The pinned ColGrep checkpoint has controlled functional acceptance on the named Apple M5 Max/macOS 26.7.1 build. All four reference cases passed exact tokenization, decoding, EOS handling and valid XML calls. Ten native controls passed, covering seed repeat, output/context stops, custom stops, invalid IDs, recovery, restart and artifact stability. The generated agent loop independently completed search, read and spontaneous finish in three turns, with verified calculation and application lines.
+
+Three of four greedy outputs match the BF16 PyTorch/Transformers reference token for token. The unforced finish case diverges after 116 shared tokens (171 native tokens versus 173 reference tokens), with exactly the same valid finish locations and line coverage. The strict [reference report](../provenance/COLGREP_GENERATION_VALIDATION.json) retains `passed: false`; this work does not establish complete token parity. The [functional disposition](../provenance/COLGREP_GENERATION_ACCEPTANCE.json), [generated loop](../provenance/COLGREP_AGENT_FIXTURE.json) and [numerical diagnosis](../provenance/COLGREP_GENERATION_DIAGNOSIS.json) preserve the separate results.
+
+At the divergence, a fresh native run chooses the same next token as the reference. Default native scoring agrees with the BF16 teacher-forced reference for the two compared candidates. Cached versus full-prefix execution changes reference logits, and the differing choice has a small margin. This supports a numerical difference that depends on execution history; the exact native kernel cause and full-vocabulary numerical parity remain unresolved.
+
+Native validation uses 4,096-token contexts and output limits of 256 (reference cases) or 512 (generated loop), plus smaller stop-boundary controls. The published 16,384/4,096 limits are implemented caps. Broad context quality, maximum-size native runs, stochastic backend parity, other checkpoints and live app/index integration remain unqualified. The app should treat `length` and `context` as truncated completions.
+
+Model-free tests and process smoke checks also cover protocol parsing, bounds, stop handling, UTF-8 decoding, stream cleanup, serial fresh state, seeded option dispatch, sanitized startup errors and failure fencing.
 
 ```sh
 cargo test --offline --locked -p stark-generate --lib --no-default-features
@@ -142,4 +150,36 @@ uv run --project tools --locked python scripts/validate_colgrep_generation.py \
 
 The harness compares BF16 greedy generation with a named PyTorch/Transformers reference and checks exact tokenization, decoded text, stops, XML calls and file/line-range output. Its tool observations are controlled fixtures, and its parser covers a controlled XML subset. It does not run a live ColGrep index or qualify the app's search/read/finish loop.
 
+The strict reference command currently exits 1 for the documented finish-token divergence. Replay the generated loop separately:
+
+```sh
+uv run --project tools --locked python scripts/validate_colgrep_agent_fixture.py \
+  --source runtime/colgrep-agent-2B-source \
+  --model models/colgrep-agent-2B-stark \
+  --worker target/release/stark-generate \
+  --upstream runtime/colgrep-agent-upstream \
+  --reference-report provenance/COLGREP_GENERATION_VALIDATION.json \
+  --report provenance/COLGREP_AGENT_FIXTURE.json
+```
+
+The loop carries actual generated calls and typed arguments into subsequent upstream-template renders. Observations come from the controlled fixture; model-proposed shell commands are not executed. Finish is spontaneous, with no injected finish prefix or reminder.
+
+Replay the numerical diagnosis with the default scoring build used by its receipt:
+
+```sh
+cargo build --release --locked -p stark-score
+uv run --project tools --locked python scripts/diagnose_colgrep_generation.py \
+  --source runtime/colgrep-agent-2B-source \
+  --model models/colgrep-agent-2B-stark \
+  --worker target/release/stark-generate \
+  --score-worker target/release/stark-score \
+  --upstream runtime/colgrep-agent-upstream \
+  --reference-report provenance/COLGREP_GENERATION_VALIDATION.json \
+  --report provenance/COLGREP_GENERATION_DIAGNOSIS.json
+```
+
+The diagnosis requires the exact source/model/worker hashes and reproduced finish token-sequence hashes from the original strict report. A different compiler or binary needs its own source-bound acceptance record.
+
 The report records aggregate results and hashes for the checkpoint, converted model, worker, dependency locks, validator and upstream assets. Keep prompts, generated text, token vectors and model weights private. Scoring acceptance remains governed by [its separate validation record](VALIDATION.md).
+
+The generic converter receipt remains `native_loading=unverified` because this checkpoint is outside the catalog's separate load-only qualification ledger. Use the source-bound generation disposition above for this worker/artifact tuple; this work does not promote every generic Llama checkpoint or change prior catalog records.

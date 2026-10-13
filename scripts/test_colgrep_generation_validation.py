@@ -10,6 +10,11 @@ from scripts import validate_colgrep_generation as validation
 
 
 class ValidationHelpersTest(unittest.TestCase):
+    def test_assistant_history_strips_reasoning_before_tool_calls(self):
+        text = '<think>private reasoning</think>\nRead the file.\n<function name="terminal"></function>'
+        self.assertEqual(validation.assistant_content(text), "Read the file.")
+        self.assertEqual(validation.assistant_content('<function name="finish"></function>'), "")
+
     def test_calls_accepts_cdata_and_xml_unescapes_values(self):
         parsed = validation.calls(
             '<function name="terminal"><param name="command">'
@@ -40,18 +45,10 @@ class ValidationHelpersTest(unittest.TestCase):
         self.assertFalse(validation.finish_valid([("finish", {"locations": "['src/retry.py:1-16']"})]))
 
     def test_stops_match_requires_the_reference_eos_and_eos_finish(self):
-        self.assertTrue(
-            validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 1})
-        )
-        self.assertFalse(
-            validation.stops_match(None, {"finish_reason": "length", "stop_token_id": None})
-        )
-        self.assertFalse(
-            validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 130073})
-        )
-        self.assertFalse(
-            validation.stops_match(130073, {"finish_reason": "eos", "stop_token_id": 1})
-        )
+        self.assertTrue(validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 1}))
+        self.assertFalse(validation.stops_match(None, {"finish_reason": "length", "stop_token_id": None}))
+        self.assertFalse(validation.stops_match(1, {"finish_reason": "eos", "stop_token_id": 130073}))
+        self.assertFalse(validation.stops_match(130073, {"finish_reason": "eos", "stop_token_id": 1}))
 
     def test_source_seal_rejects_missing_or_invalid_etag_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
