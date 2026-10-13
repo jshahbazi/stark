@@ -136,6 +136,11 @@ class Worker:
                 self.process.stdin.close()
 
 
+def assistant_content(text):
+    """Match the pinned upstream parser's reasoning stripping for history."""
+    return text.rsplit("</think>", 1)[-1].split("<function", 1)[0].strip()
+
+
 def calls(text):
     """Validate the controlled XML subset; this is not the full upstream parser."""
     result = []
@@ -247,7 +252,17 @@ def fixtures(tokenizer, upstream):
             + prefill
         )
         ids = tokenizer.encode(prompt, add_special_tokens=False)
-        cases.append({"name": name, "prompt": prompt, "ids": ids, "prefill": prefill, "expected": expected})
+        cases.append(
+            {
+                "name": name,
+                "prompt": prompt,
+                "ids": ids,
+                "prefill": prefill,
+                "expected": expected,
+                "messages": history,
+                "tools": active_tools,
+            }
+        )
     return cases, tools
 
 

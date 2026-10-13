@@ -43,4 +43,4 @@ Run native parity against a prepared private fixture:
 uv run --python 3.12.13 python scripts/validate_scoring_rename.py --reference-directory /absolute/path/to/private/reference --reaper /absolute/path/to/stark/runtime/stark-validation-reap --worker /absolute/path/to/stark/target/release/stark-score --probe /absolute/path/to/stark/target/release/stark-score-digest --model /absolute/path/to/model --output-root /absolute/path/to/stark/test-artifacts/parity-check
 ```
 
-These checks qualify probability scoring parity for this checkpoint and fixture set. General generation, other model families, Swift/Python/TypeScript binary bindings, and precise latency measurement remain unqualified.
+These checks qualify probability scoring parity for this checkpoint and fixture set. A separate [ColGrep generation record](GENERATION.md) provides controlled functional acceptance for its exact checkpoint, artifact and named worker build, including a documented token divergence. Other generation profiles, model families, Swift/Python/TypeScript binary bindings and precise latency measurement remain unqualified.
