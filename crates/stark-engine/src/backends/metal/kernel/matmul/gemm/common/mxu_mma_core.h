@@ -63,7 +63,8 @@ struct MxuMmaCore {
                                        Right::SCHEME == GemmBPrologueKind::ScaleSymmetricDequant &&
                                        Right::GROUP_SIZE == 32;
   STARK_CONST ushort THREADGROUP_BLOCK_K =
-      PAIR_STAGED_GROUPS ? 64 : Right::template outer_block_k<THREADGROUP_BLOCK_K_FP>();
+      PAIR_STAGED_GROUPS ? (GEMM_TILING == GemmTiling::Tile64x64x256_Simdgroups2x2 ? 128 : 64)
+                         : Right::template outer_block_k<THREADGROUP_BLOCK_K_FP>();
   STARK_CONST ushort SHARED_STRIDE_B = THREADGROUP_BLOCK_K + 16 / sizeof(RightElementType);
   STARK_CONST ushort THREADGROUP_THREADS = SIMDGROUPS_PER_ROW * SIMDGROUPS_PER_COLUMN * METAL_SIMD_SIZE;
 
