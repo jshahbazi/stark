@@ -22,8 +22,10 @@ template <
     short BITS,
     bool SCALE_SYMMETRIC = false>
 struct QuantizedBlockLoaderScaleZeroPoint {
-  static_assert(THREADGROUP_TILE_COLS <= GROUP_SIZE, "Group size should be larger than columns");
-  static_assert(GROUP_SIZE % THREADGROUP_TILE_COLS == 0, "Group size should be divisible by columns");
+  static_assert(
+      GROUP_SIZE % THREADGROUP_TILE_COLS == 0 || THREADGROUP_TILE_COLS % GROUP_SIZE == 0,
+      "staging tiles and coefficient groups must contain whole multiples of each other"
+  );
   static_assert(BITS == 4 || BITS == 8, "Only int4 and int8 supported");
 
   STARK_CONST short PACK_FACTOR = get_pack_factor<BITS, 8>();
@@ -33,7 +35,13 @@ struct QuantizedBlockLoaderScaleZeroPoint {
                                          ? 1
                                          : (THREADGROUP_TILE_COLS_PACKED * THREADGROUP_TILE_ROWS) / THREADGROUP_SIZE;
   STARK_CONST short GROUP_STEPS_PER_BLOCK = GROUP_SIZE / THREADGROUP_TILE_COLS;
+  STARK_CONST short PARAM_GROUPS_PER_BLOCK =
+      THREADGROUP_TILE_COLS > GROUP_SIZE ? THREADGROUP_TILE_COLS / GROUP_SIZE : 1;
   STARK_CONST bool TILE_HAS_IDLE_THREADS = THREADGROUP_TILE_COLS_PACKED * THREADGROUP_TILE_ROWS < THREADGROUP_SIZE;
+  static_assert(
+      GROUP_SIZE % (READS_PER_THREAD * PACK_FACTOR) == 0,
+      "each thread's contiguous reads must stay within one coefficient group"
+  );
 
   const int src_leading_dim;
   const int tile_stride;
@@ -74,9 +82,15 @@ struct QuantizedBlockLoaderScaleZeroPoint {
         tile_col_index((READS_PER_THREAD * thread_index) % THREADGROUP_TILE_COLS_PACKED),
         dst(dst_ + tile_row_index * DESTINATION_LEADING_DIMENSION + tile_col_index * PACK_FACTOR),
         src(src_ + tile_row_index * src_leading_dim_ * BYTES_PER_PACK / PACK_FACTOR + tile_col_index * BYTES_PER_PACK),
-        scales(scales_ + tile_row_index * params_output_stride_),
+        scales(
+            scales_ + tile_row_index * params_output_stride_ +
+            (tile_col_index * PACK_FACTOR / GROUP_SIZE) * params_group_stride_
+        ),
         zero_points_row_start(SCALE_SYMMETRIC ? nullptr : zero_points_row_start_),
-        zero_point_index(zero_point_index_ + uint(tile_row_index) * zero_point_output_stride_),
+        zero_point_index(
+            zero_point_index_ + uint(tile_row_index) * zero_point_output_stride_ +
+            uint(tile_col_index * PACK_FACTOR / GROUP_SIZE) * zero_point_group_stride_
+        ),
         signed_codes(signed_codes_) {}
 
   QuantizedBlockLoaderScaleZeroPoint(
@@ -184,9 +198,9 @@ struct QuantizedBlockLoaderScaleZeroPoint {
       }
       group_step_counter = 0;
     }
-    scales += group_stride;
+    scales += group_stride * PARAM_GROUPS_PER_BLOCK;
     if constexpr (!SCALE_SYMMETRIC) {
-      zero_point_index += zero_point_group_stride;
+      zero_point_index += zero_point_group_stride * uint(PARAM_GROUPS_PER_BLOCK);
     }
   }
 };
