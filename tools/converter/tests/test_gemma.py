@@ -310,11 +310,11 @@ def test_private_annotation_and_layer_types_must_match_reference_windows(tmp_pat
 
 
 @pytest.mark.parametrize("family", ["gemma3", "gemma4"])
-def test_multimodal_and_new_generations_are_explicitly_unsupported(tmp_path, family):
+def test_relabelled_text_is_not_a_valid_wrapper_or_new_generation(tmp_path, family):
     source = tmp_path / "source"
     config, _ = gemma_fixture(source, "gemma3_text")
     update_config(source, config, model_type=family)
     with pytest.raises(UnsupportedConversion, match="^Checkpoint model_type does not match"):
         build_gemma_plan(source, family="gemma3_text")
-    with pytest.raises(UnsupportedConversion, match="^Gemma generation"):
+    with pytest.raises((ConversionError, UnsupportedConversion)):
         build_gemma_plan(source, family=family)

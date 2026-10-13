@@ -1,6 +1,6 @@
 # Independent model conversion replacement plan
 
-Current priority: [tool hardening](MODEL_CONVERSION_HARDENING.md). Further conversion coverage is deferred at the owner's direction; existing milestone evidence remains preserved.
+Current priority: resume independent conversion coverage after the [tool hardening packet](MODEL_CONVERSION_HARDENING.md), toward the pinned Lalamo denominator. Existing milestone evidence remains preserved. Full registry parity is still open.
 
 Updated: 2026-10-12. Milestone 1's G0/G1/selected G2, milestone 2's scoped G3 and the first Qwen3 MLX packet remain preserved. Milestone 3 includes independent MLX Llama/SmolLM3/Gemma text conversion and six additional exact BF16 load-only qualifications. The new [latency packet](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) reduces six complete-command medians by 16–38% against the frozen prior implementation; five beat Lalamo and SmolLM3 8-bit remains slower. The [dense continuation](MODEL_CONVERSION_MILESTONE_3_DENSE.md) and [original review](MODEL_CONVERSION_MILESTONE_3_DENSE_REVIEW.md) retain their separate source bindings and four failed latency hypotheses. Full G4 and broad latency parity remain open.
 
@@ -14,7 +14,11 @@ This policy supersedes the permanent-fallback policy in the plan committed at `e
 
 The target is the **110 built-in registry entries** at Lalamo revision `831accb8252a6b6606c378048caeb44178f1a050`. The [catalog](../tools/converter/stark_convert/catalog.json) also records **four explicit Stark extensions** separately: `unsloth/Llama-3.2-1B-Instruct`, `mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`, and `google/gemma-2-2b-it`. Gemma2 uses the pinned config/loader with a standard LanguageModelSpec; the registry has no Gemma2 built-in. Extensions do not alter the built-in denominator or imply upstream registration.
 
-The current implementation covers **85 built-in profiles and four extensions**, including 43 dense language profiles for Qwen, Llama, LLaMBA, Mistral, Gemma3 text, Phi-4-mini, Granite, SmolLM and LFM2, 40 MLX profiles for the supported language families, and two dense ModernBERT classifier profiles. Gemma2 remains separately counted as a Stark extension. Twenty-seven exact BF16 checkpoint/source/artifact tuples have named-build load-only qualifications. The remaining 25 built-ins need independent adapters; 62 implemented identities remain unqualified, including both inaccessible Mirai classifier rows. Qualification remains per exact source revision, config variant, dtype, metadata source set and root model kind. The pinned replacement denominator excludes arbitrary Hugging Face repositories, third-party Lalamo plugins, and a moving upstream branch. Public classifier benchmark fixtures are outside that denominator and do not expand the four-extension count.
+The current implementation covers **102 built-in profiles and four extensions**, including 52 full-precision language profiles, 48 MLX profiles and two dense ModernBERT classifier profiles. Two full-precision language profiles have routed/shared MoE experts. Gemma3 wrapper outputs contain the text decoder; vision execution remains separate. Gemma2 remains a Stark extension. The remaining eight built-ins need independent adapters. Qualification remains per exact source revision, config variant, dtype, metadata source set and root model kind. The pinned replacement denominator excludes arbitrary Hugging Face repositories, third-party Lalamo plugins, and a moving upstream branch. Public classifier benchmark fixtures are outside that denominator and do not expand the four-extension count.
+
+Thirty-two exact BF16 catalog/source/artifact tuples now have named-build load-only qualifications. The prior twenty-seven records remain unchanged; five real LFM2.5/Gemma3 text tuples receive separate new proofs. Seventy-four implemented identities remain unqualified, including both access-blocked Mirai rows and every new Qwen3.6/3.8/MoE identity. Catalog coverage does not close full G5.
+
+The [milestone 7 packet](MODEL_CONVERSION_MILESTONE_7.md) records the seventeen additions, five exact qualifications, source-index compatibility and independently audited fifty-command corrected comparison. LFM2.5 latency hypotheses pass; both Gemma3 4B latency hypotheses fail. The original failed runner report and all observations remain separate. Full latency and registry parity remain open.
 
 Reusable adapters are tracked by architecture and input format. The catalog tracks checkpoint-specific metadata/source rules and implementation status; the native ledger tracks exact source/artifact tuples and named builds. An explicit `hf-generic` profile can convert a future repository with a supported architecture and self-contained metadata without adding a catalog entry. It retains strict config/layout/source validation, plain metadata defaults and an unqualified native status. It cannot override a known catalog profile or expand the pinned denominator. See [future-checkpoint usage](../tools/converter/README.md#future-checkpoints-and-architecture-tracking).
 
@@ -176,7 +180,11 @@ Dependencies: the operators and root-output contracts needed by each row. Indepe
 - [x] Validate two separate public real-weight classifier fixtures with explicit synthetic codec overlays against complete pinned reference exports and a separately bound native classifier load-only harness. Preserve generic receipt status and the original twenty-seven ledger records.
 - [ ] Obtain access to the two pinned Mirai classifier repositories, then qualify their exact source/artifact/build tuples separately; private/unavailable repositories are not qualified by public fixtures.
 - [ ] Validate classifier execution correctness and quality with a separately scoped protocol; construction/readiness/EOF proves loading only.
-- [ ] Implement conversion-only MoE artifacts as a distinct adapter; native expert/router/kernel work requires a separately scoped implementation.
+- [x] Implement full-precision batched Qwen3.5/3.6 routed/shared MoE artifacts as the distinct `qwen3_5_moe` adapter, with pinned full-export synthetic parity. Native expert/router/kernel work remains separately scoped; individual-expert and packed MoE sources are unsupported.
+- [x] Add all seven LFM2.5 profiles, including four affine MLX 4/8-bit sources, with pinned sampling/reasoning defaults and complete sixteen-layer synthetic reference exports.
+- [x] Add six Gemma3 wrapper profiles with strict text-decoder extraction, validated modal omissions and narrow source-index compatibility. Keep image execution outside conversion qualification.
+- [ ] Improve the new Gemma3 4B full-precision and MLX 8-bit complete-command latency objectives against the preserved milestone 7 sources, artifacts and measurements.
+- [x] Add the two later dense Qwen3.6/3.8 profiles and Qwen3.8 reasoning-effort metadata. Mark `swish`-gate sources runtime-blocked because the pinned exporter emits sigmoid-gate semantics.
 - [ ] Account for audio/TTS, auxiliary/speculator models, NeMo/archive origins, and their dependency/access requirements; implement each independently where in scope.
 - [ ] Complete every remaining pinned row's source, config, tensor, metadata, and failure semantics.
 - [ ] Publish an evidence-backed coverage summary using the reproducible 110-entry built-in denominator and separate extension counts.
@@ -184,7 +192,27 @@ Dependencies: the operators and root-output contracts needed by each row. Indepe
 
 Gate G5: all in-scope pinned conversion rows have independently implemented and qualified parity within documented source/access/dependency limits. Runtime and execution blocks remain separate. Complete registry accounting is a prerequisite for a claim of replacing Lalamo's conversion reach.
 
-The **fourth milestone's dense architecture packet** adds five Qwen3.5 and four LFM2 built-ins. Only the selected 0.8B/350M BF16 tuples gain exact named-build load-only qualification. Qwen3.5-35B-A3B is MoE and remains planned despite sharing the pinned reference config class. The [dense evidence](MODEL_CONVERSION_MILESTONE_4.md) records bounded workspace, fresh external benchmarks, exact hashes and [independent review](MODEL_CONVERSION_MILESTONE_4_REVIEW.md). Its [MLX continuation](MODEL_CONVERSION_MILESTONE_4_MLX.md) adds eighteen profiles and four exact group-64 BF16 qualifications with separate source bindings. [Milestone 5](MODEL_CONVERSION_MILESTONE_5.md) adds the two pinned LLaMBA rows and their Mamba2 mixer with exact independent qualifications and external-config replay support. Generic conversion reuses supported adapters without granting checkpoint-wide or architecture-wide native qualification. Full G4/G5, classifier/MoE/specialized rows, later state-space variants and complete replacement remain open.
+The **fourth milestone's dense architecture packet** adds five Qwen3.5 and four LFM2 built-ins. Only the selected 0.8B/350M BF16 tuples gain exact named-build load-only qualification. Qwen3.5-35B-A3B remained planned at that milestone despite sharing the pinned reference config class; its later conversion-only adapter retains a native runtime block. The [dense evidence](MODEL_CONVERSION_MILESTONE_4.md) records bounded workspace, fresh external benchmarks, exact hashes and [independent review](MODEL_CONVERSION_MILESTONE_4_REVIEW.md). Its [MLX continuation](MODEL_CONVERSION_MILESTONE_4_MLX.md) adds eighteen profiles and four exact group-64 BF16 qualifications with separate source bindings. [Milestone 5](MODEL_CONVERSION_MILESTONE_5.md) adds the two pinned LLaMBA rows and their Mamba2 mixer with exact independent qualifications and external-config replay support. Generic conversion reuses supported adapters without granting checkpoint-wide or architecture-wide native qualification. Full G4/G5, exact Mirai qualification, specialized formats and complete replacement remain open.
+
+## Remaining eight built-ins
+
+These are independent converter packets. Native runtime gaps do not prevent conversion-only parity, and a converted text decoder does not establish multimodal execution.
+
+| Packet | Built-ins | Required conversion contracts |
+| --- | ---: | --- |
+| Gemma4 | 4 | Nested text config; per-layer embeddings/projections/norms and scalar; shared KV sources; mixed attention and distinct RoPE/scaling. |
+| Muse-Glimmer | 1 | Text-only wrapper export; weightless embedding/QK normalization, offset layer norms, output multiplier, mixed attention and declared modal omissions. |
+| Bonsai | 1 | Qwen-shaped decoder with YARN RoPE and source-bound 1-bit MLX packing, parameter planes and embedding/head handling. |
+| GPT-OSS | 1 | Routed experts with MXFP4 blocks and E8M0 scales; canonical gate/up reorder, biases and clipping. Native MoE remains a separate gap. |
+| FishAudio | 1 | Strict `.pth` input decoding, slow/fast text decoders, codebooks, DAC audio decoder, tiktoken metadata and a TTS root. |
+
+- [ ] Implement Gemma4's PLE packet and exact pinned synthetic exports before real source qualification.
+- [ ] Implement Muse's explicit text-only export and source-verified modal omissions.
+- [ ] Implement source-bound Bonsai 1-bit repacking without broadening all Qwen MLX profiles.
+- [ ] Implement GPT-OSS MXFP4 expert export and retain an explicit native runtime block.
+- [ ] Implement FishAudio's container, tokenizer, audio and TTS root contracts without adding a Lalamo/PyTorch runtime dependency.
+- [ ] Qualify accessible exact sources with full reference parity, malformed-input checks, workspace evidence and complete-command benchmarks; retain access blocks separately.
+- [ ] Close full G5 only after all 110 rows have independently qualified conversion dispositions. Do not infer execution or quality parity from catalog coverage.
 
 ## Per-tuple qualification and promotion checklist
 

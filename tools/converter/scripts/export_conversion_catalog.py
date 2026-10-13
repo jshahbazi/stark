@@ -19,6 +19,28 @@ import sys
 from pathlib import Path
 
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
+_INDEX_COMPATIBILITY = {
+    "mlx-community/gemma-3-4b-it-4bit": {
+        "index_sha256": "77f4b67de084c31c7bcd373b039908108eee6c6181607e6d53da730e5f0bc659",
+        "weight_filenames": ["model.safetensors"],
+        "tensor_names_sha256": "c6f554dc5e6f644164fdd9e236b2d61594c1fe1eeade207a25d1541b6994c648",
+    },
+    "mlx-community/gemma-3-4b-it-8bit": {
+        "index_sha256": "77f4b67de084c31c7bcd373b039908108eee6c6181607e6d53da730e5f0bc659",
+        "weight_filenames": [f"model-{shard:05d}-of-00002.safetensors" for shard in range(1, 3)],
+        "tensor_names_sha256": "c6f554dc5e6f644164fdd9e236b2d61594c1fe1eeade207a25d1541b6994c648",
+    },
+    "mlx-community/gemma-3-27b-it-4bit": {
+        "index_sha256": "71567cc4dcf16476da69af42108fb6b30b24f6cf49a4f71f9917da57715f74c5",
+        "weight_filenames": [f"model-{shard:05d}-of-00004.safetensors" for shard in range(1, 5)],
+        "tensor_names_sha256": "3b7e04e90ca343f2f11b43cb357bdfd3c961c34c4a71fffc792489dbfeade309",
+    },
+    "mlx-community/gemma-3-27b-it-8bit": {
+        "index_sha256": "71567cc4dcf16476da69af42108fb6b30b24f6cf49a4f71f9917da57715f74c5",
+        "weight_filenames": [f"model-{shard:05d}-of-00006.safetensors" for shard in range(1, 7)],
+        "tensor_names_sha256": "3b7e04e90ca343f2f11b43cb357bdfd3c961c34c4a71fffc792489dbfeade309",
+    },
+}
 
 
 def _digest(value: object) -> str:
@@ -51,6 +73,7 @@ def export(reference: Path) -> dict:
         "HFLlamaConfig": "llama",
         "HFMistralConfig": "mistral",
         "HFGemma3TextConfig": "gemma3_text",
+        "HFGemma3Config": "gemma3",
         "HFPhi3Config": "phi3",
         "HFGraniteConfig": "granite",
         "HFSmolLM3Config": "smollm3",
@@ -106,6 +129,15 @@ def export(reference: Path) -> dict:
             if reasoning is None or dataclasses.asdict(reasoning) != expected:
                 raise ValueError("Unrecognized Granite reasoning profile")
             reasoning_id = "granite_boolean_default_off"
+        elif class_name == "HFQwen35Config" and spec.family == "Qwen3.8":
+            expected = {
+                "default_reasoning_effort": "xhigh",
+                "field_name": "reasoning_effort",
+                "reasoning_effort_to_field_value": {"xhigh": "xhigh", "medium": "medium", "low": "low"},
+            }
+            if reasoning is None or dataclasses.asdict(reasoning) != expected:
+                raise ValueError("Unrecognized Qwen3.8 reasoning profile")
+            reasoning_id = "qwen38_effort_xhigh"
         else:
             reasoning_id = "sha256:" + _digest(reasoning) if reasoning is not None else None
         thinking_end = getattr(spec, "end_of_thinking_tag", None)
@@ -124,6 +156,7 @@ def export(reference: Path) -> dict:
                 "HFLlamaConfig",
                 "HFSmolLM3Config",
                 "HFGemma3TextConfig",
+                "HFGemma3Config",
                 "HFQwen35Config",
                 "HFLFM2Config",
                 "HFLlambaConfig",
@@ -140,9 +173,12 @@ def export(reference: Path) -> dict:
             f"mlx-community/Qwen3.5-{size}-MLX-{bits}bit" for size in ("0.8B", "2B", "4B", "9B") for bits in (4, 8)
         )
         qwen35_repos.update(f"mlx-community/Qwen3.5-27B-{bits}bit" for bits in (4, 8))
+        qwen35_repos.update({"Qwen/Qwen3.6-27B", "Qwen/Qwen3.8-27B"})
         if class_name == "HFQwen35Config" and repo not in qwen35_repos:
             adapter = None
-        if class_name == "HFLFM2Config" and spec.family != "LFM2":
+        if class_name == "HFQwen35Config" and repo in {"Qwen/Qwen3.5-35B-A3B", "Qwen/Qwen3.6-35B-A3B"}:
+            adapter = "qwen3_5_moe"
+        if class_name == "HFLFM2Config" and spec.family not in {"LFM2", "LFM2.5"}:
             adapter = None
         if class_name == "HFLlambaConfig" and repo not in {"cartesia-ai/Llamba-1B", "cartesia-ai/Llamba-1B-4bit-mlx"}:
             adapter = None
@@ -192,6 +228,8 @@ def export(reference: Path) -> dict:
                 },
             }
         )
+        if repo in _INDEX_COMPATIBILITY:
+            entries[-1]["weight_index_compatibility"] = copy.deepcopy(_INDEX_COMPATIBILITY[repo])
     extensions = []
     for repository, reference_repo, family in (
         ("unsloth/Llama-3.2-1B-Instruct", "meta-llama/Llama-3.2-1B-Instruct", "Llama-3.2"),

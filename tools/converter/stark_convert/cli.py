@@ -22,7 +22,7 @@ from .contracts import CapabilityResult, ConversionRequest, ConversionResult, Pl
 from .profiles import GENERIC_PROFILE, generic_entry
 from .provenance import file_hash, toolchain_provenance
 from .registry import (
-    CONFIG_ADAPTERS,
+    ARCHITECTURE_CONFIGS,
     adapter_for_model,
     architecture_for_config,
     catalog_sha256,
@@ -39,7 +39,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     if request.metadata_profile == GENERIC_PROFILE:
         supported = (
             entry is None
-            and request.architecture in CONFIG_ADAPTERS.values()
+            and request.architecture in ARCHITECTURE_CONFIGS
             and request.model_kind == model_kind_for_architecture(request.architecture)
         )
         return CapabilityResult(
@@ -55,16 +55,20 @@ def capability(request: ConversionRequest) -> CapabilityResult:
     supported = supported and actual_kind == request.model_kind
     supported = supported and (request.architecture is None or entry["adapter"] == request.architecture)
     native = "supported_layout_unverified_tuple" if supported and request.dtype == "bfloat16" else "unverified"
-    if supported and entry["adapter"] in {"qwen3_5", "lfm2", "llamba", "modernbert"}:
+    if supported and entry["adapter"] in {"qwen3_5", "qwen3_5_moe", "gemma3", "lfm2", "llamba", "modernbert"}:
         native = "unverified"
     if supported and request.dtype != "bfloat16":
+        native = "runtime_blocked"
+    if supported and entry["adapter"] == "qwen3_5_moe":
         native = "runtime_blocked"
     return CapabilityResult(
         adapter=entry["adapter"] if supported else None,
         model_kind=actual_kind,
         conversion="implemented" if supported else "unsupported",
         native_loading=native,
-        reason=None if supported else "unsupported_catalog_tuple",
+        reason="native_moe_construction"
+        if supported and entry["adapter"] == "qwen3_5_moe"
+        else (None if supported else "unsupported_catalog_tuple"),
     )
 
 
@@ -79,7 +83,7 @@ def _validate_request(request: ConversionRequest) -> None:
         raise ValueError("invalid_workspace")
     if request.require_native_support and request.dtype != "bfloat16":
         raise UnsupportedConversion("Native dense loading requires BF16")
-    if request.architecture is not None and request.architecture not in CONFIG_ADAPTERS.values():
+    if request.architecture is not None and request.architecture not in ARCHITECTURE_CONFIGS:
         raise UnsupportedConversion("Unsupported requested architecture")
     if request.metadata_profile is not None:
         if (
@@ -109,6 +113,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         build_modernbert_plan,
         build_phi_plan,
         build_qwen2_plan,
+        build_qwen35_moe_plan,
         build_qwen35_plan,
         build_smollm3_plan,
     )
@@ -121,6 +126,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     # and signatures here; full content verification remains mandatory prepublish.
     snapshot.assert_unchanged(verify_content=False)
     config = read_json(snapshot.config_path)
+    catalog_entry = get_model(request.repo)
     if snapshot.conversion_profile is not None:
         if request.metadata_profile != GENERIC_PROFILE:
             raise ConversionError("Request and source metadata profile disagree")
@@ -136,7 +142,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise ConversionError("Requested architecture disagrees with catalog profile")
     if request.model_kind != model_kind_for_architecture(adapter):
         raise UnsupportedConversion("Checkpoint architecture disagrees with the requested model kind")
-    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
+    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "gemma3", "qwen3_5", "lfm2"}:
         from .compressed import parse_mlx_quantization
 
         entry = get_model(request.repo)
@@ -146,6 +152,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             from .adapters.qwen35 import normalize_qwen35_config
 
             packing_config = normalize_qwen35_config(config)
+        elif adapter == "gemma3":
+            from .adapters.gemma import normalize_gemma3_config
+
+            packing_config = normalize_gemma3_config(config)
         quantization = parse_mlx_quantization(packing_config)
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
@@ -170,10 +180,16 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "mistral": build_mistral_plan,
         "gemma2": partial(build_gemma_plan, family="gemma2"),
         "gemma3_text": partial(build_gemma_plan, family="gemma3_text"),
+        "gemma3": partial(
+            build_gemma_plan,
+            family="gemma3",
+            index_compatibility=catalog_entry.get("weight_index_compatibility") if catalog_entry else None,
+        ),
         "phi3": build_phi_plan,
         "granite": build_granite_plan,
         "smollm3": build_smollm3_plan,
         "qwen3_5": build_qwen35_plan,
+        "qwen3_5_moe": build_qwen35_moe_plan,
         "lfm2": build_lfm2_plan,
         "llamba": partial(
             build_llamba_plan,
@@ -183,7 +199,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "modernbert": build_modernbert_plan,
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
-    if adapter == "qwen3_5":
+    if adapter in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         config = normalize_qwen35_config(config)
@@ -197,6 +213,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             result = replace(result, native_loading="runtime_blocked", reason="native_delta_net_dimensions")
         if mixer["type"] in {"DeltaNetConfig", "ShortConvConfig", "Mamba2Config"} and mixer["kernel_size"] < 2:
             result = replace(result, native_loading="runtime_blocked", reason="native_convolution_kernel")
+    if adapter == "qwen3_5_moe":
+        result = replace(result, native_loading="runtime_blocked", reason="native_moe_construction")
+    elif adapter == "qwen3_5" and config.get("output_gate_type", "sigmoid") != "sigmoid":
+        result = replace(result, native_loading="runtime_blocked", reason="native_attention_gate_semantics")
     return PlannedConversion(request, result, tensors, config)
 
 
@@ -370,7 +390,7 @@ def main() -> int:
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--model-kind", choices=("language", "classifier", "tts"), default="language")
     parser.add_argument(
-        "--architecture", choices=sorted(set(CONFIG_ADAPTERS.values())), help="Assert the checkpoint architecture"
+        "--architecture", choices=sorted(ARCHITECTURE_CONFIGS), help="Assert the checkpoint architecture"
     )
     parser.add_argument(
         "--metadata-profile",

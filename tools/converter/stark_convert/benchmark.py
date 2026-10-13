@@ -570,13 +570,13 @@ def _run_benchmark(args, report, files, source, source_manifest, reference):
 
 def main() -> int:
     from .cli import _Parser
-    from .registry import CONFIG_ADAPTERS
+    from .registry import ARCHITECTURE_CONFIGS
 
     parser = _Parser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--repo", help="Catalog identity for a local checkpoint")
     parser.add_argument("--metadata-profile", choices=("hf-generic",))
-    parser.add_argument("--architecture", choices=sorted(set(CONFIG_ADAPTERS.values())))
+    parser.add_argument("--architecture", choices=sorted(ARCHITECTURE_CONFIGS))
     parser.add_argument("--model-kind", choices=("language", "classifier", "tts"), default="language")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")

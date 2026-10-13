@@ -63,6 +63,11 @@ _INLINE_GENERATION = {
         "temperature": 0.3,
         "min_p": 0.15,
     },
+    ("generation_config", "87e0a2277608e6706c36a9e153eddb9519995c381d7b1deea3e3e6374df73a1f"): {
+        "temperature": 0.1,
+        "top_k": 50,
+        "top_p": 0.1,
+    },
     ("generation_params_overrides", "70d45ef6963ee481c03dc57ed865b205baffe32cfcff1388b1d88189a6a97bec"): {
         "temperature": 0.8,
         "top_k": 40,
@@ -270,7 +275,13 @@ def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
         raise UnsupportedMetadata("Unsupported output-parser profile.")
     if end_id not in ends:
         raise UnsupportedMetadata("Unsupported reasoning-boundary profile.")
-    if reasoning_id not in (None, "boolean_default_on", "boolean_default_off", "granite_boolean_default_off"):
+    if reasoning_id not in (
+        None,
+        "boolean_default_on",
+        "boolean_default_off",
+        "granite_boolean_default_off",
+        "qwen38_effort_xhigh",
+    ):
         raise UnsupportedMetadata("Unsupported reasoning-default profile.")
     roles = metadata.get("roles")
     if not isinstance(roles, dict) or any(
@@ -278,7 +289,13 @@ def _profile_codec(metadata: dict[str, Any]) -> dict[str, Any]:
     ):
         raise ConversionError("Invalid role-name profile.")
     reasoning = None
-    if reasoning_id is not None:
+    if reasoning_id == "qwen38_effort_xhigh":
+        reasoning = {
+            "default_reasoning_effort": "xhigh",
+            "field_name": "reasoning_effort",
+            "reasoning_effort_to_field_value": {"xhigh": "xhigh", "medium": "medium", "low": "low"},
+        }
+    elif reasoning_id is not None:
         reasoning = {
             "default_reasoning_effort": "medium" if reasoning_id == "boolean_default_on" else "no_reasoning",
             "field_name": "thinking" if reasoning_id == "granite_boolean_default_off" else "enable_thinking",
@@ -390,7 +407,9 @@ def write_metadata(
     expected_type = _MODEL_TYPES.get(model_entry.get("config_class"))
     if expected_type is None:
         raise UnsupportedMetadata("Unsupported metadata architecture.")
-    if expected_type == "qwen3_5":
+    if model_entry.get("config_class") == "HFQwen35Config":
+        expected_type = model_entry.get("adapter", expected_type)
+    if expected_type in {"qwen3_5", "qwen3_5_moe"}:
         from .adapters.qwen35 import normalize_qwen35_config
 
         hf_config = normalize_qwen35_config(hf_config)

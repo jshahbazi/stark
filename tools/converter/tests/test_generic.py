@@ -70,6 +70,50 @@ def test_generic_probe_needs_explicit_architecture_and_never_qualifies_source():
     assert cli.capability(ConversionRequest(REPOS["qwen3"], architecture="llama")).conversion == "unsupported"
 
 
+@pytest.mark.parametrize("architecture,bits", [("gemma3", None), ("gemma3", 4), ("gemma3", 8), ("qwen3_5_moe", None)])
+def test_new_architectures_convert_anonymous_local_sources_and_replay(tmp_path, architecture, bits):
+    from test_gemma_multimodal import wrapper_fixture
+    from test_qwen_later import qwen_later_fixture
+
+    source = tmp_path / "source"
+    if architecture == "gemma3":
+        wrapper_fixture(source, bits=bits, sharded=True)
+    else:
+        qwen_later_fixture(source, profile="moe", sharded=True)
+    tokenizer = Tokenizer(models.WordLevel({"[UNKNOWN]": 0, "[STOP]": 1, "[OTHER]": 2}, unk_token="[UNKNOWN]"))
+    tokenizer.save(str(source / "tokenizer.json"))
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
+    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": 1}))
+    selected = resolve_source(source, metadata_profile="hf-generic", offline=True)
+    manifest = tmp_path / "source.json"
+    selected.write_manifest(manifest)
+    replay = resolve_source("unused", source_manifest=manifest, offline=True, hub=object())
+    receipt = cli.convert(replay, tmp_path / "output", repo=None, architecture=architecture, chunk_bytes=4096)
+    assert receipt["architecture"] == architecture
+    assert receipt["metadata_profile"] == "hf-generic"
+    assert receipt["native_qualification"] is None
+    assert receipt["capability"]["source_validation"] == "complete"
+    assert receipt["capability"]["native_loading"] == (
+        "runtime_blocked" if architecture == "qwen3_5_moe" else "unverified"
+    )
+    assert receipt["transform_peak_bytes"] <= 4096
+
+
+def test_later_qwen_swish_gate_is_explicitly_runtime_blocked(tmp_path):
+    from test_qwen_later import qwen_later_fixture
+
+    source = tmp_path / "source"
+    qwen_later_fixture(source)
+    tokenizer = Tokenizer(models.WordLevel({"[UNKNOWN]": 0, "[STOP]": 1}, unk_token="[UNKNOWN]"))
+    tokenizer.save(str(source / "tokenizer.json"))
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages }}"}))
+    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": 1}))
+    selected = resolve_source(source, metadata_profile="hf-generic", offline=True)
+    receipt = cli.convert(selected, tmp_path / "output", repo=None)
+    assert receipt["capability"]["native_loading"] == "runtime_blocked"
+    assert receipt["capability"]["reason"] == "native_attention_gate_semantics"
+
+
 @pytest.mark.parametrize("bits", [4, 8])
 def test_future_mlx_checkpoint_uses_its_declared_packing(tmp_path, bits):
     source = tmp_path / "source"

@@ -16,6 +16,7 @@ from ..compressed import parse_mlx_quantization, plan_mlx_matrix, read_mlx_matri
 from ..streaming import (
     ConversionError,
     ConversionPlan,
+    TensorInfo,
     TensorOperation,
     UnsupportedConversion,
     load_checkpoint,
@@ -37,6 +38,62 @@ _KEYS = _COMMON_KEYS | {
     "rope_local_base_freq",
     "cache_implementation",
     "use_bidirectional_attention",
+}
+_WRAPPER_KEYS = {
+    "model_type",
+    "architectures",
+    "text_config",
+    "vision_config",
+    "boi_token_index",
+    "eoi_token_index",
+    "image_token_index",
+    "mm_tokens_per_image",
+    "initializer_range",
+    "transformers_version",
+    "torch_dtype",
+    "dtype",
+    "eos_token_id",
+    "bos_token_id",
+    "pad_token_id",
+    "quantization",
+    "quantization_config",
+    "tie_word_embeddings",
+    "use_cache",
+    "_name_or_path",
+    "_attn_implementation",
+    "_attn_implementation_autoset",
+    "return_dict",
+    "output_attentions",
+    "output_hidden_states",
+    "torchscript",
+    "is_encoder_decoder",
+    "is_decoder",
+    "add_cross_attention",
+    "tie_encoder_decoder",
+}
+_VISION_KEYS = {
+    "hidden_size",
+    "image_size",
+    "intermediate_size",
+    "model_type",
+    "num_attention_heads",
+    "num_hidden_layers",
+    "patch_size",
+    "vision_use_head",
+    "skip_vision",
+    "num_channels",
+    "hidden_act",
+    "layer_norm_eps",
+    "attention_dropout",
+    "initializer_range",
+    "initializer_factor",
+    "torch_dtype",
+    "dtype",
+    "_name_or_path",
+    "transformers_version",
+    "architectures",
+    "_attn_implementation",
+    "_attn_implementation_autoset",
 }
 
 
@@ -116,18 +173,168 @@ def _global_rope(config: dict, head_dim: int, sequence_length: int, unsupported:
     return rope
 
 
-def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> ConversionPlan:
+def normalize_gemma3_config(outer: dict) -> dict:
+    """Resolve the wrapper's text decoder without silently overriding semantics."""
+    if outer.get("model_type") != "gemma3":
+        raise UnsupportedConversion("Gemma 3 wrapper normalization requires model_type gemma3")
+    if set(outer) - _WRAPPER_KEYS:
+        raise UnsupportedConversion("Gemma 3 wrapper config options are outside implemented coverage")
+    if outer.get("architectures") != ["Gemma3ForConditionalGeneration"]:
+        raise UnsupportedConversion("Gemma 3 wrapper architecture is outside implemented coverage")
+    text, vision = outer.get("text_config"), outer.get("vision_config")
+    if not isinstance(text, dict) or not isinstance(vision, dict):
+        raise ConversionError("Gemma 3 wrapper requires text_config and vision_config objects")
+    if text.get("model_type") != "gemma3_text" or vision.get("model_type") != "siglip_vision_model":
+        raise UnsupportedConversion("Gemma 3 wrapper requires Gemma 3 text and SigLIP vision configurations")
+    if set(vision) - _VISION_KEYS:
+        raise UnsupportedConversion("Gemma 3 vision config options are outside implemented coverage")
+    vocab = _integer(text, "vocab_size", 262208)
+    for key in ("boi_token_index", "eoi_token_index", "image_token_index"):
+        value = outer.get(key)
+        if type(value) is not int or not 0 <= value < vocab:
+            raise ConversionError("Gemma 3 wrapper requires valid image token indices")
+    _integer(outer, "mm_tokens_per_image")
+    for flag in ("tie_word_embeddings",):
+        if not _boolean(outer, flag, True):
+            raise UnsupportedConversion("Gemma 3 wrapper requires tied embeddings")
+    for flag in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder"):
+        if _boolean(outer, flag, False):
+            raise UnsupportedConversion("Gemma 3 wrapper requires a causal text decoder")
+    # Quantization is commonly recorded on the wrapper rather than text_config.
+    # Check every description before selecting one; no nested description wins
+    # over a contradictory outer declaration.
+    outer_quantization, text_quantization = parse_mlx_quantization(outer), parse_mlx_quantization(text)
+    if outer_quantization is not None and text_quantization is not None and outer_quantization != text_quantization:
+        raise ConversionError("Gemma 3 wrapper and text quantization descriptions disagree")
+    config = dict(text)
+    if outer_quantization is not None:
+        config["quantization"] = {
+            "bits": outer_quantization.bits,
+            "group_size": outer_quantization.group_size,
+        }
+    return config
+
+
+def _wrapper_tensors(outer: dict, tensors: dict[str, TensorInfo]) -> dict[str, TensorInfo]:
+    """Account for complete recognized modal components while exporting text only.
+
+    Pinned Lalamo's language-model importer discards these components. Explicit
+    names, shapes and floating representations bound that omission here, and
+    original TensorInfo values retain the signatures of every source file.
+    """
+    roots = ("model.language_model", "language_model.model", "model")
+    present = [
+        root
+        for root in roots
+        if any(
+            name.startswith(root + suffix) for name in tensors for suffix in (".embed_tokens.", ".layers.", ".norm.")
+        )
+    ]
+    if len(present) != 1:
+        raise ConversionError("Gemma 3 wrapper requires one unambiguous text decoder prefix")
+    root = present[0]
+    selected = {"model" + name[len(root) :]: info for name, info in tensors.items() if name.startswith(root + ".")}
+    accounted = {name for name in tensors if name.startswith(root + ".")}
+    head_roots = ("lm_head", "language_model.lm_head", "model.language_model.lm_head")
+    heads = [head for head in head_roots if any(name.startswith(head + ".") for name in tensors)]
+    if len(heads) > 1:
+        raise ConversionError("Gemma 3 wrapper has ambiguous tied output heads")
+    if heads:
+        head = heads[0]
+        allowed_heads = {
+            "model": {"lm_head"},
+            "language_model.model": {"lm_head", "language_model.lm_head"},
+            "model.language_model": {"lm_head", "model.language_model.lm_head"},
+        }
+        if head not in allowed_heads[root]:
+            raise ConversionError("Gemma 3 wrapper output head prefix contradicts its text decoder")
+        # The modern model.language_model root can contain the tied head inside
+        # the decoder prefix. Remove its normalized alias before adding lm_head.
+        selected = {name: info for name, info in selected.items() if not name.startswith("model.lm_head.")}
+        selected.update(
+            {"lm_head" + name[len(head) :]: info for name, info in tensors.items() if name.startswith(head + ".")}
+        )
+        accounted.update(name for name in tensors if name.startswith(head + "."))
+    vision = outer["vision_config"]
+    width, hidden = _integer(vision, "hidden_size"), _integer(vision, "intermediate_size")
+    layers, heads = _integer(vision, "num_hidden_layers"), _integer(vision, "num_attention_heads")
+    image, patch, channels = (
+        _integer(vision, "image_size"),
+        _integer(vision, "patch_size"),
+        _integer(vision, "num_channels", 3),
+    )
+    if width % heads or image % patch:
+        raise ConversionError("Gemma 3 vision dimensions disagree with attention or patch layout")
+    if _boolean(vision, "vision_use_head", False):
+        raise UnsupportedConversion("Gemma 3 vision pooling heads are outside implemented omission coverage")
+    _boolean(vision, "skip_vision", False)
+    shapes = {
+        "embeddings.patch_embedding.weight": ((width, channels, patch, patch), (width, patch, patch, channels)),
+        "embeddings.patch_embedding.bias": ((width,),),
+        "embeddings.position_embedding.weight": (((image // patch) ** 2, width),),
+        "post_layernorm.weight": ((width,),),
+        "post_layernorm.bias": ((width,),),
+    }
+    for layer in range(layers):
+        base = f"encoder.layers.{layer}."
+        for norm in ("layer_norm1", "layer_norm2"):
+            for plane in ("weight", "bias"):
+                shapes[base + norm + "." + plane] = ((width,),)
+        for projection in ("q_proj", "k_proj", "v_proj", "out_proj"):
+            shapes[base + "self_attn." + projection + ".weight"] = ((width, width),)
+            shapes[base + "self_attn." + projection + ".bias"] = ((width,),)
+        for projection, rows, columns in (("fc1", hidden, width), ("fc2", width, hidden)):
+            shapes[base + "mlp." + projection + ".weight"] = ((rows, columns),)
+            shapes[base + "mlp." + projection + ".bias"] = ((rows,),)
+    modal_prefixes = [
+        prefix
+        for prefix in ("", "model.")
+        if any(
+            name.startswith(prefix + component)
+            for name in tensors
+            for component in ("vision_tower.", "multi_modal_projector.")
+        )
+    ]
+    if len(modal_prefixes) > 1:
+        raise ConversionError("Gemma 3 wrapper has ambiguous modal component prefixes")
+    for prefix in modal_prefixes:
+        vision_root, projector = prefix + "vision_tower.vision_model.", prefix + "multi_modal_projector."
+        modal = {name for name in tensors if name.startswith(prefix + "vision_tower.") or name.startswith(projector)}
+        if not modal:
+            continue
+        expected = {vision_root + name: allowed for name, allowed in shapes.items()}
+        expected[projector + "mm_input_projection_weight"] = ((width, _integer(outer["text_config"], "hidden_size")),)
+        expected[projector + "mm_soft_emb_norm.weight"] = ((width,),)
+        if modal != set(expected):
+            raise ConversionError("Gemma 3 wrapper has incomplete or unknown modal tensors")
+        for name, allowed in expected.items():
+            if tensors[name].shape not in allowed or tensors[name].dtype not in _DTYPES.values():
+                raise ConversionError("Gemma 3 modal tensor shape or dtype disagrees with its config")
+        accounted.update(modal)
+    if set(tensors) != accounted:
+        raise ConversionError("Gemma 3 wrapper has unexpected tensors")
+    return selected
+
+
+def build_gemma_plan(
+    source: Path, *, family: str, dtype: str = "bfloat16", index_compatibility: dict | None = None
+) -> ConversionPlan:
     """Validate the complete recognized text layout before transformation.
 
     Embedding and norm scale offsets remain runtime config semantics. The planner
     neither modifies stored norm values nor introduces full-weight allocations.
-    Multimodal Gemma 3 and newer Gemma generations require separate adapters.
+    Gemma 3 wrappers export the same text decoder as pinned Lalamo; recognized
+    vision and projection components are validated and omitted from the output.
     """
-    if family not in _ARCHITECTURES:
+    if family not in {*_ARCHITECTURES, "gemma3"}:
         raise UnsupportedConversion("Gemma generation has no text decoder adapter")
     config = read_json(source / "config.json")
     if config.get("model_type") != family:
         raise UnsupportedConversion("Checkpoint model_type does not match the Gemma text adapter")
+    outer = config if family == "gemma3" else None
+    if outer is not None:
+        config = normalize_gemma3_config(outer)
+        family = "gemma3_text"
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Gemma adapters support BF16, F16, and F32")
     target_dtype = _DTYPES[dtype]
@@ -225,7 +432,8 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
             unsupported.append("Gemma layer types disagree with qualified window semantics")
     attention_softcap = _softcap(config, "attn_logit_softcapping", required=family == "gemma2")
     final_softcap = _softcap(config, "final_logit_softcapping", required=family == "gemma2")
-    tensors = load_checkpoint(source)
+    all_tensors = load_checkpoint(source, index_compatibility=index_compatibility)
+    tensors = _wrapper_tensors(outer, all_tensors) if outer is not None else all_tensors
     for key in ("quantization", "quantization_config"):
         if family == "gemma2" and config.get(key) is not None:
             if not isinstance(config[key], dict) or not config[key]:
@@ -461,7 +669,7 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         decoder_config,
         tuple(operations),
         metadata,
-        sum(info.nbytes for info in tensors.values()),
-        len(tensors),
-        tuple(tensors.values()),
+        sum(info.nbytes for info in all_tensors.values()),
+        len(all_tensors),
+        tuple(all_tensors.values()),
     )
