@@ -187,3 +187,6 @@ The [aggregate evidence](experiments/qwen3-gguf-2026-10-13/aggregate.json) recor
 the source revisions, model/build/tool hashes, distributions, repeatability,
 reference comparisons, and qualification disposition. Earlier validation records
 remain unchanged.
+
+A subsequent [prefill optimization experiment](QWEN3_GGUF_PREFILL_OPTIMIZATION.md)
+records new measurements and kernel changes against this preserved baseline.
