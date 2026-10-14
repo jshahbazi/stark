@@ -65,6 +65,10 @@ Some catalog profiles use metadata from another repository. Those profiles need 
 
 See [standalone installation](#install-outside-the-checkout) for using a wheel outside this checkout. The [hardening checklist](../../docs/MODEL_CONVERSION_HARDENING.md) tracks current tool work; further model coverage is deferred.
 
+## Experimental Qwen3 GGUF import
+
+The separate experimental `python -m stark_convert.gguf_import` route imports Qwen3 Q8_0 GGUF files with original HF metadata sidecars. It preserves integer compression and rounds F16 scales to native BF16, then independently verifies every emitted code and coefficient. The [Qwen3 GGUF experiment](../../docs/QWEN3_GGUF_IMPORT_EXPERIMENT.md) records scoped correctness, memory, and performance comparisons. It does not promote catalog qualification or add other GGUF quantization types.
+
 ## Catalog coverage and qualification
 
 The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **85 built-ins plus four extensions**, or 89 identities. This includes 43 dense language profiles, 40 MLX profiles and two dense ModernBERT classifier profiles:

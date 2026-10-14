@@ -57,6 +57,10 @@ These are recorded warm-file measurements from successive independently reviewed
 
 RSS sampling can miss peaks or double-count shared pages. The benchmarked 8 MiB bound applies to transformation buffers; headers, tokenizer processing, hashing and interpreter memory are additional. **These measurements establish conversion performance; inference latency and general generation quality require separate evaluation.** Earlier dense results and previous-writer measurements remain in the [evidence archive](docs/MODEL_CONVERSION_PLAN.md).
 
+## Experimental Qwen3 GGUF import
+
+The [Qwen3 GGUF experiment](docs/QWEN3_GGUF_IMPORT_EXPERIMENT.md) imports official Qwen3-0.6B Q8_0 weights into the existing native compressed format. The [prefill investigation](docs/QWEN3_GGUF_PREFILL_OPTIMIZATION.md) improves the imported model's prefill throughput by about 15% at 512 and 1,024 tokens on one M5 Max, with unchanged compressed weights and exact outputs on the tested cases. General GGUF support and generation quality remain unqualified.
+
 ## Conversion coverage and future models
 
 | Supported area | Current implementation |
