@@ -1,33 +1,73 @@
 # Stark model converter
 
-`stark-convert` is the repository's independent, bounded-memory converter for selected Hugging Face checkpoints. It produces Stark's existing `config.json`, `tokenizer.json`, and `model.safetensors` files. The runtime converter uses registered streaming adapters and has no Lalamo, JAX, or PyTorch dependency. Unsupported combinations fail explicitly; there is no upstream fallback.
+Convert supported Hugging Face models into Stark's `config.json`, `tokenizer.json`, and `model.safetensors` files.
 
-The separate experimental `python -m stark_convert.gguf_import` route imports Qwen3 Q8_0 GGUF files with original HF metadata sidecars. It preserves integer compression and rounds F16 scales to native BF16, then independently verifies every emitted code and coefficient. The [Qwen3 GGUF experiment](../../docs/QWEN3_GGUF_IMPORT_EXPERIMENT.md) records scoped correctness, memory, and performance comparisons. It does not promote catalog qualification or add other GGUF quantization types.
+## Set up
 
-The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 6](../../docs/MODEL_CONVERSION_MILESTONE_6.md) adds ModernBERT classifier roots and generic classifier conversion; its public validation fixtures are distinct from the two inaccessible catalog routers. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) retains its dense and 4-bit MLX LLaMBA qualifications and open dense latency objective. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
-
-## Convert a model
-
-Run from the repository root with managed Python 3.13.13 through `uv`:
+Install `uv`, then run these commands from the repository root. The converter uses Python 3.13.13.
 
 ```sh
 uv sync --project tools/converter --locked
-uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
-  --revision c1899de289a04d12100db370d81485cdf75e47ca \
-  --write-source-manifest runtime/converter-sources/qwen3-06b.json \
-  --output models/qwen3-06b-stark
 ```
 
-Remote inputs resolve primary and required external repositories to immutable Hugging Face commits before downloading. Authentication uses Hugging Face's existing credential mechanism, and downloads stay in its local cache. Local checkpoints require their registered profile identity:
+## Convert from Hugging Face
+
+Pass the model's Hugging Face repository name:
 
 ```sh
-uv run --project tools/converter --locked stark-convert /absolute/path/to/checkpoint \
-  --repo Qwen/Qwen3-0.6B --output models/local-qwen3-stark
+uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
+  --output models/qwen3
 ```
 
-`--backend auto` and `--backend streaming` both use the independent implementation. BF16 is the default output dtype. All implemented dense adapters perform bounded BF16/F16/F32 conversion with frozen reference-byte tests. Mixed source dtypes within a fused group fail explicitly. Existing output directories are refused. The converter stages with owner-only permissions, validates complete supported layouts, and publishes using an atomic no-replace rename on macOS or Linux. Failed conversions remove staging output.
+This downloads the model and writes the converted files to `models/qwen3`. Replace the repository name and output path for another [supported model](#catalog-coverage-and-qualification). Gated models require access through your existing Hugging Face credentials.
 
-The command emits aggregate timings, hashes, and capability status. Its private `conversion.json` receipt binds source revisions/content hashes, converter inputs, the dependency lock, emitted files, and transformation workspace use. Errors expose fixed categories without exception text or native diagnostics.
+## Convert a downloaded folder
+
+Point the converter at your local model folder:
+
+```sh
+uv run --project tools/converter --locked stark-convert /path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output models/local-model
+```
+
+Replace `/path/to/downloaded-model` with your folder's path. This conversion uses local model files and needs no Hugging Face account.
+
+Keep the full safetensors checkpoint together. The folder needs:
+
+- `config.json`
+- `tokenizer.json` and `tokenizer_config.json`
+- All `.safetensors` files, plus the index file if the weights are split into shards
+
+Language models also need a chat template and end-of-sequence (EOS) token IDs in their metadata. The converter reads `generation_config.json` and `chat_template.jinja` when present. See [metadata requirements](#future-checkpoints-and-architecture-tracking) for details.
+
+## Find the result
+
+Your output folder contains the converted config, tokenizer and weights, plus a `conversion.json` receipt. Use a new output folder each time; existing folders are refused.
+
+BF16 is the default output format. Conversion validates a supported model layout. Engine loading is tracked separately; generic conversions start native-unverified.
+
+## Optional settings
+
+| Need | Option |
+| --- | --- |
+| Convert a specific Hugging Face revision | `--revision COMMIT` |
+| Save source information for offline replay | `--write-source-manifest PATH` |
+| Require an exact recorded engine loading check | `--require-native-support` |
+
+For a downloaded model in the [catalog](#catalog-coverage-and-qualification), use its registered profile:
+
+```sh
+uv run --project tools/converter --locked stark-convert /path/to/downloaded-model \
+  --repo Qwen/Qwen3-0.6B --offline --output models/local-qwen3
+```
+
+Some catalog profiles use metadata from another repository. Those profiles need a complete source manifest for offline conversion. Use the generic command above when your model folder has all its own metadata and you want the generic profile's plain defaults.
+
+See [standalone installation](#install-outside-the-checkout) for using a wheel outside this checkout. The [hardening checklist](../../docs/MODEL_CONVERSION_HARDENING.md) tracks current tool work; further model coverage is deferred.
+
+## Experimental Qwen3 GGUF import
+
+The separate experimental `python -m stark_convert.gguf_import` route imports Qwen3 Q8_0 GGUF files with original HF metadata sidecars. It preserves integer compression and rounds F16 scales to native BF16, then independently verifies every emitted code and coefficient. The [Qwen3 GGUF experiment](../../docs/QWEN3_GGUF_IMPORT_EXPERIMENT.md) records scoped correctness, memory, and performance comparisons. It does not promote catalog qualification or add other GGUF quantization types.
 
 ## Catalog coverage and qualification
 
@@ -130,7 +170,7 @@ Stark's supported dense loader selects BF16 weights. F16/F32 outputs are convers
 
 ## Measured improvements over Lalamo
 
-Version 0.9.0 benchmarks two public real-weight ModernBERT fixtures with explicit local synthetic chat-template overlays and BF16 output:
+The preserved version 0.9.0 benchmarks two public real-weight ModernBERT fixtures with explicit local synthetic chat-template overlays and BF16 output:
 
 | Public classifier fixture | Stark median | Lalamo median | Lower time | Lower sampled RSS |
 | --- | ---: | ---: | ---: | ---: |
@@ -216,11 +256,45 @@ uv run --project tools/converter --locked stark-convert-benchmark \
 
 The benchmark starts a fresh streaming process for every repeat, warms source files, and excludes setup/downloads. `--reference-output` is optional and compares independently generated frozen artifacts: tensor names/shapes/dtypes/payload hashes, tensor specs/logical metadata, complete config, and normalized tokenizer. Reference generation occurs externally before timed runs. The benchmark does not measure reference conversion time or produce a speedup ratio. Whole-file safetensors hashes may differ when serialization order differs while all tensor payloads match.
 
+Version 0.9.1 uses the current installed Python for fresh processes and records that launcher in schema-3 reports. Historical measurements retain their original protocols. To benchmark an anonymous local folder, omit `--repo` and add `--metadata-profile hf-generic`; `--architecture` and `--model-kind` are forwarded to conversion. Reports are saved atomically with private permissions throughout the run. Errors and interruption preserve completed measurements and identify the failed repeat; an incomplete or failed report never qualifies as passing evidence. See the [failure contract](../../docs/MODEL_CONVERSION_HARDENING.md#benchmark-report-contract).
+
 Reported complete CLI time includes startup, conversion, verification, and receipt hashing. Process-tree RSS is sampled every 10 ms; shared pages can be counted more than once and brief peaks may be missed. The harness rejects source, reference, and converter-input changes during the run. Measurements run serially with other model-dependent work paused.
 
 The optional metadata parity tests consume supplied private artifacts through `STARK_CONVERT_REFERENCE_ARTIFACTS`; they never install or invoke Lalamo. Each artifact profile uses `<root>/<repo with slash replaced by __>/provenance.json`, `sources/<repo>/...`, and `expected/config.json` plus `expected/tokenizer.json`. The provenance field `reference_revision` must equal the pin below. Unsupplied profiles remain unqualified.
 
 Models and permitted native aggregate/hash validation artifacts remain in ignored private storage. Only load-only readiness/EOF aggregates and hashes were retained. Publish aggregate outcomes and hashes only. Do not capture prompts, responses, token vectors, decision probabilities, credentials, or exception dumps. The [historical prototype evidence](../../docs/MODEL_CONVERSION.md) retains its original implementation and lock hashes; its timing ratios apply to that prototype only.
+
+## Install outside the checkout
+
+Version 0.9.1 supports local wheel installation. Build and export locked dependencies from the repository, then install into a managed Python environment:
+
+```sh
+uv build tools/converter --python 3.13.13 --out-dir runtime/converter-package
+uv export --project tools/converter --locked --no-dev --no-emit-project \
+  --output-file runtime/converter-package/requirements.txt
+uv venv --python 3.13.13 /absolute/path/to/converter-env
+uv pip install --python /absolute/path/to/converter-env/bin/python --require-hashes \
+  -r runtime/converter-package/requirements.txt
+uv pip install --python /absolute/path/to/converter-env/bin/python --no-deps \
+  runtime/converter-package/stark_convert-0.9.1-py3-none-any.whl
+/absolute/path/to/converter-env/bin/stark-convert --version
+/absolute/path/to/converter-env/bin/stark-convert /absolute/path/to/downloaded-model \
+  --metadata-profile hf-generic --offline --output /absolute/path/to/converted-model
+```
+
+Installed conversion and benchmarking use packaged provenance inputs. Editable installs remain checkout-bound. The bundled lock identifies intended dependencies; the hash-checked export enforces their versions. Package publication remains separate work.
+
+## Conversion behavior
+
+The converter uses independent streaming adapters. It has no Lalamo, JAX or PyTorch runtime dependency; unsupported combinations fail explicitly.
+
+`--backend auto` and `--backend streaming` both use the independent implementation. BF16 is the default output dtype. All implemented dense adapters perform bounded BF16/F16/F32 conversion with frozen reference-byte tests. Mixed source dtypes within a fused group fail explicitly. Existing output directories are refused. The converter stages with owner-only permissions, validates complete supported layouts, and publishes using an atomic no-replace rename on macOS or Linux. Failed conversions remove staging output.
+
+The command emits aggregate timings, hashes, and capability status. Its private `conversion.json` receipt binds source revisions/content hashes, converter inputs, the dependency lock, emitted files, and transformation workspace use. Errors expose fixed categories without exception text or native diagnostics.
+
+## Validation history
+
+The [replacement plan](../../docs/MODEL_CONVERSION_PLAN.md) targets the complete built-in inventory at the pinned Lalamo reference revision. [Milestone 6](../../docs/MODEL_CONVERSION_MILESTONE_6.md) adds ModernBERT classifier roots and generic classifier conversion; its public validation fixtures are distinct from the two inaccessible catalog routers. [Milestone 5](../../docs/MODEL_CONVERSION_MILESTONE_5.md) retains its dense and 4-bit MLX LLaMBA qualifications and open dense latency objective. [Milestone 4](../../docs/MODEL_CONVERSION_MILESTONE_4.md) adds dense Qwen3.5 text/DeltaNet, LFM2 short-convolution/attention and explicit conversion of future checkpoints through supported architecture adapters. Its [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds existing affine 4/8-bit weights for both hybrid architectures. [Milestone 3 latency evidence](../../docs/MODEL_CONVERSION_MILESTONE_3_LATENCY.md) records the sequential MLX writer and its fresh comparison against the previous implementation and Lalamo. The [dense MLX qualification packet](../../docs/MODEL_CONVERSION_MILESTONE_3_DENSE.md), [first MLX packet](../../docs/MODEL_CONVERSION_MILESTONE_3.md), [milestone 2](../../docs/MODEL_CONVERSION_MILESTONE_2.md) and [milestone 1](../../docs/MODEL_CONVERSION_MILESTONE_1.md) retain their original source versions and results.
 
 ## Provenance and replacement policy
 

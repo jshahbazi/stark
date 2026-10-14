@@ -1,13 +1,14 @@
 """Comprehensive inventories invalidate evidence for relevant tooling changes."""
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-from stark_convert.provenance import toolchain_provenance
+from stark_convert.provenance import SOURCE_INPUTS, toolchain_provenance
 
 
 @pytest.fixture
@@ -23,6 +24,8 @@ def project(tmp_path):
         ".python-version",
         "LICENSE.lalamo",
         "uv.lock",
+        "setup.py",
+        "MANIFEST.in",
     ):
         path = root / filename
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,10 +66,32 @@ def test_nested_addition_and_removal_change_manifest_without_filename_collisions
     assert removal["converter_sources_sha256"] != baseline["converter_sources_sha256"]
 
 
-def test_deleted_exporter_invalidates_evidence(project):
+@pytest.mark.parametrize("name", SOURCE_INPUTS)
+def test_missing_build_input_fails_closed(project, name):
+    (project / name).unlink()
+    with pytest.raises(ValueError, match="^missing_provenance_input$"):
+        toolchain_provenance(project)
+
+
+def test_relocated_package_has_the_same_identity_and_rejects_capsule_changes(project, tmp_path):
     baseline = toolchain_provenance(project)
-    (project / "scripts" / "export_conversion_catalog.py").unlink()
-    assert toolchain_provenance(project)["converter_sources_sha256"] != baseline["converter_sources_sha256"]
+    installed = tmp_path / "site-packages"
+    shutil.copytree(project / "stark_convert", installed / "stark_convert")
+    capsule = installed / "stark_convert" / "_build_inputs"
+    for name in (*SOURCE_INPUTS, "uv.lock"):
+        path = capsule / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(project / name, path)
+    assert toolchain_provenance(installed) == baseline
+    cache = capsule / "__pycache__"
+    cache.mkdir()
+    (cache / "setup.cpython-313.pyc").write_bytes(b"interpreter cache")
+    assert toolchain_provenance(installed) == baseline
+    (capsule / "setup.py").write_text("changed package build\n")
+    assert toolchain_provenance(installed) != baseline
+    (capsule / "unexpected.txt").write_text("unaccounted input\n")
+    with pytest.raises(ValueError, match="^invalid_packaged_provenance$"):
+        toolchain_provenance(installed)
 
 
 def test_dependency_lock_hash_is_explicit_and_invalidates_evidence(project):
@@ -75,6 +100,12 @@ def test_dependency_lock_hash_is_explicit_and_invalidates_evidence(project):
     changed = toolchain_provenance(project)
     assert changed != baseline
     assert changed["converter_lock_sha256"] != baseline["converter_lock_sha256"]
+
+
+def test_stale_capsule_cannot_hide_changed_checkout_inputs(project):
+    (project / "stark_convert" / "_build_inputs").mkdir()
+    with pytest.raises(ValueError, match="^ambiguous_packaged_provenance$"):
+        toolchain_provenance(project)
 
 
 def test_runtime_python_caches_are_not_conversion_inputs(project):

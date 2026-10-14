@@ -23,6 +23,9 @@ result
 
 # Python
 *__pycache__
+/tools/converter/build/
+/tools/converter/dist/
+/tools/converter/*.egg-info/
 
 # AI tools
 .cursor
