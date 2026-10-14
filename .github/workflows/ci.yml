@@ -48,10 +48,17 @@ jobs:
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
+      - name: Check installed converter outside the checkout
+        env:
+          HF_HUB_OFFLINE: '1'
+          TOKENIZERS_PARALLELISM: 'false'
+        run: uv run --project tools/converter --locked --python 3.13.13 python tools/converter/scripts/check_installed_package.py
       - name: Check Rust formatting
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
-          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score --check
+          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate --check
+      - name: Test model-free generation protocol
+        run: cargo test --locked -p stark-generate --no-default-features
       - name: Check locked dependency resolution
         run: |
           cargo metadata --locked --format-version=1 > /dev/null
@@ -91,6 +98,8 @@ jobs:
         run: cc -std=c11 -O2 -Wall -Wextra -Werror scripts/stark-validation-reap.c -o "$RUNNER_TEMP/stark-validation-reap"
       - name: Run model-free process tests
         run: uv run --python 3.12.13 python scripts/test_scoring_process.py --reaper "$RUNNER_TEMP/stark-validation-reap"
+      - name: Test generation validation contracts
+        run: uv run --no-project --python 3.12.13 python -m unittest scripts/test_colgrep_generation_validation.py
 
   scoring:
     name: Scorer (${{ matrix.configuration }})
@@ -126,6 +135,20 @@ jobs:
         run: cargo clippy --release --locked -p stark-score --all-targets --features "$SCORING_FEATURES" -- -D warnings
       - name: Run synthetic scorer tests
         run: cargo test --release --locked -p stark-score --features "$SCORING_FEATURES" -- --test-threads=1
+      - name: Build and test generation worker
+        if: matrix.configuration == 'default'
+        run: |
+          cargo build --release --locked -p stark-generate
+          cargo clippy --release --locked -p stark-generate --all-targets -- -D warnings
+          cargo test --release --locked -p stark-generate -- --test-threads=1
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        if: matrix.configuration == 'default'
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Check generation diagnostic isolation
+        if: matrix.configuration == 'default'
+        run: uv run --no-project --python 3.12.13 python scripts/test_generation_process.py --binary target/release/stark-generate
 
   compatibility:
     name: Inherited dependency compatibility

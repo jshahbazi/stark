@@ -3,6 +3,7 @@ members = [
     "crates/stark-engine",
     "crates/stark-engine-macros",
     "crates/stark-score",
+    "crates/stark-generate",
     # --- to be rewritten
     "crates/legacy/bindings-types",
     "crates/legacy/bindings",

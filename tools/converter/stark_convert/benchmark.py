@@ -10,12 +10,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import platform
 import signal
 import statistics
 import struct
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -340,20 +343,34 @@ def _measure(command: list[str]) -> dict[str, object]:
     if child.returncode != 0:
         raise BenchmarkError("backend_conversion_failed")
     try:
-        conversion = json.loads(stdout)
-    except (ValueError, TypeError):
+        conversion = json.loads(
+            stdout, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite_number
+        )
+    except (ValueError, TypeError, BenchmarkError):
         raise BenchmarkError("invalid_backend_metrics") from None
-    if not isinstance(conversion, dict) or conversion.get("backend") != "streaming":
+    if (
+        not isinstance(conversion, dict)
+        or conversion.get("backend") != "streaming"
+        or conversion.get("status") != "ok"
+    ):
         raise BenchmarkError("invalid_backend_metrics")
+    seconds = conversion.get("elapsed_seconds")
+    if type(seconds) not in (int, float) or seconds < 0 or seconds > sys.float_info.max:
+        raise BenchmarkError("invalid_backend_metrics")
+    if not math.isfinite(seconds):
+        raise BenchmarkError("invalid_backend_metrics")
+    for name in ("total_rss_bytes", "output_bytes", "tensor_count"):
+        if type(conversion.get(name)) is not int or conversion[name] < 1:
+            raise BenchmarkError("invalid_backend_metrics")
     return {
         "backend": conversion["backend"],
         "end_to_end_seconds": elapsed,
-        "cli_conversion_seconds": conversion.get("elapsed_seconds"),
+        "cli_conversion_seconds": seconds,
         "peak_process_tree_rss_bytes": peak,
         "rss_samples": samples,
-        "reported_max_rss_bytes": conversion.get("total_rss_bytes"),
-        "output_bytes": conversion.get("output_bytes"),
-        "tensor_count": conversion.get("tensor_count", conversion.get("tensors")),
+        "reported_max_rss_bytes": conversion["total_rss_bytes"],
+        "output_bytes": conversion["output_bytes"],
+        "tensor_count": conversion["tensor_count"],
     }
 
 
@@ -375,21 +392,29 @@ def _summary(runs: list[dict[str, object]], backend: str) -> dict[str, object]:
     }
 
 
-def _sync_environment(project: Path) -> None:
-    result = subprocess.run(
-        ["uv", "sync", "--project", str(project), "--locked"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-    if result.returncode:
-        raise BenchmarkError("dependency_setup_failed")
+def _write_report(output: Path, report: dict[str, object]) -> None:
+    """Replace a complete private report; preserve the previous one on failure."""
+    temporary = None
+    try:
+        payload = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=output, prefix=".report-", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output / "report.json")
+    except (OSError, ValueError, TypeError):
+        raise BenchmarkError("report_write_failed") from None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def benchmark(args: argparse.Namespace) -> dict[str, object]:
     from .cli import toolchain_provenance
 
-    project = Path(__file__).resolve().parents[1]
     source = args.source.resolve()
     if not source.is_dir():
         raise BenchmarkError("missing_source_directory")
@@ -415,18 +440,18 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
         raise BenchmarkError("output_inside_reference")
     if args.output.exists():
         raise BenchmarkError("output_exists")
-    args.output.mkdir(parents=True, mode=0o700)
-    args.output.chmod(0o700)
-    # Installation and checkpoint hashing are completed before any timed run.
-    _sync_environment(project)
+    # Hashing and provenance validation precede output creation and timing.
     tooling = toolchain_provenance()
     source_hash, source_bytes = _source_digest(source, files)
     report: dict[str, object] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "status": "running",
         "repo": args.repo,
         "dtype": args.dtype,
         "chunk_mib": args.chunk_mib,
+        "model_kind": getattr(args, "model_kind", "language"),
+        "architecture": getattr(args, "architecture", None),
+        "metadata_profile": getattr(args, "metadata_profile", None),
         **tooling,
         "source_manifest_sha256": source_hash,
         "source_bytes": source_bytes,
@@ -444,6 +469,7 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             "physical_memory_bytes": psutil.virtual_memory().total,
         },
         "measurement": {
+            "launcher": "current_python",
             "fresh_process_per_run": True,
             "source_cache_warmed_before_each_run": True,
             "setup_downloads_excluded": True,
@@ -463,20 +489,53 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
     comparisons: list[dict[str, object]] = []
     report["runs"] = runs
     report["parity"] = comparisons
+    args.output.mkdir(parents=True, mode=0o700)
+    args.output.chmod(0o700)
+    _write_report(args.output, report)
+    try:
+        _run_benchmark(args, report, files, source, source_manifest, reference)
+        # Checkpoint changes during the benchmark invalidate source-bound evidence.
+        if _source_digest(source, files)[0] != source_hash or _source_files(source) != files:
+            report["status"] = "source_changed"
+        if source_manifest is not None and _file_sha256(source_manifest) != source_manifest_hash:
+            report["status"] = "source_changed"
+        if reference is not None and (
+            _source_digest(reference, reference_files)[0] != reference_hash
+            or _source_files(reference) != reference_files
+        ):
+            report["status"] = "reference_changed"
+        if toolchain_provenance() != tooling:
+            report["status"] = "tooling_changed"
+        if report["status"] == "running":
+            report["status"] = "passed"
+    except BaseException as error:
+        report["status"] = "failed"
+        report["error_category"] = (
+            "interrupted"
+            if isinstance(error, KeyboardInterrupt)
+            else str(error)
+            if isinstance(error, BenchmarkError)
+            else "benchmark_failed"
+        )
+        report["failed_repeat"] = report.get("active_repeat")
+    report.pop("active_repeat", None)
+    _write_report(args.output, report)
+    return report
+
+
+def _run_benchmark(args, report, files, source, source_manifest, reference):
+    runs = report["runs"]
+    comparisons = report["parity"]
     for repeat in range(args.repeats):
+        report["active_repeat"] = repeat + 1
+        _write_report(args.output, report)
         _warm_source(files)
         destination = args.output / f"repeat-{repeat + 1}" / "streaming"
         command = [
-            "uv",
-            "run",
-            "--project",
-            str(project),
-            "--locked",
-            "--no-sync",
-            "stark-convert",
+            sys.executable,
+            "-m",
+            "stark_convert.cli",
             str(source),
-            "--repo",
-            args.repo,
             "--offline",
             "--output",
             str(destination),
@@ -485,6 +544,12 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             "--chunk-mib",
             str(args.chunk_mib),
         ]
+        if args.repo is not None:
+            command.extend(("--repo", args.repo))
+        for name in ("model_kind", "architecture", "metadata_profile"):
+            value = getattr(args, name, None)
+            if value is not None:
+                command.extend(("--" + name.replace("_", "-"), value))
         if source_manifest is not None:
             command.extend(("--source-manifest", str(source_manifest)))
         metrics = _measure(command)
@@ -492,6 +557,8 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             raise BenchmarkError("unexpected_backend_selection")
         metrics.update(repeat=repeat + 1)
         runs.append(metrics)
+        report["summary"] = {"streaming": _summary(runs, "streaming")}
+        _write_report(args.output, report)
         if reference is not None:
             parity = compare_outputs(destination, reference)
             parity["repeat"] = repeat + 1
@@ -499,29 +566,18 @@ def benchmark(args: argparse.Namespace) -> dict[str, object]:
             if not parity["passed"]:
                 report["status"] = "parity_failed"
                 break
-    report["summary"] = {"streaming": _summary(runs, "streaming")}
-    if report["status"] == "running":
-        report["status"] = "passed"
-    # Checkpoint changes during the benchmark invalidate source-bound evidence.
-    if _source_digest(source, files)[0] != source_hash or _source_files(source) != files:
-        report["status"] = "source_changed"
-    if source_manifest is not None and _file_sha256(source_manifest) != source_manifest_hash:
-        report["status"] = "source_changed"
-    if reference is not None and (
-        _source_digest(reference, reference_files)[0] != reference_hash or _source_files(reference) != reference_files
-    ):
-        report["status"] = "reference_changed"
-    if toolchain_provenance() != tooling:
-        report["status"] = "tooling_changed"
-    return report
 
 
 def main() -> int:
     from .cli import _Parser
+    from .registry import CONFIG_ADAPTERS
 
     parser = _Parser(description=__doc__)
     parser.add_argument("--source", type=Path, required=True)
-    parser.add_argument("--repo", required=True)
+    parser.add_argument("--repo", help="Catalog identity for a local checkpoint")
+    parser.add_argument("--metadata-profile", choices=("hf-generic",))
+    parser.add_argument("--architecture", choices=sorted(set(CONFIG_ADAPTERS.values())))
+    parser.add_argument("--model-kind", choices=("language", "classifier", "tts"), default="language")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--repeats", type=int, default=3)
@@ -535,15 +591,18 @@ def main() -> int:
     try:
         report = benchmark(args)
     except BaseException as error:
-        category = str(error) if isinstance(error, BenchmarkError) else "benchmark_failed"
+        category = (
+            "interrupted"
+            if isinstance(error, KeyboardInterrupt)
+            else str(error)
+            if isinstance(error, BenchmarkError)
+            else "benchmark_failed"
+        )
         print(json.dumps({"status": "failed", "error_category": category}, separators=(",", ":")))
         return 130 if isinstance(error, KeyboardInterrupt) else 1
-    report_path = args.output / "report.json"
-    descriptor = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as handle:
-        json.dump(report, handle, indent=2, sort_keys=True, allow_nan=False)
-        handle.write("\n")
     print(json.dumps(report, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    if report.get("error_category") == "interrupted":
+        return 130
     return 0 if report["status"] == "passed" else 1
 
 

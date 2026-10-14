@@ -1,0 +1,159 @@
+{
+  "schema": 1,
+  "scope": "finish_divergence_diagnosis",
+  "reference_report_sha256": "c8ac00f49bd5687946ee431ac3d638899763df0066167b8100a6f3c6f1dd3b82",
+  "original_reference_passed": false,
+  "native_generated_ids_sha256": "f598b0a42da644a93a9c096213049c52363d740e268bb4eec25f7b915f901388",
+  "reference_generated_ids_sha256": "ec01201b8748dee6dc40d9b69e2ae2f7bf3c72d76f43512320c79d477b9d6f52",
+  "original_finish_output_binding": true,
+  "model_revision": "f798a61129c6decb5166864e0a3c98373e62c764",
+  "upstream_harness_revision": "c6c091d7ee14c81206bb28af90d8ff506fd0235e",
+  "reference": {
+    "torch": "2.14.1",
+    "transformers": "5.15.1",
+    "dtype": "bfloat16",
+    "device": "mps",
+    "attention": "eager"
+  },
+  "native_tokens": 171,
+  "reference_tokens": 173,
+  "common_prefix_tokens": 116,
+  "identical_teacher_forced_prefix_tokens": 1509,
+  "finish_location_set_exact": true,
+  "finish_line_coverage_exact": true,
+  "native_locations_valid": true,
+  "reference_locations_valid": true,
+  "eos_exact": true,
+  "cached_bf16_reference": {
+    "top1_top2_margin": 0.125,
+    "native_choice_gap_from_top1": 0.125,
+    "reference_choice_gap_from_top1": 0.0,
+    "native_choice_rank_strict": 2,
+    "reference_choice_rank_strict": 1,
+    "top_tie_count": 1,
+    "native_choice_is_argmax": false,
+    "reference_choice_is_argmax": true
+  },
+  "teacher_forced_bf16_reference": {
+    "top1_top2_margin": 0.125,
+    "native_choice_gap_from_top1": 0.125,
+    "reference_choice_gap_from_top1": 0.0,
+    "native_choice_rank_strict": 2,
+    "reference_choice_rank_strict": 1,
+    "top_tie_count": 1,
+    "native_choice_is_argmax": false,
+    "reference_choice_is_argmax": true
+  },
+  "cached_vs_teacher_forced_bf16_full_vocab": {
+    "max_abs_error": 0.25,
+    "mean_abs_error": 0.04606163442573127,
+    "rmse": 0.056816585738674416,
+    "finite": true
+  },
+  "generation_worker_sha256": "8a945373ee155998a274d9d4bb876f4389c0123c25d89aeb53d09680d2fe36ff",
+  "score_worker_sha256": "e3dd89371dc9bc042702773bed9ebd2f358e86f151f478232d69beec7dfffb06",
+  "diagnosis_script_sha256": "0edf04f590e48f4c401ff1bc7a3aa1fb8697eec606aefdcb4baf96420f2b001f",
+  "validator_sha256": "7b284817446e68f656023247c1c4f4472f160dccc0d017631d7c90e8ba92126c",
+  "tools_lock_sha256": "acf7c45b6f7feac003986526a309a911d35bf68266e4455fbe33457b354378f9",
+  "cargo_lock_sha256": "ebf29f018534a4f6d9a24734f9c0f87dbd78e66b80bf88df7e4c59d96a729cd2",
+  "source_files": {
+    "chat_template.jinja": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+    "config.json": "4329e012eb71be025875b362aad9a3cdb7c09a1fd62628f9f35ce63a3a0053b1",
+    "generation_config.json": "8643a6f784ffacefd3441fe1225237ea2123f107709be2bbcb36bf461892a042",
+    "model-00001-of-00002.safetensors": "19c22d8e7c3d1f3276889b5277c4bd9d1d7631687b8797285f56809d1de18f36",
+    "model-00002-of-00002.safetensors": "22be60355777581fe0ded99c7bf1b0d72d3a4ae863c069f5fbb4ff36549c483f",
+    "model.safetensors.index.json": "58a788415aad8027fdea0c07f00d65c0144b57a905a0a15c5c1b549d25e9bf77",
+    "tokenizer.json": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81",
+    "tokenizer_config.json": "5378dcce33a455cfa6a7cd4a5ab54511e787b84b7334ec2d04e54b1d5a1a3cb4"
+  },
+  "model_files": {
+    "config.json": "b21e82eea954b868d707eebb4a859aefb54f84da9d9282b01debfae8d60cd8f1",
+    "conversion.json": "70b199047fffd0a05c21e3cb797e5a4554c1ea7b25975441ff11eb43201b01f1",
+    "model.safetensors": "86325c4d8191aa39275f68cd417dabbb51ead1d719be4e7eba1133644b06cd5b",
+    "tokenizer.json": "3e065a558a034185fe299917b398685c1facd0169a9eea1e629eb30c171fed81"
+  },
+  "harness_files": {
+    "chat_template.jinja": "cc945752db555d60949b16989df4ccfeb52a313d6b4b5c5229dd786e2e9fcf1c",
+    "system_prompt.txt": "ea2097d3674ae70d0e0de9447f6d2118af8e091c65b7cbe5ba1c2787223e2897",
+    "tools.json": "902a4bba8e19c34b00df8626c02c0ff685a578db8de7e54efc934f4cd72b65df"
+  },
+  "generation_named_build": {
+    "source_commit": "b88afee92bd8fa8ad6a86ecaeec34a605c75c493",
+    "profile": "release",
+    "package": "stark-generate",
+    "features": [
+      "metal"
+    ],
+    "rust_toolchain": "1.98.1"
+  },
+  "score_build_declaration": {
+    "profile": "release",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+    "package_features": [
+      "probability-scoring"
+    ],
+    "engine_features": [
+      "metal"
+    ],
+    "feature_source": "caller_declared_build_profile_not_inferred_from_binary"
+  },
+  "teacher_forced_f32_reference": {
+    "top1_top2_margin": 0.10314750671386719,
+    "native_choice_gap_from_top1": 0.10314750671386719,
+    "reference_choice_gap_from_top1": 0.0,
+    "native_choice_rank_strict": 2,
+    "reference_choice_rank_strict": 1,
+    "top_tie_count": 1,
+    "native_choice_is_argmax": false,
+    "reference_choice_is_argmax": true
+  },
+  "teacher_forced_bf16_vs_f32_full_vocab": {
+    "max_abs_error": 0.20589971542358398,
+    "mean_abs_error": 0.03876828721064764,
+    "rmse": 0.04739578449255921,
+    "finite": true
+  },
+  "candidate_subset_count": 2,
+  "native_logit_scope": "candidate_subset_only_not_full_vocabulary_or_original_incremental_stream",
+  "native_cached_vs_fresh_argmax_exact": false,
+  "fresh_native_matches_cached_reference_argmax": true,
+  "fresh_native_matches_teacher_forced_reference_argmax": true,
+  "native_score_subset_argmax_matches_fresh_stream": true,
+  "native_score_reference_minus_native_choice_gap": 0.125,
+  "native_score_native_choice_gap_from_subset_top1": 0.125,
+  "native_score_subset_top_tie_count": 1,
+  "native_score_vs_cached_reference_candidate_subset": {
+    "max_abs_error": 0.125,
+    "mean_abs_error": 0.125,
+    "rmse": 0.125,
+    "finite": true
+  },
+  "native_score_vs_teacher_forced_reference_candidate_subset": {
+    "max_abs_error": 0.0,
+    "mean_abs_error": 0.0,
+    "rmse": 0.0,
+    "finite": true
+  },
+  "native_score_vs_f32_reference_candidate_subset": {
+    "max_abs_error": 0.10027694702148438,
+    "mean_abs_error": 0.08935070037841797,
+    "rmse": 0.09001627921558934,
+    "finite": true
+  },
+  "cached_reference_margin_within_observed_candidate_error": true,
+  "elapsed_seconds": 11.334815707989037,
+  "controls": {
+    "source_unchanged": true,
+    "model_unchanged": true,
+    "harness_unchanged": true,
+    "reference_report_unchanged": true,
+    "generation_worker_unchanged": true,
+    "score_worker_unchanged": true,
+    "validator_unchanged": true,
+    "diagnosis_script_unchanged": true,
+    "tools_lock_unchanged": true,
+    "cargo_lock_unchanged": true
+  },
+  "diagnosis_reproduced": true,
+  "interpretation": "Fresh native generation and score agree with BF16 teacher forcing on the selected candidates. The original incremental native choice differs at a small reference margin. Generation execution/history numerical drift is the leading explanation; the original incremental logits and a specific kernel root cause were not observed."
+}
