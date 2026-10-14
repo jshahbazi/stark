@@ -547,6 +547,67 @@ fn mxu_quant_parity_bf16(
 
 #[rstest]
 #[test_attr(stark_test)]
+#[case::small_split_k(24, 1024, 64)]
+#[case::partial_m_n(129, 256, 72)]
+#[case::large_tile_split_k(512, 1024, 128)]
+#[case::qwen3_qkv(33, 1024, 4096)]
+#[case::qwen3_output_projection(512, 2048, 1024)]
+#[case::qwen3_fused_mlp(128, 1024, 6144)]
+#[case::qwen3_down_projection(513, 3072, 1024)]
+fn paired_staged_w8_group32_preserves_independent_scales(
+    #[case] m: u32,
+    #[case] k: u32,
+    #[case] n: u32,
+) {
+    let context = MetalContext::new().expect("Metal context");
+    if !context.supports_mxu {
+        return;
+    }
+
+    let mut input = QuantInput::<bf16>::new(m, k, n, 32, 8, QuantizationMethod::ScaleSymmetric, 0);
+    let groups = (k / 32) as usize;
+    let words_per_row = (k / 4) as usize;
+    let mut expected_per_column = vec![0.0f32; n as usize];
+    // Exact dyadic values make the represented weights and every partial sum
+    // exact in F32. Alternating signed codes and independently varying scales
+    // catch accidentally shared coefficients, skipped groups, and bad strides.
+    for column in 0..n as usize {
+        for group in 0..groups {
+            let (code, centered_code) = if (group + column).is_multiple_of(2) {
+                (129u8, 1.0f32)
+            } else {
+                (126u8, -2.0f32)
+            };
+            let scale = ((1u32 << ((group + 2 * column) % 5)) as f32) / 512.0;
+            input.scales[column * groups + group] = bf16::from_f32(scale);
+            let word = u32::from_le_bytes([code; 4]);
+            let start = column * words_per_row + group * 8;
+            input.w_packed[start..start + 8].fill(word);
+            expected_per_column[column] += 32.0 * scale * centered_code;
+        }
+    }
+    for row in 0..m as usize {
+        input.x[row * k as usize..(row + 1) * k as usize].fill(bf16::from_f32(((row % 3 + 1) as f32) / 8.0));
+    }
+    let expected: Vec<bf16> = (0..m as usize)
+        .flat_map(|row| {
+            let activation = ((row % 3 + 1) as f32) / 8.0;
+            expected_per_column.iter().map(move |weight_sum| bf16::from_f32(activation * weight_sum))
+        })
+        .collect();
+
+    // Both metadata layouts are accepted by the native staged path.
+    for input in [input.clone(), input.with_group_output()] {
+        let actual = run_quant_metal::<bf16>(&context, &input, Some(GemmEngine::Mxu));
+        let mismatches =
+            expected.iter().zip(actual.iter()).filter(|(left, right)| left.to_bits() != right.to_bits()).count();
+        assert_eq!(actual.len(), expected.len(), "paired staging output shape");
+        assert_eq!(mismatches, 0, "paired staging must retain both independent group scales");
+    }
+}
+
+#[rstest]
+#[test_attr(stark_test)]
 #[case::sym_w4_gs32(16u32, 32u32, 4u32, QuantizationMethod::ScaleSymmetric)]
 #[case::sym_w8_gs64(16u32, 64u32, 8u32, QuantizationMethod::ScaleSymmetric)]
 #[case::sym_w4_gs128(32u32, 128u32, 4u32, QuantizationMethod::ScaleSymmetric)]

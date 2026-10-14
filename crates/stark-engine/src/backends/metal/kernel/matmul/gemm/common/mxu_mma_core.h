@@ -59,7 +59,11 @@ struct MxuMmaCore {
   STARK_CONST ushort TILES_N = SIMDGROUP_BLOCK_N / stark::matmul::MxuFragmentOps<>::FRAGMENT_COLS;
   STARK_CONST ushort TILES_K = SIMDGROUP_BLOCK_K / stark::matmul::MxuFragmentOps<>::FRAGMENT_ROWS;
 
-  STARK_CONST ushort THREADGROUP_BLOCK_K = Right::template outer_block_k<THREADGROUP_BLOCK_K_FP>();
+  STARK_CONST bool PAIR_STAGED_GROUPS = !Left::QUANTIZED && Right::BITS == 8 &&
+                                       Right::SCHEME == GemmBPrologueKind::ScaleSymmetricDequant &&
+                                       Right::GROUP_SIZE == 32;
+  STARK_CONST ushort THREADGROUP_BLOCK_K =
+      PAIR_STAGED_GROUPS ? 64 : Right::template outer_block_k<THREADGROUP_BLOCK_K_FP>();
   STARK_CONST ushort SHARED_STRIDE_B = THREADGROUP_BLOCK_K + 16 / sizeof(RightElementType);
   STARK_CONST ushort THREADGROUP_THREADS = SIMDGROUPS_PER_ROW * SIMDGROUPS_PER_COLUMN * METAL_SIMD_SIZE;
 

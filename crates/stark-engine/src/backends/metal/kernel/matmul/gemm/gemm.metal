@@ -13,12 +13,15 @@ using namespace stark::gemm;
 #define A_IS_INT8 (A_PROLOGUE == GemmAPrologueKind::Int8Symmetric)
 #define NEEDS_ASYMMETRIC_WEIGHT_CORRECTION (A_IS_INT8 && B_PROLOGUE != GemmBPrologueKind::ScaleSymmetricDequant)
 #define GEMM_MXU_QUANT (USE_MXU && B_PROLOGUE != GemmBPrologueKind::FullPrecision && !A_IS_INT8)
+#define GEMM_PAIRED_STAGED_GROUPS \
+  (GEMM_MXU_QUANT && BITS == 8 && B_PROLOGUE == GemmBPrologueKind::ScaleSymmetricDequant && GROUP_SIZE == 32)
+#define GEMM_STAGED_BLOCK_K (GEMM_PAIRED_STAGED_GROUPS ? 64 : int(GROUP_SIZE))
 #define GEMM_TGA_ELEMENTS                                                                                              \
   ((USE_MXU) ? 1 : (gemm_tiling_block_m(GEMM_TILING) * (gemm_tiling_block_k(GEMM_TILING) + 16 / int(sizeof(AT)))))
 // The A8 MXU route reads its scales into registers, so it asks for no
 // threadgroup B memory.
 #define GEMM_TGB_ELEMENTS                                                                                              \
-  ((USE_MXU) ? (GEMM_MXU_QUANT ? (gemm_tiling_block_n(GEMM_TILING) * (int(GROUP_SIZE) + 16 / int(sizeof(BT)))) : 1)    \
+  ((USE_MXU) ? (GEMM_MXU_QUANT ? (gemm_tiling_block_n(GEMM_TILING) * (GEMM_STAGED_BLOCK_K + 16 / int(sizeof(BT)))) : 1) \
              : (gemm_tiling_block_n(GEMM_TILING) * (gemm_tiling_block_k(GEMM_TILING) + 16 / int(sizeof(BT)))))
 
 template <
