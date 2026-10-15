@@ -79,3 +79,9 @@ Local validation used Rust 1.98.1 and checksum-verified OSV Scanner 2.6.0 on mac
 | --- | --- |
 | Root Cargo | `49a27c8d8b2eebc3bdf47d6957f5b2c8dbbb822ddd66090589a33bcbf1f35ec1` |
 | Inherited wasm example Cargo | `6db0b0c0a8231cf5c44d4fffee1b526402d4df2b67e4f772e9664100ae0f7217` |
+
+## PR #9 non-production rustls exception, 2026-10-15
+
+The maintainer accepted retaining rustls 0.23.45 for non-production checkpoint tests while Aikido Device Protection blocks the newly released patched version. The [temporary exception](RUSTLS_TEST_EXCEPTION.md) records four specific RustSec advisories, both Cargo lockfiles, the exact package checksum, and an exclusive 2026-11-14 UTC expiry. Dependency jobs enforce that scope before scanning, and OSV retains accepted findings as visible warnings. This is an accepted-risk decision; the dependency remains affected. Earlier source-bound scan and model validation records are preserved.
+
+Local validation on 2026-10-15 passed 28 report-policy and exception tests, the scoped preflight, repository policy, workflow syntax, and cargo-deny 0.20.2 with ten maintenance warnings under the accepted exception. Both Cargo lockfiles are unchanged. Fresh OSV scanning is assessed separately on the resulting source revision.

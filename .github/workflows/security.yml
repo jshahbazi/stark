@@ -31,6 +31,12 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Validate scoped advisory exceptions
+        run: uv run --no-project --python 3.12.13 python scripts/ci/check_dependency_exceptions.py
       - name: Install verified cargo-deny
         run: |
           archive="$RUNNER_TEMP/cargo-deny.tar.gz"
@@ -41,7 +47,7 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/cargo-deny-0.20.2-x86_64-unknown-linux-musl" >> "$GITHUB_PATH"
       - name: Check advisories, licenses and sources
-        # Maintenance notices remain visible; vulnerability advisories still fail.
+        # The preflight bounds accepted IDs; all other vulnerabilities still fail.
         run: cargo deny --locked --all-features check --warn unmaintained advisories licenses bans sources
 
   lockfiles:
@@ -56,6 +62,8 @@ jobs:
         with:
           version: '0.12.24'
           enable-cache: false
+      - name: Validate scoped advisory exceptions
+        run: uv run --no-project --python 3.12.13 python scripts/ci/check_dependency_exceptions.py
       - name: Install verified OSV Scanner
         run: |
           binary="$RUNNER_TEMP/osv-scanner"
@@ -88,6 +96,7 @@ jobs:
             exit 1
           fi
           uv run --no-project --python 3.12.13 python scripts/ci/check_osv_report.py "$report" \
+            --exceptions scripts/ci/dependency-exceptions.toml \
             --lockfile Cargo.lock \
             --lockfile crates/legacy/download-manager/examples/wasm/Cargo.lock \
             --lockfile tools/uv.lock \

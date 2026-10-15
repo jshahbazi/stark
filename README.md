@@ -10,7 +10,7 @@ Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), startin
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
 - **92–95% less sampled conversion memory across Qwen3.5 and LFM2 MLX tests.** LFM2 4-bit used 113.0 MiB versus 1,411.4 MiB; Qwen3.5 8-bit used 203.5 MiB versus 4,155.3 MiB. These are sampled process-tree RSS measurements. [Memory evidence](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
-- **85 of 110 pinned Lalamo profiles implemented, plus four Stark extensions.** Coverage includes 40 MLX profiles, hybrid/state-space models and ModernBERT sequence classifiers. Future compatible checkpoints can reuse architecture adapters.
+- **85 of 110 pinned Lalamo profiles implemented, plus five Stark extensions.** Coverage includes 40 MLX profiles, hybrid/state-space models and ModernBERT sequence classifiers. Future compatible checkpoints can reuse architecture adapters.
 - **Lightweight conversion tooling.** The installed converter needs no Lalamo, JAX or PyTorch. Transformations default to a bounded 8 MiB workspace, with full initial and final source verification.
 - **Reference-checked exports.** Validated conversion tuples match pinned Lalamo tensor payloads, specifications, logical config and tokenizer metadata. Immutable source revisions and content hashes make each result traceable.
 - **Exact probability readouts.** The scoring worker exposes raw candidate logits, log probabilities normalized over the full vocabulary, and temperature-calibrated probabilities over requested candidates.
@@ -65,7 +65,7 @@ The [Qwen3 GGUF experiment](docs/QWEN3_GGUF_IMPORT_EXPERIMENT.md) imports offici
 
 | Supported area | Current implementation |
 | --- | --- |
-| Dense language models | 43 built-in profiles: Qwen2/Qwen3/Qwen3.5 text, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2 and LLaMBA/Mamba2; four separately counted extensions include Gemma2 |
+| Dense language models | 43 built-in profiles: Qwen2/Qwen3/Qwen3.5 text, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2 and LLaMBA/Mamba2; five separately counted extensions include Gemma2 and Empero Qwen3.8-4B-Distill |
 | Affine MLX 4/8-bit | 40 built-in profiles across Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma text, LFM2 and LLaMBA; supported bit widths and layouts remain profile-specific |
 | Sequence classifiers | Two ModernBERT profiles, plus self-contained generic ModernBERT checkpoints using mean pooling and the supported GELU layout |
 | Future checkpoints | `hf-generic` dispatches by architecture and input format, validates complete config/layout/metadata, and supports private offline source replay |
@@ -81,7 +81,9 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
 
 A generic checkpoint needs self-contained config/tokenizer metadata and a supported chat template. ModernBERT additionally requires `--model-kind classifier`; optional `--architecture` asserts the expected architecture. Known catalog identities retain their authoritative metadata and packing rules. See [supported families, formats and examples](tools/converter/README.md#future-checkpoints-and-architecture-tracking).
 
-The catalog tracks **implementation**, while qualification tracks exact source/config/dtype/output/build tuples. **27 exact BF16 catalog tuples have named-build load-only qualifications; 62 implemented identities remain unqualified.** Generic outputs start native-unverified, and `--require-native-support` requires an exact stored catalog match. Classifier fixtures have separate private load-only proofs; both Mirai catalog repositories remain inaccessible to the current account and unqualified.
+For trained `Qwen3-4B-Instruct-2507` and `empero-ai/Qwen3.8-4B-Distill` checkpoints, see the [conversion and testing guide](docs/QWEN_TRAINED_CHECKPOINTS.md). Full or merged checkpoints use their own metadata through the generic route; adapter-only training outputs require merging first.
+
+The catalog tracks **implementation**, while qualification tracks exact source/config/dtype/output/build tuples. **27 exact BF16 catalog tuples have named-build load-only qualifications; 63 implemented identities remain unqualified.** Generic outputs start native-unverified, and `--require-native-support` requires an exact stored catalog match. Classifier fixtures have separate private load-only proofs; both Mirai catalog repositories remain inaccessible to the current account and unqualified.
 
 Twenty-five pinned built-ins remain planned, including specialized/MoE/multimodal and later-generation variants. Unsupported combinations fail explicitly. Complete Lalamo replacement remains an open goal. [Coverage and replacement plan](docs/MODEL_CONVERSION_PLAN.md).
 
@@ -152,7 +154,7 @@ An opt-in `--consecutive-cache` reuses one completed internal vocabulary-logit e
 
 Recorded JevK5 BF16 validation passed **243 evaluation cases / 486 cold-and-cache-hit replies**, with exact raw logits, log probabilities, calibrated candidate probabilities and tokenizations against frozen accepted Uzu scorer references. Calibration boundaries, full-vocabulary digests and process ownership have separate checks. This is source-bound scoring correctness evidence; precise engine latency benchmarking remains open. [Validation and build receipts](docs/VALIDATION.md).
 
-The latest converter packet passed **3,672 tests**, with 60 private-reference checks skipped, plus formatting, locked dependency and repository-policy checks. Architecture packets have independent technical reviews and exact tensor/spec/config/tokenizer comparisons. Real model weights and operational artifacts remain ignored/private. Completed benchmark model files are removed after review; small receipts, observations, manifests, recipes and hashes are retained. [Classifier validation and cleanup](docs/MODEL_CONVERSION_MILESTONE_6.md).
+The preserved milestone 6 converter packet passed **3,672 tests**, with 60 private-reference checks skipped, plus formatting, locked dependency and repository-policy checks. Architecture packets have independent technical reviews and exact tensor/spec/config/tokenizer comparisons. Real model weights and operational artifacts remain ignored/private. Completed benchmark model files are removed after review; small receipts, observations, manifests, recipes and hashes are retained. [Classifier validation and cleanup](docs/MODEL_CONVERSION_MILESTONE_6.md). Current Qwen trained-checkpoint checks are recorded in the [checkpoint guide](docs/QWEN_TRAINED_CHECKPOINTS.md#validation-boundaries).
 
 ## Scope, security and attribution
 

@@ -51,11 +51,16 @@ _KEYS = _COMMON_KEYS | {
     "mamba_ssm_dtype",
     "mlp_only_layers",
     "mtp_use_dedicated_embeddings",
+    "partial_rotary_factor",
 }
 
 
 def normalize_qwen35_config(config: dict) -> dict:
-    """Use the pinned importer's top-level-over-text-config precedence."""
+    """Normalize explicit text exports or the wrapper's top-level precedence."""
+    if config.get("model_type") == "qwen3_5_text":
+        if "text_config" in config or config.get("vision_config") is not None:
+            raise UnsupportedConversion("Qwen3.5 text-only config cannot declare a model wrapper")
+        return {**config, "model_type": "qwen3_5"}
     text = config.get("text_config", {})
     if not isinstance(text, dict):
         raise ConversionError("Qwen3.5 text_config must be an object")
@@ -136,6 +141,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         raise ConversionError("Qwen3.5 requires rope_parameters")
     base = _positive_float(rope_parameters, "rope_theta", 10000.0)
     partial = _positive_float(rope_parameters, "partial_rotary_factor", 1.0)
+    if "partial_rotary_factor" in config and _positive_float(config, "partial_rotary_factor", 1.0) != partial:
+        raise ConversionError("Qwen3.5 rotary factors disagree")
     rotary = int(head_dim * partial)
     if partial > 1 or rotary < 2 or rotary % 2:
         raise ConversionError("Qwen3.5 rotary dimension must be positive and even")
@@ -158,10 +165,11 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         _bool(rope_parameters, "mrope_interleaved", False)
     if set(config) - _KEYS:
         unsupported.append("Qwen3.5 config options are outside implemented coverage")
-    if config.get("architectures", ["Qwen3_5ForConditionalGeneration"]) not in (
-        ["Qwen3_5ForConditionalGeneration"],
-        ["Qwen3_5ForCausalLM"],
-    ):
+    text_only = outer.get("model_type") == "qwen3_5_text"
+    architectures = (
+        (["Qwen3_5ForCausalLM"],) if text_only else (["Qwen3_5ForConditionalGeneration"], ["Qwen3_5ForCausalLM"])
+    )
+    if config.get("architectures", architectures[0]) not in architectures:
         unsupported.append("Qwen3.5 architecture is outside implemented text coverage")
     if config.get("hidden_act", "silu") != "silu" or _bool(config, "mlp_bias", False):
         unsupported.append("Qwen3.5 requires unbiased SiLU MLPs")

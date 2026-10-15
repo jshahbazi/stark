@@ -91,9 +91,37 @@ def _bool(config: dict, key: str, default: bool) -> bool:
 
 def _positive_float(config: dict, key: str, default: float) -> float:
     value = config.get(key, default)
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConversionError("Qwen3 configuration has an invalid numeric parameter")
-    return float(value)
+    try:
+        value = float(value)
+    except OverflowError:
+        raise ConversionError("Qwen3 configuration has an invalid numeric parameter") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ConversionError("Qwen3 configuration has an invalid numeric parameter")
+    return value
+
+
+def _unscaled_rope_theta(config: dict) -> float:
+    """Accept legacy theta or the explicit modern unscaled declaration only."""
+    if config.get("rope_scaling") is not None:
+        raise UnsupportedConversion("Scaled/custom RoPE is outside implemented coverage")
+    legacy = _positive_float(config, "rope_theta", 10000.0)
+    parameters = config.get("rope_parameters")
+    if parameters is None:
+        return legacy
+    if not isinstance(parameters, dict):
+        raise ConversionError("Qwen3 RoPE parameters must be an object")
+    if set(parameters) - {"rope_type", "rope_theta"}:
+        raise UnsupportedConversion("Custom Qwen3 RoPE options are outside implemented coverage")
+    if not isinstance(parameters.get("rope_type"), str) or "rope_theta" not in parameters:
+        raise ConversionError("Qwen3 requires explicit modern RoPE type and theta")
+    if parameters["rope_type"] != "default":
+        raise UnsupportedConversion("Scaled/custom RoPE is outside implemented coverage")
+    theta = _positive_float(parameters, "rope_theta", 10000.0)
+    if "rope_theta" in config and legacy != theta:
+        raise ConversionError("Qwen3 RoPE theta declarations disagree")
+    return theta
 
 
 def build_qwen3_plan(
@@ -113,8 +141,7 @@ def build_qwen3_plan(
     if config.get("hidden_act", "silu") != "silu":
         raise UnsupportedConversion("Qwen3 streaming requires SiLU")
     quantization = parse_mlx_quantization(config)
-    if any(config.get(key) is not None for key in ("rope_scaling", "rope_parameters")):
-        raise UnsupportedConversion("Scaled/custom RoPE is outside implemented coverage")
+    theta = _unscaled_rope_theta(config)
     if config.get("attention_dropout", 0.0) != 0.0:
         raise UnsupportedConversion("Non-default Qwen3 attention dropout is outside implemented coverage")
     if any(config.get(key, False) for key in ("is_encoder_decoder", "add_cross_attention", "tie_encoder_decoder")):
@@ -136,7 +163,6 @@ def build_qwen3_plan(
     vocab = _positive_int(config, "vocab_size")
     max_sequence_length = _positive_int(config, "max_position_embeddings", 32768)
     epsilon = _positive_float(config, "rms_norm_eps", 1e-6)
-    theta = _positive_float(config, "rope_theta", 10000.0)
     tied = _bool(config, "tie_word_embeddings", False)
     attention_bias = _bool(config, "attention_bias", False)
     if "qkv_bias" in config and _bool(config, "qkv_bias", False) != attention_bias:
