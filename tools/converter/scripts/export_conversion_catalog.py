@@ -19,6 +19,44 @@ import sys
 from pathlib import Path
 
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
+QWEN38_DISTILL_REPO = "empero-ai/Qwen3.8-4B-Distill"
+QWEN38_DISTILL_REVISION = "c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e"
+
+
+def qwen38_distill_extension(entries: list[dict]) -> dict:
+    """Bind the inspected dense hybrid and its own sidecars as a Stark profile.
+
+    This identity is outside the pinned Lalamo inventory. Its public config and
+    tensor headers match the existing Qwen3.5 text planner. Sampling defaults
+    come only from this repository, rather than the reference model's overrides.
+    """
+    reference_repo = "Qwen/Qwen3.5-4B"
+    entry = copy.deepcopy(next(entry for entry in entries if entry["repo"] == reference_repo))
+    entry.update(
+        repo=QWEN38_DISTILL_REPO,
+        catalog_origin="stark_extension",
+        profile_reference=reference_repo,
+        vendor="Empero AI",
+        family="Qwen3.8",
+        name="Qwen3.8-4B-Distill",
+        size="4B",
+        profile_source={
+            "repo": QWEN38_DISTILL_REPO,
+            "revision": QWEN38_DISTILL_REVISION,
+            "files_sha256": {
+                "config.json": "0d721c3b6d378efee9b92741e8e4a05018882d4441c2fbf4f793be9ffff1376f",
+                "generation_config.json": "f703e9fc5d6929b4e9e344a0cf4a188da6717da217fa24031067e35ab730ee53",
+                "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8",
+                "chat_template.jinja": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+            },
+        },
+    )
+    for file in entry["files"].values():
+        file["repo"] = QWEN38_DISTILL_REPO
+    # The inline template is read from its own tokenizer_config.json. The
+    # identical standalone template is fingerprinted above, not read twice.
+    entry["metadata"]["inline_sources"] = {}
+    return entry
 
 
 def _digest(value: object) -> str:
@@ -227,6 +265,7 @@ def export(reference: Path) -> dict:
     for file in gemma2["files"].values():
         file["repo"] = gemma2["repo"]
     extensions.append(gemma2)
+    extensions.append(qwen38_distill_extension(entries))
     return {
         "schema_version": 1,
         "reference": {

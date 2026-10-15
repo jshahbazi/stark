@@ -234,6 +234,45 @@ def test_generic_modern_llama_preserves_nested_rope_xml_template_and_multiple_st
     )
 
 
+def test_local_text_only_qwen35_export_converts_and_replays_with_own_metadata(tmp_path):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source, mtp=True, sharded=True)
+    config.update(
+        model_type="qwen3_5_text",
+        architectures=["Qwen3_5ForCausalLM"],
+        partial_rotary_factor=1.0,
+        dtype=config.pop("torch_dtype"),
+        bos_token_id=0,
+        pad_token_id=0,
+    )
+    (source / "config.json").write_text(json.dumps(config))
+    tokenizer = Tokenizer(models.WordLevel({f"[SYNTHETIC_{i}]": i for i in range(16)}, unk_token="[SYNTHETIC_0]"))
+    tokenizer.save(str(source / "tokenizer.json"))
+    template = "{% for message in messages %}{{ message.content }}{% endfor %}"
+    (source / "tokenizer_config.json").write_text(json.dumps({"chat_template": template}))
+    (source / "chat_template.jinja").write_text(template)
+    (source / "generation_config.json").write_text(json.dumps({"eos_token_id": [3, 1], "temperature": 0.47}))
+    selected = resolve_source(source, metadata_profile="hf-generic", architecture="qwen3_5", offline=True)
+    assert selected.conversion_profile == {"architecture": "qwen3_5", "metadata_profile": "hf-generic"}
+    manifest = tmp_path / "manifest.json"
+    selected.write_manifest(manifest)
+    replay = resolve_source(source, source_manifest=manifest, architecture="qwen3_5", offline=True, hub=object())
+    receipt = cli.convert(replay, tmp_path / "output", repo=None, architecture="qwen3_5", chunk_bytes=4096)
+    assert receipt["architecture"] == "qwen3_5"
+    assert receipt["metadata_profile"] == "hf-generic" and receipt["catalogued"] is False
+    assert receipt["native_qualification"] is None
+    assert receipt["capability"]["source_validation"] == "complete"
+    assert receipt["capability"]["native_loading"] == "runtime_blocked"
+    assert receipt["capability"]["execution"] == "unverified"
+    output = json.loads((tmp_path / "output/config.json").read_text())
+    assert output["generation_config"]["stop_token_ids"] == [1, 3]
+    assert output["generation_config"]["temperature"] == 0.47
+    assert output["token_codec_config"]["prompt_template"] == template
+    assert output["token_codec_config"]["reasoning_config"] is None
+    assert output["token_codec_config"]["output_parser_regex"] is None
+    assert output["token_codec_config"]["default_system_prompt"] is None
+
+
 @pytest.mark.parametrize("template", ["{{ messages }}", "different synthetic template"])
 def test_generic_duplicate_templates_must_match(tmp_path, template):
     source = future_source(tmp_path / "source")

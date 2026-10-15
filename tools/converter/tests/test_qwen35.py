@@ -281,7 +281,7 @@ def test_malformed_tensor_layouts_fail_closed(tmp_path, case):
     "field,value,error",
     [
         ("model_type", "qwen3_5_moe", UnsupportedConversion),
-        ("model_type", "qwen3_5_text", UnsupportedConversion),
+        ("model_type", "qwen3_5_text_moe", UnsupportedConversion),
         ("layer_types", ["linear_attention"], ConversionError),
         ("layer_types", ["linear_attention", "unknown"], ConversionError),
         ("layer_types", ["linear_attention", {}], ConversionError),
@@ -325,6 +325,65 @@ def test_declared_vision_extraction_preserves_input_signatures(tmp_path):
     config.pop("vision_config")
     (source / "config.json").write_text(json.dumps(config))
     with pytest.raises(ConversionError, match="unexpected"):
+        build_qwen35_plan(source)
+
+
+def test_text_only_config_alias_preserves_the_decoder_plan(tmp_path):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source, mtp=True)
+    original = build_qwen35_plan(source)
+    config.update(model_type="qwen3_5_text", partial_rotary_factor=1.0)
+    (source / "config.json").write_text(json.dumps(config))
+    text = build_qwen35_plan(source)
+    assert text == original
+    assert normalize_qwen35_config(config)["model_type"] == "qwen3_5"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"text_config": {}},
+        {"text_config": {"model_type": "qwen3_5_text"}},
+        {"vision_config": {"model_type": "qwen3_5"}},
+        {"architectures": ["Qwen3_5ForConditionalGeneration"]},
+    ],
+)
+def test_text_only_alias_rejects_wrapper_declarations(tmp_path, changes):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source)
+    config.update(model_type="qwen3_5_text", **changes)
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion):
+        build_qwen35_plan(source)
+
+
+def test_text_only_alias_cannot_omit_visual_tensors(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = qwen35_fixture(source)
+    config["model_type"] = "qwen3_5_text"
+    tensors["model.visual.patch_embed.proj.weight"] = "BF16", np.zeros((2, 2), dtype="<u2")
+    (source / "config.json").write_text(json.dumps(config))
+    save_tensors(source / "model.safetensors", tensors)
+    with pytest.raises(ConversionError, match="unexpected tensors"):
+        build_qwen35_plan(source)
+
+
+def test_wrapper_rejects_a_different_nested_text_architecture(tmp_path):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source, wrapper=True)
+    config["text_config"]["model_type"] = "qwen3"
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(UnsupportedConversion, match="different nested text architecture"):
+        build_qwen35_plan(source)
+
+
+@pytest.mark.parametrize("partial", [0.5, 0, True, "1.0"])
+def test_duplicate_top_level_rotary_factor_must_agree(tmp_path, partial):
+    source = tmp_path / "source"
+    config, _ = qwen35_fixture(source)
+    config.update(model_type="qwen3_5_text", partial_rotary_factor=partial)
+    (source / "config.json").write_text(json.dumps(config))
+    with pytest.raises(ConversionError):
         build_qwen35_plan(source)
 
 

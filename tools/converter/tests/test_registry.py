@@ -8,17 +8,24 @@ from pathlib import Path
 
 import pytest
 
-from stark_convert.registry import adapter_for_model, get_model, load_catalog, models, required_files
+from stark_convert.registry import (
+    adapter_for_model,
+    architecture_for_config,
+    get_model,
+    load_catalog,
+    models,
+    required_files,
+)
 from stark_convert.streaming import UnsupportedConversion
 
 
 def test_complete_pinned_builtin_inventory():
     catalog = load_catalog()
     assert catalog["entry_count"] == 110 == len(catalog["models"])
-    assert catalog["extension_count"] == 4 == len(catalog["extensions"])
+    assert catalog["extension_count"] == 5 == len(catalog["extensions"])
     assert catalog["reference"]["plugins"] is False
     assert catalog["reference"]["revision"] == "831accb8252a6b6606c378048caeb44178f1a050"
-    assert len({entry["repo"] for entry in models()}) == 114
+    assert len({entry["repo"] for entry in models()}) == 115
     assert sum(entry["model_kind"] == "LanguageModelSpec" for entry in catalog["models"]) == 107
     assert sum(entry["model_kind"] == "ClassifierModelSpec" for entry in models()) == 2
     assert sum(entry["model_kind"] == "TTSModelSpec" for entry in models()) == 1
@@ -27,7 +34,7 @@ def test_complete_pinned_builtin_inventory():
 
 def test_catalog_is_independent_of_reference_and_framework_imports():
     code = (
-        "import sys; from stark_convert.registry import models; assert len(models()) == 114; "
+        "import sys; from stark_convert.registry import models; assert len(models()) == 115; "
         "assert not any(name.split('.')[0] in {'lalamo','jax','torch'} for name in sys.modules)"
     )
     env = os.environ.copy()
@@ -42,14 +49,14 @@ def test_profiles_have_no_embedded_prompt_or_vocabulary():
         assert "system_prompt" not in entry["metadata"]
         assert "vocab" not in entry["metadata"]
         assert "stop_token_ids" not in json.dumps(entry["metadata"])
-    assert sum(entry["metadata_profile"] is not None for entry in models()) == 89
+    assert sum(entry["metadata_profile"] is not None for entry in models()) == 90
     assert sum(entry["adapter"] is not None for entry in load_catalog()["models"]) == 85
 
 
 def test_specialized_dense_profiles_do_not_promote_moe_or_later_generations():
     assert {
         entry["repo"] for entry in models() if entry["adapter"] == "qwen3_5" and not entry["compressed_format"]
-    } == {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")}
+    } == {f"Qwen/Qwen3.5-{size}" for size in ("0.8B", "2B", "4B", "9B", "27B")} | {"empero-ai/Qwen3.8-4B-Distill"}
     assert {entry["repo"] for entry in models() if entry["adapter"] == "lfm2" and not entry["compressed_format"]} == {
         f"LiquidAI/LFM2-{size}" for size in ("350M", "700M", "1.2B", "2.6B")
     }
@@ -140,3 +147,10 @@ def test_catalog_callers_cannot_mutate_later_dispatch():
     entry = get_model("Qwen/Qwen3-0.6B")
     entry["adapter"] = None
     assert adapter_for_model("Qwen/Qwen3-0.6B") == "qwen3"
+
+
+def test_text_only_qwen35_alias_dispatches_to_the_canonical_adapter():
+    assert architecture_for_config({"model_type": "qwen3_5_text"}, "qwen3_5") == "qwen3_5"
+    assert adapter_for_model("empero-ai/Qwen3.8-4B-Distill", "qwen3_5_text") == "qwen3_5"
+    with pytest.raises(UnsupportedConversion):
+        adapter_for_model("Qwen/Qwen3-0.6B", "qwen3_5_text")

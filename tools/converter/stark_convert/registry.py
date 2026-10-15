@@ -24,6 +24,7 @@ CONFIG_ADAPTERS = {
     "HFLlambaConfig": "llamba",
     "ModernBERTConfig": "modernbert",
 }
+_ARCHITECTURE_ALIASES = {"qwen3_5_text": "qwen3_5"}
 
 
 def model_kind_for_architecture(architecture: str) -> str:
@@ -36,7 +37,10 @@ def model_kind_for_architecture(architecture: str) -> str:
 def architecture_for_config(config: dict, expected: str | None = None) -> str:
     """Select a reusable adapter; its planner still validates every semantic field."""
     architecture = config.get("model_type")
-    if not isinstance(architecture, str) or architecture not in CONFIG_ADAPTERS.values():
+    if not isinstance(architecture, str):
+        raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
+    architecture = _ARCHITECTURE_ALIASES.get(architecture, architecture)
+    if architecture not in CONFIG_ADAPTERS.values():
         raise UnsupportedConversion("Checkpoint architecture is outside implemented coverage")
     if expected is not None and architecture != expected:
         raise ConversionError("Checkpoint architecture disagrees with the requested architecture")
@@ -83,6 +87,8 @@ def adapter_for_model(repo: str, model_type: str | None = None) -> str:
     if entry is None or entry["adapter"] is None:
         raise UnsupportedConversion("Model tuple is outside implemented conversion coverage")
     adapter = entry["adapter"]
+    if isinstance(model_type, str):
+        model_type = _ARCHITECTURE_ALIASES.get(model_type, model_type)
     if model_type is not None and model_type != adapter:
         raise UnsupportedConversion("Model architecture disagrees with its catalog profile")
     return adapter
