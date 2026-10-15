@@ -1,0 +1,13 @@
+schema_version = 1
+
+[[exceptions]]
+ecosystem = "crates.io"
+name = "rustls"
+version = "0.23.45"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+advisories = ["RUSTSEC-2026-0346", "RUSTSEC-2026-0347", "RUSTSEC-2026-0348", "RUSTSEC-2026-0349"]
+lockfiles = ["Cargo.lock", "crates/legacy/download-manager/examples/wasm/Cargo.lock"]
+# Exclusive UTC date: this exception fails starting at 2026-11-14 00:00 UTC.
+expires = "2026-11-14"
+rationale = "Accepted for non-production model tests while Aikido blocks rustls 0.23.46; expires 2026-11-14 UTC."
