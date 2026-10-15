@@ -71,14 +71,14 @@ The separate experimental `python -m stark_convert.gguf_import` route imports Qw
 
 ## Catalog coverage and qualification
 
-The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **four explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **85 built-ins plus four extensions**, or 89 identities. This includes 43 dense language profiles, 40 MLX profiles and two dense ModernBERT classifier profiles:
+The attributed [catalog](stark_convert/catalog.json) accounts for **110 built-in reference entries**, with **five explicitly separated Stark extensions**. Implemented adapters and metadata profiles cover **85 built-ins plus five extensions**, or 90 identities. This includes 43 built-in dense language profiles, 40 MLX profiles and two dense ModernBERT classifier profiles:
 
 | Adapter | Implemented identities |
 | --- | --- |
 | Qwen3 | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, `POLARIS-Project/Polaris-4B-Preview` |
 | Qwen3 MLX | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}-MLX-{4bit,8bit}`; affine groups 16/32/64/128, divisible logical input widths |
 | Qwen2 | `Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`, `deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B` |
-| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; declared vision/MTP tensors omitted for text conversion; MoE remains unsupported |
+| Qwen3.5 text | Dense `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`; extension `empero-ai/Qwen3.8-4B-Distill`; declared vision/MTP tensors omitted for text conversion; MoE remains unsupported |
 | Qwen3.5 text MLX | `mlx-community/Qwen3.5-{0.8B,2B,4B,9B}-MLX-{4bit,8bit}` and `mlx-community/Qwen3.5-27B-{4bit,8bit}` |
 | LFM2 | Dense `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}`; short-convolution and attention layers |
 | LFM2 MLX | `mlx-community/LFM2-{350M,700M,1.2B,2.6B}-{4bit,8bit}` |
@@ -103,6 +103,8 @@ The [MLX continuation](../../docs/MODEL_CONVERSION_MILESTONE_4_MLX.md) adds exac
 
 ## Future checkpoints and architecture tracking
 
+For full or merged fine-tuned checkpoints derived from `Qwen/Qwen3-4B-Instruct-2507` or `empero-ai/Qwen3.8-4B-Distill`, follow the [trained checkpoint guide](../../docs/QWEN_TRAINED_CHECKPOINTS.md). It includes local offline conversion, the correct architecture assertion for each family, and native worker commands. Adapter-only LoRA/PEFT outputs must first be merged and exported as a complete supported checkpoint.
+
 Tensor conversion is implemented by **architecture and weight format**. Checkpoint records separately track metadata routing, exact source revisions, output hashes and native qualification. A new fine-tune of a supported architecture can reuse its adapter without adding a catalog entry:
 
 ```sh
@@ -113,6 +115,8 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
 ```
 
 The converter selects the adapter from the checkpoint's `model_type` and validates the full config and tensor layout. Optional `--architecture llama` asserts the expected type; it cannot override a conflicting checkpoint. Accepted architecture identifiers are `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, and `lfm2`. ModernBERT requires `--model-kind classifier`; the other adapters require the default language kind. Dense BF16/F16/F32 uses the corresponding strict planner. Existing affine MLX 4/8-bit support applies to Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma3 text and LFM2; the pinned LLaMBA catalog has one 4-bit profile. A different architecture or unsupported variant still needs implementation.
+
+Hugging Face text-only exports declaring `model_type=qwen3_5_text` select the canonical `qwen3_5` adapter, including when asserted with `--architecture qwen3_5`. They must declare a text-only layout; a conflicting nested text or vision wrapper is rejected. A duplicated top-level `partial_rotary_factor` must match the nested RoPE setting exactly.
 
 `hf-generic` requires self-contained `config.json`, `tokenizer.json`, and `tokenizer_config.json`; it selects `generation_config.json` and `chat_template.jinja` whenever present. Language models require a supported chat template and explicit nonempty EOS identifiers in the model or generation metadata. Duplicate inline/Jinja templates must agree exactly. It uses the checkpoint's tokenizer, template and supported generation fields, with plain system/user/assistant roles. Output parsers, reasoning controls and system-prompt defaults require a separately reviewed checkpoint profile. Registered profiles retain their authoritative metadata and packing rules and refuse generic overrides.
 
