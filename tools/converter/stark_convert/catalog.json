@@ -1,8 +1,73 @@
 {
   "entry_count": 110,
   "exporter": "tools/converter/scripts/export_conversion_catalog.py",
-  "extension_count": 4,
+  "extension_count": 5,
   "extensions": [
+    {
+      "adapter": "qwen3_5",
+      "catalog_origin": "stark_extension",
+      "compressed_format": null,
+      "config_class": "HFQwen35Config",
+      "container": ".safetensors",
+      "family": "Qwen3.8",
+      "files": {
+        "generation_config": {
+          "filename": "generation_config.json",
+          "repo": "empero-ai/Qwen3.8-4B-Distill"
+        },
+        "model_config": {
+          "filename": "config.json",
+          "repo": "empero-ai/Qwen3.8-4B-Distill"
+        },
+        "tokenizer": {
+          "filename": "tokenizer.json",
+          "repo": "empero-ai/Qwen3.8-4B-Distill"
+        },
+        "tokenizer_config": {
+          "filename": "tokenizer_config.json",
+          "repo": "empero-ai/Qwen3.8-4B-Distill"
+        }
+      },
+      "metadata": {
+        "end_of_thinking_id": "qwen_think_end",
+        "generation_config": null,
+        "generation_params_overrides": null,
+        "grammar_start_tokens_count": 0,
+        "grammar_start_tokens_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "inline_sources": {},
+        "parser_id": "optional_thinking",
+        "reasoning_id": "boolean_default_on",
+        "roles": {
+          "assistant": "assistant",
+          "system": "system",
+          "user": "user"
+        }
+      },
+      "metadata_profile": "qwen3_5",
+      "model_kind": "LanguageModelSpec",
+      "name": "Qwen3.8-4B-Distill",
+      "origin": "HuggingFaceOrigin",
+      "profile_reference": "Qwen/Qwen3.5-4B",
+      "profile_source": {
+        "files_sha256": {
+          "chat_template.jinja": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715",
+          "config.json": "0d721c3b6d378efee9b92741e8e4a05018882d4441c2fbf4f793be9ffff1376f",
+          "generation_config.json": "f703e9fc5d6929b4e9e344a0cf4a188da6717da217fa24031067e35ab730ee53",
+          "tokenizer_config.json": "316230d6a809701f4db5ea8f8fc862bc3a6f3229c937c174e674ff3ca0a64ac8"
+        },
+        "repo": "empero-ai/Qwen3.8-4B-Distill",
+        "revision": "c83cb7aa2999d2f35c43e9ae0634a30eb8985a1e"
+      },
+      "repo": "empero-ai/Qwen3.8-4B-Distill",
+      "size": "4B",
+      "status": {
+        "access": "not_assessed",
+        "conversion": "implemented",
+        "qualification": "pending",
+        "runtime": "not_assessed"
+      },
+      "vendor": "Empero AI"
+    },
     {
       "adapter": "gemma2",
       "catalog_origin": "stark_extension",
