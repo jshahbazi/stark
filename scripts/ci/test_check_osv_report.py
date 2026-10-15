@@ -8,9 +8,13 @@ import io
 import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
+import check_dependency_exceptions as exceptions_gate
 import check_osv_report as gate
+from test_check_dependency_exceptions import TODAY, write_scope
 
 
 class ReportPolicyTests(unittest.TestCase):
@@ -204,6 +208,116 @@ class ReportPolicyTests(unittest.TestCase):
             self.assertEqual(gate.main(arguments), 1)
         self.assertIn("blocking=1", output.getvalue())
         self.assertNotIn(str(self.root), output.getvalue())
+
+
+class AcceptedRiskTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.path = write_scope(self.root)
+        self.policy = exceptions_gate.load_policy(self.path, today=TODAY)
+        self.lockfiles = ["Cargo.lock", "crates/legacy/download-manager/examples/wasm/Cargo.lock"]
+        advisory = {
+            "id": "RUSTSEC-2026-0346", "modified": "2026-10-15T00:00:00Z", "affected": [{
+                "package": {"ecosystem": "crates.io", "name": "rustls"},
+                "ranges": [{"type": "SEMVER", "events": [{"introduced": "0"}]}],
+            }],
+        }
+        self.document = {"results": [{
+            "source": {"path": str(self.root / filename), "type": "lockfile"}, "packages": [{
+                "package": {"ecosystem": "crates.io", "name": "rustls", "version": "0.23.45"},
+                "vulnerabilities": [copy.deepcopy(advisory)],
+            }],
+        } for filename in self.lockfiles]}
+
+    def validate(self, enabled=True):
+        return gate.validate_report(self.document, self.root, self.lockfiles, self.policy if enabled else None)
+
+    def test_exception_requires_explicit_policy_and_keeps_advisories_visible(self):
+        default = self.validate(False)
+        self.assertEqual((len(default["blocking"]), default["accepted"]), (1, []))
+        accepted = self.validate()
+        self.assertEqual((accepted["blocking"], len(accepted["accepted"])), ([], 1))
+        for result in self.document["results"]:
+            advisory = result["packages"][0]["vulnerabilities"][0]
+            result["packages"][0]["vulnerabilities"] = [
+                {**copy.deepcopy(advisory), "id": identifier} for identifier in sorted(self.policy.advisories)
+            ]
+        self.assertEqual(len(self.validate()["accepted"]), 4)
+
+    def test_alias_alone_cannot_match_the_accepted_advisory(self):
+        for result in self.document["results"]:
+            advisory = result["packages"][0]["vulnerabilities"][0]
+            advisory.update(id="GHSA-fixture-identifier", aliases=["RUSTSEC-2026-0346"])
+        result = self.validate()
+        self.assertEqual((len(result["blocking"]), result["accepted"]), (1, []))
+
+    def test_other_advisory_version_package_or_lockfile_remains_blocking(self):
+        original = copy.deepcopy(self.document)
+        for change in ("advisory", "version", "package", "lockfile"):
+            with self.subTest(change=change):
+                self.document = copy.deepcopy(original)
+                package = self.document["results"][0]["packages"][0]
+                if change == "advisory":
+                    package["vulnerabilities"][0]["id"] = "RUSTSEC-2099-0001"
+                elif change == "version":
+                    package["package"]["version"] = "0.23.46"
+                elif change == "package":
+                    package["package"]["name"] = "other"
+                    package["vulnerabilities"][0]["affected"][0]["package"]["name"] = "other"
+                else:
+                    self.document["results"][0]["source"]["path"] = str(self.root / "other/Cargo.lock")
+                    self.lockfiles[0] = "other/Cargo.lock"
+                self.assertEqual(len(self.validate()["blocking"]), 1)
+                self.lockfiles[0] = "Cargo.lock"
+
+    def test_exception_never_bypasses_advisory_schema_or_source_completeness(self):
+        original = copy.deepcopy(self.document)
+        changes = [
+            lambda advisory: advisory.pop("modified"),
+            lambda advisory: advisory.update(modified="2026-02-31T00:00:00Z"),
+            lambda advisory: advisory["affected"][0].update(ranges=[]),
+            lambda advisory: advisory["affected"][0]["ranges"][0].update(events=[]),
+            lambda advisory: advisory["affected"][0]["package"].update(name="unrelated"),
+            lambda advisory: advisory.update(aliases=["RUSTSEC-2026-0346", "RUSTSEC-2026-0346"]),
+        ]
+        for index, change in enumerate(changes):
+            with self.subTest(change=index):
+                self.document = copy.deepcopy(original)
+                change(self.document["results"][0]["packages"][0]["vulnerabilities"][0])
+                with self.assertRaises((gate.InvalidReport, ValueError)):
+                    self.validate()
+        self.document = copy.deepcopy(original)
+        self.document["results"].pop()
+        with self.assertRaises(gate.InvalidReport):
+            self.validate()
+
+    def test_explicit_cli_policy_warns_and_expired_or_drifted_policy_fails(self):
+        report = self.root / "report.json"
+        report.write_text(json.dumps(self.document))
+        arguments = [str(report), "--root", str(self.root), "--exceptions", str(self.path)]
+        for filename in self.lockfiles:
+            arguments += ["--lockfile", filename]
+        with mock.patch.object(exceptions_gate, "datetime") as clock:
+            clock.now.return_value = datetime(2026, 10, 15, tzinfo=timezone.utc)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertEqual(gate.main(arguments), 0)
+            self.assertIn("WARNING accepted-risk: crates.io rustls@0.23.45 RUSTSEC-2026-0346", output.getvalue())
+            self.assertIn("accepted=1 blocking=0", output.getvalue())
+            self.assertNotIn(str(self.root), output.getvalue())
+            clock.now.return_value = datetime(2026, 11, 14, tzinfo=timezone.utc)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertEqual(gate.main(arguments), 2)
+            self.assertEqual(output.getvalue(), "ERROR: osv_report_invalid\n")
+            clock.now.return_value = datetime(2026, 10, 15, tzinfo=timezone.utc)
+            (self.root / "deny.toml").write_text('[advisories]\nignore = []\n')
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                self.assertEqual(gate.main(arguments), 2)
+            self.assertEqual(output.getvalue(), "ERROR: osv_report_invalid\n")
 
 
 if __name__ == "__main__":
