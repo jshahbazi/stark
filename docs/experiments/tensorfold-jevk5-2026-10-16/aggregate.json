@@ -1,0 +1,319 @@
+{
+  "schema": 1,
+  "scope": "experimental-jevk5-bf16-native-scoring",
+  "timestamp_utc": "2026-10-16T21:59:49.145137+00:00",
+  "host": {
+    "machine": "arm64",
+    "macos": "26.7.1",
+    "chip": "Apple M5 Max",
+    "memory_bytes": 137438953472
+  },
+  "tensorfold_source_commit": "0a64bacfa05388a41f3986112ed4b0e2322b9577",
+  "stark_source_commit": "1e8ef8c32a926e59adb1b38632f3b1cc12ebfcff",
+  "benchmark_script_sha256": "ef6090924228ab650d40be654c5649ca8f550e9c4151062998f96b0c881382c8",
+  "tensorfold_binary_sha256": "9fc5261822a9ddfddc4f4cf238876c40767264c96dc544d7eb60f5fac2c986f1",
+  "stark_binary_sha256": "334e11f0240b963f45b7a283325a4067b907166fcbce7d9638b10f8de90cf75c",
+  "source_config_sha256": "63f47812d0f11118e4d252d2b3ad488707eb9287a11589f4fd382a1d31182724",
+  "source_weights_sha256": "13824e47f2e40fe052f06943976cf742cb366ba305741a111e75a8ebae907a9c",
+  "stark_config_sha256": "7cd671fd90e9513487f8c6f14e62af6af638add926f55531d19073a381b66561",
+  "stark_weights_sha256": "7165b96777823061753fa96b247d687d591596b20cf24fa518a5b87a96b1be8a",
+  "cache": "disabled; fresh state per decision",
+  "temperature": 1.22,
+  "measure": "client wall seconds including fresh state, prefill, normalization and pipe exchange; excludes model load",
+  "repetitions": 7,
+  "public_decisions": {
+    "cases": 8,
+    "stark_decision_agreements": 8,
+    "max_candidate_logit_abs_error": 0.125,
+    "max_candidate_probability_abs_error": 0.009181597402552533
+  },
+  "mlx_reference": {
+    "mlx": "0.32.3",
+    "mlx_lm": "0.31.3",
+    "checks": [
+      {
+        "tokens": 1,
+        "finite": true,
+        "full_vocab_rmse": 0.03063360391713806,
+        "full_vocab_max_abs_error": 0.1640625,
+        "top1_agrees": true,
+        "cosine": 0.99996417760849
+      },
+      {
+        "tokens": 31,
+        "finite": true,
+        "full_vocab_rmse": 0.054250121707381596,
+        "full_vocab_max_abs_error": 0.28125,
+        "top1_agrees": true,
+        "cosine": 0.999846339225769
+      },
+      {
+        "tokens": 32,
+        "finite": true,
+        "full_vocab_rmse": 0.03656528762649442,
+        "full_vocab_max_abs_error": 0.1875,
+        "top1_agrees": true,
+        "cosine": 0.9998998045921326
+      },
+      {
+        "tokens": 33,
+        "finite": true,
+        "full_vocab_rmse": 0.03790715947496089,
+        "full_vocab_max_abs_error": 0.1875,
+        "top1_agrees": true,
+        "cosine": 0.999908983707428
+      },
+      {
+        "tokens": 127,
+        "finite": true,
+        "full_vocab_rmse": 0.3779712800136666,
+        "full_vocab_max_abs_error": 2.205078125,
+        "top1_agrees": true,
+        "cosine": 0.9939828515052795
+      },
+      {
+        "tokens": 128,
+        "finite": true,
+        "full_vocab_rmse": 0.10105340787420528,
+        "full_vocab_max_abs_error": 0.5234375,
+        "top1_agrees": true,
+        "cosine": 0.9996510148048401
+      },
+      {
+        "tokens": 129,
+        "finite": true,
+        "full_vocab_rmse": 0.08754791959120248,
+        "full_vocab_max_abs_error": 0.640625,
+        "top1_agrees": true,
+        "cosine": 0.9992175102233887
+      }
+    ]
+  },
+  "timings": [
+    {
+      "tokens": 32,
+      "seconds": {
+        "tensorfold": [
+          0.07284849998541176,
+          0.0691732499981299,
+          0.07533158402657136,
+          0.06887533300323412,
+          0.07746950001455843,
+          0.06973704200936481,
+          0.07407400000374764
+        ],
+        "stark": [
+          0.025702499959152192,
+          0.024243334017228335,
+          0.024321291013620794,
+          0.02406837500166148,
+          0.024422124959528446,
+          0.024371459032408893,
+          0.023957625031471252
+        ]
+      },
+      "median_seconds": {
+        "tensorfold": 0.07284849998541176,
+        "stark": 0.024321291013620794
+      },
+      "tensorfold_speedup": 0.33386124653892996,
+      "candidate_argmax_agreements": 7,
+      "unique_repeat_logit_hashes": {
+        "tensorfold": 1,
+        "stark": 1
+      }
+    },
+    {
+      "tokens": 128,
+      "seconds": {
+        "tensorfold": [
+          0.07480554102221504,
+          0.07821733300806955,
+          0.08504479203838855,
+          0.07729649997781962,
+          0.08578037499682978,
+          0.07723833300406113,
+          0.08514450001530349
+        ],
+        "stark": [
+          0.03167024999856949,
+          0.03238674998283386,
+          0.03220858401618898,
+          0.03162366698961705,
+          0.03208541701314971,
+          0.03210741700604558,
+          0.032745375006925315
+        ]
+      },
+      "median_seconds": {
+        "tensorfold": 0.07821733300806955,
+        "stark": 0.03210741700604558
+      },
+      "tensorfold_speedup": 0.41048979518047635,
+      "candidate_argmax_agreements": 7,
+      "unique_repeat_logit_hashes": {
+        "tensorfold": 1,
+        "stark": 1
+      }
+    },
+    {
+      "tokens": 512,
+      "seconds": {
+        "tensorfold": [
+          0.19452533300500363,
+          0.1971925830002874,
+          0.20261974999448285,
+          0.1971439159824513,
+          0.2014723329921253,
+          0.19403441698523238,
+          0.20171824999852106
+        ],
+        "stark": [
+          0.08374383399495855,
+          0.0860291249700822,
+          0.08304316696012393,
+          0.08551541698398069,
+          0.08445995801594108,
+          0.08574929099995643,
+          0.0856805419898592
+        ]
+      },
+      "median_seconds": {
+        "tensorfold": 0.1971925830002874,
+        "stark": 0.08551541698398069
+      },
+      "tensorfold_speedup": 0.4336644699453835,
+      "candidate_argmax_agreements": 7,
+      "unique_repeat_logit_hashes": {
+        "tensorfold": 1,
+        "stark": 1
+      }
+    },
+    {
+      "tokens": 1024,
+      "seconds": {
+        "tensorfold": [
+          0.36122787499334663,
+          0.3601732079987414,
+          0.3699773750267923,
+          0.37959041603608057,
+          0.3784441670286469,
+          0.3814724169787951,
+          0.3865446249837987
+        ],
+        "stark": [
+          0.157611167000141,
+          0.16350416699424386,
+          0.16397291596513242,
+          0.17294616700382903,
+          0.17169874999672174,
+          0.17715762497391552,
+          0.18071545800194144
+        ]
+      },
+      "median_seconds": {
+        "tensorfold": 0.3784441670286469,
+        "stark": 0.17169874999672174
+      },
+      "tensorfold_speedup": 0.45369638365631026,
+      "candidate_argmax_agreements": 7,
+      "unique_repeat_logit_hashes": {
+        "tensorfold": 1,
+        "stark": 1
+      }
+    }
+  ],
+  "validation": {
+    "tensorfold_config_tests": {
+      "passed": 4,
+      "failed": 0
+    },
+    "tensorfold_forward_cache_tests": {
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0,
+      "prefill_chunk_sizes": [
+        32,
+        128
+      ]
+    },
+    "tensorfold_private_pipe_tests": {
+      "passed": 6,
+      "failed": 0
+    },
+    "tensorfold_http_tests": {
+      "passed": 2,
+      "failed": 0,
+      "scope": "greedy and seeded draft/plain identity"
+    },
+    "tensorfold_repository_test_exit_code": 0,
+    "tensorfold_repository_test_limits": "Unrelated JPEG pixel cases skipped because the required libjpeg-turbo version was unavailable.",
+    "stark_scoring_tests": {
+      "passed": 39,
+      "failed": 0
+    },
+    "stark_build": "Rust 1.98.1; release; --locked; --features optimized",
+    "stark_build_warning": "Debug-info stripping warned about a missing rust-objcopy libLLVM.dylib; build and tests exited successfully.",
+    "zig_version": "0.17.0",
+    "tensorfold_native_server_sha256": "292722134739ead4066285bef15fc05de355341a902571c936812fe5c0beaff3",
+    "tensorfold_exact_check_sha256": "5535107f91f191c3bb57e8ee977518977a37763c33f759c22c07cb02fea7dfe8"
+  },
+  "limits": [
+    "New experimental BF16 path in a TensorFold fork; not upstream 1.0.12 model support or a general TensorFold comparison.",
+    "Synthetic single-stream decision scoring; no generation-throughput or speculative-speedup measurement.",
+    "Same source checkpoint in original HF BF16 and Stark-converted BF16 representations; different arithmetic and logits, not bit-exact cross-engine parity.",
+    "Eight public decision cases and seven full-vocabulary fixtures do not qualify broad semantic decision quality.",
+    "Full-vocabulary reference error at 127 tokens is material: RMSE 0.3779712800136666, max absolute 2.205078125; not fully explained by the follow-up MLX chunk probe."
+  ],
+  "mlx_chunk_sensitivity_followup": {
+    "scope": "Fresh caches on the identical public token fixture; aggregate values rounded to five decimals; no timing measurements.",
+    "tensorfold_source_commit": "0a64bacfa05388a41f3986112ed4b0e2322b9577",
+    "tokens_127": {
+      "tensorfold_vs_mlx_chunk_1": {
+        "rmse": 0.72655,
+        "max_abs": 4.59668,
+        "top1_agrees": true
+      },
+      "tensorfold_vs_mlx_chunk_32": {
+        "rmse": 0.37797,
+        "max_abs": 2.20508,
+        "top1_agrees": true
+      },
+      "tensorfold_vs_mlx_full": {
+        "rmse": 0.37797,
+        "max_abs": 2.20508,
+        "top1_agrees": true
+      },
+      "mlx_chunk_1_vs_chunk_32": {
+        "rmse": 0.6186,
+        "max_abs": 3.5498
+      }
+    },
+    "tokens_129": {
+      "tensorfold_vs_mlx_chunk_32": {
+        "rmse": 0.08583,
+        "max_abs": 0.64063,
+        "top1_agrees": true
+      },
+      "tensorfold_vs_mlx_chunk_128": {
+        "rmse": 0.08583,
+        "max_abs": 0.64063,
+        "top1_agrees": true
+      },
+      "tensorfold_vs_mlx_full": {
+        "rmse": 0.08755,
+        "max_abs": 0.64063,
+        "top1_agrees": true
+      },
+      "mlx_chunk_32_vs_chunk_128": {
+        "rmse": 0,
+        "max_abs": 0
+      },
+      "mlx_chunked_vs_full": {
+        "rmse": 0.01689,
+        "max_abs": 0.07422
+      }
+    },
+    "conclusion": "MLX itself is sensitive to chunk size, especially token-by-token at 127 tokens. This does not eliminate or fully explain TensorFold's difference from the MLX full-prompt reference."
+  }
+}

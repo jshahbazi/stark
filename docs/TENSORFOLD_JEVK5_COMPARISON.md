@@ -1,6 +1,58 @@
 # TensorFold and Stark on JevK5
 
-## Result — 2026-10-16
+## Implemented comparison — 2026-10-16
+
+JevK5 BF16 support has now been implemented in the
+[TensorFold fork](https://github.com/jshahbazi/TensorFold/tree/codex/jevk5-bf16-scoring).
+It includes native Metal serving and a private scoring worker using TensorFold's
+existing BF16 GEMM and lane engine. The original source checkpoint loads without
+conversion or a quantization change.
+
+On this Apple M5 Max with 128 GiB memory and macOS 26.7.1, Stark was
+2.20–3.00x faster on synthetic single-stream scoring. These medians include fresh
+state, prefill, full-vocabulary normalization and pipe exchange, and exclude model
+load. Each size received an untimed warmup and seven alternating-order rounds.
+Both engines used identical input IDs, sixteen candidates, 2048 context tokens
+and temperature 1.22, with output caching disabled.
+
+| Input tokens | TensorFold fork | Stark | Stark faster |
+| --- | --- | --- | --- |
+| 32 | 72.8 ms | 24.3 ms | 3.00x |
+| 128 | 78.2 ms | 32.1 ms | 2.44x |
+| 512 | 197.2 ms | 85.5 ms | 2.31x |
+| 1024 | 378.4 ms | 171.7 ms | 2.20x |
+
+The fork matched Stark's candidate argmax on 8/8 public synthetic decisions;
+the maximum calibrated probability difference was 0.009182. All seven
+full-vocabulary fixtures were finite and matched MLX's top token. Their RMSE
+ranged from 0.0306 to 0.378, with maximum absolute error 2.205 at 127 tokens.
+This is material distribution drift. A follow-up found MLX itself differs
+between token-by-token and chunked execution at that length (RMSE 0.619), but
+that does not fully explain the TensorFold error. The port remains experimental;
+these fixtures do not establish broad JevK5 decision quality or cross-engine
+bit-exact equivalence. No generation-throughput or speculative-speedup claim is
+made by this scoring benchmark.
+
+Validation passed: four config admission tests, nineteen native forward/cache
+checks, six scoring-pipe lifecycle/calibration tests and two native HTTP
+draft/plain identity tests. TensorFold's repository test command exited 0;
+unrelated JPEG pixel cases were skipped for an unavailable library version.
+Stark rebuilt with Rust 1.98.1, locked dependencies and `optimized`, and all
+39 scoring tests passed. Debug stripping warned about a missing
+`rust-objcopy` `libLLVM.dylib`; build and tests succeeded.
+
+Measured TensorFold source: `0a64bacfa05388a41f3986112ed4b0e2322b9577`.
+Measured Stark source: `1e8ef8c32a926e59adb1b38632f3b1cc12ebfcff`.
+The [aggregate receipt](experiments/tensorfold-jevk5-2026-10-16/aggregate.json)
+records the actual binary/model hashes, individual timings, numerical errors
+and limits. The fork's [recipe](https://github.com/jshahbazi/TensorFold/blob/codex/jevk5-bf16-scoring/docs/recipes/jevk5-bf16.md)
+contains reproducible build, serve, validation and benchmark commands.
+Only aggregate results and hashes are committed.
+
+## Initial upstream compatibility check — 2026-10-16
+
+The following records the original upstream-release check before the fork's
+JevK5 implementation. It remains historical evidence for that binary.
 
 TensorFold 1.0.12 was installed locally and passed its archive checksum check.
 It detects this Apple M5 Max's Metal backend, but cannot load the local
@@ -98,10 +150,10 @@ It was not rebuilt or attributed to the current source revision by this probe.
 Existing [JevK5 parity evidence](VALIDATION.md) remains a separate,
 source-bound validation run.
 
-A meaningful follow-up requires TensorFold support for this architecture,
-geometry and storage format. For JevK5 decision scoring, it also needs access
-to the same candidate logits and full-vocabulary normalization as Stark;
-generated-text throughput alone does not establish equivalent decisions.
-Changing quantization would require a separately labelled quality comparison.
+The later fork implementation adds this architecture, geometry, storage format
+and a matching candidate/full-vocabulary scoring readout. The initial upstream
+refusal above does not describe that fork. Generated-text throughput alone
+would not establish equivalent decisions. Changing quantization would require
+a separately labelled quality comparison.
 No prompts, generated responses, token vectors or decision probabilities were
 logged. No model files, binaries or private runtime artifacts are committed.
