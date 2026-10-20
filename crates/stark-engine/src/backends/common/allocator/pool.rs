@@ -63,3 +63,38 @@ impl<T> Drop for PoolAllocation<T> {
         self.allocator.alias(unsafe { ManuallyDrop::take(&mut self.page) }, self.range);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use stark_engine_macros::stark_test;
+
+    use super::PoolAllocator;
+
+    #[stark_test]
+    fn live_scratch_handles_keep_their_pages_out_of_the_reuse_queue() {
+        let pool = PoolAllocator::new();
+        let next_page = Cell::new(0);
+        let allocate = || {
+            pool.allocate(4, |_| {
+                let id = next_page.get();
+                next_page.set(id + 1);
+                Ok::<_, ()>(id)
+            })
+            .unwrap()
+        };
+        let retained = allocate();
+        let temporary = allocate();
+        assert_ne!(retained.page(), temporary.page());
+        let temporary_page = *temporary.page();
+        drop(temporary);
+        let reused = allocate();
+        assert_eq!(*reused.page(), temporary_page);
+        assert_ne!(retained.page(), reused.page());
+        let retained_page = *retained.page();
+        drop(retained);
+        assert_eq!(*allocate().page(), retained_page);
+        assert_eq!(next_page.get(), 2);
+    }
+}
