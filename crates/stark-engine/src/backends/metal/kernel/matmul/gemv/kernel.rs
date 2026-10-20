@@ -12,7 +12,7 @@ use crate::{
                 HADAMARD_TRANSFORM_BLOCK_SIZE,
                 gemm::{GemmBPrologueKind, GemmDTransform},
             },
-            kernel::matmul::{MatmulB, MatmulShape},
+            kernel::matmul::{MatmulB, MatmulShape, QuantParamsLayout},
         },
         metal::{
             command_buffer::MetalCommandBufferEncoding, context::MetalContext, error::MetalError,
@@ -66,6 +66,11 @@ impl GemvSpecialization {
                 shape.n,
                 shape.k,
                 bf16_io,
+                weights_data_type == DataType::BF16
+                    && shape.b_prologue == GemmBPrologueKind::ScaleBiasDequant
+                    && shape.params_layout == Some(QuantParamsLayout::GroupOutput)
+                    && !shape.signed_codes
+                    && shape.a_full_precision,
             )
         } else {
             let mixed_precision = weights_data_type == DataType::F32
