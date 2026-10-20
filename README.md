@@ -6,6 +6,8 @@ Stark combines a Rust and Metal inference engine with an independent streaming c
 
 Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), starting at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`. Upstream Git history, copyright and MIT licensing are preserved.
 
+The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) collects recorded engine, reference, conversion and predecessor-Uzu results, their limits, and candidate engines for a future benchmark.
+
 ## Why Stark
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
