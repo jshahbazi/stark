@@ -405,11 +405,15 @@ class Engine:
             )
             tokens = result["tokens"]
             text = result["content"]
+            stop_type = result.get("stop_type")
+            if stop_type not in {"limit", "eos", "word"}:
+                raise RuntimeError("unknown_llama_stop_type")
             row = {
                 "input_tokens": result["tokens_evaluated"],
                 "output_tokens": len(tokens),
                 "token_sha256": token_sha(tokens),
-                "finish_reason": "length" if result.get("stopped_limit") else "stop",
+                "finish_reason": "length" if stop_type == "limit" else "stop",
+                "server_stop_type": stop_type,
                 "cached_tokens": result.get("tokens_cached", 0),
             }
             # tokens_cached is the resident slot's state size, not necessarily reused work.
