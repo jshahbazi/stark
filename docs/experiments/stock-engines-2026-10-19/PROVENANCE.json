@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "status": "measured_pilot",
+  "measurement_source_commit": "d1138d155794f624137ee38acaf3632aa0df7c0e",
+  "scope": "stock_qwen_generation_jevk5_scoring_and_vllm_scaling",
+  "host": {
+    "platform": "macOS 26.7.1",
+    "architecture": "arm64",
+    "chip": "Apple M5 Max",
+    "memory_bytes": 137438953472
+  },
+  "model": {
+    "repository": "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+    "representation": "MLX affine 4-bit group-64",
+    "source_model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+    "path_roles": {
+      "model": "<model>/mlx-community/Qwen3.5-2B-MLX-4bit"
+    }
+  },
+  "engines": [
+    {
+      "id": "stark",
+      "version": "source",
+      "source_revision": "28fceb5546e48fd4bc39c1e6802735f7899f4f5f",
+      "source_url": "https://github.com/jshahbazi/stark",
+      "representation": "MLX affine 4-bit group-64 repacked unchanged",
+      "executable_sha256": "299c22d8733232f088a021df2dd0fee72343228e4cf4be0b2d007b681f36fd39",
+      "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d",
+      "custom_engine_code": false,
+      "path_roles": {
+        "executable": "<executable>/stark-generate",
+        "model": "<model>/stark"
+      }
+    },
+    {
+      "id": "mlx_lm",
+      "version": "0.32.2",
+      "source_url": "https://github.com/ml-explore/mlx-lm/releases/tag/v0.32.2",
+      "representation": "MLX affine 4-bit group-64",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "e5f3e0c15361db5508e20b065785c31b5ab0b565c8a410c733ba47df29f541ec",
+      "custom_engine_code": false,
+      "path_roles": {
+        "executable": "<executable>/mlx-lm",
+        "lock": "tools/stock_benchmark/mlx/uv.lock"
+      }
+    },
+    {
+      "id": "llama_cpp",
+      "version": "b11747",
+      "source_revision": "f711c8f3038020d71f69b8ced09162b014fd7335",
+      "source_url": "https://github.com/ggml-org/llama.cpp",
+      "representation": "GGUF Q4_K_M",
+      "model_repository": "unsloth/Qwen3.5-2B-GGUF",
+      "model_revision": "f6d5376be1edb4d416d56da11e5397a961aca8ae",
+      "model_sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
+      "executable_sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+      "quantizer_difference": "Q4_K_M GGUF differs from the MLX affine group-64 checkpoint",
+      "source_weight_equality": "unknown",
+      "custom_engine_code": false,
+      "archive_sha256": "a2ac5500723549481b561ea9461447387010c5bb827ecb14fb29e464dda78ee5",
+      "archive_url": "https://github.com/ggml-org/llama.cpp/releases/download/b11747/llama-b11747-bin-macos-arm64.tar.gz",
+      "path_roles": {
+        "executable": "<executable>/llama-server",
+        "model": "<model>/qwen35-q4_k_m.gguf"
+      }
+    },
+    {
+      "id": "tensorfold_default",
+      "version": "1.1.1",
+      "source_url": "https://github.com/ashhart/TensorFold/releases/tag/v1.1.1",
+      "representation": "MLX affine 4-bit group-64",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "draft": true,
+      "custom_engine_code": false,
+      "archive_sha256": "9766cc35a8a5ebdeecca73dbb57f191cb10b1b8a4624e27639b0cc0fc2567bf9",
+      "archive_url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-macos-arm64.tar.gz",
+      "path_roles": {
+        "executable": "<executable>/tensorfold-native",
+        "model": "<model>/Qwen3.5-2B-MLX-4bit"
+      },
+      "source_revision": "b10231b94f8adf3d4132acebdc0a1ac87e53a838"
+    },
+    {
+      "id": "tensorfold_plain",
+      "version": "1.1.1",
+      "source_url": "https://github.com/ashhart/TensorFold/releases/tag/v1.1.1",
+      "representation": "MLX affine 4-bit group-64",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "draft": false,
+      "custom_engine_code": false,
+      "archive_sha256": "9766cc35a8a5ebdeecca73dbb57f191cb10b1b8a4624e27639b0cc0fc2567bf9",
+      "archive_url": "https://github.com/ashhart/TensorFold/releases/download/v1.1.1/tensorfold-1.1.1-macos-arm64.tar.gz",
+      "path_roles": {
+        "executable": "<executable>/tensorfold-native",
+        "model": "<model>/Qwen3.5-2B-MLX-4bit"
+      },
+      "source_revision": "b10231b94f8adf3d4132acebdc0a1ac87e53a838"
+    },
+    {
+      "id": "vllm_metal",
+      "version": "0.31.0",
+      "source_revision": "e7a0c90bec180e5dd4275c473fd7a36e709a930e",
+      "source_url": "https://github.com/vllm-project/vllm-metal",
+      "representation": "MLX affine 4-bit group-64 with stock MLX model layers and vLLM Metal attention/scheduler",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "executable_sha256": "ffe768403be88fc567bcbdaba53b00e07d04e603198f422aeb570a5d2f54dae6",
+      "lock_sha256": "5bc1702fca04bd4deb945a562d15918f28740f13856e3dcdd20961a934dff601",
+      "stock_setup_versions": {
+        "vllm": "0.31.0+cpu",
+        "vllm-metal": "0.31.0",
+        "mlx": "0.32.1",
+        "mlx-lm": "0.32.0",
+        "mlx-vlm": "0.6.17",
+        "torch": "2.13.0",
+        "transformers": "5.17.0",
+        "huggingface-hub": "1.33.0"
+      },
+      "native_component_sha256": {
+        "vllm_metal/metal/_paged_ops.cpython-312-darwin.so": "ed1fa50efaf93c920b7f0d17b87040b36f80a6310bb11ac02862d3653c6c38e2",
+        "vllm_metal/metal/gdn_kern.metallib": "ff2756adb6dad6b593dce7137729d11d0e5668ab7708549bd173cd28a075a932",
+        "vllm_metal/metal/paged_attention_nax_kern.metallib": "2c923a58fe6aadc6e2cf6e87e7a5ee4b885bb62d88ef5b12e2dbd4c31cec1ff0",
+        "vllm_metal/metal/paged_attention_v2_kern.metallib": "0cb46c3a512e4410145d8c31458132fab12fed624f4275f9a51c988b53848e2b",
+        "vllm_metal/metal/paged_mla_kern.metallib": "e4879693b7232dc988851be4fbd6599970f94a737dd7f4249b0c48e64d9a7548"
+      },
+      "custom_engine_code": false,
+      "setup_receipt_sha256": "2fa4f71ea030194360e681b897ad3a9760f758ec734112b75fdb136c6ede5c07",
+      "path_roles": {
+        "executable": "<executable>/vllm",
+        "model": "<model>/Qwen3.5-2B-MLX-4bit",
+        "lock": "tools/stock_benchmark/vllm/uv.lock"
+      },
+      "flags": {
+        "serial_generation": [
+          "<task_runtime>/vllm/.venv/bin/vllm",
+          "serve",
+          "<qwen_mlx_source>",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--served-model-name",
+          "stock-qwen35",
+          "--max-model-len",
+          "{context}",
+          "--max-num-seqs",
+          "1",
+          "--no-enable-prefix-caching",
+          "--language-model-only",
+          "--generation-config",
+          "vllm",
+          "--gpu-memory-utilization",
+          "0.1"
+        ],
+        "serving": [
+          "<task_runtime>/vllm/.venv/bin/vllm",
+          "serve",
+          "<qwen_mlx_source>",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          "{port}",
+          "--served-model-name",
+          "stock-qwen35",
+          "--max-model-len",
+          "{context}",
+          "--max-num-seqs",
+          "8",
+          "--no-enable-prefix-caching",
+          "--language-model-only",
+          "--generation-config",
+          "vllm",
+          "--gpu-memory-utilization",
+          "0.1"
+        ]
+      },
+      "upstream_release_metadata": [
+        {
+          "repository": "vllm-project/vllm-metal",
+          "tag": "v0.31.0",
+          "source_commit": "e7a0c90bec180e5dd4275c473fd7a36e709a930e",
+          "assets": [
+            {
+              "name": "vllm_metal-0.31.0-cp312-cp312-macosx_15_0_arm64.whl",
+              "sha256": "sha256:e2ab31296f8c42d8b65c8d5f5490f160087d1070178444870a5672e44aaacf6e",
+              "bytes": 4290205,
+              "url": "https://github.com/vllm-project/vllm-metal/releases/download/v0.31.0/vllm_metal-0.31.0-cp312-cp312-macosx_15_0_arm64.whl"
+            }
+          ]
+        },
+        {
+          "repository": "vllm-project/vllm",
+          "tag": "v0.31.0",
+          "source_commit": "db9527a46873454610df6dbedf79a36d6bf1a7f6",
+          "assets": [
+            {
+              "name": "vllm-0.31.0+cpu-cp312-cp312-macosx_11_0_arm64.whl",
+              "sha256": "sha256:21378516a51ff15029f71168e827b94660e21b39484eb52277166f01ac7dd686",
+              "bytes": 29500084,
+              "url": "https://github.com/vllm-project/vllm/releases/download/v0.31.0/vllm-0.31.0%2Bcpu-cp312-cp312-macosx_11_0_arm64.whl"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "protocol": {
+    "model_load_in_timing": false,
+    "sampling": "greedy seed 0",
+    "context_tokens": 8192,
+    "fresh_state_requested": true,
+    "prompt_cache": "disabled where the engine exposes the control; missing counters remain unknown",
+    "measurement": "client end-to-end request wall time including transport and teardown",
+    "source_report": "generation-results.json",
+    "privacy": "aggregate hashes, counts and scalar timings only; no prompts, responses, token vectors, logits, credentials or exception dumps",
+    "configuration_templates": [
+      "generation-config.template.json",
+      "llama-generation-corrected-config.template.json",
+      "scoring-final-config.template.json",
+      "serving-config.template.json"
+    ],
+    "source_report_sha256": "fe5e57adc765573b6976ec275a88240e742800dc1c6f1229600832557e21f62e"
+  },
+  "jevk5_scoring_scope": {
+    "source_repository": "alibiserikbay/JevK5",
+    "source_revision": "c4f7fdb3aeab5582336406e78d3bef11bf98833d",
+    "source_url": "https://huggingface.co/alibiserikbay/JevK5/tree/c4f7fdb3aeab5582336406e78d3bef11bf98833d",
+    "source_safetensors_sha256": "13824e47f2e40fe052f06943976cf742cb366ba305741a111e75a8ebae907a9c",
+    "native_stark_representation": "BF16 native repack",
+    "llama_representation": "BF16 GGUF",
+    "llama_source_revision": "f711c8f3038020d71f69b8ced09162b014fd7335",
+    "llama_converter_revision": "86d86ed4396b4130922f7b9af26e3d9fc11a591b",
+    "llama_converter_archive_sha256": "0ed351557c96ffd729476584e052831091d8f1297fc9389d5310a69e2519a0d0",
+    "reference_path_role": "<reference>/uzu-optimization-combined",
+    "reference_dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "reference_configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "context_tokens": 8192,
+    "temperature": 1.22,
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "engines": [
+      {
+        "id": "stark_bf16",
+        "kind": "stark_score",
+        "version": "source",
+        "representation": "BF16 native repack",
+        "executable_sha256": "d246d8e5718673a9101c9bfdc151d28be8b47ffa3193353a666cd2a50f7b4095",
+        "model_sha256": "7165b96777823061753fa96b247d687d591596b20cf24fa518a5b87a96b1be8a"
+      },
+      {
+        "id": "llama_bf16",
+        "kind": "llama_score",
+        "version": "b11747",
+        "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+        "representation": "BF16 GGUF",
+        "executable_sha256": "ced94b4d022169c78d5a72e95dd406a58e548daade5089309600f251710d6d1a",
+        "model_sha256": "9fb252465834f2113eb74dd4fc4240ebf3cfab17ab48c0a23a615bbc81b07dc4"
+      }
+    ]
+  },
+  "limitations": [
+    "Original llama termination interpretation is invalid; retain original observations and a separate corrected repeat. Excluded host-screen blocks remain excluded.",
+    "The GGUF Q4_K_M model uses a different quantizer and source-weight equality is unknown.",
+    "No continuous GPU, power or thermal isolation was recorded.",
+    "This manifest records provenance and does not qualify a performance ranking or model quality."
+  ],
+  "measurement_driver_revisions": {
+    "original_generation_and_scoring": "d1138d155794f624137ee38acaf3632aa0df7c0e",
+    "corrected_llama_and_serving": "ef48bb6ecb1d109dc29424f19a5968d156db7b3b"
+  },
+  "vllm_upstream_pinned_versions": {
+    "vllm": "0.31.0+cpu",
+    "vllm-metal": "0.31.0",
+    "mlx": "0.32.1",
+    "mlx-lm": "0.32.0",
+    "mlx-vlm": "0.6.17",
+    "torch": "2.13.0",
+    "transformers": "5.17.0",
+    "huggingface-hub": "1.33.0"
+  },
+  "aggregate_evidence_sha256": {
+    "generation-results.json": "fe5e57adc765573b6976ec275a88240e742800dc1c6f1229600832557e21f62e",
+    "llama-generation-corrected-results.json": "083b4804988d503a10652ce59fcd4b0302cd4711ea301a07d8450a6781092736",
+    "scoring-results.json": "d87fe71258d8cb13c69d9cf11b6a8b3be2682907332be8c76801cc5466932f10",
+    "serving-results.json": "ba030462f58430a97bb806b39236db3a990b5830d9b87321a6d995190f67571e",
+    "generation-admission.json": "a38e53eabc0005f7577e4d2427c51e2c74cbb395e52eec15e516f7a30ba55820",
+    "vllm-generation-admission.json": "da7ace97914bf7b0bd00cd9ed8ff1e1133431837587c971f32bf3672887f13a7",
+    "scoring-admission.json": "a79d004d7f77ad44d79b529cb8d3360690e7dd4ad505ffeaa9b0d460fbaee56c",
+    "tensorfold-jevk5-admission.json": "15c5c5b504fb961a4500e2aaaa524593d5d201fa71783a5d2e6945d0ba690a95",
+    "vllm-setup-attempts.json": "2e43f4c12a0b462ddea5618ec663920d583efc5102035449b1a28d2a73d75a9b",
+    "analysis.json": "b2a70d9d86db49fcb362eac9ec4f3d1bc7eb41e880366ec06976a81719bfe8b1"
+  },
+  "stark_build": {
+    "toolchain": "Rust 1.98.1",
+    "profile": "release",
+    "default_features": true,
+    "command": "cargo +1.98.1 build --release --locked -p stark-generate -p stark-score",
+    "engine_or_converter_patches": false
+  },
+  "driver_sha256": {
+    "benchmark_stock_engines.py": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+    "benchmark_stock_scoring.py": "1fe89d477f5f7d287d60b7cfb6d118d31944c7c785469718290544e4f6234ef0",
+    "benchmark_stock_serving.py": "16832db9c99a415f3e114e7615be4bd83ca662c6cd72b2edd173d6dd30b2ff3a",
+    "stock_compare_llama.cpp": "378aad9678f0529718e2a350ff8575b3e5703fbc02b10b5988bf3969b343895c",
+    "stock_compare_mlx.py": "6d84a9acd1e8ba98a1dd76278f8eb17552a0923f294132acee288fcb6a34b228",
+    "stock_compare_cases.py": "47173ff991bd851f397484e1caf9adf0be34072830c067fc577dd58e734dc478"
+  },
+  "model_source_urls": {
+    "qwen": "https://huggingface.co/mlx-community/Qwen3.5-2B-MLX-4bit/tree/93760be4f1f69842a46bc13dbdc0f19e291392a3",
+    "gguf": "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/tree/f6d5376be1edb4d416d56da11e5397a961aca8ae"
+  }
+}

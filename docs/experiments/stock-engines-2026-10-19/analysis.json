@@ -1,0 +1,711 @@
+{
+  "filter": "Only status=complete blocks; fixed_work_eligible performance samples; corrected llama repeat replaces original only for this separately labeled derived view.",
+  "generation": {
+    "stark": {
+      "accepted_load_blocks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 12,
+          "median_tokens_per_second": 300.24973812401345,
+          "independent_load_median_rate_range": [
+            291.51957071057706,
+            354.70803297619153
+          ],
+          "block_median_rates": [
+            354.70803297619153,
+            293.2339972817435,
+            294.77907109195564,
+            291.51957071057706
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 12,
+          "median_tokens_per_second": 284.7658289693466,
+          "independent_load_median_rate_range": [
+            274.6363663195947,
+            355.09668377115446
+          ],
+          "block_median_rates": [
+            355.09668377115446,
+            289.7428214432825,
+            275.47517651964483,
+            274.6363663195947
+          ]
+        },
+        "copy-edit": {
+          "samples": 12,
+          "median_tokens_per_second": 260.61749182779545,
+          "independent_load_median_rate_range": [
+            253.73352530714223,
+            328.08794865470446
+          ],
+          "block_median_rates": [
+            328.08794865470446,
+            262.6419076038163,
+            260.5980790310681,
+            253.73352530714223
+          ]
+        },
+        "context-medium": {
+          "samples": 12,
+          "median_tokens_per_second": 251.4513013490697,
+          "independent_load_median_rate_range": [
+            248.45755318643918,
+            313.59879553415556
+          ],
+          "block_median_rates": [
+            313.59879553415556,
+            259.87807366749263,
+            248.45755318643918,
+            248.7277198223071
+          ]
+        },
+        "context-long": {
+          "samples": 12,
+          "median_tokens_per_second": 191.20777380508858,
+          "independent_load_median_rate_range": [
+            180.46989150670444,
+            240.89715340545143
+          ],
+          "block_median_rates": [
+            240.89715340545143,
+            190.57112155923784,
+            184.64643272244413,
+            180.46989150670444
+          ]
+        },
+        "long-output": {
+          "samples": 12,
+          "median_tokens_per_second": 287.4981050177457,
+          "independent_load_median_rate_range": [
+            275.78503684083864,
+            342.4649324670601
+          ],
+          "block_median_rates": [
+            342.4649324670601,
+            292.52289065161716,
+            279.97947825245643,
+            275.78503684083864
+          ]
+        }
+      }
+    },
+    "mlx_lm": {
+      "accepted_load_blocks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 12,
+          "median_tokens_per_second": 322.3979399566269,
+          "independent_load_median_rate_range": [
+            316.49283055797287,
+            325.28407053337384
+          ],
+          "block_median_rates": [
+            325.28407053337384,
+            316.49283055797287,
+            320.47851442261316,
+            324.2421344030206
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 12,
+          "median_tokens_per_second": 317.11732137218354,
+          "independent_load_median_rate_range": [
+            316.0715919588578,
+            325.2942310753651
+          ],
+          "block_median_rates": [
+            325.2942310753651,
+            316.40374239562834,
+            316.0715919588578,
+            319.19920899957157
+          ]
+        },
+        "copy-edit": {
+          "samples": 12,
+          "median_tokens_per_second": 293.0681601936405,
+          "independent_load_median_rate_range": [
+            232.9742784106458,
+            308.2808640228153
+          ],
+          "block_median_rates": [
+            308.2808640228153,
+            300.2228216499524,
+            281.1543654384709,
+            232.9742784106458
+          ]
+        },
+        "context-medium": {
+          "samples": 12,
+          "median_tokens_per_second": 275.30769851166394,
+          "independent_load_median_rate_range": [
+            264.71909684905035,
+            298.39070130052545
+          ],
+          "block_median_rates": [
+            298.39070130052545,
+            287.03828698606674,
+            264.9622605027931,
+            264.71909684905035
+          ]
+        },
+        "context-long": {
+          "samples": 12,
+          "median_tokens_per_second": 200.44433104097865,
+          "independent_load_median_rate_range": [
+            193.96354123001993,
+            237.4552221122929
+          ],
+          "block_median_rates": [
+            237.4552221122929,
+            200.25984247105205,
+            200.62881961090525,
+            193.96354123001993
+          ]
+        },
+        "long-output": {
+          "samples": 12,
+          "median_tokens_per_second": 304.493142580619,
+          "independent_load_median_rate_range": [
+            298.31354532602023,
+            333.46047056177906
+          ],
+          "block_median_rates": [
+            333.46047056177906,
+            303.66010498264194,
+            305.2957330630197,
+            298.31354532602023
+          ]
+        }
+      }
+    },
+    "vllm_metal": {
+      "accepted_load_blocks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 12,
+          "median_tokens_per_second": 283.3572412766591,
+          "independent_load_median_rate_range": [
+            280.2107453090391,
+            284.17129838288093
+          ],
+          "block_median_rates": [
+            283.87325489655126,
+            284.17129838288093,
+            283.0485171277317,
+            280.2107453090391
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 12,
+          "median_tokens_per_second": 282.3910516210195,
+          "independent_load_median_rate_range": [
+            280.27105273533,
+            283.0824510878192
+          ],
+          "block_median_rates": [
+            283.0824510878192,
+            280.27105273533,
+            282.5304057930511,
+            282.01001922243836
+          ]
+        },
+        "copy-edit": {
+          "samples": 12,
+          "median_tokens_per_second": 267.5355571207512,
+          "independent_load_median_rate_range": [
+            266.97962633096716,
+            268.1297192547018
+          ],
+          "block_median_rates": [
+            267.50373044933167,
+            267.56738379217074,
+            266.97962633096716,
+            268.1297192547018
+          ]
+        },
+        "context-medium": {
+          "samples": 12,
+          "median_tokens_per_second": 258.6415052343783,
+          "independent_load_median_rate_range": [
+            255.69778672843435,
+            259.92156669325766
+          ],
+          "block_median_rates": [
+            255.69778672843435,
+            259.18770658971795,
+            258.0953038790386,
+            259.92156669325766
+          ]
+        },
+        "context-long": {
+          "samples": 12,
+          "median_tokens_per_second": 202.89299294301304,
+          "independent_load_median_rate_range": [
+            201.88304579771523,
+            207.73972485583303
+          ],
+          "block_median_rates": [
+            201.88304579771523,
+            201.97012930960824,
+            207.73972485583303,
+            202.2676628938047
+          ]
+        },
+        "long-output": {
+          "samples": 12,
+          "median_tokens_per_second": 264.9962121365696,
+          "independent_load_median_rate_range": [
+            246.15113908459338,
+            278.69910755773634
+          ],
+          "block_median_rates": [
+            275.8011245072918,
+            278.69910755773634,
+            246.15113908459338,
+            248.3032259709997
+          ]
+        }
+      }
+    },
+    "llama_cpp": {
+      "accepted_load_blocks": [
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 9,
+          "median_tokens_per_second": 200.57173379165374,
+          "independent_load_median_rate_range": [
+            197.50075416576365,
+            203.4779629749592
+          ],
+          "block_median_rates": [
+            197.50075416576365,
+            203.4779629749592,
+            200.57173379165374
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 9,
+          "median_tokens_per_second": 188.9518872027489,
+          "independent_load_median_rate_range": [
+            187.83261661731774,
+            189.41059155775616
+          ],
+          "block_median_rates": [
+            187.83261661731774,
+            189.41059155775616,
+            188.9518872027489
+          ]
+        },
+        "copy-edit": {
+          "samples": 9,
+          "median_tokens_per_second": 183.98048618416095,
+          "independent_load_median_rate_range": [
+            182.97881277748974,
+            184.42614829601214
+          ],
+          "block_median_rates": [
+            182.97881277748974,
+            184.42614829601214,
+            184.35450754975878
+          ]
+        },
+        "context-medium": {
+          "samples": 9,
+          "median_tokens_per_second": 176.63351373398302,
+          "independent_load_median_rate_range": [
+            176.52163438432993,
+            178.13972729726362
+          ],
+          "block_median_rates": [
+            178.13972729726362,
+            177.84233825408612,
+            176.52163438432993
+          ]
+        },
+        "context-long": {
+          "samples": 9,
+          "median_tokens_per_second": 136.65577690847132,
+          "independent_load_median_rate_range": [
+            135.79689770743929,
+            137.1977484428244
+          ],
+          "block_median_rates": [
+            135.79689770743929,
+            137.1977484428244,
+            136.74301208213603
+          ]
+        },
+        "long-output": {
+          "samples": 9,
+          "median_tokens_per_second": 197.12408033017536,
+          "independent_load_median_rate_range": [
+            196.98500408737837,
+            197.6567382148213
+          ],
+          "block_median_rates": [
+            197.12408033017536,
+            197.6567382148213,
+            196.98500408737837
+          ]
+        }
+      }
+    },
+    "tensorfold_default": {
+      "accepted_load_blocks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 12,
+          "median_tokens_per_second": 162.93333142449887,
+          "independent_load_median_rate_range": [
+            151.0722293008244,
+            191.65216331107783
+          ],
+          "block_median_rates": [
+            170.3010020296567,
+            191.65216331107783,
+            158.98185377682483,
+            151.0722293008244
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 12,
+          "median_tokens_per_second": 164.28357823918174,
+          "independent_load_median_rate_range": [
+            150.61370671129583,
+            190.07141671272998
+          ],
+          "block_median_rates": [
+            174.93432577855162,
+            190.07141671272998,
+            152.62654777219407,
+            150.61370671129583
+          ]
+        },
+        "copy-edit": {
+          "samples": 12,
+          "median_tokens_per_second": 237.09447774307804,
+          "independent_load_median_rate_range": [
+            215.37791296729344,
+            254.68140842470723
+          ],
+          "block_median_rates": [
+            249.56965074838837,
+            254.68140842470723,
+            221.53697029583603,
+            215.37791296729344
+          ]
+        },
+        "context-medium": {
+          "samples": 12,
+          "median_tokens_per_second": 138.37345791355264,
+          "independent_load_median_rate_range": [
+            124.84592889677351,
+            148.030265165183
+          ],
+          "block_median_rates": [
+            147.47264442104412,
+            148.030265165183,
+            128.95289198091788,
+            124.84592889677351
+          ]
+        },
+        "context-long": {
+          "samples": 12,
+          "median_tokens_per_second": 87.21934439719575,
+          "independent_load_median_rate_range": [
+            78.13324819317815,
+            93.47889750629315
+          ],
+          "block_median_rates": [
+            93.47889750629315,
+            93.2067877056901,
+            80.38947863192715,
+            78.13324819317815
+          ]
+        },
+        "long-output": {
+          "samples": 12,
+          "median_tokens_per_second": 170.4715655368102,
+          "independent_load_median_rate_range": [
+            156.8155338668664,
+            183.64780404222554
+          ],
+          "block_median_rates": [
+            183.64780404222554,
+            179.272192521446,
+            159.8527231906206,
+            156.8155338668664
+          ]
+        }
+      }
+    },
+    "tensorfold_plain": {
+      "accepted_load_blocks": [
+        1,
+        2,
+        3
+      ],
+      "fixtures": {
+        "fibonacci-module": {
+          "samples": 9,
+          "median_tokens_per_second": 156.57650367724568,
+          "independent_load_median_rate_range": [
+            148.2802960942599,
+            174.8611783041105
+          ],
+          "block_median_rates": [
+            174.8611783041105,
+            156.57650367724568,
+            148.2802960942599
+          ]
+        },
+        "gpu-explanation": {
+          "samples": 9,
+          "median_tokens_per_second": 152.11744803218954,
+          "independent_load_median_rate_range": [
+            147.97883894780531,
+            179.7854127775415
+          ],
+          "block_median_rates": [
+            179.7854127775415,
+            152.11744803218954,
+            147.97883894780531
+          ]
+        },
+        "copy-edit": {
+          "samples": 9,
+          "median_tokens_per_second": 132.93365529179985,
+          "independent_load_median_rate_range": [
+            129.54331978806613,
+            157.23661562776434
+          ],
+          "block_median_rates": [
+            157.23661562776434,
+            132.93365529179985,
+            129.54331978806613
+          ]
+        },
+        "context-medium": {
+          "samples": 9,
+          "median_tokens_per_second": 125.8790895241249,
+          "independent_load_median_rate_range": [
+            121.89757865192726,
+            149.4649912868045
+          ],
+          "block_median_rates": [
+            149.4649912868045,
+            125.8790895241249,
+            121.89757865192726
+          ]
+        },
+        "context-long": {
+          "samples": 9,
+          "median_tokens_per_second": 78.14505815515652,
+          "independent_load_median_rate_range": [
+            77.15368599663286,
+            93.37331808588566
+          ],
+          "block_median_rates": [
+            93.37331808588566,
+            78.14505815515652,
+            77.15368599663286
+          ]
+        },
+        "long-output": {
+          "samples": 9,
+          "median_tokens_per_second": 152.12299036420472,
+          "independent_load_median_rate_range": [
+            150.59714191905312,
+            184.35244973694103
+          ],
+          "block_median_rates": [
+            184.35244973694103,
+            152.12299036420472,
+            150.59714191905312
+          ]
+        }
+      }
+    }
+  },
+  "scoring": {
+    "stark_bf16": {
+      "accepted_load_blocks": [
+        2,
+        3
+      ],
+      "accepted_requests": 486,
+      "pooled_median_milliseconds": 68.63008299842477,
+      "block_median_milliseconds": [
+        65.89562492445111,
+        74.87254205625504
+      ],
+      "buckets": {
+        "0-255": {
+          "requests": 266,
+          "cases_per_load": 133,
+          "median_milliseconds": 55.94091699458659
+        },
+        "256-1023": {
+          "requests": 132,
+          "cases_per_load": 66,
+          "median_milliseconds": 118.47220797790214
+        },
+        "1024-8191": {
+          "requests": 88,
+          "cases_per_load": 44,
+          "median_milliseconds": 598.2614994281903
+        }
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 59,
+          "brier": 1.2665228721998403,
+          "ece_10_bins": 0.6173385774349536
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 0.009406583171808189,
+          "ece_10_bins": 0.0400332894546923
+        }
+      }
+    },
+    "llama_bf16": {
+      "accepted_load_blocks": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "accepted_requests": 972,
+      "pooled_median_milliseconds": 133.13460402423516,
+      "block_median_milliseconds": [
+        130.26933290529996,
+        132.81629199627787,
+        132.24045804236084,
+        135.98708296194673
+      ],
+      "buckets": {
+        "0-255": {
+          "requests": 532,
+          "cases_per_load": 133,
+          "median_milliseconds": 120.99358346313238
+        },
+        "256-1023": {
+          "requests": 264,
+          "cases_per_load": 66,
+          "median_milliseconds": 187.64560407726094
+        },
+        "1024-8191": {
+          "requests": 176,
+          "cases_per_load": 44,
+          "median_milliseconds": 893.6670830007643
+        }
+      },
+      "quality": {
+        "public": {
+          "cases": 231,
+          "argmax_correct": 59,
+          "brier": 1.2669095330810638,
+          "ece_10_bins": 0.6260793840923095
+        },
+        "synthetic": {
+          "cases": 12,
+          "argmax_correct": 12,
+          "brier": 0.00870729903532468,
+          "ece_10_bins": 0.03882201693056009
+        }
+      }
+    }
+  },
+  "sources_sha256": {
+    "generation-results.json": "fe5e57adc765573b6976ec275a88240e742800dc1c6f1229600832557e21f62e",
+    "llama-generation-corrected-results.json": "083b4804988d503a10652ce59fcd4b0302cd4711ea301a07d8450a6781092736",
+    "scoring-results.json": "d87fe71258d8cb13c69d9cf11b6a8b3be2682907332be8c76801cc5466932f10",
+    "serving-results.json": "ba030462f58430a97bb806b39236db3a990b5830d9b87321a6d995190f67571e"
+  },
+  "serving": {
+    "1": {
+      "accepted_load_blocks": 3,
+      "waves": 15,
+      "requests": 15,
+      "median_aggregate_output_tokens_per_second": 264.41637315559217,
+      "minimum_aggregate_output_tokens_per_second": 226.95670942781786,
+      "maximum_aggregate_output_tokens_per_second": 275.4819946055689,
+      "median_request_wall_seconds": 0.48402262502349913,
+      "minimum_request_wall_seconds": 0.4646012079901993,
+      "maximum_request_wall_seconds": 0.5639074579812586,
+      "cache_counter_known_requests": 0,
+      "cache_counter_unknown_requests": 15,
+      "unique_output_token_hashes": 1
+    },
+    "4": {
+      "accepted_load_blocks": 3,
+      "waves": 15,
+      "requests": 60,
+      "median_aggregate_output_tokens_per_second": 738.0510859308218,
+      "minimum_aggregate_output_tokens_per_second": 657.4352164084726,
+      "maximum_aggregate_output_tokens_per_second": 870.3498818629387,
+      "median_request_wall_seconds": 0.6932997290277854,
+      "minimum_request_wall_seconds": 0.5873549999669194,
+      "maximum_request_wall_seconds": 0.7785215829499066,
+      "cache_counter_known_requests": 0,
+      "cache_counter_unknown_requests": 60,
+      "unique_output_token_hashes": 1
+    },
+    "8": {
+      "accepted_load_blocks": 3,
+      "waves": 15,
+      "requests": 120,
+      "median_aggregate_output_tokens_per_second": 953.420171475073,
+      "minimum_aggregate_output_tokens_per_second": 849.3930936402382,
+      "maximum_aggregate_output_tokens_per_second": 1152.983656755734,
+      "median_request_wall_seconds": 1.0733095000614412,
+      "minimum_request_wall_seconds": 0.8856937499949709,
+      "maximum_request_wall_seconds": 1.2051589579787105,
+      "cache_counter_known_requests": 0,
+      "cache_counter_unknown_requests": 120,
+      "unique_output_token_hashes": 1
+    }
+  },
+  "serving_independent_load_median_rate_ranges": {
+    "1": [
+      257.84505305231323,
+      268.4145064312595
+    ],
+    "4": [
+      696.7490482037347,
+      852.9271865041254
+    ],
+    "8": [
+      949.0628663026775,
+      962.786892200996
+    ]
+  }
+}

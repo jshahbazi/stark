@@ -1,0 +1,108 @@
+[
+  {
+    "engine": "vllm-metal",
+    "label": "stock-qwen35",
+    "status": "server_exited_before_ready",
+    "diagnostics_persisted": false,
+    "raw_payloads_persisted": false,
+    "prefix_cache_requested": false,
+    "memory_fraction": 0.1,
+    "startup_seconds": 7.651592875015922,
+    "server_returncode": 2,
+    "diagnostic_codes": [
+      "cli_argument_not_recognized"
+    ],
+    "owned_process_group_stopped": true,
+    "total_seconds": 7.651661999989301
+  },
+  {
+    "engine": "vllm-metal",
+    "label": "stock-qwen35",
+    "status": "server_exited_before_ready",
+    "diagnostics_persisted": false,
+    "raw_payloads_persisted": false,
+    "prefix_cache_requested": false,
+    "memory_fraction": 0.1,
+    "startup_seconds": 17.641711250063963,
+    "server_returncode": 1,
+    "diagnostic_codes": [],
+    "owned_process_group_stopped": true,
+    "total_seconds": 17.641827541054226
+  },
+  {
+    "engine": "vllm-metal",
+    "label": "stock-qwen35",
+    "status": "server_exited_before_ready",
+    "diagnostics_persisted": false,
+    "raw_payloads_persisted": false,
+    "prefix_cache_requested": false,
+    "memory_fraction": 0.1,
+    "startup_seconds": 11.460236667073332,
+    "server_returncode": 1,
+    "diagnostic_codes": [],
+    "diagnostic_error_classes": [
+      "ZMQError"
+    ],
+    "owned_process_group_stopped": true,
+    "total_seconds": 11.460985332960263
+  },
+  {
+    "engine": "vllm-metal",
+    "label": "stock-qwen35",
+    "status": "request_passed",
+    "diagnostics_persisted": false,
+    "raw_payloads_persisted": false,
+    "prefix_cache_requested": false,
+    "memory_fraction": 0.1,
+    "startup_seconds": 23.44502129103057,
+    "served_id_confirmed": true,
+    "prompt_token_count": 13,
+    "prompt_sha256": "e413cb1bfc7e096bcf8e20856c0181a8a9c076ffc74e21b1a2c78a1a8781a984",
+    "request_wall_seconds": 0.5568985000718385,
+    "usage_counts": {
+      "prompt_tokens": 13,
+      "total_tokens": 29,
+      "completion_tokens": 16
+    },
+    "cached_tokens_reported": null,
+    "finish_reason": "length",
+    "output_token_count": 16,
+    "output_token_sha256": "cd6877462e26bd5d9296b37ae724003ce740e9ad6e0621ce9ec404dc8b5274b8",
+    "prompt_ids_match": null,
+    "server_returncode": 0,
+    "diagnostic_codes": [],
+    "diagnostic_error_classes": [],
+    "owned_process_group_stopped": true,
+    "transient_rpc_root_removed": true,
+    "total_seconds": 29.026269583031535
+  },
+  {
+    "engine": "vllm-metal",
+    "label": "stock-jevk5",
+    "status": "server_exited_before_ready",
+    "diagnostics_persisted": false,
+    "raw_payloads_persisted": false,
+    "prefix_cache_requested": false,
+    "memory_fraction": 0.15,
+    "startup_seconds": 19.976325874915347,
+    "server_returncode": 1,
+    "diagnostic_codes": [
+      "engine_initialization_failed",
+      "flat_qwen35_text_loader_unsupported",
+      "flat_qwen35_text_module_missing",
+      "module_missing",
+      "runtime_error",
+      "unsupported_contract",
+      "value_error"
+    ],
+    "diagnostic_error_classes": [
+      "ModuleNotFoundError",
+      "RuntimeError",
+      "ValueError"
+    ],
+    "owned_process_group_stopped": true,
+    "transient_rpc_root_removed": true,
+    "total_seconds": 19.97768712497782,
+    "receipt_correction": "Scoring flags were passed by the harness but were initially omitted from the copied argument receipt."
+  }
+]
