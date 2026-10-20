@@ -1,0 +1,149 @@
+{
+  "task_root": "<task_runtime>",
+  "source": "<qwen_mlx_source>",
+  "context": 8192,
+  "blocks": 4,
+  "repeats": 3,
+  "engines": [
+    {
+      "id": "stark",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "28fceb55",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<repository>/models/tensorfold-stock-qwen35-2b-q4/model.safetensors",
+      "command": [
+        "<repository>/target/release/stark-generate",
+        "--model-path",
+        "<repository>/models/tensorfold-stock-qwen35-2b-q4"
+      ]
+    },
+    {
+      "id": "mlx_lm",
+      "kind": "mlx",
+      "version": "0.32.2",
+      "representation": "MLX affine4 g64",
+      "lock": "<task_runtime>/mlx/uv.lock",
+      "model_file": "<qwen_mlx_source>/model.safetensors",
+      "command": [
+        "<task_runtime>/mlx/.venv/bin/python",
+        "<repository>/scripts/stock_compare_mlx.py",
+        "--model-path",
+        "<qwen_mlx_source>"
+      ]
+    },
+    {
+      "id": "llama_cpp",
+      "kind": "llama",
+      "version": "b11747",
+      "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+      "representation": "GGUF Q4_K_M, unsloth/Qwen3.5-2B-GGUF@f6d5376be1edb4d416d56da11e5397a961aca8ae (different quantizer)",
+      "model_file": "<borrowed_models>/qwen3.5-2b/Qwen3.5-2B-Q4_K_M.gguf",
+      "command": [
+        "<task_runtime>/llama/release/llama-b11747/llama-server",
+        "--model",
+        "<borrowed_models>/qwen3.5-2b/Qwen3.5-2B-Q4_K_M.gguf",
+        "--ctx-size",
+        "{context}",
+        "--parallel",
+        "1",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+        "--log-disable",
+        "--no-cache-prompt",
+        "--no-ui",
+        "--no-cont-batching"
+      ]
+    },
+    {
+      "id": "tensorfold_default",
+      "kind": "tensorfold",
+      "version": "1.1.1",
+      "representation": "MLX affine4 g64",
+      "draft": true,
+      "model_file": "<qwen_mlx_source>/model.safetensors",
+      "command": [
+        "<task_runtime>/tensorfold/release/tensorfold-1.1.1-macos-arm64/bin/tensorfold-native",
+        "serve",
+        "<qwen_mlx_source>",
+        "--name",
+        "stock-qwen35",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+        "--context",
+        "{context}",
+        "--parallel",
+        "1",
+        "--prompt-cache-gib",
+        "0",
+        "--keep-warm",
+        "0",
+        "--no-update-check",
+        "--no-thinking"
+      ]
+    },
+    {
+      "id": "tensorfold_plain",
+      "kind": "tensorfold",
+      "version": "1.1.1",
+      "representation": "MLX affine4 g64",
+      "draft": false,
+      "model_file": "<qwen_mlx_source>/model.safetensors",
+      "command": [
+        "<task_runtime>/tensorfold/release/tensorfold-1.1.1-macos-arm64/bin/tensorfold-native",
+        "serve",
+        "<qwen_mlx_source>",
+        "--name",
+        "stock-qwen35",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+        "--context",
+        "{context}",
+        "--parallel",
+        "1",
+        "--prompt-cache-gib",
+        "0",
+        "--keep-warm",
+        "0",
+        "--no-update-check",
+        "--no-thinking"
+      ]
+    },
+    {
+      "id": "vllm_metal",
+      "kind": "vllm",
+      "version": "0.31.0",
+      "source_commit": "e7a0c90bec180e5dd4275c473fd7a36e709a930e",
+      "representation": "MLX affine4 g64; stock MLX model layers plus vLLM Metal attention/scheduler",
+      "lock": "<task_runtime>/vllm/uv.lock",
+      "model_file": "<qwen_mlx_source>/model.safetensors",
+      "command": [
+        "<task_runtime>/vllm/.venv/bin/vllm",
+        "serve",
+        "<qwen_mlx_source>",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "{port}",
+        "--served-model-name",
+        "stock-qwen35",
+        "--max-model-len",
+        "{context}",
+        "--max-num-seqs",
+        "1",
+        "--no-enable-prefix-caching",
+        "--language-model-only",
+        "--generation-config",
+        "vllm",
+        "--gpu-memory-utilization",
+        "0.1"
+      ]
+    }
+  ]
+}

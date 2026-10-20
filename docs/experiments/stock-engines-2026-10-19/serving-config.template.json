@@ -1,0 +1,47 @@
+{
+  "scope": "vllm_metal_within_stack_scaling",
+  "source": "<qwen_mlx_source>",
+  "task_root": "<task_runtime>",
+  "context": 8192,
+  "blocks": 3,
+  "rounds": 5,
+  "concurrencies": [
+    1,
+    4,
+    8
+  ],
+  "max_num_seqs": 8,
+  "gpu_memory_utilization": 0.1,
+  "fixture": "fibonacci-module",
+  "output_limit": 128,
+  "engine": {
+    "id": "vllm_metal",
+    "kind": "vllm",
+    "version": "0.31.0",
+    "source_commit": "e7a0c90bec180e5dd4275c473fd7a36e709a930e",
+    "representation": "MLX affine4 g64; stock MLX model layers plus vLLM Metal attention/scheduler",
+    "lock": "<task_runtime>/vllm/uv.lock",
+    "model_file": "<qwen_mlx_source>/model.safetensors",
+    "command": [
+      "<task_runtime>/vllm/.venv/bin/vllm",
+      "serve",
+      "<qwen_mlx_source>",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "{port}",
+      "--served-model-name",
+      "stock-qwen35",
+      "--max-model-len",
+      "{context}",
+      "--max-num-seqs",
+      "8",
+      "--no-enable-prefix-caching",
+      "--language-model-only",
+      "--generation-config",
+      "vllm",
+      "--gpu-memory-utilization",
+      "0.1"
+    ]
+  }
+}
