@@ -1,0 +1,19 @@
+{
+  "scope": "runtime/stock-comparison-2026-10-19 only",
+  "ownership_verified": true,
+  "target_directory_not_symlink": true,
+  "open_handle_screen_complete": true,
+  "open_handles": 0,
+  "benchmark_executable_processes": [],
+  "preexisting_installed_llama_servers": 1,
+  "du_allocated_bytes": 7532720128,
+  "logical_regular_file_bytes": 7196723512,
+  "free_bytes_before": 25651531776,
+  "initial_free_bytes_before_setup": 31900704768,
+  "preserve_existing": [
+    "models",
+    "runtime/tensorfold-stock-qwen35",
+    "external MeeCP model/runtime files"
+  ],
+  "aggregate_evidence_commit": "4adfae080a2d32152bfb3f362b26e6ab49da02ce"
+}
