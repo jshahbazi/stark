@@ -109,3 +109,24 @@ and the task-owned runtime root, and verify absence/open handles. Preserve
 preexisting models, source downloads, app packages and runtimes. Record logical
 task size and actual filesystem free-space change separately. No article or PR
 is created by this pilot.
+
+## Recorded driver amendment
+
+After the initial generation run, review found that the llama.cpp adapter read
+the legacy `stopped_limit` field. The pinned b11747 native `/completion` API
+returns `stop_type` (`limit`, `eos`, or `word`). The corrected adapter preserves
+that field and rejects unknown values. A model-free test checks all three
+termination types, including EOS at exactly the requested count.
+
+Preserve the original generation report, whose llama.cpp termination coverage is
+invalid. Repeat only llama.cpp with four independent loads and the same fixture,
+warmup, repetition, context and sampling settings. Record the repeat separately;
+its load order is no longer paired with the other engines. Do not retroactively
+infer termination from output counts or substitute its observations into the
+original report. The JevK5 scoring process already running at amendment time
+retains its imported original driver and source revision.
+
+The serving extension uses three fresh vLLM Metal loads, five measured waves per
+concurrency per load, one warmup wave at each concurrency, `max-num-seqs=8`, and
+GPU memory utilization 0.1 throughout. Rotate concurrency 1/4/8 across loads.
+Freeze this implementation before starting its measured run.

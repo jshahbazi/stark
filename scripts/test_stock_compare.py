@@ -7,6 +7,9 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from benchmark_stock_engines import Engine
 
 
 def worker_module():
@@ -26,6 +29,43 @@ class Response:
 
 
 class StockWorkerTests(unittest.TestCase):
+    def test_current_llama_native_termination_schema(self):
+        engine = object.__new__(Engine)
+        engine.kind = "llama"
+        engine.base = "http://unused"
+        fixture = {"ids": [1, 2], "limit": 3}
+        response = {
+            "tokens": [10, 11, 12],
+            "content": "fixture",
+            "tokens_evaluated": 2,
+        }
+        for stop_type, reason in (
+            ("limit", "length"),
+            ("eos", "stop"),
+            ("word", "stop"),
+        ):
+            with (
+                self.subTest(stop_type=stop_type),
+                patch(
+                    "benchmark_stock_engines.http",
+                    return_value={**response, "stop_type": stop_type},
+                ),
+            ):
+                result = engine.generate(fixture, 8192)
+                self.assertEqual(result["server_stop_type"], stop_type)
+                self.assertEqual(result["finish_reason"], reason)
+                self.assertEqual(result["fixed_work_eligible"], stop_type == "limit")
+        for stop_type in (None, "unknown", "none"):
+            with (
+                self.subTest(stop_type=stop_type),
+                patch(
+                    "benchmark_stock_engines.http",
+                    return_value={**response, "stop_type": stop_type},
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "unknown_llama_stop_type"):
+                    engine.generate(fixture, 8192)
+
     def test_length_final_response_contributes_actual_last_token(self):
         worker = worker_module()
         mlx_lm = types.ModuleType("mlx_lm")
