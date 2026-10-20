@@ -4,6 +4,12 @@ Compiled: **2026-10-19**. Status: historical evidence and research for a future
 benchmark. No new model runs or article publication were performed for this
 document.
 
+Follow-up: the [2026-10-19 stock engine pilot](STOCK_ENGINE_BENCHMARK_2026_10_19.md)
+adds measured current MLX-LM, llama.cpp, TensorFold and vLLM Metal comparisons,
+stock JevK5 admission and scoring, and a vLLM concurrency check. Its own protocol,
+exclusions and conclusions govern those new results. The historical findings
+below retain their original scope and source revisions.
+
 This inventory covers the standalone Stark comparisons, its converter, and the
 earlier MeeCP Uzu experiments that led to Stark. Each result retains its original
 scope. Historical Uzu candidates, upstream Uzu, standalone Stark and installed

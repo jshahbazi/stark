@@ -8,6 +8,8 @@ Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), startin
 
 The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) collects recorded engine, reference, conversion and predecessor-Uzu results, their limits, and candidate engines for a future benchmark.
 
+The [2026-10-19 stock engine pilot](docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md) records current Qwen3.5-2B generation, JevK5 scoring and vLLM Metal concurrency results, including support failures and excluded timings.
+
 ## Why Stark
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).

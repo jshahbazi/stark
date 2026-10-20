@@ -1,7 +1,8 @@
 # Stock benchmark runtimes
 
-These directories preserve the exact dependency locks used for future
-read-only stock-engine comparisons. They are separate projects so the root
+These directories preserve the exact dependency locks used for the
+[2026-10-19 stock-engine pilot](../../docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md).
+They are separate projects so the root
 tool environment and application dependencies remain unchanged.
 
 Use a task-owned environment when replaying a runtime. For example:
@@ -11,17 +12,33 @@ UV_PROJECT_ENVIRONMENT=/absolute/path/to/task-runtime/mlx/.venv uv run --project
 ```
 
 Set `UV_CACHE_DIR` to a task-owned cache path. Do not rely on globally
-installed modules. Model loading and GPU execution require a separately
-approved benchmark lane.
+installed modules. Serialize measured GPU work on the benchmark host and record
+background activity and timing exclusions.
 
 The MLX runtime uses stock `mlx_lm.utils.load` and `stream_generate`; its
 worker keeps prompt and output payloads on a private pipe and writes only
 aggregate hashes and scalar timings. Flat JevK5 admission must fail closed if
 the stock loader does not support its exact `qwen3_5_text` configuration.
 
-The vLLM lock is retained for a later Apple-silicon admission check. Its
-planned RPC path must use a short local socket/HTTP timeout and record the
-exact server/runtime identity. Cache flags, prompt caching, GPU offload and
-server overhead must be explicit in any result.
+The vLLM lock was admitted on Apple silicon for the exact Qwen checkpoint in the
+report. Its worker RPC sockets must use an owned short temporary directory
+(the shared driver creates `/tmp/svm-*` and removes it after server teardown).
+The longer runtime-root path exceeds macOS socket-path limits. The driver keeps
+caches under the task-owned root and records the exact server/runtime identity.
+Cache flags, prompt caching, GPU offload and server overhead are explicit in the
+report and configuration templates.
 
-Neither lock constitutes a qualification or benchmark result.
+The path-redacted configuration templates in the experiment directory preserve
+the actual CLI flags. Replace `<repository>`, `<task_runtime>`,
+`<qwen_mlx_source>`, `<borrowed_models>` and `<sealed_reference>` recursively with
+local absolute paths in private configuration copies. Never run the placeholder
+templates directly. Use the corresponding generation, scoring or serving driver
+with `--config PRIVATE_CONFIG --output AGGREGATE_JSON` through the locked `tools`
+project. The corrected llama repeat uses the generation driver.
+
+The scoring C++ adapter's header records its build command and exact upstream
+header revision. Link it against the matching release libraries. These adapters
+provide measurement and readout; they do not patch the engine implementations.
+
+Locks alone do not qualify a result. Preserve the source-bound aggregate evidence,
+host-screen dispositions and model hashes when reproducing the measurements.
