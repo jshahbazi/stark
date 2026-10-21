@@ -1,6 +1,6 @@
 # Probability scoring
 
-Build `stark-score` with the README command and provide a converted model directory through `--score-model-path`. The worker emits readiness followed by one JSON response per request. Readiness identifies Stark, the original Uzu revision, worker mode, and cache policy. The build receipt records selected optimization features.
+Build `stark-score` using the [scoring setup commands](TECHNICAL_OVERVIEW.md#run-the-scoring-worker) and provide a converted model directory through `--score-model-path`. The worker emits readiness followed by one JSON response per request. Readiness identifies Stark, the original Uzu revision, worker mode, and cache policy. The build receipt records selected optimization features.
 
 Operations are `tokenize`, `score`, and `reset_cache`. A score request supplies `input_token_ids`, distinct `candidate_token_ids`, `context_tokens`, and a positive finite `temperature`. Context is capped at 16,384 tokens and each input line at 1 MiB. Unknown fields and invalid arguments are rejected with fixed error codes.
 
