@@ -37,6 +37,26 @@ Model files, source downloads and private IPC artifacts stay outside Git. Preser
 
 For this checkpoint, the app must render the exact Hugging Face/upstream MiniCPM5 XML chat template with the upstream tools and `enable_thinking=False`. The validation harness pins upstream agent assets at revision `c6c091d7ee14c81206bb28af90d8ff506fd0235e` and checks their hashes. Pass the complete rendered string to the worker, including the generation prefix. The worker tokenizes that string with `add_special_tokens=false` and performs inference.
 
+## Interactive CLI chat
+
+With an updated source installation (`./install.sh --from-source`), start a terminal conversation:
+
+```sh
+stark chat --model-path /absolute/path/to/converted/model
+```
+
+For development without rebuilding the bundle:
+
+```sh
+./scripts/stark chat --model-path "$PWD/models/gguf-experiment/qwen3-dense"
+```
+
+The client renders `token_codec_config.prompt_template` from the converted model and keeps message history only in memory. It loads one worker for the session and sends each complete conversation through its private pipes. Replies appear after generation completes. Messages are single lines; `/help` lists commands, `/reset` clears history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C closes the chat and worker. No transcript or input history is saved.
+
+The checkout launcher uses `uv` with locked Python dependencies and the existing `target/release/stark-generate` binary. Build that worker first if it is missing. Installed bundles use their private Python runtime and bundled worker.
+
+Options include `--system "Your system message"`, `--context-tokens 8192`, `--max-new-tokens 512`, `--thinking`, and `--timeout 300` (seconds per worker reply, including startup). Generation uses greedy sampling. Thinking is disabled by default when the model template supports that setting. The default context budget is the smaller of 8192 and the worker's advertised limit. The client reserves room for the full reply budget and rejects an oversized turn without changing history; use `/reset` or restart with a larger context. Templates run in a Jinja sandbox. Models must have a compatible text chat template; this client does not execute tools or accept multimodal input.
+
 ## Private JSON-lines protocol
 
 Start the worker with exactly `--model-path PATH`. Read its readiness reply before sending requests. Readiness includes `ready`, `engine`, `version`, `mode` (`text-generation-v1`), supported `operations`, `state_policy` (`fresh-per-request`), `vocab_size`, context/output bounds, `eos_token_ids` and `sampling_modes`.
