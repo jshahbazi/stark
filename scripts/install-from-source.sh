@@ -1,0 +1,38 @@
+#!/bin/sh
+# A source checkout uses the same relocatable bundle as a binary installation.
+set -eu
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
+fail() { printf 'stark source install: %s\n' "$*" >&2; exit 1; }
+prefix=${HOME:?HOME must be set}/.local
+if [ "$#" -gt 0 ]; then
+    [ "$#" -eq 2 ] && [ "$1" = --prefix ] || fail 'usage: ./install.sh --from-source [--prefix /absolute/path]'
+    prefix=$2
+fi
+case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path' ;; esac
+[ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || fail 'use an Apple silicon Mac in a native arm64 terminal'
+sw_vers -productVersion | awk -F. '$1 > 26 || ($1 == 26 && $2 >= 4) { ok=1 } END { exit !ok }' \
+    || fail 'macOS 26.4 or newer is required'
+# Discover the usual tool locations without changing the caller\047s shell profile.
+PATH=${PATH:-/usr/bin:/bin}:/opt/homebrew/bin:${HOME}/.cargo/bin
+export PATH
+command -v uv >/dev/null 2>&1 || fail 'install uv first: brew install uv (required version: 0.12.24)'
+command -v rustup >/dev/null 2>&1 || fail 'install Rust with rustup: https://rustup.rs'
+[ "$(uv --version | awk '{print $2}')" = 0.12.24 ] || fail 'this source build requires uv 0.12.24 to preserve build provenance'
+xcrun -sdk macosx metal --version >/dev/null 2>&1 \
+    || fail 'install Xcode and its Metal Toolchain, then select Xcode in Settings > Locations > Command Line Tools'
+rustup toolchain install 1.98.1 --profile minimal
+revision=$(git -C "$root" rev-parse --short=12 HEAD)
+# Include all owned build inputs, including new source files, in development identity.
+suffix=$(uv run --no-project --python 3.13.13 python -c '
+import hashlib, json, sys
+sys.path.insert(0, sys.argv[1] + "/scripts")
+from build_distribution import clean_environment, source_provenance
+identity = source_provenance(clean_environment(), allow_dirty=True)
+print(hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12])
+' "$root")
+version=0.1.0-dev.$revision.$suffix
+output=$root/artifacts/distributions
+printf 'Building Stark %s. This can take several minutes.\n' "$version"
+uv run --no-project --python 3.13.13 python "$root/scripts/build_distribution.py" \
+    --version "$version" --output-dir "$output" --allow-dirty
+exec /bin/sh "$root/install.sh" --archive "$output/stark-$version-aarch64-apple-darwin.tar.gz" --prefix "$prefix"

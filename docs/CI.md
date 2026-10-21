@@ -20,11 +20,25 @@ Compatibility jobs use the CPU feature for inherited bindings and server code. T
 
 The existing repository quality job also runs converter synthetic tests with Hugging Face offline mode, Ruff, and a lock consistency check. It downloads no model and installs no Lalamo environment. Converter source/model parity and native loading remain separately recorded private validation evidence.
 
+Standalone installation checks cover the launcher, bundle manifests and archive creation, checksum failures, unsupported platforms, command collisions and unsafe archive entries. The macOS lifecycle job also exercises installation, relocation, upgrades and uninstall under a temporary prefix with spaces. These tests use synthetic workers and no model. Creating a real standalone bundle remains a local build operation; it does not enable release hosting or the inherited signing workflows.
+
 Formatting uses `nightly-2026-10-01` because the upstream import configuration requires nightly rustfmt. Scoring compilation still uses Rust 1.98.1. Legacy crate formatting is not a gate. Actionlint suppresses only the constant-false-condition diagnostic used by deliberately disabled inherited jobs; the repository checker independently requires those jobs to remain disabled.
 
 The inherited Tests, Release, Run Benchmark, and Run Stark Cargo Command workflows stay disabled. Their action references are pinned for repository policy compliance; this does not qualify or enable their infrastructure.
 
 ## Local checks
+
+For installer changes, run:
+
+```sh
+sh -n install.sh
+sh -n scripts/install-from-source.sh
+sh -n scripts/stark
+uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py scripts/test_build_distribution.py
+uv run --project tools/converter --locked ruff check scripts/build_distribution.py scripts/test_build_distribution.py scripts/test_install.py scripts/test_stark_cli.py
+```
+
+The broader repository checks are:
 
 ```sh
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
