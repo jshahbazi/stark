@@ -43,11 +43,11 @@ Four of six planned pairs passed the frozen host guards; two were excluded for i
 
 ## Quickstart
 
-Use an Apple silicon Mac with **macOS 26.4 or newer**. The [v0.1.0 prebuilt release](https://github.com/jshahbazi/stark/releases/tag/v0.1.0) includes the workers, converter and a private Python runtime. No source checkout, Rust, Xcode, uv or system Python setup is required.
+Use an Apple silicon Mac with **macOS 26.4 or newer**. The [v0.1.1 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.1) includes the workers, converter and a private Python runtime. Its native components are Developer ID signed and notarized by Apple. No source checkout, Rust, Xcode, uv or system Python setup is required.
 
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.0/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.0
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.1/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.1
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 stark convert Qwen/Qwen3-0.6B --output models/qwen3

@@ -45,7 +45,15 @@ def run(
     return result
 
 
-def verify(archive: Path, version: str, expected_source: str) -> dict:
+def verify(
+    archive: Path,
+    version: str,
+    expected_source: str,
+    *,
+    expected_distribution_source: str | None = None,
+    expected_signer: str | None = None,
+    require_notarized: bool = False,
+) -> dict:
     archive = archive.resolve()
     with archive.open("rb") as archive_stream:
         digest = hashlib.file_digest(archive_stream, "sha256").hexdigest()
@@ -61,6 +69,15 @@ def verify(archive: Path, version: str, expected_source: str) -> dict:
     require(manifest["source"]["revision"] == expected_source, "source_identity")
     require(manifest["source"]["dirty"] is False, "dirty_source")
     require(manifest["target"] == "aarch64-apple-darwin", "target_identity")
+    if expected_distribution_source is not None:
+        distribution_source = manifest.get("distribution_source", {})
+        require(
+            distribution_source.get("revision") == expected_distribution_source
+            and distribution_source.get("dirty") is False,
+            "distribution_source_identity",
+        )
+    require(not require_notarized or expected_signer is not None, "signer_required")
+    signing_result = {}
     converter_version = tomllib.loads(
         (ROOT / "tools/converter/pyproject.toml").read_text()
     )["project"]["version"]
@@ -102,6 +119,45 @@ def verify(archive: Path, version: str, expected_source: str) -> dict:
         )
         checks.append("isolated_doctor_and_cli_identity")
         bundle = (prefix / "lib/stark/current").resolve()
+        if expected_signer is not None:
+            from sign_distribution import macho_files, verify_signature
+
+            signing = manifest.get("signing", {})
+            require(
+                signing.get("certificate_sha1") == expected_signer.upper()
+                and signing.get("hardened_runtime") is True
+                and signing.get("secure_timestamp") is True,
+                "signing_identity",
+            )
+            identity = {"sha1": expected_signer.upper(), "team_id": signing["team_id"]}
+            paths = macho_files(bundle)
+            require(
+                [path.relative_to(bundle).as_posix() for path in paths]
+                == signing["mach_o_files"],
+                "signed_native_inventory",
+            )
+            executables = {
+                "libexec/stark-score",
+                "libexec/stark-generate",
+                "libexec/python/bin/python3.13",
+            }
+            for path in paths:
+                verify_signature(
+                    path,
+                    identity,
+                    environment,
+                    notarized=require_notarized
+                    and path.relative_to(bundle).as_posix() in executables,
+                )
+            checks.append("all_native_developer_id_signatures_and_hardened_runtime")
+            if require_notarized:
+                checks.append("standalone_executable_notarization_tickets_online")
+            signing_result = {
+                "certificate_sha1": identity["sha1"],
+                "team_id": identity["team_id"],
+                "signed_mach_o_count": len(paths),
+                "notarization_tickets_verified_online": require_notarized,
+            }
         python = bundle / "libexec/python/bin/python3.13"
         run(
             [
@@ -194,6 +250,7 @@ def verify(archive: Path, version: str, expected_source: str) -> dict:
         "checks": checks,
         "models_loaded": 0,
         "native_inference_calls": 0,
+        **signing_result,
     }
 
 
@@ -202,10 +259,20 @@ def main() -> int:
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--version", required=True)
     parser.add_argument("--expected-source", required=True)
+    parser.add_argument("--expected-distribution-source")
+    parser.add_argument("--expected-signer")
+    parser.add_argument("--require-notarized", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     options = parser.parse_args()
     try:
-        result = verify(options.archive, options.version, options.expected_source)
+        result = verify(
+            options.archive,
+            options.version,
+            options.expected_source,
+            expected_distribution_source=options.expected_distribution_source,
+            expected_signer=options.expected_signer,
+            require_notarized=options.require_notarized,
+        )
         options.output.parent.mkdir(parents=True, exist_ok=True)
         options.output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
     # Release checks must never emit exception dumps or private protocol data.
