@@ -8,11 +8,13 @@ ignored directories; subprocess diagnostics are intentionally not published.
 from __future__ import annotations
 
 import argparse
+import ast
 import gzip
 import hashlib
 import json
 import os
 import platform
+import pprint
 import re
 import shutil
 import subprocess
@@ -263,6 +265,55 @@ def copy_runtime(source: Path, destination: Path) -> None:
     shutil.copytree(source, destination, symlinks=False)
 
 
+def normalize_python_configuration(runtime: Path, managed_prefix: Path) -> None:
+    """Resolve uv's build-prefix variables against the installed runtime.
+
+    uv expands standalone Python's sysconfig prefix to its managed installation
+    path. That path changes for every staging directory and does not survive
+    relocation. Keep the same values while resolving that prefix at import.
+    """
+    configuration = runtime / "lib" / "python3.13" / "_sysconfigdata__darwin_darwin.py"
+    tree = ast.parse(configuration.read_text())
+    assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "build_time_vars"
+            for target in node.targets
+        )
+    ]
+    if len(assignments) != 1:
+        raise BuildError("python_sysconfig_layout")
+    variables = ast.literal_eval(assignments[0].value)
+    if not isinstance(variables, dict):
+        raise BuildError("python_sysconfig_layout")
+    prefix = variables.get("prefix")
+    marker = "__STARK_PYTHON_RUNTIME_PREFIX__"
+    if (
+        not isinstance(prefix, str)
+        or Path(prefix).resolve() != managed_prefix.resolve()
+    ):
+        raise BuildError("python_sysconfig_managed_prefix_missing")
+    variables = {
+        key: value.replace(prefix, marker) if isinstance(value, str) else value
+        for key, value in variables.items()
+    }
+    configuration.write_text(
+        "# Standalone Python configuration; Stark resolves its installation prefix at import.\n"
+        + "build_time_vars = "
+        + pprint.pformat(variables, width=119, sort_dicts=True)
+        + "\n"
+        + "import sys as _stark_sys\n"
+        + "for _stark_key, _stark_value in tuple(build_time_vars.items()):\n"
+        + "    if isinstance(_stark_value, str):\n"
+        + "        build_time_vars[_stark_key] = _stark_value.replace("
+        + repr(marker)
+        + ", _stark_sys.base_prefix)\n"
+        + "del _stark_key, _stark_value, _stark_sys\n"
+    )
+
+
 def build_python(
     bundle: Path, temporary: Path, uv: str, environment: dict[str, str]
 ) -> None:
@@ -288,6 +339,7 @@ def build_python(
         raise BuildError("python_runtime_layout")
     runtime = bundle / "libexec" / "python"
     copy_runtime(interpreters[0].parent.parent, runtime)
+    normalize_python_configuration(runtime, interpreters[0].parent.parent)
     python = runtime / "bin" / "python3.13"
     version = (
         run([str(python), "-I", "-B", "--version"], "python_version", environment)
@@ -307,6 +359,7 @@ def build_python(
             "--locked",
             "--no-dev",
             "--no-emit-project",
+            "--no-header",
             "--output-file",
             str(requirements),
         ],
@@ -369,12 +422,11 @@ def build_python(
         "converter_install",
         environment,
     )
-    # The wheel's local staging URL is not useful after relocation. Source and
-    # artifact hashes are carried in the bundle and converter receipts instead.
-    for entry in runtime.glob(
-        "lib/python3.13/site-packages/stark_convert-*.dist-info/direct_url.json"
-    ):
-        entry.unlink()
+    # Local wheel URLs and uv's timestamp-bearing install caches are useful only
+    # in a development environment. Source/artifact hashes live in our receipts.
+    for metadata_name in ("direct_url.json", "uv_cache.json"):
+        for entry in site_packages.glob(f"*.dist-info/{metadata_name}"):
+            entry.unlink()
     if (site_packages / "bin").exists():
         shutil.rmtree(site_packages / "bin")
     # uv-generated console scripts contain a staging path. The bundle launcher
@@ -600,6 +652,9 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             "import sys; from pathlib import Path; import stark_convert; "
             "assert sys.version.split()[0] == '3.13.13'; "
             "assert Path(stark_convert.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); "
+            "import sysconfig; "
+            "assert sysconfig.get_config_var('prefix') == sys.base_prefix; "
+            "assert Path(sysconfig.get_config_var('LIBDIR')).resolve() == (Path(sys.base_prefix) / 'lib').resolve(); "
             "import numpy, tokenizers, ml_dtypes, huggingface_hub, psutil; "
             "assert not any(n.split('.')[0] in {'lalamo','jax','torch'} for n in sys.modules)"
         )
@@ -800,7 +855,15 @@ def build(options: argparse.Namespace) -> Path:
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
         digest = create_archive(bundle, output)
-    print(f"Bundle: {output}\nSHA-256: {digest}", flush=True)
+    installer = output_directory / "install.sh"
+    temporary_installer = output_directory / ".install.sh.partial"
+    try:
+        shutil.copyfile(ROOT / "install.sh", temporary_installer)
+        temporary_installer.chmod(0o755)
+        temporary_installer.replace(installer)
+    finally:
+        temporary_installer.unlink(missing_ok=True)
+    print(f"Bundle: {output}\nSHA-256: {digest}\nInstaller: {installer}", flush=True)
     return output
 
 

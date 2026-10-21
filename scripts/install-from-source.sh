@@ -30,7 +30,11 @@ from build_distribution import clean_environment, source_provenance
 identity = source_provenance(clean_environment(), allow_dirty=True)
 print(hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12])
 ' "$root")
-version=0.1.0-dev.$revision.$suffix
+# Upstream Python installation metadata can vary across builds. Each source
+# build gets its own immutable version; reinstalling an existing archive keeps
+# its exact version and checksum instead.
+build_time=$(date -u +%Y%m%d%H%M%S)
+version=0.1.0-dev.$revision.$suffix.$build_time
 output=$root/artifacts/distributions
 printf 'Building Stark %s. This can take several minutes.\n' "$version"
 uv run --no-project --python 3.13.13 python "$root/scripts/build_distribution.py" \

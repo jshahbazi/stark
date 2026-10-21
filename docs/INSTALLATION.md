@@ -14,7 +14,7 @@ From the Stark checkout:
 ./install.sh
 ```
 
-This installs Rust 1.98.1 through your existing rustup, builds the workers with locked dependencies, downloads Python 3.13.13 and the locked converter dependencies, and creates a standalone installation in `~/.local`. It does not require an administrator password. The build can take several minutes. The resulting installation runs independently of the source checkout, Rust, uv, Xcode and your system Python.
+This installs Rust 1.98.1 through your existing rustup, builds the workers with locked dependencies, downloads Python 3.13.13 and the locked converter dependencies, and creates a standalone installation in `~/.local`. It does not require an administrator password. The build can take several minutes. Each source build gets a version containing its source identity and UTC build time. The resulting installation runs independently of the source checkout, Rust, uv, Xcode and your system Python.
 
 If `~/.local/bin` is absent from your shell's PATH, add this line to `~/.zprofile`, then open a new terminal:
 
@@ -35,7 +35,7 @@ stark doctor
 
 A bundle contains the native scoring and generation workers, embedded Metal kernels, a private Python runtime, the converter with locked dependencies, provenance and license notices. No compiler, package manager or Python setup is needed on the receiving Mac. Installing a local archive requires no network access.
 
-Keep the archive and its adjacent `.sha256` file together, and use `install.sh` from the same source revision:
+Keep the archive, its adjacent `.sha256` file and the companion `install.sh` together. The builder emits all three; the receiving Mac does not need a source checkout:
 
 ```sh
 sh install.sh --archive /path/to/stark-VERSION-aarch64-apple-darwin.tar.gz
@@ -50,9 +50,12 @@ sh install.sh --archive /path/to/stark-VERSION-aarch64-apple-darwin.tar.gz \
 
 Replace `VERSION` and `SHA256` with the archive's actual version and hash. Checksums detect corruption and can verify an independently obtained expected hash. An adjacent checksum has the same publisher trust as the archive. Archives are not Developer ID signed or notarized by this tooling. If macOS blocks a downloaded executable, use the normal macOS approval flow only after verifying its source; the installer does not remove quarantine attributes or change Gatekeeper settings.
 
-For a published GitHub release tagged `vVERSION`, this downloads and verifies its archive and checksum:
+For a published GitHub release tagged `vVERSION` containing the three files, download its installer, then let it download and verify the archive and checksum:
 
 ```sh
+curl --proto '=https' --tlsv1.2 --fail --location \
+  https://github.com/jshahbazi/stark/releases/download/vVERSION/install.sh \
+  --output install.sh
 sh install.sh --version VERSION
 ```
 
@@ -117,8 +120,11 @@ Output stays in ignored `artifacts/distributions/`:
 
 - `stark-VERSION-aarch64-apple-darwin.tar.gz`
 - `stark-VERSION-aarch64-apple-darwin.tar.gz.sha256`
+- `install.sh`
 
 The builder uses separate Cargo invocations for the optimized scorer and default generation worker, avoiding feature unification. It checks arm64 architecture, system-only native dynamic libraries, fixed model-free worker responses, relocated Python imports and converter entry points. Its manifest records source identity, lockfiles, build configuration and file hashes. Native and Python notices travel with the archive. `--allow-dirty` creates an explicitly identified development bundle; it does not extend existing source-bound inference validation to the new build.
+
+Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
 The builder creates local archives. Public hosting and signing require their own release operation. The inherited Uzu release, cloud and signing workflows remain disabled.
 
