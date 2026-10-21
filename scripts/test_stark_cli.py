@@ -1,5 +1,6 @@
 """Model-free contracts for the relocatable standalone command."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 
 LAUNCHER = Path(__file__).with_name("stark")
+CONVERTER_ENTRYPOINT = 'import sys; from stark_convert.cli import main; sys.argv[0] = "stark-convert"; raise SystemExit(main())'
 
 
 class LauncherTests(unittest.TestCase):
@@ -77,8 +79,8 @@ class LauncherTests(unittest.TestCase):
             [
                 "-I",
                 "-B",
-                "-m",
-                "stark_convert.cli",
+                "-c",
+                CONVERTER_ENTRYPOINT,
                 "local model",
                 "--output",
                 "output folder",
@@ -95,7 +97,7 @@ class LauncherTests(unittest.TestCase):
         direct = self.run_cli("--help", launcher=self.bundle / "bin" / "stark-convert")
         self.assertEqual(
             direct.stdout.splitlines(),
-            ["-I", "-B", "-m", "stark_convert.cli", "--help"],
+            ["-I", "-B", "-c", CONVERTER_ENTRYPOINT, "--help"],
         )
         # Aliases are selected by the invoked name. An arbitrary symlink keeps
         # the regular command syntax while retaining correct bundle resolution.
@@ -154,7 +156,35 @@ class LauncherTests(unittest.TestCase):
         )
         self.assertEqual(
             self.run_cli("convert", "--version").stdout.splitlines(),
-            ["-I", "-B", "-m", "stark_convert.cli", "--version"],
+            ["-I", "-B", "-c", CONVERTER_ENTRYPOINT, "--version"],
+        )
+
+    def test_converter_entrypoint_sets_argv0_and_preserves_user_arguments(self):
+        import sys
+
+        runtime = self.directory / "converter runtime"
+        package = runtime / "stark_convert"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "cli.py").write_text(
+            "import json, sys\ndef main():\n    print(json.dumps(sys.argv))\n    return 0\n"
+        )
+        prefix = f"import sys; sys.path.insert(0, {str(runtime)!r}); "
+        shim = (
+            "import os, sys; args = sys.argv[1:]; "
+            f"os.execv({sys.executable!r}, [{sys.executable!r}, '-I', '-B', '-c', "
+            + repr(prefix)
+            + "+ args[3], *args[4:]])"
+        )
+        python = self.bundle / "libexec" / "python" / "bin" / "python3.13"
+        python.write_text(f"#!{sys.executable} -I\n" + shim + "\n")
+        python.chmod(0o755)
+        result = self.run_cli(
+            "convert", "model folder", "--output", "output folder", "--version"
+        )
+        self.assertEqual(
+            json.loads(result.stdout),
+            ["stark-convert", "model folder", "--output", "output folder", "--version"],
         )
 
     def test_doctor_rejects_platform_and_missing_components(self):

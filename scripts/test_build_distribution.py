@@ -24,6 +24,56 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_relocation_checks_user_facing_converter_identity_and_restores_tree(self):
+        for version, help_text, expected_error in (
+            (b"stark-convert 7.8.9\n", b"usage: stark-convert [-h]\n", None),
+            (b"cli.py 7.8.9\n", b"usage: stark-convert [-h]\n", "version_identity"),
+            (b"stark-convert 7.8.9\n", b"usage: cli.py [-h]\n", "help_identity"),
+        ):
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                bundle = root / "stark"
+                bundle.mkdir()
+                project = root / "tools" / "converter"
+                project.mkdir(parents=True)
+                (project / "pyproject.toml").write_text(
+                    '[project]\nversion = "7.8.9"\n'
+                )
+
+                def response(
+                    command,
+                    stage,
+                    *_args,
+                    version_output=version,
+                    help_output=help_text,
+                    **_kwargs,
+                ):
+                    output = b""
+                    if stage == "relocated_launcher_converter_version":
+                        output = version_output
+                    if stage == "relocated_launcher_converter_help":
+                        output = help_output
+                    return subprocess.CompletedProcess(
+                        command, 0, stdout=output, stderr=b""
+                    )
+
+                with (
+                    self.subTest(version=version, help_text=help_text),
+                    patch.object(distribution, "ROOT", root),
+                    patch.object(distribution, "run", side_effect=response),
+                    patch.object(distribution, "verify_native"),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    if expected_error is None:
+                        distribution.verify_relocation(bundle, {})
+                    else:
+                        with self.assertRaisesRegex(
+                            distribution.BuildError, expected_error
+                        ):
+                            distribution.verify_relocation(bundle, {})
+                self.assertTrue(bundle.is_dir())
+                self.assertFalse((root / "relocated bundle" / "stark").exists())
+
     def test_supplemental_notices_require_matching_crate_source_and_hashes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

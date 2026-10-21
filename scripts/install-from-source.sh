@@ -20,7 +20,7 @@ command -v rustup >/dev/null 2>&1 || fail 'install Rust with rustup: https://rus
 [ "$(uv --version | awk '{print $2}')" = 0.12.24 ] || fail 'this source build requires uv 0.12.24 to preserve build provenance'
 xcrun -sdk macosx metal --version >/dev/null 2>&1 \
     || fail 'install Xcode and its Metal Toolchain, then select Xcode in Settings > Locations > Command Line Tools'
-rustup toolchain install 1.98.1 --profile minimal
+rustup toolchain install 1.98.1 --profile minimal --no-self-update
 revision=$(git -C "$root" rev-parse --short=12 HEAD)
 # Include all owned build inputs, including new source files, in development identity.
 suffix=$(uv run --no-project --python 3.13.13 python -c '
