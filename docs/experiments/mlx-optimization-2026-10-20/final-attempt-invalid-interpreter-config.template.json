@@ -1,0 +1,50 @@
+{
+  "task_root": "<task_runtime>",
+  "source": "<qwen_mlx_source>",
+  "context": 8192,
+  "blocks": 4,
+  "repeats": 3,
+  "engines": [
+    {
+      "id": "stark_baseline",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "54d113a7034fc0d9bacb4c0653a7713500fb5bbe",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<qwen_stark_model>/model.safetensors",
+      "command": [
+        "<task_runtime>/bin/stark-generate-baseline",
+        "--model-path",
+        "<qwen_stark_model>"
+      ]
+    },
+    {
+      "id": "stark_optimized",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "045d0ca6",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<qwen_stark_model>/model.safetensors",
+      "command": [
+        "<task_runtime>/bin/stark-generate-final",
+        "--model-path",
+        "<qwen_stark_model>"
+      ]
+    },
+    {
+      "id": "mlx_lm",
+      "kind": "mlx",
+      "version": "0.32.3.dev6+g72be8c955",
+      "representation": "MLX affine4 g64",
+      "model_file": "<qwen_mlx_source>/model.safetensors",
+      "lock": "<task_runtime>/mlx-current/uv.lock",
+      "command": [
+        "<incorrect_base_python>",
+        "<repository>/scripts/stock_compare_mlx.py",
+        "--model-path",
+        "<qwen_mlx_source>"
+      ],
+      "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa"
+    }
+  ]
+}

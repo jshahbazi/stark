@@ -35,6 +35,9 @@ SCANNED_LOCKFILES = {
     "scripts/ci/check_repository.py.lock",
     "tools/uv.lock",
     "tools/converter/uv.lock",
+    "tools/stock_benchmark/mlx/uv.lock",
+    "tools/stock_benchmark/mlx_current/uv.lock",
+    "tools/stock_benchmark/vllm/uv.lock",
 }
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 

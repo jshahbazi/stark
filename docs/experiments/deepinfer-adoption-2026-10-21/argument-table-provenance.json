@@ -1,0 +1,14 @@
+{
+  "id": "argument-table-only",
+  "base_commit": "8be4b52d",
+  "files": {
+    "crates/stark-engine/src/backends/metal/command_buffer.rs": "e71579d49e16458ef8de8e9dd8cd5b956d2dbd2eade67606c8ab7029cefa5534",
+    "crates/stark-engine/src/engine/language_model/stream/stream.rs": "c6219551d091ce00c685ec0bbf21929e5d4907df5331273260d82a5f87284ad8"
+  },
+  "patch_sha256": "233a3eb5b2821aae42f0a64c83e7992b3e0947fa8e9c2cab650cbff937bd2604",
+  "binary_sha256": "71c2a02607a60a993477e18c7f74a11f707c231ca94460d6de5d777fba0a170c",
+  "composition": {
+    "command_buffer.rs": "f2a5a988",
+    "stream.rs": "8be4b52d"
+  }
+}

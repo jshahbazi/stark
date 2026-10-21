@@ -1,0 +1,5191 @@
+{
+  "outcome": "quiet_window_timeout",
+  "elapsed_seconds": 60.45685845799744,
+  "host_screen": {
+    "samples": [
+      {
+        "start_seconds": 0.05838600010611117,
+        "end_seconds": 0.6182867500465363,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 200.03545273209224,
+        "max_process_cpu_percent": 75.01329477495624,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 75.01329477495624
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 32.14855490230501
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 26.79046241964336
+          },
+          {
+            "pid": 2065,
+            "name": "com.docker.backend",
+            "cpu_percent": 14.288246624113011
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 14.288246623788133
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.716184967759881
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.358092483879941
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 0.6182867500465363,
+        "end_seconds": 1.205553875071928,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 229.87835390050887,
+        "max_process_cpu_percent": 74.92331534495091,
+        "max_model_cpu_percent": 1.7028026214746035,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 74.92331534495091
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 27.244841943593656
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.542039323629023
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 25.542039322157773
+          },
+          {
+            "pid": 77167,
+            "name": "(ps)",
+            "cpu_percent": 10.216815728856913
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 10.216815728770188
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.216815728770188
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 8.514013107411735
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.811210485898414
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 1.205553875071928,
+        "end_seconds": 1.8006206250283867,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 173.0898256483555,
+        "max_process_cpu_percent": 80.66321972032861,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 80.66321972032861
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 21.846288674235943
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.84628867259292
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.402418720898188
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.041451232630616
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.041451232515986
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.041451232477777
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 1.8006206250283867,
+        "end_seconds": 2.398620584048331,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 175.58529631516873,
+        "max_process_cpu_percent": 78.5953231117742,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 78.5953231117742
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.083613760536807
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 20.066891007281168
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.705686421005902
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.6889636689289595
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.016722751924854
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.016722751772764
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 2.398620584048331,
+        "end_seconds": 2.9896560000488535,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 175.9623826000065,
+        "max_process_cpu_percent": 76.13756939391283,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 76.13756939391283
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 27.071135785093286
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 27.071135784477757
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.45972993268777
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.767783946273322
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 2.9896560000488535,
+        "end_seconds": 3.5828269170597196,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 182.0723115417647,
+        "max_process_cpu_percent": 70.80589893322566,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 70.80589893322566
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.659530520296833
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 25.28782104759582
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 16.858547364961662
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.429273682557495
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.429273682404167
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 3.5828269170597196,
+        "end_seconds": 4.176967375096865,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 222.1696876781312,
+        "max_process_cpu_percent": 74.05656255990719,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 74.05656255990719
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 26.929659112669167
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.88034802739812
+          },
+          {
+            "pid": 77197,
+            "name": "(ps)",
+            "cpu_percent": 13.46482955634683
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.464829556334584
+          },
+          {
+            "pid": 77196,
+            "name": "(ps)",
+            "cpu_percent": 11.781725861803478
+          },
+          {
+            "pid": 77198,
+            "name": "(ps)",
+            "cpu_percent": 11.781725861803478
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.0986221671744
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.415518472900462
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 4.176967375096865,
+        "end_seconds": 4.76705825002864,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 205.05316238798522,
+        "max_process_cpu_percent": 79.64874902604437,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 79.64874902604437
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 23.725159284370655
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.335850816837226
+          },
+          {
+            "pid": 77201,
+            "name": "(ps)",
+            "cpu_percent": 11.86257964217685
+          },
+          {
+            "pid": 77203,
+            "name": "(ps)",
+            "cpu_percent": 11.86257964217685
+          },
+          {
+            "pid": 77202,
+            "name": "(ps)",
+            "cpu_percent": 10.167925407580157
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.47327117301429
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.7786169383806065
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.083962703901051
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.083962703592794
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 4.76705825002864,
+        "end_seconds": 5.35754362505395,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 198.14207929215243,
+        "max_process_cpu_percent": 71.12792590028153,
+        "max_model_cpu_percent": 1.6935220452432513,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 71.12792590028153
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 28.789874769173775
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 22.015786586506497
+          },
+          {
+            "pid": 77206,
+            "name": "(ps)",
+            "cpu_percent": 10.161132271468748
+          },
+          {
+            "pid": 77207,
+            "name": "(ps)",
+            "cpu_percent": 10.161132271468748
+          },
+          {
+            "pid": 77208,
+            "name": "(ps)",
+            "cpu_percent": 10.161132271468748
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.774088181127029
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.080566135845272
+          }
+        ],
+        "gpu_device_utilization_percent": 12,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 5.35754362505395,
+        "end_seconds": 5.954597917036153,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 204.33652623974925,
+        "max_process_cpu_percent": 75.37003017029016,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 75.37003017029016
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.798232950021493
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 25.12334339007391
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.399116474706085
+          },
+          {
+            "pid": 77212,
+            "name": "(ps)",
+            "cpu_percent": 10.049337356038704
+          },
+          {
+            "pid": 77213,
+            "name": "(ps)",
+            "cpu_percent": 10.049337356038704
+          },
+          {
+            "pid": 77214,
+            "name": "(ps)",
+            "cpu_percent": 10.049337356038704
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.0246686779767
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.02466867782437
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 5.954597917036153,
+        "end_seconds": 6.550406459020451,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 241.6883778149811,
+        "max_process_cpu_percent": 78.88440109211952,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 78.88440109211952
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.854264202158635
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 26.85426420154804
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 21.819089663795943
+          },
+          {
+            "pid": 77217,
+            "name": "(ps)",
+            "cpu_percent": 11.748740588187955
+          },
+          {
+            "pid": 77218,
+            "name": "(ps)",
+            "cpu_percent": 11.748740588187955
+          },
+          {
+            "pid": 77219,
+            "name": "(ps)",
+            "cpu_percent": 11.748740588187955
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 10.07034907565684
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.391957563174573
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.391957563021926
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.035174537752096
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 6.550406459020451,
+        "end_seconds": 7.145090667065233,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 201.78776967014224,
+        "max_process_cpu_percent": 80.71510786845224,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 80.71510786845224
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.54190646153417
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 21.86034171435274
+          },
+          {
+            "pid": 77223,
+            "name": "(ps)",
+            "cpu_percent": 11.770953230816028
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.770953230767086
+          },
+          {
+            "pid": 77222,
+            "name": "(ps)",
+            "cpu_percent": 10.089388483556593
+          },
+          {
+            "pid": 77224,
+            "name": "(ps)",
+            "cpu_percent": 10.089388483556593
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.089388483470948
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 7.145090667065233,
+        "end_seconds": 7.739117209101096,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 203.6946019026017,
+        "max_process_cpu_percent": 75.75419079049085,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 75.75419079049085
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.251396929183574
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 23.567970468169403
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 16.834264620170213
+          },
+          {
+            "pid": 77229,
+            "name": "(ps)",
+            "cpu_percent": 11.783985234076281
+          },
+          {
+            "pid": 77227,
+            "name": "(ps)",
+            "cpu_percent": 10.100558772065382
+          },
+          {
+            "pid": 77228,
+            "name": "(ps)",
+            "cpu_percent": 10.100558772065382
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.417132310085107
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.050279386142929
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 7.739117209101096,
+        "end_seconds": 8.335836917045526,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 227.91270036684992,
+        "max_process_cpu_percent": 77.08811924187945,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 77.08811924187945
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 23.46160150837689
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.461601508300685
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.406629433358225
+          },
+          {
+            "pid": 77232,
+            "name": "(ps)",
+            "cpu_percent": 10.054972075027813
+          },
+          {
+            "pid": 77233,
+            "name": "(ps)",
+            "cpu_percent": 10.054972075027813
+          },
+          {
+            "pid": 77234,
+            "name": "(ps)",
+            "cpu_percent": 10.054972075027813
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.703314716679112
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.703314716526696
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.02748603747123
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 8.335836917045526,
+        "end_seconds": 8.930930709000677,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 189.8860339799769,
+        "max_process_cpu_percent": 72.25751735491247,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 72.25751735491247
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.88651808613572
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 23.52570332487205
+          },
+          {
+            "pid": 77237,
+            "name": "(ps)",
+            "cpu_percent": 10.082444282080816
+          },
+          {
+            "pid": 77238,
+            "name": "(ps)",
+            "cpu_percent": 10.082444282080816
+          },
+          {
+            "pid": 77239,
+            "name": "(ps)",
+            "cpu_percent": 8.402036901734014
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.041222141150447
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.041222140997616
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 8.930930709000677,
+        "end_seconds": 9.527192792040296,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 196.22243863700803,
+        "max_process_cpu_percent": 70.43882412561433,
+        "max_model_cpu_percent": 1.6771148601416757,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 70.43882412561433
+          },
+          {
+            "pid": 747,
+            "name": "trustd",
+            "cpu_percent": 26.833837762152413
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.15672290346933
+          },
+          {
+            "pid": 77244,
+            "name": "(ps)",
+            "cpu_percent": 10.062689160802005
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.385574300698845
+          },
+          {
+            "pid": 77242,
+            "name": "(ps)",
+            "cpu_percent": 8.385574300668338
+          },
+          {
+            "pid": 77243,
+            "name": "(ps)",
+            "cpu_percent": 8.385574300668338
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 6.70845944052857
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.708459440376037
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 9.527192792040296,
+        "end_seconds": 10.122809125110507,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 203.1509098752599,
+        "max_process_cpu_percent": 95.69918894967725,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.69918894967725
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.54186337066318
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.431465115731953
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.073598836722615
+          },
+          {
+            "pid": 77247,
+            "name": "(ps)",
+            "cpu_percent": 8.394665697340105
+          },
+          {
+            "pid": 77248,
+            "name": "(ps)",
+            "cpu_percent": 8.394665697340105
+          },
+          {
+            "pid": 77249,
+            "name": "(ps)",
+            "cpu_percent": 8.394665697340105
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.715732558018674
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.0367994183994815
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 10.122809125110507,
+        "end_seconds": 10.718167834100313,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 260.34724555079686,
+        "max_process_cpu_percent": 94.06094032792369,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 94.06094032792369
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 47.03047016376642
+          },
+          {
+            "pid": 52843,
+            "name": "com.aikido.endpoint.proxy.l4.dist.extension",
+            "cpu_percent": 18.47625613582539
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.398298243595187
+          },
+          {
+            "pid": 77254,
+            "name": "(ps)",
+            "cpu_percent": 8.398298243564636
+          },
+          {
+            "pid": 77255,
+            "name": "(ps)",
+            "cpu_percent": 8.398298243564636
+          },
+          {
+            "pid": 77256,
+            "name": "(ps)",
+            "cpu_percent": 8.398298243564636
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.71863859499836
+          },
+          {
+            "pid": 77253,
+            "name": "SearchUploadWorker",
+            "cpu_percent": 6.718638594851707
+          },
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 5.03897894624877
+          },
+          {
+            "pid": 393,
+            "name": "dasd",
+            "cpu_percent": 5.038978946134198
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 10.718167834100313,
+        "end_seconds": 11.321553875110112,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 208.82153619141127,
+        "max_process_cpu_percent": 96.12419919912921,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.12419919912921
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 36.46090314469033
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.60119645516985
+          },
+          {
+            "pid": 77259,
+            "name": "(ps)",
+            "cpu_percent": 8.28656889647668
+          },
+          {
+            "pid": 77260,
+            "name": "(ps)",
+            "cpu_percent": 8.28656889647668
+          },
+          {
+            "pid": 77261,
+            "name": "(ps)",
+            "cpu_percent": 8.28656889647668
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.286568896356094
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 6.6292551171753145
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 11.321553875110112,
+        "end_seconds": 11.922281834064052,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 269.67281543004316,
+        "max_process_cpu_percent": 96.5495265127949,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.5495265127949
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 28.298999150313804
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.634352139619406
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 14.981823079595708
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 13.317176070718094
+          },
+          {
+            "pid": 77264,
+            "name": "(ps)",
+            "cpu_percent": 9.987882053047656
+          },
+          {
+            "pid": 77265,
+            "name": "(ps)",
+            "cpu_percent": 9.987882053047656
+          },
+          {
+            "pid": 77266,
+            "name": "(ps)",
+            "cpu_percent": 9.987882053047656
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.987882052962872
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.658588035207649
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 11.922281834064052,
+        "end_seconds": 12.520254750037566,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 202.35030177732767,
+        "max_process_cpu_percent": 96.9943595280974,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.9943595280974
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.08474815527849
+          },
+          {
+            "pid": 77269,
+            "name": "(ps)",
+            "cpu_percent": 13.378532348703132
+          },
+          {
+            "pid": 77270,
+            "name": "(ps)",
+            "cpu_percent": 11.70621580511524
+          },
+          {
+            "pid": 77271,
+            "name": "(ps)",
+            "cpu_percent": 10.033899261527347
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.361582717969876
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.016949630873183
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 12.520254750037566,
+        "end_seconds": 13.117096959031187,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 207.76010498412148,
+        "max_process_cpu_percent": 97.17811362202052,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.17811362202052
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.10581661067237
+          },
+          {
+            "pid": 77275,
+            "name": "(ps)",
+            "cpu_percent": 13.403877740968387
+          },
+          {
+            "pid": 77274,
+            "name": "(ps)",
+            "cpu_percent": 11.728393023347339
+          },
+          {
+            "pid": 77276,
+            "name": "(ps)",
+            "cpu_percent": 11.728393023347339
+          },
+          {
+            "pid": 76096,
+            "name": "node",
+            "cpu_percent": 10.05290830572629
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.052908305640953
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.701938870630482
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 13.117096959031187,
+        "end_seconds": 13.713373667094857,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 202.92592074201255,
+        "max_process_cpu_percent": 97.27027605748215,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.27027605748215
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.124884703207606
+          },
+          {
+            "pid": 77281,
+            "name": "(ps)",
+            "cpu_percent": 13.41658980103206
+          },
+          {
+            "pid": 77279,
+            "name": "(ps)",
+            "cpu_percent": 11.739516075903055
+          },
+          {
+            "pid": 77280,
+            "name": "(ps)",
+            "cpu_percent": 11.739516075903055
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.062442350841158
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.708294900357401
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.0312211753443155
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 13.713373667094857,
+        "end_seconds": 14.308557375101373,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 210.01918956806225,
+        "max_process_cpu_percent": 97.44890395986033,
+        "max_model_cpu_percent": 1.6801535165477721,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.44890395986033
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.16184219780922
+          },
+          {
+            "pid": 77284,
+            "name": "(ps)",
+            "cpu_percent": 13.441228132394404
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.441228132382177
+          },
+          {
+            "pid": 77285,
+            "name": "(ps)",
+            "cpu_percent": 11.761074615845104
+          },
+          {
+            "pid": 77286,
+            "name": "(ps)",
+            "cpu_percent": 11.761074615845104
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.720614066343898
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.7206140661910885
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 14.308557375101373,
+        "end_seconds": 14.909006750094704,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 196.51948176560384,
+        "max_process_cpu_percent": 94.9289022086717,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 94.9289022086717
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.64670939248947
+          },
+          {
+            "pid": 77291,
+            "name": "(ps)",
+            "cpu_percent": 11.657935358959676
+          },
+          {
+            "pid": 77289,
+            "name": "(ps)",
+            "cpu_percent": 9.992516021965436
+          },
+          {
+            "pid": 77290,
+            "name": "(ps)",
+            "cpu_percent": 9.992516021965436
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.661677347819431
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 14.909006750094704,
+        "end_seconds": 15.506871250108816,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 217.44057390398743,
+        "max_process_cpu_percent": 97.01194835724625,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.01194835724625
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 33.45239598477063
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 15.053578193390182
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 13.380958394090802
+          },
+          {
+            "pid": 77294,
+            "name": "(ps)",
+            "cpu_percent": 10.035718795577228
+          },
+          {
+            "pid": 77295,
+            "name": "(ps)",
+            "cpu_percent": 10.035718795577228
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.363098996496905
+          },
+          {
+            "pid": 77296,
+            "name": "(ps)",
+            "cpu_percent": 8.363098996314358
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 15.506871250108816,
+        "end_seconds": 16.10300283401739,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 229.81503362342605,
+        "max_process_cpu_percent": 98.97143783787223,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.97143783787223
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.48474796143151
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.419855978004453
+          },
+          {
+            "pid": 77300,
+            "name": "(ps)",
+            "cpu_percent": 11.742373980764578
+          },
+          {
+            "pid": 77302,
+            "name": "(ps)",
+            "cpu_percent": 11.742373980764578
+          },
+          {
+            "pid": 77301,
+            "name": "(ps)",
+            "cpu_percent": 10.064891983512494
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.387409986290924
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.387409986138358
+          },
+          {
+            "pid": 77298,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 6.70992798900833
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 6.709927989002226
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.03244599175167
+          }
+        ],
+        "gpu_device_utilization_percent": 11,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 16.10300283401739,
+        "end_seconds": 16.691681666998193,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 168.1731947091825,
+        "max_process_cpu_percent": 93.42955261616123,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 93.42955261616123
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 18.68591052333098
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.192314830921852
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.794876553896402
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.794876553741905
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.096157415422301
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 16.691681666998193,
+        "end_seconds": 17.28669516707305,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 194.95355985207772,
+        "max_process_cpu_percent": 97.47677992634303,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.47677992634303
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 28.570780323250787
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.167609639150495
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 10.083804820033805
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.403170683488883
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.722536546638253
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 5.041902409940477
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 17.28669516707305,
+        "end_seconds": 17.884235125035048,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 215.88514421852472,
+        "max_process_cpu_percent": 95.39111023538446,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.39111023538446
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.102923747614973
+          },
+          {
+            "pid": 77319,
+            "name": "(ps)",
+            "cpu_percent": 13.388225997948688
+          },
+          {
+            "pid": 77321,
+            "name": "(ps)",
+            "cpu_percent": 13.388225997948688
+          },
+          {
+            "pid": 77320,
+            "name": "(ps)",
+            "cpu_percent": 11.714697748205104
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 10.04116949837628
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.694112998968256
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 17.884235125035048,
+        "end_seconds": 18.47417145909276,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 201.71668217280055,
+        "max_process_cpu_percent": 98.31569383269402,
+        "max_model_cpu_percent": 1.6950981695276708,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.31569383269402
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.42647254195151
+          },
+          {
+            "pid": 77325,
+            "name": "(ps)",
+            "cpu_percent": 13.560785356233698
+          },
+          {
+            "pid": 77324,
+            "name": "(ps)",
+            "cpu_percent": 11.865687186704488
+          },
+          {
+            "pid": 77326,
+            "name": "(ps)",
+            "cpu_percent": 11.865687186704488
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.085294508544471
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.085294508544471
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.085294508390302
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 18.47417145909276,
+        "end_seconds": 19.07168074999936,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 205.8545396226023,
+        "max_process_cpu_percent": 98.74323445327462,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.74323445327462
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.451440435396886
+          },
+          {
+            "pid": 77329,
+            "name": "(ps)",
+            "cpu_percent": 11.71529900293082
+          },
+          {
+            "pid": 77330,
+            "name": "(ps)",
+            "cpu_percent": 11.71529900293082
+          },
+          {
+            "pid": 77331,
+            "name": "(ps)",
+            "cpu_percent": 11.71529900293082
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.041684859874177
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.041684859569749
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 19.07168074999936,
+        "end_seconds": 19.663396000047214,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 192.6602364729808,
+        "max_process_cpu_percent": 96.33011823742947,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.33011823742947
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.350031114129294
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 18.590022817694205
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.83001452049059
+          },
+          {
+            "pid": 77336,
+            "name": "(ps)",
+            "cpu_percent": 10.140012446045203
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.7600082972036155
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 19.663396000047214,
+        "end_seconds": 20.254442167002708,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 209.7974861071291,
+        "max_process_cpu_percent": 96.43916700045565,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.43916700045565
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.99489773773388
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.535321684262163
+          },
+          {
+            "pid": 77339,
+            "name": "(ps)",
+            "cpu_percent": 11.843406473740165
+          },
+          {
+            "pid": 77340,
+            "name": "(ps)",
+            "cpu_percent": 11.843406473740165
+          },
+          {
+            "pid": 77341,
+            "name": "(ps)",
+            "cpu_percent": 11.843406473740165
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.459576052702321
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.459576052548442
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 20.254442167002708,
+        "end_seconds": 20.85088150005322,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 192.81089228681319,
+        "max_process_cpu_percent": 97.24375437038435,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.24375437038435
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.796013911384186
+          },
+          {
+            "pid": 77344,
+            "name": "(ps)",
+            "cpu_percent": 11.73631518263263
+          },
+          {
+            "pid": 77346,
+            "name": "(ps)",
+            "cpu_percent": 11.73631518263263
+          },
+          {
+            "pid": 77345,
+            "name": "(ps)",
+            "cpu_percent": 10.059698727970824
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.706465818641116
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.029849363980837
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 20.85088150005322,
+        "end_seconds": 21.445037709083408,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 201.96708908493187,
+        "max_process_cpu_percent": 95.93436731569004,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.93436731569004
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.245886134728224
+          },
+          {
+            "pid": 77350,
+            "name": "(ps)",
+            "cpu_percent": 11.781413529997018
+          },
+          {
+            "pid": 77351,
+            "name": "(ps)",
+            "cpu_percent": 11.781413529997018
+          },
+          {
+            "pid": 77349,
+            "name": "(ps)",
+            "cpu_percent": 10.098354454283157
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.732236303002388
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.049177227098718
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 21.445037709083408,
+        "end_seconds": 22.037909917067736,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 237.82528190956674,
+        "max_process_cpu_percent": 97.82883936690278,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.82883936690278
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 45.541011430107645
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.49363301611229
+          },
+          {
+            "pid": 77356,
+            "name": "(ps)",
+            "cpu_percent": 11.806928889108994
+          },
+          {
+            "pid": 77354,
+            "name": "(ps)",
+            "cpu_percent": 10.120224762093422
+          },
+          {
+            "pid": 77355,
+            "name": "(ps)",
+            "cpu_percent": 10.120224762093422
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.746816508056145
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.060112381042108
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.060112380850352
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 22.037909917067736,
+        "end_seconds": 22.631921417079866,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 247.4699563851328,
+        "max_process_cpu_percent": 95.95773818997799,
+        "max_model_cpu_percent": 1.6834690910507135,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.95773818997799
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 45.453665459096534
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 21.88509818354444
+          },
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 15.151221819494697
+          },
+          {
+            "pid": 77359,
+            "name": "(ps)",
+            "cpu_percent": 10.100814546313467
+          },
+          {
+            "pid": 77361,
+            "name": "(ps)",
+            "cpu_percent": 10.100814546313467
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.100814546227726
+          },
+          {
+            "pid": 77360,
+            "name": "(ps)",
+            "cpu_percent": 8.417345455261223
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 8.417345455138733
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.733876364355964
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 22.631921417079866,
+        "end_seconds": 23.23005229199771,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 197.28123885191522,
+        "max_process_cpu_percent": 96.96874452094877,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.96874452094877
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.07812358203091
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.703124338838629
+          },
+          {
+            "pid": 77365,
+            "name": "(ps)",
+            "cpu_percent": 10.031249433201626
+          },
+          {
+            "pid": 77366,
+            "name": "(ps)",
+            "cpu_percent": 10.031249433201626
+          },
+          {
+            "pid": 77364,
+            "name": "(ps)",
+            "cpu_percent": 8.359374527668024
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.359374527546377
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.015624716710294
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 23.23005229199771,
+        "end_seconds": 23.81788429210428,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 221.15162151173905,
+        "max_process_cpu_percent": 98.66764652057817,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.66764652057817
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 23.816328470540157
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.816328470385436
+          },
+          {
+            "pid": 77369,
+            "name": "(ps)",
+            "cpu_percent": 8.505831596601594
+          },
+          {
+            "pid": 77371,
+            "name": "(ps)",
+            "cpu_percent": 8.505831596601594
+          },
+          {
+            "pid": 77370,
+            "name": "(ps)",
+            "cpu_percent": 6.804665277281274
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.804665277275085
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.103498958072354
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.1034989579563135
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 23.81788429210428,
+        "end_seconds": 24.415363959036767,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 200.8436548398064,
+        "max_process_cpu_percent": 95.40073604955148,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.40073604955148
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.105456854170892
+          },
+          {
+            "pid": 77374,
+            "name": "(ps)",
+            "cpu_percent": 11.715879865734388
+          },
+          {
+            "pid": 77376,
+            "name": "(ps)",
+            "cpu_percent": 11.715879865734388
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.715879865685675
+          },
+          {
+            "pid": 77375,
+            "name": "(ps)",
+            "cpu_percent": 10.042182742058046
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.694788494699274
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.694788494547053
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 24.415363959036767,
+        "end_seconds": 25.01384345907718,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 188.81181392652175,
+        "max_process_cpu_percent": 96.91225847515935,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.91225847515935
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.73441613166175
+          },
+          {
+            "pid": 77379,
+            "name": "(ps)",
+            "cpu_percent": 11.69630705734671
+          },
+          {
+            "pid": 77380,
+            "name": "(ps)",
+            "cpu_percent": 10.025406049154322
+          },
+          {
+            "pid": 77381,
+            "name": "(ps)",
+            "cpu_percent": 10.025406049154322
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.68360403276347
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.012703024686577
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.012703024610594
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 25.01384345907718,
+        "end_seconds": 25.608830209006555,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 200.00445390544382,
+        "max_process_cpu_percent": 97.48116240720377,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.48116240720377
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.849226057569755
+          },
+          {
+            "pid": 77384,
+            "name": "(ps)",
+            "cpu_percent": 11.764967876731525
+          },
+          {
+            "pid": 77385,
+            "name": "(ps)",
+            "cpu_percent": 10.084258180055592
+          },
+          {
+            "pid": 77386,
+            "name": "(ps)",
+            "cpu_percent": 10.084258180055592
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.40354848356309
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.403548483410232
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 25.608830209006555,
+        "end_seconds": 26.20467070909217,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 211.46598792972028,
+        "max_process_cpu_percent": 97.3414865079933,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.3414865079933
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.13961789742405
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.426411932277475
+          },
+          {
+            "pid": 77389,
+            "name": "(ps)",
+            "cpu_percent": 10.069808949102784
+          },
+          {
+            "pid": 77391,
+            "name": "(ps)",
+            "cpu_percent": 10.069808949102784
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.39150745761618
+          },
+          {
+            "pid": 77390,
+            "name": "(ps)",
+            "cpu_percent": 8.391507457585654
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.713205965909776
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 26.20467070909217,
+        "end_seconds": 26.800264584016986,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 186.368605644291,
+        "max_process_cpu_percent": 97.38179394024387,
+        "max_model_cpu_percent": 1.678996447244062,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.38179394024387
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 18.46896091979921
+          },
+          {
+            "pid": 77394,
+            "name": "(ps)",
+            "cpu_percent": 10.073978683473534
+          },
+          {
+            "pid": 77395,
+            "name": "(ps)",
+            "cpu_percent": 10.073978683473534
+          },
+          {
+            "pid": 77396,
+            "name": "(ps)",
+            "cpu_percent": 8.394982236227944
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.39498223610578
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.036989341846714
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.036989341732186
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 26.800264584016986,
+        "end_seconds": 27.401984916999936,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 194.44249028417215,
+        "max_process_cpu_percent": 96.39029432905004,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.39029432905004
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.252327647879373
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 9.971409758244002
+          },
+          {
+            "pid": 77400,
+            "name": "(ps)",
+            "cpu_percent": 9.971409758177497
+          },
+          {
+            "pid": 77399,
+            "name": "(ps)",
+            "cpu_percent": 8.309508131814582
+          },
+          {
+            "pid": 77401,
+            "name": "(ps)",
+            "cpu_percent": 8.309508131814582
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.309508131693661
+          }
+        ],
+        "gpu_device_utilization_percent": 11,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 27.401984916999936,
+        "end_seconds": 27.997520917095244,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 258.5905805441805,
+        "max_process_cpu_percent": 99.07041722172538,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 99.07041722172538
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.54571343647529
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 26.866553822816513
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.149915367112385
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 15.11243652521975
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 10.074957683632551
+          },
+          {
+            "pid": 77406,
+            "name": "(ps)",
+            "cpu_percent": 8.395798069637797
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.716638455704128
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.037478841892636
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.037478841778096
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 27.997520917095244,
+        "end_seconds": 28.592451375094242,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 191.61903457459346,
+        "max_process_cpu_percent": 94.12864856230726,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 94.12864856230726
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.170424693586174
+          },
+          {
+            "pid": 77410,
+            "name": "(ps)",
+            "cpu_percent": 13.446949794615268
+          },
+          {
+            "pid": 77411,
+            "name": "(ps)",
+            "cpu_percent": 13.446949794615268
+          },
+          {
+            "pid": 77409,
+            "name": "(ps)",
+            "cpu_percent": 11.766081070288362
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.085212345875842
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.7234748971486455
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.042606172937921
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 28.592451375094242,
+        "end_seconds": 29.18612612504512,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 170.12682450808572,
+        "max_process_cpu_percent": 97.69659229198959,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.69659229198959
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.213088059627328
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.106544030426454
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.106544030273257
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.0532720150983295
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 29.18612612504512,
+        "end_seconds": 29.780730292084627,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 176.58806617914516,
+        "max_process_cpu_percent": 95.86209306907344,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.86209306907344
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.18149327691652
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.40895553240545
+          },
+          {
+            "pid": 83251,
+            "name": "com.apple.Virtualization.VirtualMachine",
+            "cpu_percent": 6.727164425932008
+          },
+          {
+            "pid": 77417,
+            "name": "mdworker_shared",
+            "cpu_percent": 6.727164425899887
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.04537331922913
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 29.780730292084627,
+        "end_seconds": 30.3744843340246,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 173.47250330031454,
+        "max_process_cpu_percent": 97.68354554774281,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.68354554774281
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.57878685625375
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.789393428280052
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.736796244818988
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.052597183461064
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 30.3744843340246,
+        "end_seconds": 30.968552084057592,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 201.99716277262752,
+        "max_process_cpu_percent": 95.94865231589253,
+        "max_model_cpu_percent": 1.6833096897605375,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.94865231589253
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.932955036627888
+          },
+          {
+            "pid": 77430,
+            "name": "(ps)",
+            "cpu_percent": 11.7831678282675
+          },
+          {
+            "pid": 77432,
+            "name": "(ps)",
+            "cpu_percent": 11.7831678282675
+          },
+          {
+            "pid": 77431,
+            "name": "(ps)",
+            "cpu_percent": 10.099858138514998
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.416548448793119
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.73323875885078
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 30.968552084057592,
+        "end_seconds": 31.565296000102535,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 221.2004118526832,
+        "max_process_cpu_percent": 97.19412035971496,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.19412035971496
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 33.515213916655476
+          },
+          {
+            "pid": 77435,
+            "name": "(ps)",
+            "cpu_percent": 11.730324871000116
+          },
+          {
+            "pid": 77436,
+            "name": "(ps)",
+            "cpu_percent": 11.730324871000116
+          },
+          {
+            "pid": 77437,
+            "name": "(ps)",
+            "cpu_percent": 10.054564175142955
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.054564175057607
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.70304278357495
+          },
+          {
+            "pid": 52843,
+            "name": "com.aikido.endpoint.proxy.l4.dist.extension",
+            "cpu_percent": 5.027282087566905
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 31.565296000102535,
+        "end_seconds": 32.15948841709178,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 186.80817329086815,
+        "max_process_cpu_percent": 97.61147793484952,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.61147793484952
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.195478195082288
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.195478193398582
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.463652128932392
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.731826064619259
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.731826064313131
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 5.048869548387912
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 32.15948841709178,
+        "end_seconds": 32.748703917022794,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 149.35112876300204,
+        "max_process_cpu_percent": 95.0416273953349,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.0416273953349
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.36606301249592
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.091515753432694
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.091515753278337
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 32.748703917022794,
+        "end_seconds": 33.34185241709929,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 217.48348007824967,
+        "max_process_cpu_percent": 96.09735166260903,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.09735166260903
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.66061365346617
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 26.97469520351483
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 15.173266052015425
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.743673800878708
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.743673800725373
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.05775535065903
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 33.34185241709929,
+        "end_seconds": 33.93771341710817,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 216.49344393801258,
+        "max_process_cpu_percent": 95.65989383287456,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.65989383287456
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 48.669068793531835
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 15.104193763109869
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.034731254471714
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.034731254357237
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.0347312543190785
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 33.93771341710817,
+        "end_seconds": 34.528785709058866,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 167.49220247391352,
+        "max_process_cpu_percent": 98.12674488358297,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.12674488358297
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 37.220489438797046
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.459202145167158
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.075521287192618
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 34.528785709058866,
+        "end_seconds": 35.123992459033616,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 168.0088473530787,
+        "max_process_cpu_percent": 97.44513146475627,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.44513146475627
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.521238629326202
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.760619314663101
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 11.760619314663101
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 6.720353894191431
+          }
+        ],
+        "gpu_device_utilization_percent": 11,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 35.123992459033616,
+        "end_seconds": 35.71931537508499,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 176.37486676271712,
+        "max_process_cpu_percent": 97.4261168790532,
+        "max_model_cpu_percent": 1.679760635844222,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.4261168790532
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.196409536708497
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.078563815141719
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.39880317910653
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.039281907532666
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.039281907494473
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 35.71931537508499,
+        "end_seconds": 36.30796554207336,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 219.14544025281555,
+        "max_process_cpu_percent": 96.83170615855089,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.83170615855089
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.385622349150058
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.385622348377535
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.590414899433373
+          },
+          {
+            "pid": 77476,
+            "name": "(ps)",
+            "cpu_percent": 6.7952074497228665
+          },
+          {
+            "pid": 77477,
+            "name": "(ps)",
+            "cpu_percent": 6.7952074497228665
+          },
+          {
+            "pid": 77478,
+            "name": "(ps)",
+            "cpu_percent": 6.7952074497228665
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.096405587403393
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 5.0964055873261405
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.0964055872488885
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 5.0964055872488885
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 36.30796554207336,
+        "end_seconds": 36.90532450005412,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 175.7737095896377,
+        "max_process_cpu_percent": 95.42001377643349,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.42001377643349
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.110529942628325
+          },
+          {
+            "pid": 77481,
+            "name": "(ps)",
+            "cpu_percent": 8.370176647055567
+          },
+          {
+            "pid": 77482,
+            "name": "(ps)",
+            "cpu_percent": 8.370176647055567
+          },
+          {
+            "pid": 77483,
+            "name": "(ps)",
+            "cpu_percent": 6.696141317644454
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.696141317638363
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.022105988342962
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.022105988228772
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 36.90532450005412,
+        "end_seconds": 37.505124292103574,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 185.06175138974396,
+        "max_process_cpu_percent": 98.36615614420748,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.36615614420748
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.341121796833686
+          },
+          {
+            "pid": 77488,
+            "name": "(ps)",
+            "cpu_percent": 10.003337912970313
+          },
+          {
+            "pid": 77486,
+            "name": "(ps)",
+            "cpu_percent": 8.336114927475261
+          },
+          {
+            "pid": 77487,
+            "name": "(ps)",
+            "cpu_percent": 8.336114927475261
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.6688919419741435
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.668891941822511
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 37.505124292103574,
+        "end_seconds": 38.10169004206546,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 209.53264582840092,
+        "max_process_cpu_percent": 97.22314766428748,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.22314766428748
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.467656332661257
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.41008933299285
+          },
+          {
+            "pid": 77492,
+            "name": "(ps)",
+            "cpu_percent": 10.057566999753783
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.381305833158645
+          },
+          {
+            "pid": 77491,
+            "name": "(ps)",
+            "cpu_percent": 8.381305833128154
+          },
+          {
+            "pid": 77493,
+            "name": "(ps)",
+            "cpu_percent": 8.381305833128154
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.705044666648879
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 38.10169004206546,
+        "end_seconds": 38.699076209100895,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 219.28863979133362,
+        "max_process_cpu_percent": 97.08962677831667,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.08962677831667
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 26.78334531813204
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.087508987837804
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 15.065631741487334
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 11.717713576644707
+          },
+          {
+            "pid": 77500,
+            "name": "(ps)",
+            "cpu_percent": 10.04375449430865
+          },
+          {
+            "pid": 77501,
+            "name": "(ps)",
+            "cpu_percent": 8.369795411923876
+          },
+          {
+            "pid": 77502,
+            "name": "(ps)",
+            "cpu_percent": 8.369795411923876
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.021877247111696
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.021877247111696
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 38.699076209100895,
+        "end_seconds": 39.29573270899709,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 214.52879508222242,
+        "max_process_cpu_percent": 97.20836027109434,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.20836027109434
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 30.168111809538978
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.056037269490654
+          },
+          {
+            "pid": 77505,
+            "name": "(ps)",
+            "cpu_percent": 10.056037269423582
+          },
+          {
+            "pid": 77507,
+            "name": "(ps)",
+            "cpu_percent": 10.056037269423582
+          },
+          {
+            "pid": 77506,
+            "name": "(ps)",
+            "cpu_percent": 8.380031057852985
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.38003105773104
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.0280186346691105
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 39.29573270899709,
+        "end_seconds": 39.89291558403056,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 219.36328966562425,
+        "max_process_cpu_percent": 97.1226778677291,
+        "max_model_cpu_percent": 1.6745289287524316,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.1226778677291
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.11793393033462
+          },
+          {
+            "pid": 77510,
+            "name": "(ps)",
+            "cpu_percent": 11.721702501277683
+          },
+          {
+            "pid": 77512,
+            "name": "(ps)",
+            "cpu_percent": 11.721702501277683
+          },
+          {
+            "pid": 77511,
+            "name": "(ps)",
+            "cpu_percent": 10.047173572523729
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 10.047173572438442
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.047173572438442
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.698115715009727
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.023586786219221
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 39.89291558403056,
+        "end_seconds": 40.481347542023286,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 190.3363651110772,
+        "max_process_cpu_percent": 98.56704621865153,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.56704621865153
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.49147746935147
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 22.09261380764713
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.79772732557256
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.098295494024857
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 40.481347542023286,
+        "end_seconds": 41.07352575007826,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 194.19829780150414,
+        "max_process_cpu_percent": 94.56612762555554,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 94.56612762555554
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.641531906290794
+          },
+          {
+            "pid": 77521,
+            "name": "(ps)",
+            "cpu_percent": 13.509446803650906
+          },
+          {
+            "pid": 77520,
+            "name": "(ps)",
+            "cpu_percent": 11.820765953194545
+          },
+          {
+            "pid": 77522,
+            "name": "(ps)",
+            "cpu_percent": 11.820765953194545
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.132085102805759
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.132085102652173
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.754723401819311
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 41.07352575007826,
+        "end_seconds": 41.666208459064364,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 205.84369705965884,
+        "max_process_cpu_percent": 97.86011827343599,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.86011827343599
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.246921023759594
+          },
+          {
+            "pid": 77525,
+            "name": "(ps)",
+            "cpu_percent": 11.810703929552512
+          },
+          {
+            "pid": 77526,
+            "name": "(ps)",
+            "cpu_percent": 11.810703929552512
+          },
+          {
+            "pid": 77527,
+            "name": "(ps)",
+            "cpu_percent": 10.123460511045009
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.123460510959074
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.436217092721652
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.061730255479537
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 41.666208459064364,
+        "end_seconds": 42.25882195902523,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 249.74118883357175,
+        "max_process_cpu_percent": 96.18410651084471,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.18410651084471
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 25.311606976476682
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.93672604466322
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.499523720808027
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 10.124642790682756
+          },
+          {
+            "pid": 77531,
+            "name": "(ps)",
+            "cpu_percent": 10.124642790615228
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.437202325543385
+          },
+          {
+            "pid": 77530,
+            "name": "(ps)",
+            "cpu_percent": 8.43720232551269
+          },
+          {
+            "pid": 77532,
+            "name": "(ps)",
+            "cpu_percent": 8.43720232551269
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.749761860404013
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.06232139530301
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 42.25882195902523,
+        "end_seconds": 42.85797187499702,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 221.98117108157652,
+        "max_process_cpu_percent": 96.8038189672889,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.8038189672889
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.03547042403205
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 21.69740769943124
+          },
+          {
+            "pid": 77536,
+            "name": "(ps)",
+            "cpu_percent": 11.683219530534902
+          },
+          {
+            "pid": 77538,
+            "name": "(ps)",
+            "cpu_percent": 10.014188169029916
+          },
+          {
+            "pid": 77537,
+            "name": "(ps)",
+            "cpu_percent": 8.34515680752493
+          },
+          {
+            "pid": 52843,
+            "name": "com.aikido.endpoint.proxy.l4.dist.extension",
+            "cpu_percent": 6.676125446013873
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.676125446013873
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.676125446013873
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 5.007094084548354
+          }
+        ],
+        "gpu_device_utilization_percent": 11,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 42.85797187499702,
+        "end_seconds": 43.459935792023316,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 227.58839213602218,
+        "max_process_cpu_percent": 96.35129010144,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.35129010144
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 33.22458279311662
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.628603977862774
+          },
+          {
+            "pid": 77541,
+            "name": "(ps)",
+            "cpu_percent": 9.967374838080028
+          },
+          {
+            "pid": 77542,
+            "name": "(ps)",
+            "cpu_percent": 9.967374838080028
+          },
+          {
+            "pid": 77543,
+            "name": "(ps)",
+            "cpu_percent": 9.967374838080028
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.30614569858133
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 6.644916558713976
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.644916558713976
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 43.459935792023316,
+        "end_seconds": 44.05590900010429,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 248.33331094823046,
+        "max_process_cpu_percent": 97.31981104781332,
+        "max_model_cpu_percent": 1.6779277766849152,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.31981104781332
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 30.20269997918393
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 21.813061097094657
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.423422213479322
+          },
+          {
+            "pid": 77546,
+            "name": "(ps)",
+            "cpu_percent": 11.74549443680509
+          },
+          {
+            "pid": 77547,
+            "name": "(ps)",
+            "cpu_percent": 10.067566660118649
+          },
+          {
+            "pid": 77548,
+            "name": "(ps)",
+            "cpu_percent": 10.067566660118649
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 10.06756666003319
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.06756666003319
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.389638883310122
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 44.05590900010429,
+        "end_seconds": 44.64703008404467,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 191.1621883756949,
+        "max_process_cpu_percent": 98.11864536005915,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.11864536005915
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.30040938651387
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.300409384821418
+          },
+          {
+            "pid": 77552,
+            "name": "(ps)",
+            "cpu_percent": 10.15020469241994
+          },
+          {
+            "pid": 77551,
+            "name": "(ps)",
+            "cpu_percent": 8.458503910349952
+          },
+          {
+            "pid": 77553,
+            "name": "(ps)",
+            "cpu_percent": 8.458503910349952
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.075102346205354
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.07510234616689
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 44.64703008404467,
+        "end_seconds": 45.235885125002824,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 207.18171963120884,
+        "max_process_cpu_percent": 96.79801654963096,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.79801654963096
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 35.66242714847969
+          },
+          {
+            "pid": 77556,
+            "name": "(ps)",
+            "cpu_percent": 11.887475716621193
+          },
+          {
+            "pid": 77557,
+            "name": "(ps)",
+            "cpu_percent": 10.189264899961021
+          },
+          {
+            "pid": 77558,
+            "name": "(ps)",
+            "cpu_percent": 10.189264899961021
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.491054083177291
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.094632450091716
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 5.0946324500144895
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 45.235885125002824,
+        "end_seconds": 45.83426270901691,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 230.62361239216662,
+        "max_process_cpu_percent": 93.58639343462069,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 93.58639343462069
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 46.793196717115606
+          },
+          {
+            "pid": 77562,
+            "name": "(ps)",
+            "cpu_percent": 10.027113582280748
+          },
+          {
+            "pid": 77563,
+            "name": "(ps)",
+            "cpu_percent": 10.027113582280748
+          },
+          {
+            "pid": 77564,
+            "name": "(ps)",
+            "cpu_percent": 10.027113582280748
+          },
+          {
+            "pid": 77561,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 8.355927985233956
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.684742388181085
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 45.83426270901691,
+        "end_seconds": 46.43376133404672,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 213.51174907835193,
+        "max_process_cpu_percent": 98.41557184066131,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.41557184066131
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.68896863533866
+          },
+          {
+            "pid": 77567,
+            "name": "(ps)",
+            "cpu_percent": 11.676423777705795
+          },
+          {
+            "pid": 77568,
+            "name": "(ps)",
+            "cpu_percent": 11.676423777705795
+          },
+          {
+            "pid": 77569,
+            "name": "(ps)",
+            "cpu_percent": 10.008363238033537
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 10.00836323794858
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.672242158682956
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.672242158531247
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 46.43376133404672,
+        "end_seconds": 47.029011792037636,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 206.6357082974378,
+        "max_process_cpu_percent": 97.43797626928512,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.43797626928512
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.87944173004476
+          },
+          {
+            "pid": 77577,
+            "name": "(ps)",
+            "cpu_percent": 11.759755756637894
+          },
+          {
+            "pid": 77578,
+            "name": "(ps)",
+            "cpu_percent": 10.079790648546764
+          },
+          {
+            "pid": 77579,
+            "name": "(ps)",
+            "cpu_percent": 10.079790648546764
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.39982554063899
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.719860432358399
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.039895324230601
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 47.029011792037636,
+        "end_seconds": 47.626624374999665,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 215.85890872756974,
+        "max_process_cpu_percent": 97.0528426836797,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.0528426836797
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 36.81314722503803
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 21.75322336000071
+          },
+          {
+            "pid": 77582,
+            "name": "(ps)",
+            "cpu_percent": 11.713274116995574
+          },
+          {
+            "pid": 77583,
+            "name": "(ps)",
+            "cpu_percent": 10.039949243139063
+          },
+          {
+            "pid": 77584,
+            "name": "(ps)",
+            "cpu_percent": 10.039949243139063
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.039949243053838
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 47.626624374999665,
+        "end_seconds": 48.221849125111476,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 248.64557458638393,
+        "max_process_cpu_percent": 97.44218463547548,
+        "max_model_cpu_percent": 1.6800376661273646,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 97.44218463547548
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 38.64086632027999
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.440301329018917
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 13.440301329018917
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.760263663006151
+          },
+          {
+            "pid": 77587,
+            "name": "(ps)",
+            "cpu_percent": 11.760263662902249
+          },
+          {
+            "pid": 77588,
+            "name": "(ps)",
+            "cpu_percent": 11.760263662902249
+          },
+          {
+            "pid": 77589,
+            "name": "(ps)",
+            "cpu_percent": 10.080225996773356
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.0401129983438935
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 48.221849125111476,
+        "end_seconds": 48.8234402500093,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 234.37845766689077,
+        "max_process_cpu_percent": 96.41099677102258,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.41099677102258
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 38.231946994728325
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 29.920654170365818
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 16.62258565023683
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.635809955075072
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.649034260064495
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 6.649034259913314
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 48.8234402500093,
+        "end_seconds": 49.41889216704294,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 211.60398748539475,
+        "max_process_cpu_percent": 95.72561338614159,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.72561338614159
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 41.984918151816984
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 16.79396726078789
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 11.755777082459879
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 8.396983630393946
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.717586904284609
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.038190178328011
+          }
+        ],
+        "gpu_device_utilization_percent": 16,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 49.41889216704294,
+        "end_seconds": 50.01820045907516,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 215.24814809826339,
+        "max_process_cpu_percent": 98.44682742488808,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.44682742488808
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 41.714757383426914
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 21.69167383924845
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.348722362684473
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 11.680132067310973
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.0057708859687375
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 50.01820045907516,
+        "end_seconds": 50.61468166706618,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 182.73836382593169,
+        "max_process_cpu_percent": 98.91342629001765,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 98.91342629001765
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 33.52997501551682
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 20.117985008273248
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.058992504136624
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 50.61468166706618,
+        "end_seconds": 51.21097641706001,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 196.21168893542006,
+        "max_process_cpu_percent": 95.59030999449352,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 95.59030999449352
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 25.155344734417177
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 23.478321753241215
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.06213789407192
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.385114911828284
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.031068947188485
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 51.21097641706001,
+        "end_seconds": 51.801873750053346,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 243.69715678027734,
+        "max_process_cpu_percent": 96.46345789251272,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.46345789251272
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 40.61619279681
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.769803230804392
+          },
+          {
+            "pid": 77617,
+            "name": "gh",
+            "cpu_percent": 10.154048199211733
+          },
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 5.07702409956277
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 5.07702409956277
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 51.801873750053346,
+        "end_seconds": 52.40129633410834,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 178.50511950462138,
+        "max_process_cpu_percent": 96.75978440391705,
+        "max_model_cpu_percent": 1.668272144893609,
+        "active_processes": [
+          {
+            "pid": 76975,
+            "name": "XProtectRemediatorColdSnap",
+            "cpu_percent": 96.75978440391705
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.69235431890466
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.67790501421733
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.673088579726165
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.673088579574436
+          },
+          {
+            "pid": 76086,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 5.004816434685569
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 52.40129633410834,
+        "end_seconds": 53.0029219170101,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 111.36494508182604,
+        "max_process_cpu_percent": 23.270287032039068,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 23.270287032039068
+          },
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 19.94596031324113
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 18.28379695376658
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 53.0029219170101,
+        "end_seconds": 53.60137237503659,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 147.04642434543365,
+        "max_process_cpu_percent": 81.87812264625414,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 81.87812264625414
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.72276723345778
+          },
+          {
+            "pid": 382,
+            "name": "opendirectoryd",
+            "cpu_percent": 10.025892568919959
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.683928379431947
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.683928379279973
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 5.012946284573961
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 53.60137237503659,
+        "end_seconds": 54.20749741711188,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 197.97895099039405,
+        "max_process_cpu_percent": 89.09052794636435,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 89.09052794636435
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 19.79789509842382
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 13.198596732782713
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.54877214129741
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 9.89894754966206
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 6.599298366397364
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 54.20749741711188,
+        "end_seconds": 54.8018975420855,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 171.60157899373462,
+        "max_process_cpu_percent": 92.53026318330801,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 92.53026318330801
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.18842105739288
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 6.729473686205655
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.729473686052644
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 6.7294736858996345
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.047105264654241
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 5.047105264544116
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 54.8018975420855,
+        "end_seconds": 55.40176158410031,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 165.03739691978902,
+        "max_process_cpu_percent": 90.02039831996858,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 90.02039831996858
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 28.339755026365665
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.00226648006322
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 10.002266479911603
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 6.6681776533310115
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 55.40176158410031,
+        "end_seconds": 55.99750695901457,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 187.9997809752293,
+        "max_process_cpu_percent": 90.64275154091096,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 90.64275154091096
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 30.21425051490716
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.428555783826447
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.39284736508236
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.714277891913223
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 5.03570841893954
+          },
+          {
+            "pid": 89364,
+            "name": "backgroundtaskmanagementd",
+            "cpu_percent": 5.0357084189349175
+          }
+        ],
+        "gpu_device_utilization_percent": 12,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 55.99750695901457,
+        "end_seconds": 56.59581820911262,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 157.10886262595653,
+        "max_process_cpu_percent": 91.9253983457385,
+        "max_model_cpu_percent": 1.6713708790119075,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 91.9253983457385
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 20.05645054738284
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 8.35685439494553
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 5.014112637040176
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 5.01411263684571
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 56.59581820911262,
+        "end_seconds": 57.19755679205991,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 189.45103942217168,
+        "max_process_cpu_percent": 89.7399660422474,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 89.7399660422474
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 46.53183424393481
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 18.28036345299598
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 57.19755679205991,
+        "end_seconds": 57.790551292011514,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 204.04911008558497,
+        "max_process_cpu_percent": 87.69052664779198,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 87.69052664779198
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 35.41348191653423
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 6.745425126900474
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.745425126900474
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.745425126747101
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 5.059068845064969
+          },
+          {
+            "pid": 77688,
+            "name": "ManagedClient",
+            "cpu_percent": 5.059068845064926
+          },
+          {
+            "pid": 52807,
+            "name": "endpoint-protection",
+            "cpu_percent": 5.05906884506392
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 57.790551292011514,
+        "end_seconds": 58.39122095901985,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 186.45855809249844,
+        "max_process_cpu_percent": 89.89966193723393,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 89.89966193723393
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 21.642511207887107
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.653659880704092
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 58.39122095901985,
+        "end_seconds": 58.99405433400534,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 170.8598167800164,
+        "max_process_cpu_percent": 91.23582449515766,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 91.23582449515766
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 26.541330760393066
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.635332690701748
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 6.635332690550877
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 58.99405433400534,
+        "end_seconds": 59.59378383401781,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 210.09471769945952,
+        "max_process_cpu_percent": 90.04059329894059,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 90.04059329894059
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 31.680949494459913
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 21.676439127389283
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 10.00451036661568
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 8.337091972002808
+          },
+          {
+            "pid": 80440,
+            "name": "bird",
+            "cpu_percent": 6.669673577699308
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 5.0022551833836655
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 59.59378383401781,
+        "end_seconds": 60.1951782500837,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 187.89665647162022,
+        "max_process_cpu_percent": 91.45412483173835,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 91.45412483173835
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 19.953627235241342
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.302418157331664
+          },
+          {
+            "pid": 75296,
+            "name": "Codex (Service)",
+            "cpu_percent": 9.976813617923133
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.651209078817064
+          },
+          {
+            "pid": 77723,
+            "name": "mdworker_shared",
+            "cpu_percent": 6.651209078671883
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 60.1951782500837,
+        "end_seconds": 60.43074100010563,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 131.59975419719666,
+        "max_process_cpu_percent": 89.14822058260586,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 77637,
+            "name": "XProtectRemediatorSheepSwap",
+            "cpu_percent": 89.14822058260586
+          },
+          {
+            "pid": 414,
+            "name": "WindowServer",
+            "cpu_percent": 16.980613447765286
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      }
+    ],
+    "sampling_failures": 0,
+    "measurement_samples": 0,
+    "cpu_guard_exceeded": false,
+    "background_model_active": false,
+    "thermal_guard_exceeded": false
+  }
+}

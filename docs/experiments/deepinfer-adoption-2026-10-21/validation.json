@@ -1,0 +1,107 @@
+{
+  "schema": 1,
+  "candidate_commit": "f2a5a9885fd8c5b8c2ad01de1cdad558e1a8acaf",
+  "reference_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+  "restoration_commit": "42ffa85dab0cd5e16872bb677d37f992c2d4b4f0",
+  "production_build": {
+    "passed": true,
+    "rust": "1.98.1",
+    "locked": true,
+    "bootstrap": false
+  },
+  "default_engine_check": {
+    "command": "cargo +1.98.1 check --locked -p stark-engine",
+    "passed": true,
+    "includes_grammar": true
+  },
+  "metal_cache_tests": {
+    "command": "RUSTC_BOOTSTRAP=1 cargo +1.98.1 test --release --locked -p stark-engine --lib --no-default-features --features cpu,metal command_buffer::tests -- --test-threads=1",
+    "passed": 2,
+    "failed": 0,
+    "coverage": [
+      "exclusive tables for outstanding encodings",
+      "table reuse after completion",
+      "buffer rebinding",
+      "changing constant offsets",
+      "optional-input specialization changes"
+    ],
+    "gpu_failure_injected": false,
+    "failed_feedback_exclusion": "static review only",
+    "initial_test_compile_failure": "E0283 pointer type inference; corrected before passing run"
+  },
+  "sampler_property_test": {
+    "command": "PROPTEST_CASES=16 target/release/deps/stark_engine-08dad9acec330570 test_sampling_prop --test-threads=1",
+    "passed_test_functions": 1,
+    "cases": 16,
+    "random_seed_recorded": false
+  },
+  "numerics": {
+    "receipt": "numerics.json",
+    "cases": 23,
+    "full_vocabulary_f32_bit_matches": 23,
+    "cache_enabled": false,
+    "scope": "combined scoring candidate only; no independent per-ablation digest run; does not exercise generation token handoff"
+  },
+  "generation_hashes": {
+    "scope": "all ten fixtures, all loads including excluded timings, both campaigns",
+    "token_matches": true,
+    "text_matches": true,
+    "within_engine_stable": true,
+    "quality_qualification": false
+  },
+  "campaigns": {
+    "combined": {
+      "receipt": "combined-results.json",
+      "measured_requests": 408,
+      "performance_requests": 360,
+      "loads_per_engine": 6,
+      "performance_repeats_per_load": 5,
+      "matched_accepted_pairs": [
+        0,
+        2
+      ],
+      "timing_accepted": false
+    },
+    "ablations": {
+      "receipt": "ablation-results.json",
+      "measured_requests": 264,
+      "performance_requests": 216,
+      "loads_per_engine": 4,
+      "performance_repeats_per_load": 3,
+      "metadata_accepted_pairs": [
+        2,
+        3
+      ],
+      "token_handoff_accepted_pairs": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "timing_accepted": false
+    }
+  },
+  "review": {
+    "candidate_lifetime_and_binding_review": "no concrete defect found",
+    "raw_receipt_independent_recalculation": "agrees within 1e-14",
+    "retention": "neither isolated change demonstrated a useful gain; restored per frozen rule"
+  },
+  "formatting": {
+    "candidate_rustfmt": "passed with nightly-2026-10-01",
+    "git_diff_check": "passed before candidate commits"
+  },
+  "limits": [
+    "observed quiet conditions only",
+    "per-process GPU/power unavailable",
+    "nominal thermal state does not prove equal clocks",
+    "no new Stark-versus-MLX ranking",
+    "no claim about DeepInfer distributed performance"
+  ],
+  "replay_patch_validation": {
+    "standard_unified_patches": 3,
+    "all_apply_cached_checks_passed": true,
+    "alternate_index_targets_equal_recorded_candidate_files": true,
+    "production_checkout_untouched": true,
+    "historical_display_diff_bytes_preserved": true
+  }
+}

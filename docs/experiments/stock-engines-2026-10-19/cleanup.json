@@ -1,0 +1,72 @@
+{
+  "scope": "new task runtime root and bytecode of newly added benchmark drivers/tests only",
+  "ownership_verified": true,
+  "target_directory_not_symlink": true,
+  "open_handle_screen_complete": true,
+  "open_handles": 0,
+  "benchmark_executable_processes": [],
+  "preexisting_installed_llama_servers": 1,
+  "du_allocated_bytes": 7532720128,
+  "logical_regular_file_bytes": 7196723512,
+  "free_bytes_before": 25651531776,
+  "initial_free_bytes_before_setup": 31900704768,
+  "preserve_existing": [
+    "models",
+    "runtime/tensorfold-stock-qwen35",
+    "external MeeCP model/runtime files"
+  ],
+  "aggregate_evidence_commit": "4adfae080a2d32152bfb3f362b26e6ab49da02ce",
+  "status": "complete",
+  "completed_utc": "2026-10-20T04:08:05.222134+00:00",
+  "runtime_root_absent": true,
+  "free_bytes_immediately_before_removal": 25649922048,
+  "free_bytes_after": 31212670976,
+  "observed_free_space_increase_bytes": 5562748928,
+  "task_driver_bytecode_removed": [
+    {
+      "path": "scripts/__pycache__/benchmark_stock_engines.cpython-312.pyc",
+      "bytes": 36758
+    },
+    {
+      "path": "scripts/__pycache__/benchmark_stock_engines.cpython-315.pyc",
+      "bytes": 36966
+    },
+    {
+      "path": "scripts/__pycache__/benchmark_stock_serving.cpython-312.pyc",
+      "bytes": 23597
+    },
+    {
+      "path": "scripts/__pycache__/stock_compare_mlx.cpython-315.pyc",
+      "bytes": 12157
+    },
+    {
+      "path": "scripts/__pycache__/stock_compare_mlx.cpython-312.pyc",
+      "bytes": 10156
+    },
+    {
+      "path": "scripts/__pycache__/stock_compare_cases.cpython-312.pyc",
+      "bytes": 6865
+    },
+    {
+      "path": "scripts/__pycache__/stock_compare_cases.cpython-315.pyc",
+      "bytes": 7639
+    },
+    {
+      "path": "scripts/__pycache__/test_stock_compare.cpython-312.pyc",
+      "bytes": 13929
+    },
+    {
+      "path": "scripts/__pycache__/test_stock_compare.cpython-315.pyc",
+      "bytes": 11948
+    },
+    {
+      "path": "scripts/__pycache__/test_stock_serving.cpython-312.pyc",
+      "bytes": 8554
+    }
+  ],
+  "temporary_rpc_directories_remaining": 0,
+  "preexisting_model_paths_verified_present": 5,
+  "retained_code_locks_and_aggregate_evidence": true,
+  "free_space_measurement_scope": "shared filesystem; observed change is not exclusively attributable to this cleanup",
+  "preexisting_installed_llama_servers_after": 1
+}

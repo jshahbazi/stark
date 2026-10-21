@@ -1,0 +1,11 @@
+{
+  "pid": 75270,
+  "bundle_id": "com.openai.codex",
+  "was_hidden": false,
+  "is_hidden": true,
+  "appkit_hide_returned": false,
+  "method": "macOS System Events visibility",
+  "visibility_verified": true,
+  "restored_visible": true,
+  "end_hidden_state": "not separately retained; restore command verified visible=true"
+}

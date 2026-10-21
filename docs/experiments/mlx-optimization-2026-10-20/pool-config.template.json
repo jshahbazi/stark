@@ -1,0 +1,35 @@
+{
+  "task_root": "<task_runtime>",
+  "source": "<qwen_mlx_source>",
+  "context": 8192,
+  "blocks": 4,
+  "repeats": 3,
+  "engines": [
+    {
+      "id": "stark_baseline",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "54d113a7",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<qwen_stark_model>/model.safetensors",
+      "command": [
+        "<task_runtime>/bin/stark-generate-baseline",
+        "--model-path",
+        "<qwen_stark_model>"
+      ]
+    },
+    {
+      "id": "stark_pool",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "54d113a7",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<qwen_stark_model>/model.safetensors",
+      "command": [
+        "<task_runtime>/bin/stark-generate-pool",
+        "--model-path",
+        "<qwen_stark_model>"
+      ]
+    }
+  ]
+}

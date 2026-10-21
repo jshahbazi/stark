@@ -1,0 +1,338 @@
+{
+  "schema": 1,
+  "harness_sha256": "8d261db769ff71be1c6f7bab9eb7bfaa029aecfd57fddc5402fb09607d44e2ca",
+  "baseline_binary_sha256": "c8d40289fcbb958fd6c385e43fd94804254fcea337bf38ce4d158f786a7ce460",
+  "candidate_binary_sha256": "a49600159cc6badc6afca0d9460e19a67191304f651004145c1837ea5e81d171",
+  "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d",
+  "cache_enabled": false,
+  "timing_eligible": false,
+  "cases": 23,
+  "full_vocabulary_bitwise_matches": 23,
+  "mismatches": [],
+  "baseline": [
+    {
+      "case": "fibonacci-module",
+      "input_tokens": 42,
+      "input_sha256": "23d8ce2b1305ad01f8eab792db759e3a6ba4ad99b55913aed18c92228998ee85",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "e1b9d08971e18b9b3fcf9461d04e3a6b3f7a2adde9115d85feec9f4b7f9bc3ab"
+    },
+    {
+      "case": "gpu-explanation",
+      "input_tokens": 40,
+      "input_sha256": "882b3da4813c399e033c6a66329405e3304fda9a62cbd32db3b83ef8152fdf67",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "839e0fadc1c2a542cd628898a2cbfe74566aba6f884307f8e12901c3accbbbf5"
+    },
+    {
+      "case": "copy-edit",
+      "input_tokens": 383,
+      "input_sha256": "d9a559cee0b6de82803baefdb67ecbf340903a5d3f9d398e373d796dc2f09e54",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "4ba5dd71f53fbe3be22df376895e175d4bb3b9974a308224b599a60bbec33e4c"
+    },
+    {
+      "case": "context-medium",
+      "input_tokens": 522,
+      "input_sha256": "4a32791d79ba4eab316531fe84336449e4e45b9ec12331d822ea1642da3c1873",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "6af06e845207eea534fa023b8d91ef846edf165472d072d2ae3879d6cab3a7ac"
+    },
+    {
+      "case": "context-long",
+      "input_tokens": 2118,
+      "input_sha256": "0ba841ffe06355e1bfb5294c031d83aa34de53c4418d554957af415f62be2fac",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "c1ccd3982db8b6ab68852d31cf03e7a24fb1b84ee3cfc9b96ebedfaed695f32a"
+    },
+    {
+      "case": "long-output",
+      "input_tokens": 50,
+      "input_sha256": "4a138bfb63ede93f2bf6d9a79c8e86130c399b3c59b19ecef813c093aff14f7c",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7e4b1016561a23bc719e9f0f3bd0ae3c7bf978a6b429ee27c1225ee7e2a5930c"
+    },
+    {
+      "case": "arithmetic",
+      "input_tokens": 29,
+      "input_sha256": "c16784a023fb8614f1933c17cb5804a67457177bdfe6c4dbe9764b7212f2afc4",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b0d68bf804b1462818be3b945cae25c16bb9f14fbbf5c61eb13619b8f4cf5872"
+    },
+    {
+      "case": "prime",
+      "input_tokens": 47,
+      "input_sha256": "f026365fcb51733f4adbae5a4fea14f7827f271e037f5447f4f368432a9b31b9",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "82bd2de8d8e2c3ae4a9f1810bfc1cddff1d4c3b8fe3e12ca5f93c487a4c5ffc7"
+    },
+    {
+      "case": "sorting",
+      "input_tokens": 33,
+      "input_sha256": "f17f8ce1bb9471298d0e5d429104527ce29404dd41860d9baa86c2121f9a72f2",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "5f4e4e357f6035bd0a58702ec14ac320f7ec16bc31e35491f836c9c6e80a809a"
+    },
+    {
+      "case": "python",
+      "input_tokens": 35,
+      "input_sha256": "6d91487c00475dd73a2346cd63e90f1a2fe9514faaf4b977754a1c9ed871cc1d",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "402160b3b95fcc16183fa0ff4d1587b63d33c30247999c7b54d9421925464e7e"
+    },
+    {
+      "case": "prefix-1",
+      "input_tokens": 1,
+      "input_sha256": "f9ec16cdf22e0d09b737c0b00f7ad357eb62cd6ece5796706f0871f0e3759b4b",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "406ce50c2aa0d8a507cad26979ef3dba0d6d2c1e6a09cbc10486e2b5ca9b1055"
+    },
+    {
+      "case": "prefix-2",
+      "input_tokens": 2,
+      "input_sha256": "239cdad3d41d4e80041ff58b9dfcd3ae6bf08d7c1181d5012537715913085fb6",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "a545e6120a65b0ce37528a46a3ea899d75ea6d32515cba75422228512fc2c23f"
+    },
+    {
+      "case": "prefix-7",
+      "input_tokens": 7,
+      "input_sha256": "cfd8dad37b4aefdef7a957497e536730b937b596a8736ec806bec6a14342f73c",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "2f5aa40bd6d9043fdd4d9347aa2ee080edf531053fe4901fda755c6688eba2d6"
+    },
+    {
+      "case": "prefix-8",
+      "input_tokens": 8,
+      "input_sha256": "292bb04d1ba0a64b7387e1e8e28d1272f1958f70dea01d7a4aaf8a73f2cd9768",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7a7099ab3f7fd284191837d26962f0ce9a6ed0985c732299eeb4acbbfcebfc81"
+    },
+    {
+      "case": "prefix-9",
+      "input_tokens": 9,
+      "input_sha256": "6b0a0ed0ca97d00872877a2a58b6d4d519cafa768693a1235b0414967aab63c2",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7b0cc59f71ed749df69bc00fd06290e21c8a23f856da3d23388a273c336b0322"
+    },
+    {
+      "case": "prefix-16",
+      "input_tokens": 16,
+      "input_sha256": "569cf477b4b7f854734c6d82b330aef98b12c181e7f9ffd14806865254113926",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "9efd5f35867ca742c1e355bdd7747f6ee0b112533d1324cdd635f52b282c7fcd"
+    },
+    {
+      "case": "prefix-127",
+      "input_tokens": 127,
+      "input_sha256": "def4cc0bfa578f3a3ee1ad66f32175ed4ef222bc1ff952d5ce51ecf5a2103416",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "c2f986b945e21b12df0b641b6d7aa6ec11a366153555ce5e2e7585f16f85feec"
+    },
+    {
+      "case": "prefix-128",
+      "input_tokens": 128,
+      "input_sha256": "1fc77f20f58a41039dd3f43d95cd82068c4b25bac33f47192aef5cec1ade8ec7",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b391ea163234073be1fb0e1967f2955b2ccb29dba9dbe1dad69c5f67858aca23"
+    },
+    {
+      "case": "prefix-129",
+      "input_tokens": 129,
+      "input_sha256": "308c32c06583ce58ac84924e0119af36138fa09509f45b4674781836c8f3d24e",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "44f33fbab66f32023c0c259ad7063a1c2215f7b6526d4a20e706aa983aa57fa8"
+    },
+    {
+      "case": "prefix-1023",
+      "input_tokens": 1023,
+      "input_sha256": "8ed2cc74b671738a61856ba2984507e625b5e364c1697a5d10dd3b2e3f2898fa",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "218503e6ebaad2d00fc57dfa50ae319fe9416739aed2099733b37f5d6f64c76f"
+    },
+    {
+      "case": "prefix-1024",
+      "input_tokens": 1024,
+      "input_sha256": "770a0dbae978b920fca04d11d5886adb28a51f84efb75fb9618a38273fb3a4b8",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "34045cd8f012c6a0cb577f67e3203c758d1c28bb71f92e898554067f179ed9d7"
+    },
+    {
+      "case": "prefix-1025",
+      "input_tokens": 1025,
+      "input_sha256": "fed8c78284bfdeda6f6815dd3055d8c6e9247ea44d768acaf017c0dac8bbdccb",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b946c5e4ba6b5a2dc246ef9249b08d798d07e7cc57ed0eb4452f4f5b1158648b"
+    },
+    {
+      "case": "prefix-2048",
+      "input_tokens": 2048,
+      "input_sha256": "3ee7694fa8e445e6c7a433354501645c241bc6592688096669e86b7834008ffe",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "76d2830c13815803598c18802de4e04cf9fde690bd376552c450a7b7e0c14a8c"
+    }
+  ],
+  "candidate": [
+    {
+      "case": "fibonacci-module",
+      "input_tokens": 42,
+      "input_sha256": "23d8ce2b1305ad01f8eab792db759e3a6ba4ad99b55913aed18c92228998ee85",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "e1b9d08971e18b9b3fcf9461d04e3a6b3f7a2adde9115d85feec9f4b7f9bc3ab"
+    },
+    {
+      "case": "gpu-explanation",
+      "input_tokens": 40,
+      "input_sha256": "882b3da4813c399e033c6a66329405e3304fda9a62cbd32db3b83ef8152fdf67",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "839e0fadc1c2a542cd628898a2cbfe74566aba6f884307f8e12901c3accbbbf5"
+    },
+    {
+      "case": "copy-edit",
+      "input_tokens": 383,
+      "input_sha256": "d9a559cee0b6de82803baefdb67ecbf340903a5d3f9d398e373d796dc2f09e54",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "4ba5dd71f53fbe3be22df376895e175d4bb3b9974a308224b599a60bbec33e4c"
+    },
+    {
+      "case": "context-medium",
+      "input_tokens": 522,
+      "input_sha256": "4a32791d79ba4eab316531fe84336449e4e45b9ec12331d822ea1642da3c1873",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "6af06e845207eea534fa023b8d91ef846edf165472d072d2ae3879d6cab3a7ac"
+    },
+    {
+      "case": "context-long",
+      "input_tokens": 2118,
+      "input_sha256": "0ba841ffe06355e1bfb5294c031d83aa34de53c4418d554957af415f62be2fac",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "c1ccd3982db8b6ab68852d31cf03e7a24fb1b84ee3cfc9b96ebedfaed695f32a"
+    },
+    {
+      "case": "long-output",
+      "input_tokens": 50,
+      "input_sha256": "4a138bfb63ede93f2bf6d9a79c8e86130c399b3c59b19ecef813c093aff14f7c",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7e4b1016561a23bc719e9f0f3bd0ae3c7bf978a6b429ee27c1225ee7e2a5930c"
+    },
+    {
+      "case": "arithmetic",
+      "input_tokens": 29,
+      "input_sha256": "c16784a023fb8614f1933c17cb5804a67457177bdfe6c4dbe9764b7212f2afc4",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b0d68bf804b1462818be3b945cae25c16bb9f14fbbf5c61eb13619b8f4cf5872"
+    },
+    {
+      "case": "prime",
+      "input_tokens": 47,
+      "input_sha256": "f026365fcb51733f4adbae5a4fea14f7827f271e037f5447f4f368432a9b31b9",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "82bd2de8d8e2c3ae4a9f1810bfc1cddff1d4c3b8fe3e12ca5f93c487a4c5ffc7"
+    },
+    {
+      "case": "sorting",
+      "input_tokens": 33,
+      "input_sha256": "f17f8ce1bb9471298d0e5d429104527ce29404dd41860d9baa86c2121f9a72f2",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "5f4e4e357f6035bd0a58702ec14ac320f7ec16bc31e35491f836c9c6e80a809a"
+    },
+    {
+      "case": "python",
+      "input_tokens": 35,
+      "input_sha256": "6d91487c00475dd73a2346cd63e90f1a2fe9514faaf4b977754a1c9ed871cc1d",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "402160b3b95fcc16183fa0ff4d1587b63d33c30247999c7b54d9421925464e7e"
+    },
+    {
+      "case": "prefix-1",
+      "input_tokens": 1,
+      "input_sha256": "f9ec16cdf22e0d09b737c0b00f7ad357eb62cd6ece5796706f0871f0e3759b4b",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "406ce50c2aa0d8a507cad26979ef3dba0d6d2c1e6a09cbc10486e2b5ca9b1055"
+    },
+    {
+      "case": "prefix-2",
+      "input_tokens": 2,
+      "input_sha256": "239cdad3d41d4e80041ff58b9dfcd3ae6bf08d7c1181d5012537715913085fb6",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "a545e6120a65b0ce37528a46a3ea899d75ea6d32515cba75422228512fc2c23f"
+    },
+    {
+      "case": "prefix-7",
+      "input_tokens": 7,
+      "input_sha256": "cfd8dad37b4aefdef7a957497e536730b937b596a8736ec806bec6a14342f73c",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "2f5aa40bd6d9043fdd4d9347aa2ee080edf531053fe4901fda755c6688eba2d6"
+    },
+    {
+      "case": "prefix-8",
+      "input_tokens": 8,
+      "input_sha256": "292bb04d1ba0a64b7387e1e8e28d1272f1958f70dea01d7a4aaf8a73f2cd9768",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7a7099ab3f7fd284191837d26962f0ce9a6ed0985c732299eeb4acbbfcebfc81"
+    },
+    {
+      "case": "prefix-9",
+      "input_tokens": 9,
+      "input_sha256": "6b0a0ed0ca97d00872877a2a58b6d4d519cafa768693a1235b0414967aab63c2",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "7b0cc59f71ed749df69bc00fd06290e21c8a23f856da3d23388a273c336b0322"
+    },
+    {
+      "case": "prefix-16",
+      "input_tokens": 16,
+      "input_sha256": "569cf477b4b7f854734c6d82b330aef98b12c181e7f9ffd14806865254113926",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "9efd5f35867ca742c1e355bdd7747f6ee0b112533d1324cdd635f52b282c7fcd"
+    },
+    {
+      "case": "prefix-127",
+      "input_tokens": 127,
+      "input_sha256": "def4cc0bfa578f3a3ee1ad66f32175ed4ef222bc1ff952d5ce51ecf5a2103416",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "c2f986b945e21b12df0b641b6d7aa6ec11a366153555ce5e2e7585f16f85feec"
+    },
+    {
+      "case": "prefix-128",
+      "input_tokens": 128,
+      "input_sha256": "1fc77f20f58a41039dd3f43d95cd82068c4b25bac33f47192aef5cec1ade8ec7",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b391ea163234073be1fb0e1967f2955b2ccb29dba9dbe1dad69c5f67858aca23"
+    },
+    {
+      "case": "prefix-129",
+      "input_tokens": 129,
+      "input_sha256": "308c32c06583ce58ac84924e0119af36138fa09509f45b4674781836c8f3d24e",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "44f33fbab66f32023c0c259ad7063a1c2215f7b6526d4a20e706aa983aa57fa8"
+    },
+    {
+      "case": "prefix-1023",
+      "input_tokens": 1023,
+      "input_sha256": "8ed2cc74b671738a61856ba2984507e625b5e364c1697a5d10dd3b2e3f2898fa",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "218503e6ebaad2d00fc57dfa50ae319fe9416739aed2099733b37f5d6f64c76f"
+    },
+    {
+      "case": "prefix-1024",
+      "input_tokens": 1024,
+      "input_sha256": "770a0dbae978b920fca04d11d5886adb28a51f84efb75fb9618a38273fb3a4b8",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "34045cd8f012c6a0cb577f67e3203c758d1c28bb71f92e898554067f179ed9d7"
+    },
+    {
+      "case": "prefix-1025",
+      "input_tokens": 1025,
+      "input_sha256": "fed8c78284bfdeda6f6815dd3055d8c6e9247ea44d768acaf017c0dac8bbdccb",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "b946c5e4ba6b5a2dc246ef9249b08d798d07e7cc57ed0eb4452f4f5b1158648b"
+    },
+    {
+      "case": "prefix-2048",
+      "input_tokens": 2048,
+      "input_sha256": "3ee7694fa8e445e6c7a433354501645c241bc6592688096669e86b7834008ffe",
+      "vocab_size": 248320,
+      "vocab_logits_sha256": "76d2830c13815803598c18802de4e04cf9fde690bd376552c450a7b7e0c14a8c"
+    }
+  ]
+}

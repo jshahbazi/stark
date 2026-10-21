@@ -1,0 +1,31 @@
+{
+  "task_root": "<task_runtime>",
+  "reference": "<sealed_reference>",
+  "blocks": 4,
+  "engines": [
+    {
+      "id": "stark_bf16",
+      "kind": "stark_score",
+      "version": "source",
+      "representation": "BF16 native repack",
+      "model_file": "<borrowed_models>/uzu-jevk5/bf16/model.safetensors",
+      "command": [
+        "<repository>/target/release/stark-score",
+        "--score-model-path",
+        "<borrowed_models>/uzu-jevk5/bf16"
+      ]
+    },
+    {
+      "id": "llama_bf16",
+      "kind": "llama_score",
+      "version": "b11747",
+      "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+      "representation": "BF16 GGUF",
+      "model_file": "<borrowed_models>/uzu-jevk5/JevK5-4B-v0.3-BF16.gguf",
+      "command": [
+        "<task_runtime>/llama/driver/stock_compare_llama",
+        "<borrowed_models>/uzu-jevk5/JevK5-4B-v0.3-BF16.gguf"
+      ]
+    }
+  ]
+}

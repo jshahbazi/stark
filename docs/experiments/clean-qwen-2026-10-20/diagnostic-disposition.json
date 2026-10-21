@@ -1,0 +1,10 @@
+{
+  "disposition": "interrupted_diagnostic_campaign",
+  "reason": "attributed renderer CPU spike and paging; superseded by separately preserved hidden-window campaign",
+  "owned_driver_pid": 79717,
+  "owned_processes_stopped": [
+    79717,
+    79757,
+    82133
+  ]
+}

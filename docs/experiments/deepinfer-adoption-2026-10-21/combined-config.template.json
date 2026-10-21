@@ -1,0 +1,35 @@
+{
+  "task_root": "<FRESH_COMBINED_RUNTIME>",
+  "source": "<SOURCE_MODEL_DIR>",
+  "context": 8192,
+  "blocks": 6,
+  "repeats": 5,
+  "engines": [
+    {
+      "id": "stark_reference",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<STARK_MODEL_DIR>/model.safetensors",
+      "command": [
+        "<REFERENCE_BINARY>",
+        "--model-path",
+        "<STARK_MODEL_DIR>"
+      ]
+    },
+    {
+      "id": "stark_deepinfer",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "f2a5a9885fd8c5b8c2ad01de1cdad558e1a8acaf",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<STARK_MODEL_DIR>/model.safetensors",
+      "command": [
+        "<COMBINED_BINARY>",
+        "--model-path",
+        "<STARK_MODEL_DIR>"
+      ]
+    }
+  ]
+}

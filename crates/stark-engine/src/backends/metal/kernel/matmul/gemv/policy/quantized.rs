@@ -104,6 +104,7 @@ pub fn select(
     n: u32,
     k: u32,
     bf16_io: bool,
+    qwen35_affine_layout: bool,
 ) -> Option<GemvTile> {
     if !matches!(bits, 4 | 8) || !matches!(group, 16 | 32 | 64 | 128) || !(1..=8).contains(&m) {
         return None;
@@ -112,6 +113,21 @@ pub fn select(
     if !bf16_io {
         let tile = lane_default(bits, group);
         return (m <= 4 && n >= tile.rows_per_lane()).then_some(tile);
+    }
+
+    // M5 geometry for the fused Qwen3.5-2B decode projections.
+    // Keep each row's K lanes and quantization-group partition unchanged;
+    // increasing rows per SIMD group reuses its activation loads.
+    if qwen35_affine_layout
+        && gpu_core_count >= LARGE_MIN_GPU_CORES
+        && apple_gpu_family == MTLGPUFamily::Apple10
+        && bits == 4
+        && group == 64
+        && m == 1
+        && k == 2048
+        && matches!(n, 8224 | 12288)
+    {
+        return Some(lane_tile(2, 4, bits, group));
     }
 
     let tile = match m {

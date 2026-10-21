@@ -1,0 +1,30 @@
+{
+  "stopped_task_owned_diagnostics": [
+    {
+      "pid": 61483,
+      "command_sha256": "5e2e68965d007ba67c3ccf29a414ffa628420ff67e3d34cc8355748f5d56763b",
+      "same_repository_cwd": true,
+      "diagnostic_loop_verified": true,
+      "signal": "SIGTERM",
+      "exited": true
+    },
+    {
+      "pid": 62061,
+      "command_sha256": "9646021a472a39c3e1cbe1b14dca721a4349fea6b6acef6fb0f3e8a9230d992f",
+      "same_repository_cwd": true,
+      "diagnostic_loop_verified": true,
+      "signal": "SIGTERM",
+      "exited": true
+    },
+    {
+      "pid": 62994,
+      "command_sha256": "f86a322fb25d2191814d2b82115a9559dbc7b8e76d97d554dd03ec298d68ea69",
+      "same_repository_cwd": true,
+      "diagnostic_loop_verified": true,
+      "signal": "SIGTERM",
+      "exited": true
+    }
+  ],
+  "reason": "30-second bound incorrectly reused per-sample timestamp; loop never expired",
+  "unrelated_processes_stopped": 0
+}

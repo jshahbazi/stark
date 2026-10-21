@@ -1,0 +1,28 @@
+{
+  "clean_monitor_tests": {
+    "command": "python -m unittest discover -s scripts -p test_clean_qwen.py",
+    "passed": 6,
+    "harness_sha256": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+    "test_sha256": "4183d06fe8f90b27165f0a7ac771cc1d6e19f86f2aa25c5698b527a65fc46169"
+  },
+  "ruff_lint_and_format": "passed for new harness, tests, summarizer",
+  "repository_policy": "passed; repeated after staging new inventory",
+  "independent_review": "paired mathematics, guard recomputation, artifacts, outputs and runtime pins passed",
+  "aggregate_privacy_scan": "passed",
+  "aggregate_counts": {
+    "planned_pairs": 6,
+    "strict_common_pairs": [
+      2,
+      3,
+      4,
+      5
+    ],
+    "total_requests": 408,
+    "performance_requests": 360,
+    "paired_performance_requests": 240
+  },
+  "source_hash_checks": "passed",
+  "local_document_links": "passed",
+  "whole_timing_accepted": false,
+  "engine_tests": "not repeated: engine/model/worker implementation unchanged; prior numerical evidence remains source-bound"
+}

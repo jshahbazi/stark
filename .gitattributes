@@ -1,0 +1,2 @@
+# Preserve formatting in hash-bound experimental diff artifacts.
+docs/experiments/deepinfer-adoption-2026-10-21/*.patch -whitespace

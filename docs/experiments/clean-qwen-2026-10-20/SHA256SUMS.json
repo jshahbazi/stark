@@ -1,0 +1,20 @@
+{
+  "PROTOCOL.md": "ae4ad92b2bf56416ce689f3deaa4eb1ec6846b4a8f5b2bc26656d4c377013183",
+  "PROVENANCE.json": "822fdcdbeab903cd81d05d408e1d8c1b566891f61b43795ad1ff32f5373e815b",
+  "attempts.json": "df97d39ceef6a23c0458ec641ded39e4649fa8b276e27bf2894396dfe6276e7a",
+  "cleanup-receipt.json": "0e1ff187afd5fa50a09757accc7e7d21178ba892d9a4ab7ff089276b19924d92",
+  "config-template.json": "812120392bf11c76c01b2f582c96a39a6ed69c21baa0e6f94135acb1eaaa6956",
+  "diagnostic-disposition.json": "1b6645844b9f413bc2de59fe593c75e50e7f87ae7c1e17e99fea89722d2bdfc2",
+  "diagnostic-results.json": "0b700d4c926e1813a1d55e2f2bdd2563dbb83f47d239c53492692c174687664e",
+  "final-clean-results.json": "4fe2aa8b1019f02007ae94af3805b7e4464ab1db63312c8fa8c0f12c1dce5f4c",
+  "hidden-build-contaminated-results.json": "3bf8059f9d23aa85ade4e459c764ff34163dc964fdd734bac285aaf557ab95fa",
+  "host-before.json": "f9e87823b982d8b2abe78ae2bbb835a5a80d55d9ce3f035d36227e403d8f5405",
+  "preflight-final.json": "b5662843cb0e67fea5df983d26527d7b42c2e8a491b14f8a85388389fc8ba0ed",
+  "process-cleanup.json": "0880b1757d034209bc10a329f25f69d7941bc4e47f9c46761fb3196dd7718eec",
+  "quiet-diagnostic.json": "1d9be88099743609ea4d5d86837485610fe39536bb7bc4549a350b19e196f525",
+  "setup-interrupted-results.json": "40ba117ae17f7bcaa5924023c8f95887c114f2850084938847eaf4cf550354b9",
+  "summarize.py": "d55ae88983b5dd0a9e2a6a045b10a158e2e8246a1fb266beb8c9c9c4d6c4457a",
+  "summary.json": "b42db79563dd4bb9cb99a3a9f47d2493024cf0636f6a607d9acc8507ff8da16b",
+  "validation.json": "c0942fb949e668de515518788d05e5bfaa729cbbb1c32bbb4a0e3c4740568f89",
+  "window-state.json": "945afc90c24c0a4d3247e62e410b3e319453d9da54353ce9cdad836d1a40d653"
+}
