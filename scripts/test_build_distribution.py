@@ -9,6 +9,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -24,6 +25,115 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_sysconfig_normalization_is_deterministic_and_uses_relocated_prefix(self):
+        with tempfile.TemporaryDirectory() as temporary_name:
+            root = Path(temporary_name)
+            outputs = []
+            for stage in ("one", "different-staging-name"):
+                managed_prefix = root / stage
+                runtime = managed_prefix / "copied"
+                configuration = (
+                    runtime / "lib" / "python3.13" / "_sysconfigdata__darwin_darwin.py"
+                )
+                configuration.parent.mkdir(parents=True)
+                variables = {
+                    "prefix": str(managed_prefix),
+                    "LIBDIR": str(managed_prefix / "lib"),
+                    "DESTDIRS": str(managed_prefix / "bin")
+                    + " "
+                    + str(managed_prefix / "lib"),
+                    "STATIC": 7,
+                }
+                configuration.write_text("build_time_vars = " + repr(variables) + "\n")
+                distribution.normalize_python_configuration(runtime, managed_prefix)
+                outputs.append(configuration.read_bytes())
+                spec = importlib.util.spec_from_file_location(
+                    "normalized_sysconfig", configuration
+                )
+                assert spec is not None and spec.loader is not None
+                module = importlib.util.module_from_spec(spec)
+                with patch.object(sys, "base_prefix", "/relocated bundle/python"):
+                    spec.loader.exec_module(module)
+                normalized = module.build_time_vars
+                self.assertEqual(normalized["prefix"], "/relocated bundle/python")
+                self.assertEqual(normalized["LIBDIR"], "/relocated bundle/python/lib")
+                self.assertEqual(normalized["STATIC"], 7)
+                self.assertNotIn(str(managed_prefix).encode(), outputs[-1])
+            self.assertEqual(outputs[0], outputs[1])
+
+    def test_converter_export_excludes_staging_command_header(self):
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            bundle = temporary / "bundle"
+            (bundle / "share" / "stark").mkdir(parents=True)
+            work = temporary / "work"
+            work.mkdir()
+            export_commands = []
+
+            def command_result(command, stage, *_args, **_kwargs):
+                output = b""
+                if stage == "python_download":
+                    runtime = work / "managed-python" / "cpython-3.13.13-test" / "bin"
+                    runtime.mkdir(parents=True)
+                    (runtime / "python3.13").write_bytes(b"synthetic interpreter")
+                    configuration = (
+                        runtime.parent
+                        / "lib"
+                        / "python3.13"
+                        / "_sysconfigdata__darwin_darwin.py"
+                    )
+                    configuration.parent.mkdir(parents=True)
+                    configuration.write_text(
+                        "build_time_vars = "
+                        + repr({"prefix": str(runtime.parent)})
+                        + "\n"
+                    )
+                    for metadata_name in ("direct_url.json", "uv_cache.json"):
+                        metadata = (
+                            configuration.parent
+                            / "site-packages"
+                            / "pip-1.0.dist-info"
+                            / metadata_name
+                        )
+                        metadata.parent.mkdir(parents=True, exist_ok=True)
+                        metadata.write_text("synthetic staging metadata\n")
+                if stage == "python_version":
+                    output = b"Python 3.13.13\n"
+                if stage == "converter_locked_requirements":
+                    export_commands.append(command)
+                    destination = Path(command[command.index("--output-file") + 1])
+                    destination.write_text(
+                        "synthetic-package==1.0 --hash=sha256:test\n"
+                    )
+                if stage == "converter_wheel":
+                    wheels = work / "wheels"
+                    wheels.mkdir()
+                    (wheels / "stark_convert-0.9.1-py3-none-any.whl").write_bytes(
+                        b"synthetic wheel"
+                    )
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=output, stderr=b""
+                )
+
+            with (
+                patch.object(distribution, "run", side_effect=command_result),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                distribution.build_python(bundle, work, "uv", {})
+            self.assertEqual(len(export_commands), 1)
+            self.assertIn("--no-header", export_commands[0])
+            self.assertIn("--locked", export_commands[0])
+            self.assertFalse(
+                any((bundle / "libexec" / "python").rglob("direct_url.json"))
+            )
+            self.assertFalse(
+                any((bundle / "libexec" / "python").rglob("uv_cache.json"))
+            )
+            self.assertEqual(
+                (bundle / "share" / "stark" / "converter-requirements.txt").read_text(),
+                "synthetic-package==1.0 --hash=sha256:test\n",
+            )
+
     def test_relocation_checks_user_facing_converter_identity_and_restores_tree(self):
         for version, help_text, expected_error in (
             (b"stark-convert 7.8.9\n", b"usage: stark-convert [-h]\n", None),
