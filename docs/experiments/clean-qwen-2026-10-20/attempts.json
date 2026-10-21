@@ -1,0 +1,29 @@
+{
+  "attempts": [
+    {
+      "receipt": "quiet-diagnostic.json",
+      "disposition": "initial quiet admission failed; Apple scanners observed; no performance ranking"
+    },
+    {
+      "receipt": "diagnostic-results.json",
+      "disposition": "interrupted diagnostic campaign; renderer660percent and5pageouts; raw report remains running; interruption disposition separate"
+    },
+    {
+      "receipt": "setup-interrupted-results.json",
+      "disposition": "interrupted setup after app hide API returnedfalse; zero measured samples"
+    },
+    {
+      "receipt": "hidden-build-contaminated-results.json",
+      "disposition": "interrupted campaign due concurrentRustbuilds; not comparison evidence"
+    },
+    {
+      "receipt": "preflight-final.json",
+      "disposition": "60.866second continuous quiet admission passed before final attempt"
+    },
+    {
+      "receipt": "final-clean-results.json",
+      "disposition": "completed6pairedloads; whole timingfalse; compare only strict common acceptedpairs2,3,4,5"
+    }
+  ],
+  "pooling_across_attempts": false
+}

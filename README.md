@@ -10,7 +10,9 @@ The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) colle
 
 The [2026-10-19 stock engine pilot](docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md) records current Qwen3.5-2B generation, JevK5 scoring and vLLM Metal concurrency results, including support failures and excluded timings.
 
-The [2026-10-20 MLX-informed optimization](docs/MLX_GENERATION_OPTIMIZATION_2026_10_20.md) records two decode changes, bounded bitwise validation and modest Qwen3.5-2B throughput gains, with timing exclusions and the unresolved current MLX ranking retained.
+The [2026-10-20 MLX-informed optimization](docs/MLX_GENERATION_OPTIMIZATION_2026_10_20.md) records two decode changes, bounded bitwise validation and modest Qwen3.5-2B throughput gains, with its original timing exclusions retained.
+
+The [quiet-window Qwen3.5-2B follow-up](docs/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md) attributes interfering processes and records Stark's 7.36% throughput advantage over pinned MLX-LM across four clean paired loads, with rejected pairs and quality limits explicit.
 
 ## Why Stark
 

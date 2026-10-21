@@ -51,3 +51,10 @@ provide measurement and readout; they do not patch the engine implementations.
 
 Locks alone do not qualify a result. Preserve the source-bound aggregate evidence,
 host-screen dispositions and model hashes when reproducing the measurements.
+
+The [quiet-window Qwen follow-up](../../docs/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md)
+uses `scripts/benchmark_clean_qwen.py` with the same workers and pinned artifacts.
+It attributes external CPU activity by phase and requires fresh quiet admission
+after full warmup. Its stricter measurement guards, per-attempt receipts and
+accepted paired subsets must accompany any result. Regression checks run with
+`python -m unittest discover -s scripts -p test_clean_qwen.py`.
