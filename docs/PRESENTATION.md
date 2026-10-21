@@ -24,14 +24,17 @@ Use the supplied logo for the repository's visual identity. A dedicated wide soc
 
 ## Remaining work before a broader launch
 
-1. **Deliver the source people are reading about.** Integrate the reviewed presentation and measured runtime branches into the chosen public branch, and name a reproducible release or tag. This task pushes a reviewable branch; it does not merge or open a PR.
-2. **Make first use easier.** Verify the exact fresh-machine build and model-preparation path, then consider signed packages through a separately scoped distribution plan. Current instructions require Rust, Xcode's Metal tools and `uv`.
-3. **Strengthen the public performance claim.** Repeat the frozen comparison in a fully accepted campaign, add independent hardware/model replication and investigate quality failures. Benchmark HTTP serving or concurrency separately if advertising those workloads.
-4. **Show a small real integration.** Publish a documented generation or scoring example with application-specific acceptance checks. Keep hypothetical examples clearly labelled and private evaluation payloads outside Git.
-5. **Finish the public launch configuration.** Choose the site's audience/domain, set GitHub About/topics/social preview, and verify outbound links against the released revision.
+1. **Resolve blocking dependency/security CI.** The [presentation branch run for `2d878e47`](https://github.com/jshahbazi/stark/actions/runs/39645908467) reports blocking advisories in existing Python and Rust lockfiles. This presentation change adds no dependency or lockfile change. Triage the affected paths and resolve the gates before a broader launch; scanner findings alone do not establish runtime exploitability.
+2. **Deliver the source people are reading about.** Integrate the reviewed presentation and measured runtime branches into the chosen public branch, and name a reproducible release or tag. This task pushes a reviewable branch; it does not merge or open a PR.
+3. **Make first use easier.** Verify the exact fresh-machine build and model-preparation path, then consider signed packages through a separately scoped distribution plan. Current instructions require Rust, Xcode's Metal tools and `uv`.
+4. **Strengthen the public performance claim.** Repeat the frozen comparison in a fully accepted campaign, add independent hardware/model replication and investigate quality failures. Benchmark HTTP serving or concurrency separately if advertising those workloads.
+5. **Show a small real integration.** Publish a documented generation or scoring example with application-specific acceptance checks. Keep hypothetical examples clearly labelled and private evaluation payloads outside Git.
+6. **Finish the public launch configuration.** Choose the site's audience/domain, set GitHub About/topics/social preview, and verify outbound links against the released revision.
 
 These are follow-up recommendations. The existing benchmark remains a preliminary local result and the source-build setup remains the current entry path.
 
 ## Verification
 
 The presentation changes use dependency-free static site generation. Verification covers source-bound table values, archived README preservation, local/immutable links, original-logo hashes, JavaScript syntax, repository policy, desktop/mobile browser layout and the implemented controls. Native inference benchmarks are not rerun for this documentation and design change.
+
+The [owner-private preview](https://stark-inference.arcanepine32.chatgpt.site) was deployed successfully through Sites. It requires ChatGPT sign-in and is not the public project homepage. The [deployment and validation receipt](experiments/presentation-2026-10-21/validation.json) pins the source snapshots and verification scope.
