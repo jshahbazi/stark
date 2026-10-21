@@ -2,7 +2,16 @@
 
 Stark runs on an Apple silicon Mac with macOS 26.4 or newer. The native engine currently compiles Metal 4 kernels for that minimum OS. Use a native arm64 terminal; Intel Macs and Rosetta terminals are rejected.
 
-The installer and bundle builder are available in this source tree. This change does not publish a public binary release. Today, use the source installer or install a locally built archive. Once a version is published, the same installer can download its exact release assets.
+Install the [v0.1.0 prebuilt release](https://github.com/jshahbazi/stark/releases/tag/v0.1.0) without a source checkout or developer tools:
+
+```sh
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.0/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.0
+export PATH="$HOME/.local/bin:$PATH"
+stark doctor
+```
+
+The installer downloads and verifies the versioned archive and installs to `~/.local`, without sudo. Add `~/.local/bin` to your shell profile to keep it on PATH. The runtime includes Python and the converter; Rust, Xcode and uv are only needed to build Stark itself.
 
 The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
 
@@ -128,7 +137,7 @@ The builder uses separate Cargo invocations for the optimized scorer and default
 
 Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
-The builder creates local archives. Public hosting and signing require their own release operation. The inherited Uzu release, cloud and signing workflows remain disabled.
+The builder creates local archives. The v0.1.0 assets are published through a manual GitHub release. The inherited Uzu release, cloud and signing workflows remain disabled.
 
 ## What other engines do
 

@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "date": "2026-10-21",
+  "checked_utc": "2026-10-21T18:13:52.775299+00:00",
+  "stark_source_commit": "b6f057ecdeb44c699a2b0f4d34e2f65629103583",
+  "site_source_commit": "6093d9a57c622ffcab37b3e116a33c804bf61c5d",
+  "access": {
+    "id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb",
+    "access_mode": "public",
+    "version": 3,
+    "url": "https://stark-inference.arcanepine32.chatgpt.site"
+  },
+  "deployment": {
+    "id": "appgdep_6ad9001b83548191b658555038d2dfff",
+    "project_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb",
+    "title": "Stark \u2014 native inference on Apple silicon",
+    "version_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_817ef617f71c8191939f83e87ca91868",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://stark-inference.arcanepine32.chatgpt.site",
+    "has_mcp": false,
+    "screenshot_asset_pointer": null,
+    "provider_deployment_id": "site---6ad8f59df1f4819185403a1dff22a0fb",
+    "failure_message": null,
+    "env_set_revision": 0,
+    "updated_at": "2026-10-21T18:10:44.255202+00:00"
+  },
+  "prior_public_deployment": {
+    "id": "appgdep_6ad8ff5a910081919616f7d2ea796f67",
+    "project_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb",
+    "title": "Stark \u2014 native inference on Apple silicon",
+    "version_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_16e12a26d9d88191896a3a5324af9075",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://stark-inference.arcanepine32.chatgpt.site",
+    "has_mcp": false,
+    "screenshot_asset_pointer": null,
+    "provider_deployment_id": "site---6ad8f59df1f4819185403a1dff22a0fb",
+    "failure_message": null,
+    "env_set_revision": 0,
+    "updated_at": "2026-10-21T18:07:30.259951+00:00"
+  },
+  "website_source_sha256": {
+    "README.md": "49328c76250b72db910270d9aad12600e995626183838b575f33ba6fdc38a671",
+    ".gitignore": "5659a93772285503cea96a5707fae696a42cebfb52355be16729fa7abf4f9401",
+    "build.mjs": "7b6587769d747424c21e4fc5e4ec55aa9463ba6e9589d347c9aa46cb6bc28cfe",
+    "public/index.html": "21eaa2584b2124e6dfeb59c2931d0cbc17cad53a64a3ec4c23ff5594a3133e6e",
+    "public/styles.css": "b401d14f57a08754e2ddf4772a608a3bc49bb40024a7b931255e6e0b5e5e0aa9",
+    "public/app.js": "03b37c7017e30c8167b206283ef41d9727831e8aedcc566c1c0edb95fa32b8f5",
+    ".openai/hosting.json": "e74fbcc4e02cde20778eda1dbde84bbac93ae6b5d7c05175ff0b4b141721acaa",
+    "public/assets/stark-engine.jpg": "68e23223ec271709bf11e004b662802da68bb1d8dada8d3d30d60bc8fa883dc0"
+  },
+  "archive_sha256": "1c2dfbcfdf74164e0e80c5f6171b0259a15cc7a17cace9f6d1317ce1ea506f63",
+  "anonymous_http": {
+    "method": "GET using curl -q with no cookies or authentication",
+    "status": 200,
+    "html_sha256": "41007e49f175f2125e37d6ce283f71b67154bd4492610f2eb0e584758d0c3bea",
+    "source_body_preserved": true,
+    "hosting_bootstrap_appended": true,
+    "login_gate_absent": true
+  },
+  "copy": {
+    "benchmark_numbers": "unchanged",
+    "front_page_priorities": [
+      "benchmarks",
+      "getting started",
+      "engine"
+    ],
+    "source_build_and_no_installer": "explicit",
+    "run_level_details": "retained inside collapsed methodology"
+  },
+  "browser_checks": {
+    "live_headline": "Local models. Native execution.",
+    "methodology_closed_by_default": true,
+    "methodology_expands_with_full_details": true,
+    "speedup_control": "passed",
+    "setup_navigation": "passed",
+    "mobile_viewport_width": 390,
+    "mobile_document_width": 390,
+    "logo_loaded": true,
+    "viewport_override_cleared": true
+  },
+  "readme_public_url": "https://stark-inference.arcanepine32.chatgpt.site/",
+  "checks": {
+    "static_build": "passed",
+    "javascript_syntax": "passed",
+    "repository_policy": "passed",
+    "diff_whitespace": "passed",
+    "native_source_and_dependencies": "unchanged"
+  },
+  "cleanup": {
+    "owned_preview_server_stopped": true,
+    "unrelated_processes_stopped": false
+  }
+}
