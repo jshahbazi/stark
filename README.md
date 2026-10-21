@@ -6,6 +6,24 @@ Stark combines a Rust and Metal inference engine with an independent streaming c
 
 Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), starting at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`. Upstream Git history, copyright and MIT licensing are preserved.
 
+## Install
+
+On an Apple silicon Mac with macOS 26.4 or newer, run this from a source checkout configured with Xcode's Metal Toolchain, rustup and uv 0.12.24:
+
+```sh
+./install.sh
+```
+
+It builds and installs the workers, converter and a private Python runtime in `~/.local`. Add `~/.local/bin` to PATH if prompted, then run `stark doctor`. The installed bundle runs without Rust, Xcode, uv or a system Python. Prebuilt archives can be installed with `sh install.sh --archive FILE`; public binary releases have not been published by this change. See [installation, updates and uninstall](docs/INSTALLATION.md).
+
+```sh
+stark convert Qwen/Qwen3-0.6B --output models/qwen3
+stark score --score-model-path /absolute/path/to/converted-model
+stark generate --model-path /absolute/path/to/converted-model
+```
+
+The worker commands expose private JSON-lines protocols for application callers. See the [scoring](docs/SCORING.md) and [generation](docs/GENERATION.md) guides.
+
 The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) collects recorded engine, reference, conversion and predecessor-Uzu results, their limits, and candidate engines for a future benchmark.
 
 The [short benchmark write-up](docs/STARK_BENCHMARK_BRIEF_2026_10_21.md) presents Stark's local Qwen3.5-2B result, developer interfaces and evidence limits as an engineering preview.
@@ -101,7 +119,7 @@ Twenty-five pinned built-ins remain planned, including specialized/MoE/multimoda
 
 The proposed [Pi-assisted adapter builder](docs/PI_ADAPTER_BUILDER_PLAN.md) would generate missing conversion adapters through an optional developer tool, with host-owned verification and reviewable source patches. The plan covers architecture preflight, process confinement, resource budgets, independent parity checks and staged acceptance. Implementation and new model qualifications remain pending.
 
-## Quickstart
+## Development quickstart
 
 Run these commands from the repository root.
 
@@ -170,7 +188,7 @@ The preserved milestone 6 converter packet passed **3,672 tests**, with 60 priva
 
 ## Scope, security and attribution
 
-Native loading checks prove construction/readiness and EOF on the named build. Scoring, general generation and classifier execution have their own acceptance requirements. Inherited Python, TypeScript, Swift, CLI and playground binary distributions remain unqualified; no Stark packages or Swift XCFramework are published. Inherited cloud release and benchmark infrastructure stays disabled.
+Native loading checks prove construction/readiness and EOF on the named build. Scoring, general generation and classifier execution have their own acceptance requirements. The [standalone CLI bundle](docs/INSTALLATION.md) has its own installation checks; it does not extend model qualification. Inherited Python bindings, TypeScript, Swift, CLI and playground binary distributions remain unqualified; no Swift XCFramework or public Stark packages are published by this change. Inherited cloud release and benchmark infrastructure stays disabled.
 
 Native diagnostics and capture variables are suppressed. Protocol requests/responses belong in private pipes or files. Models, credentials, private evaluation data and runtime artifacts remain outside Git.
 
