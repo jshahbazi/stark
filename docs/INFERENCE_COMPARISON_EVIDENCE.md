@@ -1,5 +1,7 @@
 # Stark comparisons: evidence inventory and future benchmark plan
 
+Follow-up: [quiet-window Qwen3.5-2B comparison](QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md) identifies renderer, scanner, stale diagnostic and build interference. Four clean matched load pairs show optimized Stark 7.36% ahead of pinned MLX-LM on six fixtures. Two rejected pairs, whole-campaign rejection and strict sanity failures remain explicit; the earlier evidence below is unchanged.
+
 Follow-up: [2026-10-20 MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) adds source investigation, before/after Stark measurements, current MLX-LM results, rejected kernel experiments and explicit timing exclusions. Its modified Stark build is a separate comparison from the earlier stock pilot.
 
 Compiled: **2026-10-19**. Status: historical evidence and research for a future

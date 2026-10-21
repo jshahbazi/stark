@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "status": "interrupted",
+  "started_utc": "2026-10-21T06:17:23.252038+00:00",
+  "source_commit": "682d68abf646badaff3b7b4e5d70b81eb18836fa",
+  "harness_sha256": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+  "stock_harness_sha256": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+  "worker_sha256": "6d84a9acd1e8ba98a1dd76278f8eb17552a0923f294132acee288fcb6a34b228",
+  "model": "mlx-community/Qwen3.5-2B-MLX-4bit",
+  "model_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+  "protocol": {
+    "context": 8192,
+    "blocks": 6,
+    "repeats": 5
+  },
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "045d0ca6cca8eafae89f32a303e5123f001eaf43",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "executable_sha256": "66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89",
+      "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d"
+    },
+    {
+      "id": "mlx_lm",
+      "kind": "mlx",
+      "version": "0.32.3.dev6+g72be8c955",
+      "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+      "representation": "MLX affine4 g64",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac"
+    }
+  ],
+  "fixtures": [
+    {
+      "name": "fibonacci-module",
+      "input_tokens": 42,
+      "output_limit": 128,
+      "input_token_sha256": "46a0051162c04c2c77e6f52f113782533f3d97421e916edc7dda2e2c066a11b2",
+      "population": "performance"
+    },
+    {
+      "name": "gpu-explanation",
+      "input_tokens": 40,
+      "output_limit": 128,
+      "input_token_sha256": "c501540d49b6d819d1656f27b3a722643395e4ebcb089f0ffe32cf79c76834ab",
+      "population": "performance"
+    },
+    {
+      "name": "copy-edit",
+      "input_tokens": 383,
+      "output_limit": 128,
+      "input_token_sha256": "f13e4b9fb0e3c03c0b74858204f791747816dfd1b2a7885288d27932c2a5a54a",
+      "population": "performance"
+    },
+    {
+      "name": "context-medium",
+      "input_tokens": 522,
+      "output_limit": 128,
+      "input_token_sha256": "fbc2282c8263ae0baeebb2c609abbc286a9f0f52fe543bf5886e6fdc39fe240a",
+      "population": "performance"
+    },
+    {
+      "name": "context-long",
+      "input_tokens": 2118,
+      "output_limit": 128,
+      "input_token_sha256": "913b0e174de4fb05c69b564a3880fb64f490e3e51e2643363c878955a80a7024",
+      "population": "performance"
+    },
+    {
+      "name": "long-output",
+      "input_tokens": 50,
+      "output_limit": 512,
+      "input_token_sha256": "fdcd67f50b82c6501ead4735342101c77b90b7b9e75da2a2d471a9e5e25f74f3",
+      "population": "performance"
+    },
+    {
+      "name": "arithmetic",
+      "input_tokens": 29,
+      "output_limit": 64,
+      "input_token_sha256": "6319343d9015e663252ccb7b414307d0e09f081c79a0214b5716d2e754e5818e",
+      "population": "sanity"
+    },
+    {
+      "name": "prime",
+      "input_tokens": 47,
+      "output_limit": 64,
+      "input_token_sha256": "76220692fbe9d20e8686f3049ac40e68f16078a13088ebe050e3897304e8ed78",
+      "population": "sanity"
+    },
+    {
+      "name": "sorting",
+      "input_tokens": 33,
+      "output_limit": 64,
+      "input_token_sha256": "0c690b78cad5d4dfdbdc631a6bd414056da904d14ff6f1f484754426cf7d07b2",
+      "population": "sanity"
+    },
+    {
+      "name": "python",
+      "input_tokens": 35,
+      "output_limit": 64,
+      "input_token_sha256": "c261dfbcb7c57f39f1bac28c384df95c94e3be33851a22e95b529ab64e3527c9",
+      "population": "sanity"
+    }
+  ],
+  "blocks": [],
+  "failures": [],
+  "timing_accepted": false,
+  "ended_utc": "2026-10-21T06:17:43.471086+00:00"
+}

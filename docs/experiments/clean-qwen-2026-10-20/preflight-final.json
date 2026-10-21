@@ -1,0 +1,2087 @@
+{
+  "outcome": "quiet",
+  "elapsed_seconds": 60.86598220805172,
+  "harness_sha256": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+  "host_screen": {
+    "samples": [
+      {
+        "start_seconds": 0.05493579199537635,
+        "end_seconds": 0.6278868339722976,
+        "interval_seconds": 0.5729510419769213,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 48.86979505858404,
+        "max_process_cpu_percent": 6.981399294073514,
+        "max_model_cpu_percent": 1.7453498235282996,
+        "active_processes": [
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 6.981399294073514
+          },
+          {
+            "pid": 57458,
+            "name": "iTerm2",
+            "cpu_percent": 5.236049470555135
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 5.23604947051545
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 0.6278868339722976,
+        "end_seconds": 1.2530364169506356,
+        "interval_seconds": 0.625149582978338,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 39.99042898034055,
+        "max_process_cpu_percent": 7.998085796038105,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 7.998085796038105
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 1.2530364169506356,
+        "end_seconds": 1.8556607089703903,
+        "interval_seconds": 0.6026242920197546,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 77.99220944662561,
+        "max_process_cpu_percent": 11.615860981159102,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.615860981159102
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 6.637634846247267
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 1.8556607089703903,
+        "end_seconds": 2.4556212089955807,
+        "interval_seconds": 0.5999605000251904,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 75.00493782206738,
+        "max_process_cpu_percent": 10.000658376256947,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 52807,
+            "name": "endpoint-protection",
+            "cpu_percent": 10.000658376256947
+          },
+          {
+            "pid": 87478,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 6.667105584171046
+          },
+          {
+            "pid": 382,
+            "name": "opendirectoryd",
+            "cpu_percent": 6.6671055841649824
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 2.4556212089955807,
+        "end_seconds": 3.0660062090028077,
+        "interval_seconds": 0.6103850000072271,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 50.78761765058856,
+        "max_process_cpu_percent": 16.383102467831005,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 16.383102467831005
+          },
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 11.468171727645608
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 3.0660062090028077,
+        "end_seconds": 3.685482749948278,
+        "interval_seconds": 0.6194765409454703,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 37.12812105026773,
+        "max_process_cpu_percent": 14.528395193591004,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 14.528395193591004
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 3.685482749948278,
+        "end_seconds": 4.308429708937183,
+        "interval_seconds": 0.622946958988905,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 46.55292008649723,
+        "max_process_cpu_percent": 12.842184851463747,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.842184851463747
+          },
+          {
+            "pid": 87539,
+            "name": "mdworker_shared",
+            "cpu_percent": 8.026365532172143
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 4.308429708937183,
+        "end_seconds": 4.937294916948304,
+        "interval_seconds": 0.6288652080111206,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 47.704976546333924,
+        "max_process_cpu_percent": 9.540995309511489,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 9.540995309511489
+          },
+          {
+            "pid": 87543,
+            "name": "contactsd",
+            "cpu_percent": 6.36066353972832
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 4.937294916948304,
+        "end_seconds": 5.557915749959648,
+        "interval_seconds": 0.6206208330113441,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 37.059664736764816,
+        "max_process_cpu_percent": 8.05644885597604,
+        "max_model_cpu_percent": 1.6112897711585714,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 8.05644885597604
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 8.056448855829492
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 5.557915749959648,
+        "end_seconds": 6.181216791970655,
+        "interval_seconds": 0.6233010420110077,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 72.19625344258485,
+        "max_process_cpu_percent": 12.834889501168748,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 2065,
+            "name": "com.docker.backend",
+            "cpu_percent": 12.834889501168748
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.834889500876917
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 6.181216791970655,
+        "end_seconds": 6.801611416973174,
+        "interval_seconds": 0.6203946250025183,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 12.895018231350967,
+        "max_process_cpu_percent": 1.6118772789460718,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 6.801611416973174,
+        "end_seconds": 7.4031367499846965,
+        "interval_seconds": 0.6015253330115229,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 46.54833049132458,
+        "max_process_cpu_percent": 21.61172487089739,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 21.61172487089739
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 7.4031367499846965,
+        "end_seconds": 8.024495958932675,
+        "interval_seconds": 0.6213592089479789,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 37.01562585491848,
+        "max_process_cpu_percent": 12.875000297392383,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.875000297392383
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 8.024495958932675,
+        "end_seconds": 8.649670833954588,
+        "interval_seconds": 0.6251748750219122,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 19.19462934183784,
+        "max_process_cpu_percent": 3.199104890336615,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 8.649670833954588,
+        "end_seconds": 9.27841274999082,
+        "interval_seconds": 0.6287419160362333,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 25.44764328724959,
+        "max_process_cpu_percent": 4.771433116643661,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 9.27841274999082,
+        "end_seconds": 9.894444333971478,
+        "interval_seconds": 0.6160315839806572,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 40.582334818798074,
+        "max_process_cpu_percent": 11.363053749337695,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.363053749337695
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 9.894444333971478,
+        "end_seconds": 10.518642292008735,
+        "interval_seconds": 0.6241979580372572,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 57.6740111635676,
+        "max_process_cpu_percent": 24.030837984974948,
+        "max_model_cpu_percent": 1.6020558656479975,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 24.030837984974948
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 11.214391059499556
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 10.518642292008735,
+        "end_seconds": 11.147235875017941,
+        "interval_seconds": 0.6285935830092058,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 31.817060403808043,
+        "max_process_cpu_percent": 6.363412080812249,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.363412080812249
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 6.363412080739906
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 11.147235875017941,
+        "end_seconds": 11.763198583968915,
+        "interval_seconds": 0.615962708950974,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 47.08077222624004,
+        "max_process_cpu_percent": 17.85822394799183,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 17.85822394799183
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 11.763198583968915,
+        "end_seconds": 12.383904792019166,
+        "interval_seconds": 0.620706208050251,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 35.44349922036728,
+        "max_process_cpu_percent": 11.277477024194901,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.277477024194901
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 12.383904792019166,
+        "end_seconds": 13.006452874979004,
+        "interval_seconds": 0.6225480829598382,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 12.850413034740924,
+        "max_process_cpu_percent": 3.212603258678811,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 13.006452874979004,
+        "end_seconds": 13.622854624991305,
+        "interval_seconds": 0.6164017500123009,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 11.35622992621639,
+        "max_process_cpu_percent": 3.244637121744494,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 13.622854624991305,
+        "end_seconds": 14.25258341699373,
+        "interval_seconds": 0.6297287920024246,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 50.815526312798994,
+        "max_process_cpu_percent": 12.703881578217441,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.703881578217441
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 14.25258341699373,
+        "end_seconds": 14.872793667018414,
+        "interval_seconds": 0.6202102500246838,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 17.735921003485846,
+        "max_process_cpu_percent": 3.224712909724699,
+        "max_model_cpu_percent": 1.6123564548623495,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 14.872793667018414,
+        "end_seconds": 15.48266674997285,
+        "interval_seconds": 0.6098730829544365,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 47.550877076551984,
+        "max_process_cpu_percent": 18.036539580642742,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 18.036539580642742
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 9.83811249855952
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 15.48266674997285,
+        "end_seconds": 16.10419395903591,
+        "interval_seconds": 0.6215272090630606,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 69.18442084630507,
+        "max_process_cpu_percent": 11.262580138067007,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 11.262580138067007
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.262580137920674
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 6.435760078832718
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 16.10419395903591,
+        "end_seconds": 16.703506459016353,
+        "interval_seconds": 0.5993124999804422,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 95.10897904165061,
+        "max_process_cpu_percent": 76.75461466514513,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 52843,
+            "name": "com.aikido.endpoint.proxy.l4.dist.extension",
+            "cpu_percent": 76.75461466514513
+          },
+          {
+            "pid": 669,
+            "name": "AppleCentauriAlpha",
+            "cpu_percent": 5.005735739140072
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 16.703506459016353,
+        "end_seconds": 17.32782758399844,
+        "interval_seconds": 0.6243211249820888,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 94.50264878131118,
+        "max_process_cpu_percent": 72.07829144221924,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 52843,
+            "name": "com.aikido.endpoint.proxy.l4.dist.extension",
+            "cpu_percent": 72.07829144221924
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 17.32782758399844,
+        "end_seconds": 17.945104583981447,
+        "interval_seconds": 0.6172769999830052,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 37.260419553396986,
+        "max_process_cpu_percent": 12.960145931588215,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.960145931588215
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 17.945104583981447,
+        "end_seconds": 18.557030000025406,
+        "interval_seconds": 0.6119254160439596,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 24.51279127623368,
+        "max_process_cpu_percent": 1.634186085106146,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 18.557030000025406,
+        "end_seconds": 19.177730583935045,
+        "interval_seconds": 0.6207005839096382,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 61.22114427658175,
+        "max_process_cpu_percent": 16.110827441225968,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 16.110827441225968
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 12.888661952922162
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.444330976607608
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.444330976461081
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 19.177730583935045,
+        "end_seconds": 19.777575541986153,
+        "interval_seconds": 0.5998449580511078,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 53.34711840205547,
+        "max_process_cpu_percent": 20.00516940073482,
+        "max_model_cpu_percent": 1.6670974500612352,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.00516940073482
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 6.668389800244941
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 19.777575541986153,
+        "end_seconds": 20.399094499996863,
+        "interval_seconds": 0.6215189580107108,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 33.788188966112784,
+        "max_process_cpu_percent": 6.435845517567349,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 6.435845517567349
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 20.399094499996863,
+        "end_seconds": 21.000334874959663,
+        "interval_seconds": 0.6012403749627993,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 61.53944668497524,
+        "max_process_cpu_percent": 24.94842433176867,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 24.94842433176867
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 8.316141443822044
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.652913154997127
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 21.000334874959663,
+        "end_seconds": 21.61793095897883,
+        "interval_seconds": 0.6175960840191692,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 17.81099376205198,
+        "max_process_cpu_percent": 3.238362502134371,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 21.61793095897883,
+        "end_seconds": 22.23697808396537,
+        "interval_seconds": 0.6190471249865368,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 54.923120757460524,
+        "max_process_cpu_percent": 12.923087236963923,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.923087236963923
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 22.23697808396537,
+        "end_seconds": 22.861005584010854,
+        "interval_seconds": 0.6240275000454858,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 36.85735003408498,
+        "max_process_cpu_percent": 4.807480439245605,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 22.861005584010854,
+        "end_seconds": 23.463045667042024,
+        "interval_seconds": 0.6020400830311701,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 31.559360474964244,
+        "max_process_cpu_percent": 6.644075889195015,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.644075889195015
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 23.463045667042024,
+        "end_seconds": 24.078830042039044,
+        "interval_seconds": 0.6157843749970198,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 58.462022522578735,
+        "max_process_cpu_percent": 19.487340840772653,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 19.487340840772653
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.367615490561487
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 24.078830042039044,
+        "end_seconds": 24.693604917032644,
+        "interval_seconds": 0.6147748749936,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 40.66529231573443,
+        "max_process_cpu_percent": 4.879835077886849,
+        "max_model_cpu_percent": 1.6266116926381957,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 24.693604917032644,
+        "end_seconds": 25.305612209020182,
+        "interval_seconds": 0.6120072919875383,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 47.38505631965245,
+        "max_process_cpu_percent": 9.803804756164105,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 417,
+            "name": "loginwindow",
+            "cpu_percent": 9.803804756164105
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 8.169837296840573
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 25.305612209020182,
+        "end_seconds": 25.92690237495117,
+        "interval_seconds": 0.6212901659309864,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 64.38215538095069,
+        "max_process_cpu_percent": 12.876431076299014,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.876431076299014
+          },
+          {
+            "pid": 417,
+            "name": "loginwindow",
+            "cpu_percent": 11.266877191798235
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 6.438215538295895
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 25.92690237495117,
+        "end_seconds": 26.54758354194928,
+        "interval_seconds": 0.6206811669981107,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 59.61192632920069,
+        "max_process_cpu_percent": 14.500198295918242,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 14.500198295918242
+          },
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 11.277932007871287
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.66679886399434
+          },
+          {
+            "pid": 417,
+            "name": "loginwindow",
+            "cpu_percent": 6.444532575947383
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 26.54758354194928,
+        "end_seconds": 27.168683958938345,
+        "interval_seconds": 0.6211004169890657,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 54.741550752976075,
+        "max_process_cpu_percent": 8.050228052102907,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 8.050228052102907
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 27.168683958938345,
+        "end_seconds": 27.777442708960734,
+        "interval_seconds": 0.608758750022389,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 41.067171517696885,
+        "max_process_cpu_percent": 4.928060582068348,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 27.777442708960734,
+        "end_seconds": 28.373725624987856,
+        "interval_seconds": 0.5962829160271212,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 82.17575698220176,
+        "max_process_cpu_percent": 20.124675179262187,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.124675179262187
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 10.062337589631094
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 8.38528132473071
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 8.38528132473071
+          },
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 6.708225059754063
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 28.373725624987856,
+        "end_seconds": 28.992426709039137,
+        "interval_seconds": 0.6187010840512812,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 12.93031514929601,
+        "max_process_cpu_percent": 3.2325787873969287,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 28.992426709039137,
+        "end_seconds": 29.610994416987523,
+        "interval_seconds": 0.6185677079483867,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 30.716120088121162,
+        "max_process_cpu_percent": 3.233275798750654,
+        "max_model_cpu_percent": 1.616637899375327,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 29.610994416987523,
+        "end_seconds": 30.226417750003748,
+        "interval_seconds": 0.6154233330162242,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 42.24734196142571,
+        "max_process_cpu_percent": 12.99918214147695,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.99918214147695
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 30.226417750003748,
+        "end_seconds": 30.853983209002763,
+        "interval_seconds": 0.6275654589990154,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 19.121511274873143,
+        "max_process_cpu_percent": 3.1869185458170968,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 30.853983209002763,
+        "end_seconds": 31.479548792005517,
+        "interval_seconds": 0.6255655830027536,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 62.34358324614525,
+        "max_process_cpu_percent": 23.97830124854806,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 23.97830124854806
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.591320499361068
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 31.479548792005517,
+        "end_seconds": 32.07535525003914,
+        "interval_seconds": 0.5958064580336213,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 68.81429270655221,
+        "max_process_cpu_percent": 20.140768597227805,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 20.140768597227805
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.427179064818537
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 32.07535525003914,
+        "end_seconds": 32.69678825000301,
+        "interval_seconds": 0.6214329999638721,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 41.838782300077504,
+        "max_process_cpu_percent": 8.045919673224116,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 87815,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 8.045919673224116
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 32.69678825000301,
+        "end_seconds": 33.32142637495417,
+        "interval_seconds": 0.6246381249511614,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 14.408342431271363,
+        "max_process_cpu_percent": 3.2018538735673236,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 33.32142637495417,
+        "end_seconds": 33.935316334012896,
+        "interval_seconds": 0.6138899590587243,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 50.49764952572062,
+        "max_process_cpu_percent": 13.031651490536026,
+        "max_model_cpu_percent": 1.6289564363170033,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.031651490536026
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 33.935316334012896,
+        "end_seconds": 34.56422304199077,
+        "interval_seconds": 0.6289067079778761,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 22.260853354692973,
+        "max_process_cpu_percent": 6.360243815585245,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.360243815585245
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 34.56422304199077,
+        "end_seconds": 35.172588292043656,
+        "interval_seconds": 0.6083652500528842,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 26.299990012081757,
+        "max_process_cpu_percent": 4.93124812727095,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 35.172588292043656,
+        "end_seconds": 35.77913191693369,
+        "interval_seconds": 0.6065436248900369,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 41.217150710292266,
+        "max_process_cpu_percent": 6.5947441137833085,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 6.5947441137833085
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 35.77913191693369,
+        "end_seconds": 36.391628792043775,
+        "interval_seconds": 0.6124968751100823,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 37.55121198901083,
+        "max_process_cpu_percent": 19.591936690015537,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 19.591936690015537
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 6.5306455633385125
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 36.391628792043775,
+        "end_seconds": 37.01574941701256,
+        "interval_seconds": 0.6241206249687821,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 64.09017487942118,
+        "max_process_cpu_percent": 22.431561207646453,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 22.431561207646453
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.613526231952568
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 37.01574941701256,
+        "end_seconds": 37.64058174996171,
+        "interval_seconds": 0.6248323329491541,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 36.809874886674386,
+        "max_process_cpu_percent": 4.801288028445641,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 37.64058174996171,
+        "end_seconds": 38.265677458955906,
+        "interval_seconds": 0.6250957089941949,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 39.99387556218501,
+        "max_process_cpu_percent": 12.798040179903102,
+        "max_model_cpu_percent": 1.5997550224878878,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.798040179903102
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 38.265677458955906,
+        "end_seconds": 38.88648654194549,
+        "interval_seconds": 0.6208090829895809,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 19.32961409345155,
+        "max_process_cpu_percent": 3.2216023489330086,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 38.88648654194549,
+        "end_seconds": 39.512853167019784,
+        "interval_seconds": 0.6263666250742972,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 9.579054438456396,
+        "max_process_cpu_percent": 1.5965090731058853,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 39.512853167019784,
+        "end_seconds": 40.137954583973624,
+        "interval_seconds": 0.6251014169538394,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 41.59325078436846,
+        "max_process_cpu_percent": 12.797923317750989,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.797923317750989
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 40.137954583973624,
+        "end_seconds": 40.760248417034745,
+        "interval_seconds": 0.6222938330611214,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 43.38786368367703,
+        "max_process_cpu_percent": 16.069579142132017,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 16.069579142132017
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 40.760248417034745,
+        "end_seconds": 41.38481629197486,
+        "interval_seconds": 0.6245678749401122,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 20.81439107207332,
+        "max_process_cpu_percent": 3.202214011071182,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 41.38481629197486,
+        "end_seconds": 42.0122914169915,
+        "interval_seconds": 0.6274751250166446,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 70.12230165903838,
+        "max_process_cpu_percent": 22.311641436894288,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 22.311641436894288
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.749509392552435
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.562132044341855
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 42.0122914169915,
+        "end_seconds": 42.636072334018536,
+        "interval_seconds": 0.6237809170270339,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 24.046904274099333,
+        "max_process_cpu_percent": 3.2062539032618456,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 42.636072334018536,
+        "end_seconds": 43.26542462501675,
+        "interval_seconds": 0.629352290998213,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 25.422962986524748,
+        "max_process_cpu_percent": 3.177870373477888,
+        "max_model_cpu_percent": 1.588935186702816,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 43.26542462501675,
+        "end_seconds": 43.875674042035826,
+        "interval_seconds": 0.6102494170190766,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 42.60553025441591,
+        "max_process_cpu_percent": 11.470719684182875,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.470719684182875
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 43.875674042035826,
+        "end_seconds": 44.46330041694455,
+        "interval_seconds": 0.5876263749087229,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 35.73699360125189,
+        "max_process_cpu_percent": 22.122900800751545,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 22.122900800751545
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 44.46330041694455,
+        "end_seconds": 45.079185917042196,
+        "interval_seconds": 0.6158855000976473,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 22.731497977445496,
+        "max_process_cpu_percent": 1.6236784270181388,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 45.079185917042196,
+        "end_seconds": 45.701613000012,
+        "interval_seconds": 0.6224270829698071,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 28.919050106508607,
+        "max_process_cpu_percent": 4.819841684399836,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 45.701613000012,
+        "end_seconds": 46.31173329195008,
+        "interval_seconds": 0.6101202919380739,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 42.61454723521358,
+        "max_process_cpu_percent": 13.112168380075301,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.112168380075301
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 8.195105237509795
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 46.31173329195008,
+        "end_seconds": 46.92561549996026,
+        "interval_seconds": 0.6138822080101818,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 24.43465505892285,
+        "max_process_cpu_percent": 3.2579540079536065,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 46.92561549996026,
+        "end_seconds": 47.55089770897757,
+        "interval_seconds": 0.625282209017314,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 67.16967058131951,
+        "max_process_cpu_percent": 25.588445935685357,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 25.588445935685357
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 14.393500838859374
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 47.55089770897757,
+        "end_seconds": 48.17499566695187,
+        "interval_seconds": 0.6240979579742998,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 51.27400208745101,
+        "max_process_cpu_percent": 12.81850052187186,
+        "max_model_cpu_percent": 1.6023125652339825,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.81850052187186
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.40925026093593
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 48.17499566695187,
+        "end_seconds": 48.78964329196606,
+        "interval_seconds": 0.6146476250141859,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 66.7048863955821,
+        "max_process_cpu_percent": 21.150329832674338,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 21.150329832674338
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 48.78964329196606,
+        "end_seconds": 49.417808416998014,
+        "interval_seconds": 0.6281651250319555,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 14.327442962717813,
+        "max_process_cpu_percent": 3.1838762139842025,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 49.417808416998014,
+        "end_seconds": 50.03834591701161,
+        "interval_seconds": 0.6205375000135973,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 49.956690772365164,
+        "max_process_cpu_percent": 11.280543077279795,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.280543077279795
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 50.03834591701161,
+        "end_seconds": 50.6648262089584,
+        "interval_seconds": 0.6264802919467911,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 39.90548517072413,
+        "max_process_cpu_percent": 4.788658220512399,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 50.6648262089584,
+        "end_seconds": 51.28389874997083,
+        "interval_seconds": 0.6190725410124287,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 20.999154604547687,
+        "max_process_cpu_percent": 4.845958754945415,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 51.28389874997083,
+        "end_seconds": 51.89202408399433,
+        "interval_seconds": 0.608125334023498,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 70.70910812985787,
+        "max_process_cpu_percent": 13.15518290787669,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.15518290787669
+          },
+          {
+            "pid": 87903,
+            "name": "mdworker_shared",
+            "cpu_percent": 9.86638718091649
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 51.89202408399433,
+        "end_seconds": 52.50908566697035,
+        "interval_seconds": 0.6170615829760209,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 77.78802201222068,
+        "max_process_cpu_percent": 22.68817308736547,
+        "max_model_cpu_percent": 1.6205837919388844,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 22.68817308736547
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 12.964670335511075
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 8.102918959657575
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 52.50908566697035,
+        "end_seconds": 53.12280675000511,
+        "interval_seconds": 0.6137210830347613,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 43.993926143142474,
+        "max_process_cpu_percent": 17.923451392063658,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 17.923451392063658
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 53.12280675000511,
+        "end_seconds": 53.74784304201603,
+        "interval_seconds": 0.6250362920109183,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 30.39823485895271,
+        "max_process_cpu_percent": 3.1998141956903274,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 53.74784304201603,
+        "end_seconds": 54.356713916989975,
+        "interval_seconds": 0.6088708749739453,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 85.40398652219227,
+        "max_process_cpu_percent": 18.06622791824115,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 18.06622791824115
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 11.49669049331755
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 9.854306137161338
+          },
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 8.211921781005126
+          },
+          {
+            "pid": 87924,
+            "name": "(ps)",
+            "cpu_percent": 6.5695374247802
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 54.356713916989975,
+        "end_seconds": 54.97891337494366,
+        "interval_seconds": 0.622199457953684,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 30.536831488498432,
+        "max_process_cpu_percent": 8.036008286574859,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 8.036008286574859
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 54.97891337494366,
+        "end_seconds": 55.61020483402535,
+        "interval_seconds": 0.6312914590816945,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 66.53028390605077,
+        "max_process_cpu_percent": 28.512978816773465,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75949,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 28.512978816773465
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 55.61020483402535,
+        "end_seconds": 56.224412749987096,
+        "interval_seconds": 0.6142079159617424,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 53.7277347660076,
+        "max_process_cpu_percent": 13.02490539781813,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.02490539781813
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 56.224412749987096,
+        "end_seconds": 56.81753879203461,
+        "interval_seconds": 0.5931260420475155,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 89.35706113399918,
+        "max_process_cpu_percent": 32.033663425686996,
+        "max_model_cpu_percent": 1.6859822855740745,
+        "active_processes": [
+          {
+            "pid": 1,
+            "name": "launchd",
+            "cpu_percent": 32.033663425686996
+          },
+          {
+            "pid": 9266,
+            "name": "python",
+            "cpu_percent": 15.173840570118752
+          },
+          {
+            "pid": 76086,
+            "name": "Google Chrome Helper (Aperitif Renderer)",
+            "cpu_percent": 13.487858284525512
+          },
+          {
+            "pid": 19036,
+            "name": "python3.12",
+            "cpu_percent": 5.0579468567318076
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 56.81753879203461,
+        "end_seconds": 57.44471745903138,
+        "interval_seconds": 0.6271786669967696,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 28.699955765695247,
+        "max_process_cpu_percent": 4.7833259609099334,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 57.44471745903138,
+        "end_seconds": 58.06962845893577,
+        "interval_seconds": 0.6249109999043867,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 81.61162150727172,
+        "max_process_cpu_percent": 20.8029623451834,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 595,
+            "name": "sysmond",
+            "cpu_percent": 20.8029623451834
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 12.801822981539368
+          },
+          {
+            "pid": 59949,
+            "name": "Activity Monitor",
+            "cpu_percent": 9.601367236227297
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 58.06962845893577,
+        "end_seconds": 58.67916937498376,
+        "interval_seconds": 0.6095409160479903,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 42.65505286922131,
+        "max_process_cpu_percent": 6.562315826032972,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 6.562315826032972
+          },
+          {
+            "pid": 75762,
+            "name": "codex",
+            "cpu_percent": 6.562315826032972
+          },
+          {
+            "pid": 75761,
+            "name": "Codex (Renderer)",
+            "cpu_percent": 6.562315825883762
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 58.67916937498376,
+        "end_seconds": 59.280895874951966,
+        "interval_seconds": 0.6017264999682084,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 19.94261512631568,
+        "max_process_cpu_percent": 3.3237691877444715,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 59.280895874951966,
+        "end_seconds": 59.879075875040144,
+        "interval_seconds": 0.5981800000881776,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 70.21297936190366,
+        "max_process_cpu_percent": 16.71737603825317,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [
+          {
+            "pid": 75270,
+            "name": "ChatGPT",
+            "cpu_percent": 16.71737603825317
+          },
+          {
+            "pid": 12722,
+            "name": "meecp",
+            "cpu_percent": 13.373900830541718
+          },
+          {
+            "pid": 42083,
+            "name": "io.kandji.KandjiAgent.ESF-Extension",
+            "cpu_percent": 11.702163226685993
+          }
+        ],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 59.879075875040144,
+        "end_seconds": 60.50211020896677,
+        "interval_seconds": 0.6230343339266255,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 28.89086366647894,
+        "max_process_cpu_percent": 4.815143944138687,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      },
+      {
+        "start_seconds": 60.50211020896677,
+        "end_seconds": 60.83936895895749,
+        "interval_seconds": 0.337258749990724,
+        "phases": [
+          "quiet"
+        ],
+        "external_cpu_percent": 20.75557713531869,
+        "max_process_cpu_percent": 2.965082447970088,
+        "max_model_cpu_percent": 0.0,
+        "active_processes": [],
+        "gpu_device_utilization_percent": 0,
+        "thermal_state": 0
+      }
+    ],
+    "sampling_failures": 0,
+    "measurement_samples": 0,
+    "sampling_gap_exceeded": false,
+    "cpu_guard_exceeded": false,
+    "background_model_active": false,
+    "thermal_guard_exceeded": false
+  }
+}
