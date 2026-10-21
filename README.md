@@ -8,6 +8,8 @@ Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), startin
 
 The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) collects recorded engine, reference, conversion and predecessor-Uzu results, their limits, and candidate engines for a future benchmark.
 
+The [short benchmark write-up](docs/STARK_BENCHMARK_BRIEF_2026_10_21.md) presents Stark's local Qwen3.5-2B result, developer interfaces and evidence limits as an engineering preview.
+
 The [2026-10-19 stock engine pilot](docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md) records current Qwen3.5-2B generation, JevK5 scoring and vLLM Metal concurrency results, including support failures and excluded timings.
 
 The [2026-10-20 MLX-informed optimization](docs/MLX_GENERATION_OPTIMIZATION_2026_10_20.md) records two decode changes, bounded bitwise validation and modest Qwen3.5-2B throughput gains, with its original timing exclusions retained.
