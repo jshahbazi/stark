@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "checked_utc": "2026-10-21T07:44:24.511819+00:00",
+  "remaining_task_owned_benchmark_processes": [],
+  "codex_visible": true,
+  "prior_codex_visibility": true,
+  "both_campaigns_restored_prior_visibility": true,
+  "unrelated_processes_terminated": false,
+  "borrowed_models_unchanged": true,
+  "runtime_source_restored_to_reference": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+  "rebuilt_binary_hashes_verified": true,
+  "ignored_study_artifacts_retained_for_replay": true,
+  "checked_worker_basenames": [
+    "stark-generate-argument-table",
+    "stark-generate-candidate",
+    "stark-generate-final",
+    "stark-generate-token-handoff",
+    "stark-score-candidate",
+    "stark-score-digest-candidate",
+    "stark-score-digest-final"
+  ]
+}

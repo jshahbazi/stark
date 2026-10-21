@@ -1,0 +1,12 @@
+{
+  "tool": "macOS sample, 10 seconds, 1 ms requested interval",
+  "baseline_binary_sha256": "299c22d8733232f088a021df2dd0fee72343228e4cf4be0b2d007b681f36fd39",
+  "private_sample_sha256": "6cd804a722417a187eee10eae6b96118d9d6b19a1b3e9f299ce893643fca3ca9",
+  "main_thread_samples": 8436,
+  "completion_wait_stack_samples": 7493,
+  "decoder_encode_stack_samples": 798,
+  "completion_wait_fraction": 0.888217164532954,
+  "decoder_encode_fraction": 0.0945945945945946,
+  "timing_eligible": false,
+  "limits": "Wall-stack observations include blocking and callback scheduling. They do not measure GPU utilization or individual kernel time."
+}

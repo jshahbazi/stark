@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "phase": "scoring_admission",
+  "started_utc": "2026-10-20T03:36:22.141439+00:00",
+  "status": "complete_with_failures",
+  "source_commit": "28fceb5546e48fd4bc39c1e6802735f7899f4f5f",
+  "harness_sha256": "a80a18db13eaa2ed0fe7bb6ca9ff237f7a0f2a370e74a620bb78caa2d2f20369",
+  "cases_loader_sha256": "5bf6e786da6fa239f3d4fbe11dac93254325b807135c4f8b88b0cd9e945759ed",
+  "dataset": {
+    "case_count": 243,
+    "public_case_count": 231,
+    "synthetic_case_count": 12,
+    "dataset_sha256": "acf56888f47486fd8eba45d17a46372d65d911e2f57bc390474e7b41f37aae58",
+    "configuration_sha256": "70001de82eb6cdfa018e63bfcfe1968ca68a6fd669508cd6c08be70cd1d6e9bd",
+    "post_run_seal_sha256": "a825be816ca80c8c94739ab2556cc064d942b16c8b3da01daa5cd7cb13fe0003"
+  },
+  "model": "alibiserikbay/JevK5",
+  "model_revision": "c4f7fdb3aeab5582336406e78d3bef11bf98833d",
+  "protocol": {
+    "context_tokens": 8192,
+    "temperature": 1.22,
+    "blocks": 1,
+    "cases_per_block": 4,
+    "cache": "fresh native state per score, output caching off",
+    "host_screen_scope": "sampled process CPU and whole-window sleep; continuous GPU/thermal/power isolation unverified",
+    "timing": "private pipe complete scoring request; model load excluded; context initialization/readout/cleanup included"
+  },
+  "engines": [
+    {
+      "id": "stark_bf16",
+      "kind": "stark_score",
+      "version": "source",
+      "representation": "BF16 native repack",
+      "executable_sha256": "d246d8e5718673a9101c9bfdc151d28be8b47ffa3193353a666cd2a50f7b4095",
+      "model_sha256": "7165b96777823061753fa96b247d687d591596b20cf24fa518a5b87a96b1be8a"
+    },
+    {
+      "id": "llama_bf16",
+      "kind": "llama_score",
+      "version": "b11747",
+      "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+      "representation": "BF16 GGUF",
+      "executable_sha256": "ced94b4d022169c78d5a72e95dd406a58e548daade5089309600f251710d6d1a",
+      "model_sha256": "9fb252465834f2113eb74dd4fc4240ebf3cfab17ab48c0a23a615bbc81b07dc4"
+    },
+    {
+      "id": "mlx_bf16",
+      "kind": "mlx",
+      "version": "0.32.2",
+      "representation": "BF16 original source",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "13824e47f2e40fe052f06943976cf742cb366ba305741a111e75a8ebae907a9c",
+      "lock_sha256": "e5f3e0c15361db5508e20b065785c31b5ab0b565c8a410c733ba47df29f541ec"
+    }
+  ],
+  "blocks": [
+    {
+      "engine": "stark_bf16",
+      "block": 0,
+      "status": "complete",
+      "load_seconds": 2.001302708988078,
+      "runtime": {
+        "vocab_size": 248320,
+        "cache_policy": "fresh-state"
+      },
+      "timings": [
+        {
+          "input_tokens": 194,
+          "wall_seconds": 0.049459374975413084
+        },
+        {
+          "input_tokens": 174,
+          "wall_seconds": 0.04205441696103662
+        },
+        {
+          "input_tokens": 4033,
+          "wall_seconds": 0.6386766250943765
+        },
+        {
+          "input_tokens": 2436,
+          "wall_seconds": 0.40385074994992465
+        }
+      ],
+      "cases": 4,
+      "median_wall_seconds": 0.22665506246266887,
+      "buckets": {
+        "0-255": {
+          "count": 2,
+          "median_seconds": 0.04575689596822485
+        },
+        "256-1023": {
+          "count": 0,
+          "median_seconds": null
+        },
+        "1024-8191": {
+          "count": 2,
+          "median_seconds": 0.5212636875221506
+        }
+      },
+      "host_screen": {
+        "samples": 6,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 36.64357621105392,
+        "max_background_model_process_cpu_percent": 1.7449322005254324,
+        "cpu_guard_exceeded": false,
+        "background_model_active": false
+      }
+    },
+    {
+      "engine": "llama_bf16",
+      "block": 0,
+      "status": "complete",
+      "load_seconds": 3.2258830840000883,
+      "runtime": {
+        "vocab_size": 248320
+      },
+      "timings": [
+        {
+          "input_tokens": 194,
+          "wall_seconds": 0.11257079092320055
+        },
+        {
+          "input_tokens": 174,
+          "wall_seconds": 0.11010370799340308
+        },
+        {
+          "input_tokens": 4033,
+          "wall_seconds": 1.0223341669188812
+        },
+        {
+          "input_tokens": 2436,
+          "wall_seconds": 0.6417776249581948
+        }
+      ],
+      "cases": 4,
+      "median_wall_seconds": 0.37717420794069767,
+      "buckets": {
+        "0-255": {
+          "count": 2,
+          "median_seconds": 0.11133724945830181
+        },
+        "256-1023": {
+          "count": 0,
+          "median_seconds": null
+        },
+        "1024-8191": {
+          "count": 2,
+          "median_seconds": 0.832055895938538
+        }
+      },
+      "host_screen": {
+        "samples": 10,
+        "sampling_failures": 0,
+        "max_background_process_cpu_percent": 951.8224699839052,
+        "max_background_model_process_cpu_percent": 1.7350360881214264,
+        "cpu_guard_exceeded": true,
+        "background_model_active": false
+      }
+    },
+    {
+      "engine": "mlx_bf16",
+      "block": 0,
+      "status": "failed",
+      "error": "model_load_failed"
+    }
+  ],
+  "failures": [
+    {
+      "engine": "mlx_bf16",
+      "block": 0,
+      "error": "model_load_failed"
+    }
+  ],
+  "ended_utc": "2026-10-20T03:36:42.407564+00:00",
+  "wall_elapsed_seconds": 11.397764921188354,
+  "monotonic_elapsed_seconds": 11.397893334040418,
+  "power_log_screen": {
+    "checked": true,
+    "sleep_events": 0
+  },
+  "repeatability_max_probability_difference": {},
+  "comparisons": [
+    {
+      "reference": "stark_bf16",
+      "candidate": "llama_bf16",
+      "cases": 4,
+      "candidate_argmax_agreement": 4,
+      "maximum_probability_difference": 0.0014778779855793012,
+      "mean_probability_difference": 0.00039677667691497947,
+      "maximum_candidate_logit_difference": 0.09267044067382812,
+      "maximum_candidate_log_probability_difference": 0.12710418037758942
+    }
+  ],
+  "timing_accepted": false
+}

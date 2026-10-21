@@ -1,0 +1,8 @@
+{
+  "engine": "tensorfold",
+  "version": "1.1.1",
+  "model": "JevK5 BF16 unchanged",
+  "status": "not_admitted",
+  "raw_diagnostics_persisted": false,
+  "error": "server_exited_before_ready"
+}

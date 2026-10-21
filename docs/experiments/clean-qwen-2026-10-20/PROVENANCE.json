@@ -1,0 +1,47 @@
+{
+  "campaign_source_commit": "d29c30f7cc4aca6de46deb57f42e82252eddb74a",
+  "campaign_harness_sha256": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+  "stock_harness_sha256": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+  "mlx_worker_sha256": "6d84a9acd1e8ba98a1dd76278f8eb17552a0923f294132acee288fcb6a34b228",
+  "frozen_protocol_sha256": "ae4ad92b2bf56416ce689f3deaa4eb1ec6846b4a8f5b2bc26656d4c377013183",
+  "private_config_sha256": "f43bd455e9d732394e47ac82e1607cf2e857a80aa5126d8264ae73e86035ccdb",
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "045d0ca6cca8eafae89f32a303e5123f001eaf43",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "executable_sha256": "66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89",
+      "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d"
+    },
+    {
+      "id": "mlx_lm",
+      "kind": "mlx",
+      "version": "0.32.3.dev6+g72be8c955",
+      "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+      "representation": "MLX affine4 g64",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac"
+    }
+  ],
+  "model_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+  "mlx_runtime_provenance_reference": "../mlx-optimization-2026-10-20/mlx-current-provenance.json",
+  "mlx_runtime_provenance_sha256": "1c429c027537c8e8c477bc217b88df4d74cfc50e0b871b69363196ed6f0df012",
+  "tooling_only_change": true,
+  "engine_model_and_worker_changes_this_followup": false,
+  "powermetrics": "unavailable: noninteractive sudo requires a password",
+  "quiet_diagnostic_provenance_gap": "initial exploratory quiet diagnostic used an uncommitted pre-fix harness whose exact hash was not captured; not performance evidence",
+  "runtime_after": {
+    "thermal_state": 0,
+    "paging": {
+      "pageouts": 185662,
+      "swapouts": 8499223
+    }
+  },
+  "independent_review": {
+    "scope": "paired arithmetic, order, guards, outputs, binaries, locked MLX runtime",
+    "result": "passed"
+  }
+}

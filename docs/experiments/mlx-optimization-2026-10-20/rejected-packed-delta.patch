@@ -1,0 +1,840 @@
+diff --git a/crates/stark-engine/Cargo.toml b/crates/stark-engine/Cargo.toml
+--- a/crates/stark-engine/Cargo.toml
++++ b/crates/stark-engine/Cargo.toml
+@@ -14,6 +14,10 @@
+
+ [features]
+ default = ["cpu", "metal", "grammar"]
++
++# Experimental MLX-informed DeltaNet decode lane packing.
++packed-delta-decode = []
++packed-delta-decode-split = ["packed-delta-decode"]
+
+ # Experimental scoring optimization. An encoded state must be discarded if its
+ # command buffer is abandoned or fails; initialization is ordered on first encode.
+diff --git a/crates/stark-engine/src/backends/cpu/kernel/gdn/mod.rs b/crates/stark-engine/src/backends/cpu/kernel/gdn/mod.rs
+index 77b3046c..01ed0c91 100644
+--- a/crates/stark-engine/src/backends/cpu/kernel/gdn/mod.rs
++++ b/crates/stark-engine/src/backends/cpu/kernel/gdn/mod.rs
+@@ -6,3 +6,4 @@ pub mod prefill;
+ pub mod prefill_prep;
+ pub mod tree_verify;
+ pub mod update;
++pub mod update_packed;
+diff --git a/crates/stark-engine/src/encodable_block/mixer/delta_net.rs b/crates/stark-engine/src/encodable_block/mixer/delta_net.rs
+index 25247229..6a2980b1 100644
+--- a/crates/stark-engine/src/encodable_block/mixer/delta_net.rs
++++ b/crates/stark-engine/src/encodable_block/mixer/delta_net.rs
+@@ -3,6 +3,12 @@ use thiserror::Error;
+
+ #[cfg(feature = "direct-delta-conv")]
+ use crate::backends::common::kernel::DeltaNetConvDirectKernel;
++#[cfg(not(feature = "packed-delta-decode"))]
++use crate::backends::common::kernel::DeltaNetUpdateKernel;
++#[cfg(all(feature = "packed-delta-decode", not(feature = "packed-delta-decode-split")))]
++use crate::backends::common::kernel::DeltaNetUpdatePackedKernel;
++#[cfg(feature = "packed-delta-decode-split")]
++use crate::backends::common::kernel::{DeltaNetUpdatePackedNormGateKernel, DeltaNetUpdatePackedRowsKernel};
+ #[cfg(not(feature = "deferred-state-init"))]
+ use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
+ use crate::{
+@@ -11,8 +17,7 @@ use crate::{
+         Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, Context, Kernels,
+         kernel::{
+             Conv1dPackKernel, ConvTreeScanKernel, DeltaNetConvScanKernel, DeltaNetConvUpdateKernel,
+-            DeltaNetNormGateKernel, DeltaNetPrefillKernel, DeltaNetPrefillPrepKernel, DeltaNetUpdateKernel,
+-            StateAdvanceKernel,
++            DeltaNetNormGateKernel, DeltaNetPrefillKernel, DeltaNetPrefillPrepKernel, StateAdvanceKernel,
+             delta_net_chunked_prefill::{DeltaNetChunkedPrefill, DeltaNetChunkedPrefillArgs},
+             delta_net_tree_verify::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait,
+         },
+@@ -146,7 +151,14 @@ pub struct DeltaNet<B: Backend> {
+     dt_bias: B::GlobalBuffer,
+     norm_weight: B::GlobalBuffer,
+     norm_epsilon: f32,
++    #[cfg(not(feature = "packed-delta-decode"))]
+     delta_net_update: <B::Kernels as Kernels>::DeltaNetUpdateKernel,
++    #[cfg(all(feature = "packed-delta-decode", not(feature = "packed-delta-decode-split")))]
++    delta_net_update: <B::Kernels as Kernels>::DeltaNetUpdatePackedKernel,
++    #[cfg(feature = "packed-delta-decode-split")]
++    delta_net_update_rows: <B::Kernels as Kernels>::DeltaNetUpdatePackedRowsKernel,
++    #[cfg(feature = "packed-delta-decode-split")]
++    delta_net_update_norm: <B::Kernels as Kernels>::DeltaNetUpdatePackedNormGateKernel,
+     delta_net_prefill_prep: <B::Kernels as Kernels>::DeltaNetPrefillPrepKernel,
+     delta_net_tree_prep: <B::Kernels as Kernels>::DeltaNetPrefillPrepKernel,
+     delta_net_prefill: <B::Kernels as Kernels>::DeltaNetPrefillKernel,
+@@ -247,9 +259,22 @@ impl<B: Backend> DeltaNet<B> {
+         let norm_weight =
+             parameter_tree.leaf("norm.scales")?.validate(&[config.value_head_dim], INNER_DATA_TYPE)?.read_buffer()?;
+         let norm_epsilon = config.norm_config.epsilon;
++        #[cfg(not(feature = "packed-delta-decode"))]
+         let delta_net_update =
+             <B::Kernels as Kernels>::DeltaNetUpdateKernel::new(context, outer_data_type, config.head_dim)
+                 .map_err(DeltaNetNewError::Backend)?;
++        #[cfg(all(feature = "packed-delta-decode", not(feature = "packed-delta-decode-split")))]
++        let delta_net_update =
++            <B::Kernels as Kernels>::DeltaNetUpdatePackedKernel::new(context, outer_data_type, config.head_dim)
++                .map_err(DeltaNetNewError::Backend)?;
++        #[cfg(feature = "packed-delta-decode-split")]
++        let delta_net_update_rows =
++            <B::Kernels as Kernels>::DeltaNetUpdatePackedRowsKernel::new(context, outer_data_type, config.head_dim)
++                .map_err(DeltaNetNewError::Backend)?;
++        #[cfg(feature = "packed-delta-decode-split")]
++        let delta_net_update_norm =
++            <B::Kernels as Kernels>::DeltaNetUpdatePackedNormGateKernel::new(context, outer_data_type)
++                .map_err(DeltaNetNewError::Backend)?;
+         let delta_net_prefill_prep = <B::Kernels as Kernels>::DeltaNetPrefillPrepKernel::new(
+             context,
+             outer_data_type,
+@@ -331,7 +356,12 @@ impl<B: Backend> DeltaNet<B> {
+                 dt_bias,
+                 norm_weight,
+                 norm_epsilon,
++                #[cfg(not(feature = "packed-delta-decode-split"))]
+                 delta_net_update,
++                #[cfg(feature = "packed-delta-decode-split")]
++                delta_net_update_rows,
++                #[cfg(feature = "packed-delta-decode-split")]
++                delta_net_update_norm,
+                 delta_net_prefill_prep,
+                 delta_net_tree_prep,
+                 delta_net_prefill,
+@@ -547,6 +577,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
+                 command_buffer,
+             );
+
++            #[cfg(not(feature = "packed-delta-decode-split"))]
+             self.delta_net_update.encode(
+                 &in_projected,
+                 &self.a_log,
+@@ -562,6 +593,35 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
+                 self.norm_epsilon,
+                 command_buffer,
+             );
++            #[cfg(feature = "packed-delta-decode-split")]
++            {
++                let mut raw = command_buffer.allocate_scratch_for_shape(&[self.value_dim], DataType::F32)?;
++                self.delta_net_update_rows.encode(
++                    &in_projected,
++                    &self.a_log,
++                    &self.dt_bias,
++                    &mut state.ssm_state,
++                    &mut raw,
++                    self.num_heads,
++                    self.num_groups,
++                    self.value_head_dim,
++                    self.key_dim,
++                    self.value_dim,
++                    command_buffer,
++                );
++                self.delta_net_update_norm.encode(
++                    &raw,
++                    &in_projected,
++                    &self.norm_weight,
++                    &mut delta_output,
++                    self.num_heads,
++                    self.value_head_dim,
++                    self.value_dim,
++                    self.conv_dim,
++                    self.norm_epsilon,
++                    command_buffer,
++                );
++            }
+         } else {
+             #[cfg(feature = "compact-delta-conv")]
+             let qkv_stride = self.conv_dim;
+diff --git a/crates/stark-engine/unit/backends/common/kernel/gdn/mod.rs b/crates/stark-engine/unit/backends/common/kernel/gdn/mod.rs
+index cb47dcd2..3abc6e34 100644
+--- a/crates/stark-engine/unit/backends/common/kernel/gdn/mod.rs
++++ b/crates/stark-engine/unit/backends/common/kernel/gdn/mod.rs
+@@ -1,3 +1,4 @@
+ mod conv_direct_test;
+ mod delta_net_test;
+ mod tree_verify;
++mod update_packed_test;
+diff --git a/crates/stark-engine/src/backends/cpu/kernel/gdn/update_packed.rs b/crates/stark-engine/src/backends/cpu/kernel/gdn/update_packed.rs
+new file mode 100644
+index 00000000..347ef022
+--- /dev/null
++++ b/crates/stark-engine/src/backends/cpu/kernel/gdn/update_packed.rs
+@@ -0,0 +1,131 @@
++use half::bf16;
++use num_traits::Float;
++use stark_engine_macros::kernel;
++
++use crate::array::ArrayElement;
++
++// CPU reference remains independent of the Metal lane packing.
++#[kernel(DeltaNetUpdatePacked)]
++#[variants(T, f32, bf16)]
++#[variants(HEAD_K_DIM, 128)]
++pub fn delta_net_update_packed<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
++    in_proj: *const T,
++    a_log: *const f32,
++    dt_bias: *const f32,
++    norm_weight: *const f32,
++    state: *mut f32,
++    out: *mut T,
++    num_v_heads: u32,
++    num_k_heads: u32,
++    head_v_dim: u32,
++    key_dim: u32,
++    value_dim: u32,
++    norm_epsilon: f32,
++) {
++    super::update::delta_net_update::<T, HEAD_K_DIM>(
++        in_proj,
++        a_log,
++        dt_bias,
++        norm_weight,
++        state,
++        out,
++        num_v_heads,
++        num_k_heads,
++        head_v_dim,
++        key_dim,
++        value_dim,
++        norm_epsilon,
++    );
++}
++
++#[kernel(DeltaNetUpdatePackedRows)]
++#[variants(T, f32, bf16)]
++#[variants(HEAD_K_DIM, 128)]
++pub fn delta_net_update_packed_rows<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
++    in_proj: *const T,
++    a_log: *const f32,
++    dt_bias: *const f32,
++    state: *mut f32,
++    out: *mut f32,
++    num_v_heads: u32,
++    num_k_heads: u32,
++    head_v_dim: u32,
++    key_dim: u32,
++    value_dim: u32,
++) {
++    let d = HEAD_K_DIM as usize;
++    let dv = head_v_dim as usize;
++    let key_dim = key_dim as usize;
++    let value_dim = value_dim as usize;
++    let conv_dim = 2 * key_dim + value_dim;
++    for hv in 0..num_v_heads as usize {
++        let hk = hv / (num_v_heads / num_k_heads) as usize;
++        let mut q = vec![0.0f32; d];
++        let mut k = vec![0.0f32; d];
++        for j in 0..d {
++            q[j] = unsafe { (*in_proj.add(hk * d + j)).to_f32().unwrap() };
++            k[j] = unsafe { (*in_proj.add(key_dim + hk * d + j)).to_f32().unwrap() };
++        }
++        let q_scale = 1.0 / (q.iter().map(|x| x * x).sum::<f32>() + 1e-6).sqrt() / (d as f32).sqrt();
++        let k_scale = 1.0 / (k.iter().map(|x| x * x).sum::<f32>() + 1e-6).sqrt();
++        for j in 0..d {
++            q[j] *= q_scale;
++            k[j] *= k_scale;
++        }
++        let kq = q.iter().zip(&k).map(|(q, k)| q * k).sum::<f32>();
++        let beta_raw = unsafe { (*in_proj.add(conv_dim + value_dim + hv)).to_f32().unwrap() };
++        let beta = 1.0 / (1.0 + (-beta_raw).exp());
++        let a = unsafe { (*in_proj.add(conv_dim + value_dim + num_v_heads as usize + hv)).to_f32().unwrap() };
++        let bias = unsafe { *dt_bias.add(hv) };
++        let x = a + bias;
++        let softplus = if x > 20.0 {
++            x
++        } else {
++            x.exp().ln_1p()
++        };
++        let decay = (-unsafe { *a_log.add(hv) }.exp() * softplus).exp();
++        for i in 0..dv {
++            let base = (hv * dv + i) * d;
++            let mut sq = 0.0;
++            let mut sk = 0.0;
++            for j in 0..d {
++                let s = unsafe { *state.add(base + j) };
++                sq += s * q[j];
++                sk += s * k[j];
++            }
++            let value = unsafe { (*in_proj.add(2 * key_dim + hv * dv + i)).to_f32().unwrap() };
++            let delta = beta * (value - decay * sk);
++            unsafe { *out.add(hv * dv + i) = decay * sq + delta * kq };
++            for j in 0..d {
++                unsafe { *state.add(base + j) = decay * *state.add(base + j) + k[j] * delta };
++            }
++        }
++    }
++}
++
++#[kernel(DeltaNetUpdatePackedNormGate)]
++#[variants(T, f32, bf16)]
++pub fn delta_net_update_packed_norm_gate<T: ArrayElement + Float>(
++    raw: *const f32,
++    in_proj: *const T,
++    norm_weight: *const f32,
++    out: *mut T,
++    num_v_heads: u32,
++    head_v_dim: u32,
++    value_dim: u32,
++    conv_dim: u32,
++    norm_epsilon: f32,
++) {
++    for hv in 0..num_v_heads as usize {
++        let base = hv * head_v_dim as usize;
++        let values = unsafe { std::slice::from_raw_parts(raw.add(base), head_v_dim as usize) };
++        let inv_rms = 1.0 / (values.iter().map(|x| x * x).sum::<f32>() / head_v_dim as f32 + norm_epsilon).sqrt();
++        for (i, value) in values.iter().copied().enumerate() {
++            let z = unsafe { (*in_proj.add(conv_dim as usize + base + i)).to_f32().unwrap() };
++            let weight = unsafe { *norm_weight.add(i) };
++            let result = value * inv_rms * weight * z / (1.0 + (-z).exp());
++            unsafe { *out.add(base + i) = <T as num_traits::NumCast>::from(result).unwrap() };
++        }
++    }
++    let _ = value_dim;
++}
+diff --git a/crates/stark-engine/src/backends/metal/kernel/gdn/update_packed.metal b/crates/stark-engine/src/backends/metal/kernel/gdn/update_packed.metal
+new file mode 100644
+index 00000000..2790c6d1
+--- /dev/null
++++ b/crates/stark-engine/src/backends/metal/kernel/gdn/update_packed.metal
+@@ -0,0 +1,325 @@
++// Copyright © 2025 Apple Inc.
++// Copyright © 2026 Stark contributors.
++//
++// The four-lane row packing and explicit reduction tree are adapted from
++// mlx-lm/mlx_lm/models/gated_delta.py at
++// e9308d7b0854105386a587db52c2f1a635196165 (MIT License).
++// Stark retains its fused decode arithmetic, float state and RMSNorm gate.
++//
++// Permission is hereby granted, free of charge, to any person obtaining a copy
++// of this software and associated documentation files (the "Software"), to deal
++// in the Software without restriction, including without limitation the rights
++// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++// copies of the Software, and to permit persons to whom the Software is
++// furnished to do so, subject to the following conditions:
++//
++// The above copyright notice and this permission notice shall be included in
++// all copies or substantial portions of the Software.
++//
++// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
++// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++// THE SOFTWARE.
++
++#include <metal_stdlib>
++#include "../activation/activations.h"
++#include "../common/defines.h"
++#include "../common/dsl.h"
++#include "../common/thread_context.h"
++#include "../common/threadgroup_reduce.h"
++
++using namespace metal;
++
++#define PACKED_UPDATE_THREADS 128
++#define PACKED_UPDATE_MAX_HEAD_V_DIM 128
++
++// A four-lane subgroup owns one value row. Each lane combines four-element
++// partials from eight original lanes, then two shuffles complete the row sum.
++static float packed_row_sum(thread const float* partials) {
++  float value = ((partials[0] + partials[1]) + (partials[2] + partials[3])) +
++                ((partials[4] + partials[5]) + (partials[6] + partials[7]));
++  value += simd_shuffle_xor(value, 1);
++  value += simd_shuffle_xor(value, 2);
++  return value;
++}
++
++template <typename T>
++static void packed_prepare_qk(
++    device const T* in_proj,
++    const uint hk,
++    const uint key_dim,
++    const uint lane,
++    threadgroup float* shared_q,
++    threadgroup float* shared_k,
++    threadgroup float* kq_dot
++) {
++  float q[4];
++  float k[4];
++  float q_sq = 0.0f;
++  float k_sq = 0.0f;
++  for (uint i = 0; i < 4; ++i) {
++    const uint dk = lane + METAL_SIMD_SIZE * i;
++    q[i] = float(in_proj[hk * 128 + dk]);
++    k[i] = float(in_proj[key_dim + hk * 128 + dk]);
++    q_sq += q[i] * q[i];
++    k_sq += k[i] * k[i];
++  }
++  const float q_inv_norm = rsqrt(simd_sum(q_sq) + 1e-6f);
++  const float k_inv_norm = rsqrt(simd_sum(k_sq) + 1e-6f);
++  const float q_scale = rsqrt(128.0f);
++  float kq_partial = 0.0f;
++  for (uint i = 0; i < 4; ++i) {
++    const uint dk = lane + METAL_SIMD_SIZE * i;
++    q[i] *= q_inv_norm * q_scale;
++    k[i] *= k_inv_norm;
++    shared_q[dk] = q[i];
++    shared_k[dk] = k[i];
++    kq_partial += q[i] * k[i];
++  }
++  const float value = simd_sum(kq_partial);
++  if (lane == 0) {
++    *kq_dot = value;
++  }
++}
++
++static float packed_update_row(
++    device float* state_row,
++    threadgroup const float* q,
++    threadgroup const float* k,
++    const uint row_lane,
++    const float value,
++    const float kq_dot,
++    const float beta,
++    const float decay
++) {
++  float sq[8];
++  float sk[8];
++  float s[32];
++  for (uint part = 0; part < 8; ++part) {
++    const uint original_lane = row_lane * 8 + part;
++    float sq_partial = 0.0f;
++    float sk_partial = 0.0f;
++    for (uint i = 0; i < 4; ++i) {
++      const uint dk = original_lane + METAL_SIMD_SIZE * i;
++      const uint e = part * 4 + i;
++      s[e] = state_row[dk];
++      sq_partial += s[e] * q[dk];
++      sk_partial += s[e] * k[dk];
++    }
++    sq[part] = sq_partial;
++    sk[part] = sk_partial;
++  }
++  const float sq_acc = packed_row_sum(sq);
++  const float sk_acc = packed_row_sum(sk);
++  const float delta = beta * (value - decay * sk_acc);
++  const float output = decay * sq_acc + delta * kq_dot;
++  for (uint part = 0; part < 8; ++part) {
++    const uint original_lane = row_lane * 8 + part;
++    for (uint i = 0; i < 4; ++i) {
++      const uint dk = original_lane + METAL_SIMD_SIZE * i;
++      state_row[dk] = decay * s[part * 4 + i] + k[dk] * delta;
++    }
++  }
++  return output;
++}
++
++template <typename T, uint HEAD_K_DIM>
++VARIANTS(T, float, bfloat)
++VARIANTS(HEAD_K_DIM, 128)
++PUBLIC KERNEL(DeltaNetUpdatePacked)(
++    device const T* in_proj,
++    device const float* a_log,
++    device const float* dt_bias,
++    device const float* norm_weight,
++    device float* state,
++    device T* out,
++    constant const uint& num_v_heads,
++    constant const uint& num_k_heads,
++    constant const uint& head_v_dim,
++    constant const uint& key_dim,
++    constant const uint& value_dim,
++    constant const float& norm_epsilon,
++    threadgroup float shared_q[HEAD_K_DIM],
++    threadgroup float shared_k[HEAD_K_DIM],
++    threadgroup float shared_controls[3],
++    threadgroup float shared_o[PACKED_UPDATE_MAX_HEAD_V_DIM],
++    threadgroup float shared_scratch[METAL_SIMD_SIZE],
++    const ThreadContext thread_context,
++    const uint hv_idx GROUPS(num_v_heads),
++    const uint tid THREADS(PACKED_UPDATE_THREADS)
++) {
++  static_assert(HEAD_K_DIM == 128, "packed decode requires Dk=128");
++  constexpr uint LANES_PER_ROW = 4;
++  constexpr uint ROWS_PER_GROUP = PACKED_UPDATE_THREADS / LANES_PER_ROW;
++  const uint lane = tid % METAL_SIMD_SIZE;
++  const uint row_lane = tid % LANES_PER_ROW;
++  const uint row_in_group = tid / LANES_PER_ROW;
++  const uint conv_dim = 2 * key_dim + value_dim;
++  const uint hk = hv_idx / (num_v_heads / num_k_heads);
++
++  // Prepare once per head using the original strided four-element partials.
++  if (tid < METAL_SIMD_SIZE) {
++    float q[4];
++    float k[4];
++    float q_sq = 0.0f;
++    float k_sq = 0.0f;
++    for (uint i = 0; i < 4; ++i) {
++      const uint dk = lane + METAL_SIMD_SIZE * i;
++      q[i] = float(in_proj[hk * HEAD_K_DIM + dk]);
++      k[i] = float(in_proj[key_dim + hk * HEAD_K_DIM + dk]);
++      q_sq += q[i] * q[i];
++      k_sq += k[i] * k[i];
++    }
++    const float q_inv_norm = rsqrt(simd_sum(q_sq) + 1e-6f);
++    const float k_inv_norm = rsqrt(simd_sum(k_sq) + 1e-6f);
++    const float q_scale = rsqrt(float(HEAD_K_DIM));
++    float kq_partial = 0.0f;
++    for (uint i = 0; i < 4; ++i) {
++      const uint dk = lane + METAL_SIMD_SIZE * i;
++      q[i] *= q_inv_norm * q_scale;
++      k[i] *= k_inv_norm;
++      shared_q[dk] = q[i];
++      shared_k[dk] = k[i];
++      kq_partial += q[i] * k[i];
++    }
++    const float kq_dot = simd_sum(kq_partial);
++    if (lane == 0) {
++      shared_controls[0] = kq_dot;
++      const float beta_raw = float(in_proj[conv_dim + value_dim + hv_idx]);
++      shared_controls[1] = 1.0f / (1.0f + fast::exp(-beta_raw));
++      const float a_raw = float(in_proj[conv_dim + value_dim + num_v_heads + hv_idx]);
++      const float sp = activate_softplus(a_raw + float(dt_bias[hv_idx]));
++      shared_controls[2] = fast::exp(-fast::exp(float(a_log[hv_idx])) * sp);
++    }
++  }
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++
++  const float kq_dot = shared_controls[0];
++  const float beta = shared_controls[1];
++  const float decay = shared_controls[2];
++  for (uint dv = row_in_group; dv < head_v_dim; dv += ROWS_PER_GROUP) {
++    const uint state_row = (hv_idx * head_v_dim + dv) * HEAD_K_DIM;
++    float sq[8];
++    float sk[8];
++    float s[32];
++    for (uint part = 0; part < 8; ++part) {
++      const uint original_lane = row_lane * 8 + part;
++      float sq_partial = 0.0f;
++      float sk_partial = 0.0f;
++      for (uint i = 0; i < 4; ++i) {
++        const uint dk = original_lane + METAL_SIMD_SIZE * i;
++        const uint e = part * 4 + i;
++        s[e] = state[state_row + dk];
++        sq_partial += s[e] * shared_q[dk];
++        sk_partial += s[e] * shared_k[dk];
++      }
++      sq[part] = sq_partial;
++      sk[part] = sk_partial;
++    }
++    const float sq_acc = packed_row_sum(sq);
++    const float sk_acc = packed_row_sum(sk);
++    const float v_i = float(in_proj[2 * key_dim + hv_idx * head_v_dim + dv]);
++    const float delta_i = beta * (v_i - decay * sk_acc);
++    const float o_i = decay * sq_acc + delta_i * kq_dot;
++    for (uint part = 0; part < 8; ++part) {
++      const uint original_lane = row_lane * 8 + part;
++      for (uint i = 0; i < 4; ++i) {
++        const uint dk = original_lane + METAL_SIMD_SIZE * i;
++        state[state_row + dk] = decay * s[part * 4 + i] + shared_k[dk] * delta_i;
++      }
++    }
++    if (row_lane == 0) {
++      shared_o[dv] = o_i;
++    }
++  }
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++
++  const float o = tid < head_v_dim ? shared_o[tid] : 0.0f;
++  const float o_sumsq = threadgroup_cooperative_reduce<SimdReduceSum<float>, PACKED_UPDATE_THREADS>(
++      o * o, shared_scratch, thread_context);
++  const float inv_rms = rsqrt(o_sumsq / float(head_v_dim) + norm_epsilon);
++  if (tid < head_v_dim) {
++    const float z = float(in_proj[conv_dim + hv_idx * head_v_dim + tid]);
++    out[hv_idx * head_v_dim + tid] = static_cast<T>(o * inv_rms * norm_weight[tid] * activate_silu(z));
++  }
++}
++
++// The split route exposes eight independent row groups per head to the GPU.
++// Keep the intermediate in float: rounding it to T before RMSNorm would change
++// the fused decode contract for BF16 models.
++template <typename T, uint HEAD_K_DIM>
++VARIANTS(T, float, bfloat)
++VARIANTS(HEAD_K_DIM, 128)
++PUBLIC KERNEL(DeltaNetUpdatePackedRows)(
++    device const T* in_proj,
++    device const float* a_log,
++    device const float* dt_bias,
++    device float* state,
++    device float* out,
++    constant const uint& num_v_heads,
++    constant const uint& num_k_heads,
++    constant const uint& head_v_dim,
++    constant const uint& key_dim,
++    constant const uint& value_dim,
++    threadgroup float shared_q[HEAD_K_DIM],
++    threadgroup float shared_k[HEAD_K_DIM],
++    threadgroup float shared_kq[1],
++    const uint hv_idx GROUPS(num_v_heads),
++    const uint dv_group GROUPS((head_v_dim + 15u) / 16u),
++    const uint tid THREADS(64)
++) {
++  static_assert(HEAD_K_DIM == 128, "packed decode requires Dk=128");
++  const uint lane = tid % METAL_SIMD_SIZE;
++  const uint hk = hv_idx / (num_v_heads / num_k_heads);
++  if (tid < METAL_SIMD_SIZE) {
++    packed_prepare_qk(in_proj, hk, key_dim, lane, shared_q, shared_k, shared_kq);
++  }
++  threadgroup_barrier(mem_flags::mem_threadgroup);
++  const uint dv = dv_group * 16 + tid / 4;
++  if (dv >= head_v_dim) {
++    return;
++  }
++  const uint conv_dim = 2 * key_dim + value_dim;
++  const float beta_raw = float(in_proj[conv_dim + value_dim + hv_idx]);
++  const float beta = 1.0f / (1.0f + fast::exp(-beta_raw));
++  const float a_raw = float(in_proj[conv_dim + value_dim + num_v_heads + hv_idx]);
++  const float sp = activate_softplus(a_raw + dt_bias[hv_idx]);
++  const float decay = fast::exp(-fast::exp(a_log[hv_idx]) * sp);
++  const float value = float(in_proj[2 * key_dim + hv_idx * head_v_dim + dv]);
++  const float output = packed_update_row(
++      state + (hv_idx * head_v_dim + dv) * HEAD_K_DIM,
++      shared_q, shared_k, tid % 4, value, shared_kq[0], beta, decay);
++  if (tid % 4 == 0) {
++    out[hv_idx * head_v_dim + dv] = output;
++  }
++}
++
++template <typename T>
++VARIANTS(T, float, bfloat)
++PUBLIC KERNEL(DeltaNetUpdatePackedNormGate)(
++    device const float* raw,
++    device const T* in_proj,
++    device const float* norm_weight,
++    device T* out,
++    constant const uint& num_v_heads,
++    constant const uint& head_v_dim,
++    constant const uint& value_dim,
++    constant const uint& conv_dim,
++    constant const float& norm_epsilon,
++    threadgroup float shared_scratch[METAL_SIMD_SIZE],
++    const ThreadContext thread_context,
++    const uint hv_idx GROUPS(num_v_heads),
++    const uint tid THREADS(128)
++) {
++  const float value = tid < head_v_dim ? raw[hv_idx * head_v_dim + tid] : 0.0f;
++  const float sumsq = threadgroup_cooperative_reduce<SimdReduceSum<float>, 128>(
++      value * value, shared_scratch, thread_context);
++  if (tid < head_v_dim) {
++    const float inv_rms = rsqrt(sumsq / float(head_v_dim) + norm_epsilon);
++    const float z = float(in_proj[conv_dim + hv_idx * head_v_dim + tid]);
++    out[hv_idx * head_v_dim + tid] = static_cast<T>(value * inv_rms * norm_weight[tid] * activate_silu(z));
++  }
++}
+diff --git a/crates/stark-engine/unit/backends/common/kernel/gdn/update_packed_test.rs b/crates/stark-engine/unit/backends/common/kernel/gdn/update_packed_test.rs
+new file mode 100644
+index 00000000..022dca03
+--- /dev/null
++++ b/crates/stark-engine/unit/backends/common/kernel/gdn/update_packed_test.rs
+@@ -0,0 +1,212 @@
++use std::time::Duration;
++
++use half::bf16;
++use stark_engine_macros::stark_test;
++
++use crate::{
++    array::ArrayElement,
++    backends::{
++        common::{
++            Backend, CommandBufferCompleted, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending,
++            Context, Kernels,
++            kernel::{
++                DeltaNetUpdateKernel, DeltaNetUpdatePackedKernel, DeltaNetUpdatePackedNormGateKernel,
++                DeltaNetUpdatePackedRowsKernel,
++            },
++        },
++        cpu::Cpu,
++    },
++    tests::helpers::{buffer_to_vec, create_buffer, create_buffer_with_data, for_each_backend},
++};
++
++#[derive(Clone, Copy, Debug)]
++enum Variant {
++    Reference,
++    Packed,
++    Split,
++}
++
++fn run<B: Backend, T: ArrayElement>(
++    heads: u32,
++    key_heads: u32,
++    variant: Variant,
++    steps: usize,
++) -> (Vec<f32>, Vec<f32>, Duration) {
++    let context = B::Context::new().expect("context");
++    let key_dim = key_heads * 128;
++    let value_dim = heads * 128;
++    let conv_dim = 2 * key_dim + value_dim;
++    let projection_dim = conv_dim + value_dim + 2 * heads;
++    let mut projection: Vec<f32> = (0..projection_dim).map(|i| (i % 43) as f32 * 0.025 - 0.51).collect();
++    for head in 0..heads {
++        projection[(conv_dim + value_dim + head) as usize] = [-12.0, 0.0, 12.0][head as usize % 3];
++    }
++    let projection: Vec<T> =
++        projection.into_iter().map(|x| <T as num_traits::NumCast>::from(x).expect("activation")).collect();
++    let a: Vec<f32> = (0..heads).map(|i| [-5.0, -1.5, 1.0][i as usize % 3]).collect();
++    let bias: Vec<f32> = (0..heads).map(|i| (i % 7) as f32 * 0.1 - 0.3).collect();
++    let weights: Vec<f32> = (0..128).map(|i| 0.8 + i as f32 * 0.001).collect();
++    let initial: Vec<f32> = (0..heads * 128 * 128).map(|i| (i % 29) as f32 * 0.005 - 0.05).collect();
++    let projection = create_buffer_with_data::<B, T>(&context, &projection);
++    let a = create_buffer_with_data::<B, f32>(&context, &a);
++    let bias = create_buffer_with_data::<B, f32>(&context, &bias);
++    let weights = create_buffer_with_data::<B, f32>(&context, &weights);
++    let mut state = create_buffer_with_data::<B, f32>(&context, &initial);
++    let mut output = create_buffer::<B, T>(&context, value_dim as usize);
++    let mut raw = create_buffer::<B, f32>(&context, value_dim as usize);
++    let reference = <B::Kernels as Kernels>::DeltaNetUpdateKernel::new(&context, T::data_type(), 128).unwrap();
++    let packed = <B::Kernels as Kernels>::DeltaNetUpdatePackedKernel::new(&context, T::data_type(), 128).unwrap();
++    let rows = <B::Kernels as Kernels>::DeltaNetUpdatePackedRowsKernel::new(&context, T::data_type(), 128).unwrap();
++    let norm = <B::Kernels as Kernels>::DeltaNetUpdatePackedNormGateKernel::new(&context, T::data_type()).unwrap();
++    let mut command = context.create_command_buffer(None, None).unwrap();
++    for _ in 0..steps {
++        match variant {
++            Variant::Reference => reference.encode(
++                &projection,
++                &a,
++                &bias,
++                &weights,
++                &mut state,
++                &mut output,
++                heads,
++                key_heads,
++                128,
++                key_dim,
++                value_dim,
++                1e-6,
++                &mut command,
++            ),
++            Variant::Packed => packed.encode(
++                &projection,
++                &a,
++                &bias,
++                &weights,
++                &mut state,
++                &mut output,
++                heads,
++                key_heads,
++                128,
++                key_dim,
++                value_dim,
++                1e-6,
++                &mut command,
++            ),
++            Variant::Split => {
++                rows.encode(
++                    &projection,
++                    &a,
++                    &bias,
++                    &mut state,
++                    &mut raw,
++                    heads,
++                    key_heads,
++                    128,
++                    key_dim,
++                    value_dim,
++                    &mut command,
++                );
++                norm.encode(
++                    &raw,
++                    &projection,
++                    &weights,
++                    &mut output,
++                    heads,
++                    128,
++                    value_dim,
++                    conv_dim,
++                    1e-6,
++                    &mut command,
++                );
++            },
++        }
++    }
++    let complete = command.end_encoding().submit().wait_until_completed().unwrap();
++    let duration = complete.gpu_execution_time();
++    let output = buffer_to_vec::<B, T>(&output).into_iter().map(|x| x.to_f32().expect("output")).collect();
++    (output, buffer_to_vec::<B, f32>(&state), duration)
++}
++
++fn check<T: ArrayElement>(
++    heads: u32,
++    key_heads: u32,
++    steps: usize,
++    output_atol: f32,
++    output_rtol: f32,
++) {
++    let (reference, reference_state, _) = run::<Cpu, T>(heads, key_heads, Variant::Reference, steps);
++    for_each_backend!(|B| {
++        for variant in [Variant::Packed, Variant::Split] {
++            let (output, state, _) = run::<B, T>(heads, key_heads, variant, steps);
++            assert!(output.iter().chain(&state).all(|value| value.is_finite()), "nonfinite packed update");
++            assert!(
++                is_close::default()
++                    .abs_tol(output_atol)
++                    .rel_tol(output_rtol)
++                    .all_close(reference.iter().copied(), output.iter().copied()),
++                "packed output mismatch: {variant:?}, heads={heads}, key_heads={key_heads}, steps={steps}"
++            );
++            assert!(
++                is_close::default()
++                    .abs_tol(1e-4)
++                    .rel_tol(1e-3)
++                    .all_close(reference_state.iter().copied(), state.iter().copied()),
++                "packed state mismatch: {variant:?}, heads={heads}, key_heads={key_heads}, steps={steps}"
++            );
++        }
++    });
++}
++
++#[stark_test]
++fn test_delta_net_update_packed_f32() {
++    for (heads, key_heads) in [(16, 16), (48, 16)] {
++        for steps in [1, 16] {
++            check::<f32>(heads, key_heads, steps, 1e-3, 1e-2);
++        }
++    }
++}
++
++#[stark_test]
++fn test_delta_net_update_packed_bf16() {
++    for (heads, key_heads) in [(16, 16), (48, 16)] {
++        for steps in [1, 16] {
++            check::<bf16>(heads, key_heads, steps, 2e-2, 5e-2);
++        }
++    }
++}
++
++#[cfg(backend = "metal")]
++#[stark_test]
++#[ignore]
++fn benchmark_delta_net_update_packed_gpu_time() {
++    use crate::backends::metal::Metal;
++
++    for heads in [16, 48] {
++        let variants = [Variant::Reference, Variant::Packed, Variant::Split];
++        for variant in variants {
++            let _ = run::<Metal, bf16>(heads, 16, variant, 16);
++        }
++        let mut timings: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::new());
++        for block in 0..6 {
++            let order = if block % 2 == 0 {
++                [0, 1, 2]
++            } else {
++                [2, 1, 0]
++            };
++            for index in order {
++                let (_, _, duration) = run::<Metal, bf16>(heads, 16, variants[index], 256);
++                timings[index].push(duration.as_secs_f64() * 1e6 / 256.0);
++            }
++        }
++        for (index, mut values) in timings.into_iter().enumerate() {
++            values.sort_by(f64::total_cmp);
++            eprintln!(
++                "GDN update GPU aggregate: heads={heads}, key_heads=16, dtype=BF16, variant={:?}, samples={}, updates_per_sample=256, median_us={:.6}, min_us={:.6}, max_us={:.6}",
++                variants[index],
++                values.len(),
++                (values[2] + values[3]) * 0.5,
++                values[0],
++                values[5]
++            );
++        }
++    }
++}

@@ -32,6 +32,7 @@ enum ForwardPassChaining<B: Backend> {
     Constant {
         token: u64,
         output_norm: Option<B::ScratchBuffer>,
+        completed_pool: Option<Arc<B::AllocationPool>>,
     },
     InFlight(DecodingStatePending<B>),
 }
@@ -46,12 +47,13 @@ impl<B: Backend> ForwardPassChaining<B> {
             Self::Constant {
                 token,
                 output_norm,
+                ..
             } => Ok((*token, output_norm.as_ref())),
             Self::InFlight(in_flight) => {
                 assert!(in_flight.full_accept);
-                for pending in replace(&mut in_flight.pending, Box::new([])) {
-                    pending.wait_until_completed().map_err(LanguageModelStreamError::Backend)?;
-                }
+                let completed_pool = in_flight.pending.take().unwrap().wait(|pending| {
+                    pending.wait_until_completed().map(|_| ()).map_err(LanguageModelStreamError::Backend)
+                })?;
                 let output_tokens = in_flight.output_tokens.as_slice::<u32>();
                 assert_eq!(output_tokens.len(), 1);
                 let token_id = output_tokens[0] as u64;
@@ -59,6 +61,7 @@ impl<B: Backend> ForwardPassChaining<B> {
                 *self = Self::Constant {
                     token: token_id,
                     output_norm,
+                    completed_pool,
                 };
                 tokens.push(token_id);
                 #[cfg(grammar)]
@@ -86,12 +89,60 @@ impl<B: Backend> ForwardPassChaining<B> {
             Self::InFlight(pending) => drop(pending.output_norm.take()),
         }
     }
+
+    fn take_completed_pool(&mut self) -> Option<Arc<B::AllocationPool>> {
+        match self {
+            Self::Constant {
+                completed_pool,
+                ..
+            } => completed_pool.take(),
+            Self::InFlight(_) => None,
+        }
+    }
+}
+
+/// Keep a pool unavailable until every submission using its pages completes.
+/// Dropping a CPU pending handle alone is not a GPU completion signal.
+struct SubmittedScratchPool<P, S> {
+    pending: Box<[P]>,
+    reusable_pool: Option<S>,
+}
+
+impl<P, S> SubmittedScratchPool<P, S> {
+    fn new(
+        pending: Box<[P]>,
+        reusable_pool: Option<S>,
+    ) -> Self {
+        Self {
+            pending,
+            reusable_pool,
+        }
+    }
+
+    fn wait<E>(
+        self,
+        mut wait: impl FnMut(P) -> Result<(), E>,
+    ) -> Result<Option<S>, E> {
+        let mut first_error = None;
+        for pending in self.pending {
+            if let Err(error) = wait(pending)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        // Drain every submission on failure, but never publish its pool for reuse.
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(self.reusable_pool),
+        }
+    }
 }
 
 struct DecodingStatePending<B: Backend> {
     input_trie: TrieNode,
     full_accept: bool,
-    pending: Box<[<B::CommandBuffer as CommandBuffer>::Pending]>,
+    pending: Option<SubmittedScratchPool<<B::CommandBuffer as CommandBuffer>::Pending, Arc<B::AllocationPool>>>,
     capture_span: Option<CaptureSpan<B>>,
     hidden_features: Option<Box<[B::ScratchBuffer]>>,
     output_norm: Option<B::ScratchBuffer>,
@@ -133,6 +184,8 @@ pub struct LanguageModelStream<'a, B: Backend> {
     model_state: &'a mut LanguageModelState<B>,
     options: LanguageModelStreamOptions,
     allocation_pool: Arc<B::AllocationPool>,
+    reusable_decode_pool: Option<Arc<B::AllocationPool>>,
+    reuse_decode_pool: bool,
     context_ring: Option<B::GlobalBuffer>,
     decoding_state: DecodingState<B>,
     metrics: TokenStreamMetrics,
@@ -348,7 +401,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             DecodingState::ForwardPassPending(DecodingStatePending {
                 input_trie: TrieNode::new(0, 0, 0.0),
                 full_accept: true,
-                pending,
+                // Large prefill workspaces are released rather than retained
+                // for the stream's single-token decode pool rotation.
+                pending: Some(SubmittedScratchPool::new(pending, None)),
                 capture_span,
                 hidden_features: None,
                 output_norm,
@@ -362,11 +417,20 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             }
         };
 
+        // Speculation and grammar can submit extra work on the active pool.
+        // Keep their existing pool lifecycle until those paths have their own
+        // completion accounting. Ordinary decode has at most two passes live.
+        let reuse_decode_pool = model.speculator.is_none();
+        #[cfg(grammar)]
+        let reuse_decode_pool = reuse_decode_pool && options.grammar.is_none();
+
         Ok(LanguageModelStream {
             model,
             model_state,
             options,
             allocation_pool,
+            reusable_decode_pool: None,
+            reuse_decode_pool,
             context_ring,
             decoding_state,
             metrics,
@@ -391,6 +455,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     ForwardPassChaining::Constant {
                         token: seed_token,
                         output_norm: None,
+                        completed_pool: None,
                     },
                     None,
                 )
@@ -400,9 +465,9 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                     self.metrics.num_tokens_returned += 1;
                     (ForwardPassChaining::InFlight(forward_pass_pending), None)
                 } else {
-                    for pending in forward_pass_pending.pending {
-                        pending.wait_until_completed().map_err(LanguageModelStreamError::Backend)?;
-                    }
+                    forward_pass_pending.pending.unwrap().wait(|pending| {
+                        pending.wait_until_completed().map(|_| ()).map_err(LanguageModelStreamError::Backend)
+                    })?;
                     let sampled_tokens = forward_pass_pending
                         .output_tokens
                         .as_slice::<u32>()
@@ -524,6 +589,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                         ForwardPassChaining::Constant {
                             token: output_token_id,
                             output_norm,
+                            completed_pool: None,
                         },
                         Some(command_buffer),
                     )
@@ -605,7 +671,11 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             pending.push(accept_command_buffer.end_encoding().submit());
         }
 
-        self.allocation_pool = self.model.engine.context.create_allocation_pool();
+        // The previous pass is still in flight while this pass is encoded.
+        // Reuse only a pool returned by a completed earlier pass, never the
+        // active pool whose CPU scratch handles may already have been dropped.
+        self.allocation_pool =
+            self.reusable_decode_pool.take().unwrap_or_else(|| self.model.engine.context.create_allocation_pool());
 
         let mut command_buffer = self
             .model
@@ -770,7 +840,10 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         self.decoding_state = DecodingState::ForwardPassPending(DecodingStatePending {
             input_trie,
             full_accept,
-            pending: pending.into_boxed_slice(),
+            pending: Some(SubmittedScratchPool::new(
+                pending.into_boxed_slice(),
+                self.reuse_decode_pool.then(|| self.allocation_pool.clone()),
+            )),
             capture_span,
             hidden_features: if full_accept {
                 None
@@ -782,15 +855,15 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             _input_token_source: chain_copy,
         });
 
-        Ok(Some(
-            prev_output
-                .resolve(
-                    &mut self.model_state.tokens,
-                    #[cfg(grammar)]
-                    self.options.grammar.as_mut(),
-                )?
-                .0,
-        ))
+        let token = prev_output
+            .resolve(
+                &mut self.model_state.tokens,
+                #[cfg(grammar)]
+                self.options.grammar.as_mut(),
+            )?
+            .0;
+        self.reusable_decode_pool = prev_output.take_completed_pool();
+        Ok(Some(token))
     }
 
     pub fn metrics(&self) -> &TokenStreamMetrics {
@@ -813,9 +886,7 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                 seed_token,
             } => Some(seed_token),
             DecodingState::ForwardPassPending(in_flight) => {
-                for pending in in_flight.pending {
-                    pending.wait_until_completed().unwrap();
-                }
+                in_flight.pending.unwrap().wait(|pending| pending.wait_until_completed().map(|_| ())).unwrap();
 
                 if !in_flight.full_accept {
                     let mut command_buffer = self
@@ -884,5 +955,83 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
         };
 
         self.model_state.last_output_token = last_output_token;
+    }
+}
+
+#[cfg(test)]
+mod decode_pool_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use stark_engine_macros::stark_test;
+
+    use super::SubmittedScratchPool;
+
+    struct Pool {
+        outstanding: Cell<usize>,
+    }
+
+    impl Pool {
+        fn submit(
+            pool: &Rc<Self>,
+            count: usize,
+        ) -> SubmittedScratchPool<Rc<Self>, Rc<Self>> {
+            assert_eq!(pool.outstanding.get(), 0, "attempted to reuse an in-flight scratch pool");
+            pool.outstanding.set(count);
+            SubmittedScratchPool::new(vec![pool.clone(); count].into_boxed_slice(), Some(pool.clone()))
+        }
+
+        fn complete(pool: Rc<Self>) -> Result<(), ()> {
+            pool.outstanding.set(pool.outstanding.get() - 1);
+            Ok(())
+        }
+    }
+
+    #[stark_test]
+    fn decode_pool_rotation_keeps_in_flight_pages_separate() {
+        let first = Rc::new(Pool {
+            outstanding: Cell::new(0),
+        });
+        let second = Rc::new(Pool {
+            outstanding: Cell::new(0),
+        });
+
+        // Encode and submit the next pass before resolving the current pass,
+        // matching the stream's one-token lookahead scheduling.
+        let mut current = Pool::submit(&first, 2);
+        let mut spare = second;
+        for _ in 0..8 {
+            let next = Pool::submit(&spare, 1);
+            let completed = current.wait(Pool::complete).unwrap().unwrap();
+            assert_eq!(completed.outstanding.get(), 0);
+            assert_eq!(spare.outstanding.get(), 1);
+            assert!(!Rc::ptr_eq(&completed, &spare));
+            spare = completed;
+            current = next;
+        }
+        current.wait(Pool::complete).unwrap();
+    }
+
+    #[stark_test]
+    fn decode_pool_wait_failure_never_returns_pool() {
+        for failure_position in 1..=3 {
+            let pool = Rc::new(Pool {
+                outstanding: Cell::new(0),
+            });
+            let submitted = Pool::submit(&pool, 3);
+            let mut waited = 0;
+            let result = submitted.wait(|pending| {
+                waited += 1;
+                Pool::complete(pending)?;
+                if waited == failure_position {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            });
+            assert!(result.is_err());
+            assert_eq!(waited, 3);
+            assert_eq!(pool.outstanding.get(), 0);
+            assert_eq!(Rc::strong_count(&pool), 1);
+        }
     }
 }

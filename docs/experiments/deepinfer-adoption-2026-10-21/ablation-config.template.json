@@ -1,0 +1,48 @@
+{
+  "task_root": "<FRESH_ABLATION_RUNTIME>",
+  "source": "<SOURCE_MODEL_DIR>",
+  "context": 8192,
+  "blocks": 4,
+  "repeats": 3,
+  "engines": [
+    {
+      "id": "stark_reference",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<STARK_MODEL_DIR>/model.safetensors",
+      "command": [
+        "<REFERENCE_BINARY>",
+        "--model-path",
+        "<STARK_MODEL_DIR>"
+      ]
+    },
+    {
+      "id": "stark_metadata",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9+patch:233a3eb5b2821aae42f0a64c83e7992b3e0947fa8e9c2cab650cbff937bd2604",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<STARK_MODEL_DIR>/model.safetensors",
+      "command": [
+        "<METADATA_BINARY>",
+        "--model-path",
+        "<STARK_MODEL_DIR>"
+      ]
+    },
+    {
+      "id": "stark_token_handoff",
+      "kind": "stark",
+      "version": "source",
+      "source_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9+patch:670fce955db18624d930ff7baca0bcb3e6b68e9dc9f20adeb2cb1895c06c1789",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "model_file": "<STARK_MODEL_DIR>/model.safetensors",
+      "command": [
+        "<TOKEN_HANDOFF_BINARY>",
+        "--model-path",
+        "<STARK_MODEL_DIR>"
+      ]
+    }
+  ]
+}

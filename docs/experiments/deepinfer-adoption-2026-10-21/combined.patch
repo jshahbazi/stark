@@ -1,0 +1,219 @@
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 1/7 --- Rust
+ 55  55         name: Option<&str>,
+ 56  56         allocation_pool: Option<Arc<<Metal as Backend>::AllocationPool>>,
+ 57  57     ) -> Result<Self, MetalError> {
+ 58  58         let (command_allocator, command_buffer, argument_table) = if let mut command_buffer_cache =
+ ..  59             context.command_buffer_cache.lock()
+ 59  60             && let Some(command_buffer_cached) = command_buffer_cache.pop()
+ 60  61         {
+ 61  62             command_buffer_cached.command_allocator.reset();
+ 62  63             (
+ ..  64                 command_buffer_cached.command_allocator,
+ ..  65                 command_buffer_cached.command_buffer,
+ ..  66                 command_buffer_cached.argument_table,
+ ..  67             )
+ 63  68         } else {
+ ..  69             let argument_table_descriptor = MTL4ArgumentTableDescriptor::new();
+ ..  70             argument_table_descriptor.set_max_buffer_bind_count(31);
+ ..  71             let argument_table = context
+ ..  72                 .device
+ ..  73                 .new_argument_table_with_descriptor(&argument_table_descriptor)
+ ..  74                 .map_err(|error| MetalError::CannotCreateArgumentTable(error.to_string()))?;
+ 64  75             (
+ 65  76                 context.device.new_command_allocator().ok_or(MetalError::CannotCreateCommandBuffer)?,
+ 66  77                 context.device.new_mtl4_command_buffer().ok_or(MetalError::CannotCreateCommandBuffer)?,
+ ..  78                 argument_table,
+ 67  79             )
+ 68  80         };
+ 69  81 
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 2/7 --- Rust
+ 79             MTL4VisibilityOptions::   91             MTL4VisibilityOptions::
+ .. Device,                               .. Device,
+ 80         );                            92         );
+ 81                                       93 
+ 82         let argument_table_descript   94         // Each encoding owns its t
+ .. or = MTL4ArgumentTableDescriptor::n   .. able. Dispatches overwrite their re
+ .. ew();                                 .. quired
+ 83         argument_table_descriptor.s   95         // bindings; completed tabl
+ .. et_max_buffer_bind_count(31);         .. es can be rebound without allocatin
+ ..                                       .. g again.
+ 84         let argument_table = contex   .. 
+ .. t                                     .. 
+ 85             .device                   .. 
+ 86             .new_argument_table_wit   .. 
+ .. h_descriptor(&argument_table_descri   .. 
+ .. ptor)                                 .. 
+ 87             .map_err(|error| MetalE   .. 
+ .. rror::CannotCreateArgumentTable(err   .. 
+ .. or.to_string()))?;                    .. 
+ 88         compute_encoder.set_argumen   96         compute_encoder.set_argumen
+ .. t_table(Some(&argument_table));       .. t_table(Some(&argument_table));
+ 89                                       97 
+ 90         let constant_allocator = Bu   98         let constant_allocator = Bu
+ .. mpAllocator::new(256 * 1024);         .. mpAllocator::new(256 * 1024);
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 3/7 --- Rust
+220 228         MetalCommandBufferExecutable {
+221 229             command_allocator: self.command_allocator.clone(),
+222 230             command_buffer: self.command_buffer.clone(),
+... 231             argument_table: self.argument_table.clone(),
+223 232             constant_allocator,
+224 233             allocation_pool: self.allocation_pool.clone(),
+225 234             context: self.context.clone(),
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 4/7 --- Rust
+242 251 pub struct MetalCommandBufferExecutable {
+243 252     command_allocator: Retained<ProtocolObject<dyn MTL4CommandAllocator>>,
+244 253     command_buffer: Retained<ProtocolObject<dyn MTL4CommandBuffer>>,
+... 254     argument_table: Retained<ProtocolObject<dyn MTL4ArgumentTable>>,
+245 255     constant_allocator: BumpAllocator<<Metal as Backend>::GlobalBuffer>,
+246 256     allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
+247 257     context: Arc<MetalContext>,
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 5/7 --- Rust
+255 265 
+256 266         let command_allocator = self.command_allocator.clone();
+257 267         let command_buffer = self.command_buffer.clone();
+... 268         let argument_table = self.argument_table.clone();
+258 269         let context_clone = self.context.clone();
+259 270 
+260 271         let constant_allocator = self.constant_allocator;
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 6/7 --- Rust
+265             } else {                 276             } else {
+266                 Ok(Duration::from_s  277                 Ok(Duration::from_s
+... ecs_f64(feedback.gpu_end_time() - f  ... ecs_f64(feedback.gpu_end_time() - f
+... eedback.gpu_start_time()))           ... eedback.gpu_start_time()))
+267             };                       278             };
+268             let _ = sender.send(mes  279             // Publish only success
+... sage);                               ... fully completed resources, before w
+...                                      ... aking a
+...                                      280             // waiter that may imme
+...                                      ... diately start the next encoding.
+...                                      281             if message.is_ok() {
+269             context_clone.command_b  282                 context_clone.comma
+... uffer_cache.lock().push(MetalComman  ... nd_buffer_cache.lock().push(MetalCo
+... dBufferCache {                       ... mmandBufferCache {
+270                 command_allocator:   283                     command_allocat
+... command_allocator.clone(),           ... or: command_allocator.clone(),
+271                 command_buffer: com  284                     command_buffer:
+... mand_buffer.clone(),                 ...  command_buffer.clone(),
+...                                      285                     argument_table:
+...                                      ...  argument_table.clone(),
+272             });                      286                 });
+...                                      287             }
+...                                      288             let _ = sender.send(mes
+...                                      ... sage);
+273             let _keep_alive = (&con  289             let _keep_alive = (&con
+... stant_allocator, &allocation_pool);  ... stant_allocator, &allocation_pool);
+274         };                           290         };
+275                                      291 
+
+crates/stark-engine/src/backends/metal/command_buffer.rs --- 7/7 --- Rust
+320 336 pub struct MetalCommandBufferCache {
+321 337     command_allocator: Retained<ProtocolObject<dyn MTL4CommandAllocator>>,
+322 338     command_buffer: Retained<ProtocolObject<dyn MTL4CommandBuffer>>,
+... 339     argument_table: Retained<ProtocolObject<dyn MTL4ArgumentTable>>,
+323 340 }
+    341 
+    342 #[cfg(test)]
+    343 #[path = "../../../unit/backends/metal/command_buffer_test.rs"]
+    344 mod tests;
+
+crates/stark-engine/src/engine/language_model/stream/stream.rs --- Rust
+684 684             .create_command_buffer(Some("decode"), Some(self.allocation_pool.clone()))
+685 685             .map_err(LanguageModelStreamError::Backend)?;
+... 686 
+... 687         let direct_chained_token = self.model.speculator.is_none();
+... 688         #[cfg(grammar)]
+... 689         let direct_chained_token = direct_chained_token && self.options.grammar.is_none();
+686 690 
+687 691         let scratch_token_ids;
+688 692         let mut constant_token_ids = None;
+689 693         let token_ids: &dyn Buffer<Backend = B> = if let Some(chain_copy) = chain_copy.as_deref() {
+... 694             if direct_chained_token {
+... 695                 // Ordinary decode only reads the preceding pass's one-token
+... 696                 // output. Keep that allocation in _input_token_source until
+... 697                 // this pass completes instead of copying it into scratch.
+... 698                 chain_copy
+... 699             } else {
+690 700                 let mut token_ids = command_buffer
+691 701                     .allocate_scratch(DataType::U32.size_in_bytes())
+692 702                     .map_err(LanguageModelStreamError::Backend)?;
+693 703                 command_buffer.encode_copy(chain_copy, &mut token_ids);
+694 704                 scratch_token_ids = token_ids;
+695 705                 &scratch_token_ids
+696 706             }
+... 707         } else {
+697 708             constant_token_ids.insert(
+698 709                 command_buffer
+
+crates/stark-engine/unit/backends/metal/command_buffer_test.rs --- Rust
+ 1 use stark_engine_macros::stark_test;
+ 2 
+ 3 use super::*;
+ 4 use crate::{
+ 5     backends::common::{BufferMut, BufferRef, Kernels, kernel::TensorAddScaleKernel},
+ 6     data_type::DataType,
+ 7 };
+ 8 
+ 9 #[stark_test]
+10 fn argument_tables_are_exclusive_until_completion() {
+11     let context = MetalContext::new().unwrap();
+12     let first = context.create_command_buffer(None, None).unwrap();
+13     let first_table = first.argument_table.clone();
+14     let second = context.create_command_buffer(None, None).unwrap();
+15     let second_table = second.argument_table.clone();
+16     assert!(!std::ptr::eq(&*first_table, &*second_table));
+17     assert!(context.command_buffer_cache.lock().is_empty());
+18 
+19     let first_pending = first.end_encoding().submit();
+20     let second_pending = second.end_encoding().submit();
+21     first_pending.wait_until_completed().unwrap();
+22     second_pending.wait_until_completed().unwrap();
+23     assert_eq!(context.command_buffer_cache.lock().len(), 2);
+24 
+25     let recycled = context.create_command_buffer(None, None).unwrap();
+26     assert!(
+27         std::ptr::eq(&*recycled.argument_table, &*first_table)
+28             || std::ptr::eq(&*recycled.argument_table, &*second_table)
+29     );
+30     recycled.end_encoding().submit().wait_until_completed().unwrap();
+31 }
+32 
+33 #[stark_test]
+34 fn recycled_argument_tables_rebind_buffers_constants_and_optional_inputs() {
+35     let context = MetalContext::new().unwrap();
+36     let out_of_place =
+37         <<Metal as Backend>::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::F32, false).unwrap();
+38     let in_place =
+39         <<Metal as Backend>::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::F32, true).unwrap();
+40     // Retain earlier buffers so stale bindings cannot accidentally refer to a
+41     // new allocation at the same address.
+42     let mut retained = Vec::new();
+43     for iteration in 0..8 {
+44         let values = [iteration as f32 + 1.0; 8];
+45         let biases = [2.0f32; 8];
+46         let mut input = context.create_buffer(32).unwrap();
+47         input.copyin(&values);
+48         let mut bias = context.create_buffer(32).unwrap();
+49         bias.copyin(&biases);
+50         let mut output = context.create_buffer(32).unwrap();
+51         output.copyin(&values);
+52         let scale = iteration as f32 + 0.5;
+53         let mut command = context.create_command_buffer(None, None).unwrap();
+54         // Vary constant offsets even when the global allocator reuses a page.
+55         drop(command.allocate_constant((iteration + 1) * 64).unwrap());
+56         if iteration % 2 == 0 {
+57             out_of_place.encode(Some(&input), &bias, &mut output, 8, 8, scale, &mut command);
+58         } else {
+59             in_place.encode(None::<&<Metal as Backend>::GlobalBuffer>, &bias, &mut output, 8, 8, scale, &mut command);
+60         }
+61         command.end_encoding().submit().wait_until_completed().unwrap();
+62         assert_eq!(output.copyout::<f32>(), vec![(values[0] + biases[0]) * scale; 8]);
+63         retained.push((input, bias, output));
+64     }
+65 }
+66 
+

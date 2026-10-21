@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "date": "2026-10-20",
+  "host": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "memory_bytes": 137438953472,
+    "macos": "26.7.1",
+    "architecture": "arm64"
+  },
+  "baseline_checkout_commit": "54d113a7034fc0d9bacb4c0653a7713500fb5bbe",
+  "final_engine_commit": "045d0ca6cca8eafae89f32a303e5123f001eaf43",
+  "pool_commit": "00f2534480673e5c08039a8f1552e2a7bba8b1d8",
+  "rust": "1.98.1",
+  "final_build": "cargo +1.98.1 build --release --locked -p stark-generate -p stark-score",
+  "experimental_scoring_features": false,
+  "model_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+  "source_model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+  "native_model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d",
+  "binaries": {
+    "stark-generate-baseline": "299c22d8733232f088a021df2dd0fee72343228e4cf4be0b2d007b681f36fd39",
+    "stark-generate-final": "66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89",
+    "stark-generate-gemv": "3a22c713256d04085e58092b61e6625163af85ac4383af9151da572a0f6f5255",
+    "stark-generate-packed": "62b946ffbe6fc0f84effbec6d335ae4f4f71a0fbe2af65b2cf26568ecdf2a0d0",
+    "stark-generate-pool": "885f2914a12496037f0f2eea8dc077e5ab62ed765bf654f7a9a1ffcda7a0f0eb",
+    "stark-generate-split": "8b0275463bb561a034fe5b78ce782cafcf4cf346e341b1d2b261dbe0b6f47a9e",
+    "stark-score-baseline": "d246d8e5718673a9101c9bfdc151d28be8b47ffa3193353a666cd2a50f7b4095",
+    "stark-score-digest-baseline": "301d279f61cf0f877c13c3889d9240859e4162f6c138002eaa32b7ba72008cc9",
+    "stark-score-digest-final": "c8d40289fcbb958fd6c385e43fd94804254fcea337bf38ce4d158f786a7ce460",
+    "stark-score-digest-gemv": "4868f9aa45327a430d6b875bf397078af9345f646e4ae135d20203905241d890"
+  },
+  "harnesses": {
+    "scripts/benchmark_stock_engines.py": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+    "scripts/stock_compare_mlx.py": "6d84a9acd1e8ba98a1dd76278f8eb17552a0923f294132acee288fcb6a34b228",
+    "scripts/verify_stark_optimization.py": "8d261db769ff71be1c6f7bab9eb7bfaa029aecfd57fddc5402fb09607d44e2ca"
+  },
+  "cargo_lock_sha256": "ebf29f018534a4f6d9a24734f9c0f87dbd78e66b80bf88df7e4c59d96a729cd2",
+  "mlx_current_lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac",
+  "mlx_current_source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+  "rejected_delta_patch_base": "54d113a7034fc0d9bacb4c0653a7713500fb5bbe",
+  "rejected_delta_patch_sha256": "79950e64cc368a96b836d107a192d989e6c2316d0f3c6b7d532fcf02f37d9dc9",
+  "exploration_boundary": "Exploratory binaries have recorded hashes. The retained DeltaNet patch isolates its implementation; the final default source and locked build above bind the confirmation. Unqualified exploratory timing is not promoted to final acceptance.",
+  "prior_packet_provenance_sha256": "d5589af122a6ed43dfad18d9b7249c82c675a18d38f401d95ca6f8b2fceadabf",
+  "private_config_sha256": {
+    "baseline": "f933c4127c9bff49fb9fae26aac7758090802f008e202d9c4d9cefe84ffcd1af",
+    "pool": "4951cb4230caaf494e686f61c258a59e824c6dfe16422b65116a61f337b8d4f5",
+    "kernel": "8be4252867c300a1b46b9107fa9fa7414231583bc4610baa3be894ebc71cbd95",
+    "gemv": "ec988b673f5b6b5b33a1b58e135ef3751de14158b3ad67a815cd913fcce8bd4e",
+    "gemv-confirmation": "08f4531aa27242f8fde1ec17ef5c82834432485e2fd9c0a6c849145837845361",
+    "final": "e946534c9b2fd9245c46bcc95caf4f4400e80e1394366d1905e716b6f7e67a32",
+    "stark-confirmation": "8c454877415aa1347aacadc5eaa3007fae475ff8cbc5d6f7cc7fb0e68ecc597e",
+    "final-attempt-invalid-interpreter": "6cfeb1cac086a5e1a6a25a1f11560ce9ece271d3b49c38dad878ec653a7b150e"
+  }
+}

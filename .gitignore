@@ -43,3 +43,6 @@ tools/gpu_trace/*.json
 .swiftpm/
 Package.resolved
 .dinghy.toml
+
+# Generated website output
+/website/dist/

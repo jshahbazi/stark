@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "engine_source_commit": "045d0ca6cca8eafae89f32a303e5123f001eaf43",
+  "source_scope": "No engine changes after the final measured default release build",
+  "checks": [
+    {"name": "GEMV policy and private BF16 output-bit tests", "passed": 12, "runner": "Rust 1.98.1, release, CPU+Metal, no grammar; RUSTC_BOOTSTRAP=1 for custom lib test harness"},
+    {"name": "Completion-gated pool and live allocator-handle tests", "passed": 3, "runner": "Same engine lib test harness; model-free"},
+    {"name": "Generation worker limits, cleanup and error handling", "passed": 11, "runner": "Rust 1.98.1; stark-generate without native features; unchanged worker code"},
+    {"name": "Stock worker adapter tests", "passed": 4, "runner": "Python unittest"},
+    {"name": "Repository CI unit tests", "passed": 28, "runner": "Python unittest"},
+    {"name": "Default locked release generation and scoring builds", "result": "passed", "runner": "Rust 1.98.1"},
+    {"name": "Default engine check including grammar", "result": "passed", "runner": "Rust 1.98.1"},
+    {"name": "Rust formatting", "result": "passed", "runner": "nightly-2026-10-01 rustfmt"},
+    {"name": "Verifier and analysis Python lint/format", "result": "passed", "runner": "locked converter-tool ruff"},
+    {"name": "Pinned current MLX project offline lock check", "result": "passed"},
+    {"name": "Aggregate privacy, receipt hashes, table populations and local links", "result": "passed"},
+    {"name": "Repository policy with new tracked lock inventory and OSV coverage", "result": "passed"}
+  ],
+  "bounded_numerical_validation": {"cases": 23, "full_vocabulary_bitwise_matches": 23, "cache_enabled": false, "receipt": "final-numerics.json"},
+  "generation_hash_validation": {"fixtures": 10, "token_and_text_hash_matches": 10, "receipts": ["final-corrected-results.json", "stark-confirmation-results.json"]},
+  "performance_qualification": "All whole campaigns timing_accepted=false; accepted paired subsets are descriptive only",
+  "build_warning": "Existing rust-objcopy missing-libLLVM stripping warning; the builds completed successfully"
+}
