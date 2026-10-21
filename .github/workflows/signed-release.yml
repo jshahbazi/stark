@@ -1,0 +1,164 @@
+name: Signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'New immutable distribution version, matching an existing tag on main'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stark-signed-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sign:
+    name: Sign and notarize the verified prebuilt bundle
+    if: github.repository == 'jshahbazi/stark' && github.ref == 'refs/heads/main'
+    runs-on: macos-26
+    timeout-minutes: 60
+    environment: macos-release
+    env:
+      STARK_RELEASE_VERSION: ${{ inputs.version }}
+      STARK_ENGINE_SOURCE: 8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e
+      STARK_INPUT_SHA256: 20f43b0f62fbe58dd026241031856a5f901067a88ed0f9cf27f2c3ea67d9e05b
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          python-version: '3.13.13'
+          enable-cache: false
+      - name: Select pinned Python for the credential helper
+        run: dirname "$(uv python find --managed-python 3.13.13)" >> "$GITHUB_PATH"
+      - name: Require a new version tag on this protected source
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          case "$STARK_RELEASE_VERSION" in
+            ''|*[!0-9A-Za-z.-]*) exit 1 ;;
+          esac
+          printf '%s\n' "$STARK_RELEASE_VERSION" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'
+          test "$STARK_RELEASE_VERSION" != 0.1.0
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/v$STARK_RELEASE_VERSION^{commit}")" = "$GITHUB_SHA"
+          git merge-base --is-ancestor "$STARK_ENGINE_SOURCE" HEAD
+      - name: Download the immutable reviewed input
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stark-input"
+          curl --proto '=https' --tlsv1.2 -fLSs --retry 3 \
+            https://github.com/jshahbazi/stark/releases/download/v0.1.0/stark-0.1.0-aarch64-apple-darwin.tar.gz \
+            -o "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz"
+          printf '%s  %s\n' "$STARK_INPUT_SHA256" "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
+            > "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz.sha256"
+          shasum -a 256 --check "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz.sha256"
+      - name: Test the release tools before importing credentials
+        run: |
+          uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py
+          uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
+            --archive "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
+            --version 0.1.0 --expected-source "$STARK_ENGINE_SOURCE" \
+            --output "$RUNNER_TEMP/stark-input/input-verification.json"
+      - name: Import temporary Apple credentials
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: python .github/scripts/apple_credentials.py setup
+      - name: Sign every native component and require Apple acceptance
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+        run: |
+          uv run --no-project --python 3.13.13 python scripts/sign_distribution.py \
+            --archive "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
+            --input-sha256 "$STARK_INPUT_SHA256" --expected-source "$STARK_ENGINE_SOURCE" \
+            --version "$STARK_RELEASE_VERSION" --sign-identity "$MACOS_SIGNING_IDENTITY" \
+            --keychain "$RUNNER_TEMP/stark-signing/signing.keychain-db" --notary-profile stark-notary \
+            --output-dir artifacts/signed-release
+      - name: Remove temporary Apple credentials
+        if: always()
+        run: python .github/scripts/apple_credentials.py cleanup
+      - name: Verify the signed installation after credential cleanup
+        run: |
+          uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
+            --archive "artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz" \
+            --version "$STARK_RELEASE_VERSION" --expected-source "$STARK_ENGINE_SOURCE" \
+            --expected-distribution-source "$GITHUB_SHA" \
+            --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 --require-notarized \
+            --output artifacts/signed-release/verification.json
+          cp install.sh artifacts/signed-release/install.sh
+      - name: Upload verified signed assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stark-signed-${{ github.sha }}
+          path: artifacts/signed-release/*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Create a draft from the verified signed assets
+    needs: sign
+    if: github.repository == 'jshahbazi/stark' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stark-signed-${{ github.sha }}
+          path: artifacts/signed-release
+      - name: Create a new draft without replacing existing release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STARK_RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$STARK_RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo 'A release already exists for this version; assets are never replaced.' >&2
+            exit 1
+          fi
+          cd artifacts/signed-release
+          stem="stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
+          shasum -a 256 --check "$stem.tar.gz.sha256" "$stem.zip.sha256"
+          printf '%s\n' \
+            "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
+            '' \
+            'The native workers, Python runtime, and native converter dependencies are Developer ID signed with hardened runtime and secure timestamps. Apple accepted the signed contents for notarization; executable tickets were checked online.' \
+            '' \
+            '```sh' \
+            "curl -fL https://github.com/$GH_REPO/releases/download/$tag/install.sh -o stark-install.sh" \
+            "sh stark-install.sh --version $STARK_RELEASE_VERSION" \
+            '```' \
+            '' \
+            'No Rust, Xcode, uv, or system Python setup is required. Models are separate.' \
+            '' \
+            'The signed distribution repackages the verified v0.1.0 engine without rebuilding it. Engine and signing-recipe revisions, archive hashes, Apple acceptance, and model-free installation checks are recorded in the attached JSON receipts.' \
+            '' \
+            'Apple cannot staple tickets to standalone command-line binaries or ZIP files. Gatekeeper retrieves these tickets online. The installer does not remove quarantine attributes or change Gatekeeper settings.' \
+            > "$RUNNER_TEMP/signed-release-notes.md"
+          gh release create "$tag" \
+            "$stem.tar.gz" "$stem.tar.gz.sha256" "$stem.zip" "$stem.zip.sha256" \
+            "$stem.notarization.json" verification.json install.sh \
+            --repo "$GH_REPO" --verify-tag --draft --title "Stark $STARK_RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/signed-release-notes.md"

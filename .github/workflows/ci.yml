@@ -38,13 +38,14 @@ jobs:
       - name: Check repository security policy
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
       - name: Test dependency-report gate
-        run: uv run --no-project --python 3.12.13 python -m unittest discover -s scripts/ci -p 'test_*.py'
+        run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
       - name: Test standalone installation contracts
         run: |
           sh -n install.sh
           sh -n scripts/install-from-source.sh
           sh -n scripts/stark
           uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py scripts/test_build_distribution.py
+          uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py
       - name: Test model-free converter contracts
         env:
           HF_HUB_OFFLINE: '1'
@@ -58,6 +59,8 @@ jobs:
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/build_distribution.py scripts/test_build_distribution.py scripts/test_install.py scripts/test_stark_cli.py
           uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/verify_distribution.py
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/verify_distribution.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/sign_distribution.py scripts/test_sign_distribution.py .github/scripts/apple_credentials.py scripts/test_apple_credentials.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/sign_distribution.py scripts/test_sign_distribution.py .github/scripts/apple_credentials.py scripts/test_apple_credentials.py
       - name: Check installed converter outside the checkout
         env:
           HF_HUB_OFFLINE: '1'
