@@ -8,6 +8,7 @@ import ctypes
 import json
 import os
 import plistlib
+import signal
 import subprocess
 import threading
 import time
@@ -418,8 +419,21 @@ def main():
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
+
+    def interrupt(_signal, _frame):
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, interrupt)
+    signal.signal(signal.SIGTERM, interrupt)
     try:
         run(json.loads(args.config.read_text()), args.output)
+    except KeyboardInterrupt:
+        if args.output.exists():
+            report = json.loads(args.output.read_text())
+            report.update(status="interrupted", timing_accepted=False)
+            report["ended_utc"] = datetime.now(UTC).isoformat()
+            save(args.output, report)
+        raise SystemExit("clean_benchmark_interrupted") from None
     except Exception:  # noqa: BLE001 - never print private worker failures.
         raise SystemExit("clean_benchmark_failed") from None
 
