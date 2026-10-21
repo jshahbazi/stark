@@ -1,0 +1,28 @@
+crates/stark-engine/src/engine/language_model/stream/stream.rs --- Rust
+684 684             .create_command_buffer(Some("decode"), Some(self.allocation_pool.clone()))
+685 685             .map_err(LanguageModelStreamError::Backend)?;
+... 686 
+... 687         let direct_chained_token = self.model.speculator.is_none();
+... 688         #[cfg(grammar)]
+... 689         let direct_chained_token = direct_chained_token && self.options.grammar.is_none();
+686 690 
+687 691         let scratch_token_ids;
+688 692         let mut constant_token_ids = None;
+689 693         let token_ids: &dyn Buffer<Backend = B> = if let Some(chain_copy) = chain_copy.as_deref() {
+... 694             if direct_chained_token {
+... 695                 // Ordinary decode only reads the preceding pass's one-token
+... 696                 // output. Keep that allocation in _input_token_source until
+... 697                 // this pass completes instead of copying it into scratch.
+... 698                 chain_copy
+... 699             } else {
+690 700                 let mut token_ids = command_buffer
+691 701                     .allocate_scratch(DataType::U32.size_in_bytes())
+692 702                     .map_err(LanguageModelStreamError::Backend)?;
+693 703                 command_buffer.encode_copy(chain_copy, &mut token_ids);
+694 704                 scratch_token_ids = token_ids;
+695 705                 &scratch_token_ids
+696 706             }
+... 707         } else {
+697 708             constant_token_ids.insert(
+698 709                 command_buffer
+

@@ -1,0 +1,136 @@
+{
+  "schema": 1,
+  "date": "2026-10-21",
+  "disposition": "all runtime candidates rejected and reverted",
+  "upstream": {
+    "repository": "https://github.com/deepseek-ai/DeepInfer",
+    "commit": "9bd9cf243fc53ef9afbf8f04d391d989117d6ab9",
+    "root_license": "Apache-2.0",
+    "run_upstream_code": false,
+    "copied_upstream_code": false,
+    "source_sha256": {
+      "README.md": "b55624158ada4dc21b882d24ded06bf82f65350b44d170877b68395712cd670d",
+      "LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "deepinfer/worker/worker.py": "ad32e595d9ab289dff1a7709136431ac60dae709e9e5123ae42eb0ebf7c30cbb",
+      "deepinfer/worker/cuda_graph_runner.py": "9f559e88d60d057d23243852616aa9cd7264a59841d580731bec1f8cb8bd57b0",
+      "deepinfer/model_executor/input_metadata/prepare_tensor_input_zos.py": "da306b02a40cfa2cf3ea70f78e49e22984bfcf2348cbf7897fee0238811ce9e7",
+      "deepinfer/model_executor/layers/tilelang_ops/cuda/fused_sample.py": "2b289145a9c28bb869dcc4cb63d80eff845d923a3fc34885366a2caa0411223f",
+      "deepinfer/model_executor/layers/tilelang_ops/cuda/norm.py": "568abbc63ec7d72aed3edaa8ffde9033095eb1421077141c787cabe6628dcb91"
+    }
+  },
+  "stark": {
+    "reference_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+    "reference_engine_code_commit": "045d0ca6cca8eafae89f32a303e5123f001eaf43",
+    "combined_candidate_commit": "f2a5a9885fd8c5b8c2ad01de1cdad558e1a8acaf",
+    "ablation_protocol_commit": "b520b10ea3cd35b7da224558ffa2181f478bf6a4",
+    "restoration_commit": "42ffa85dab0cd5e16872bb677d37f992c2d4b4f0",
+    "restored_trees": [
+      "crates/stark-engine",
+      "crates/stark-generate",
+      "crates/stark-score",
+      "Cargo.lock"
+    ],
+    "diff_from_reference": "",
+    "restored_runtime_file_sha256": {
+      "crates/stark-engine/src/backends/metal/command_buffer.rs": "9274e8707f96ebc9d25f6819424acff7e5d5a6c09706971fe1b91203d0811e20",
+      "crates/stark-engine/src/engine/language_model/stream/stream.rs": "c6219551d091ce00c685ec0bbf21929e5d4907df5331273260d82a5f87284ad8"
+    },
+    "restored_release_binary_sha256": {
+      "stark-generate": "66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89",
+      "stark-score": "a12418b4a0fad4fc970cabbc8b6160509a86a4d9a4dcb876ba2e2c577dc14bdc",
+      "stark-score-digest": "c8d40289fcbb958fd6c385e43fd94804254fcea337bf38ce4d158f786a7ce460"
+    },
+    "combined_candidate_binary_hashes": "candidate-binaries.json",
+    "ablation_source_maps": [
+      "argument-table-provenance.json",
+      "token-handoff-provenance.json"
+    ]
+  },
+  "model": {
+    "repository": "mlx-community/Qwen3.5-2B-MLX-4bit",
+    "revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
+    "source_weights_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+    "stark_weights_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d",
+    "representation": "affine unsigned W4, group64, unchanged repack"
+  },
+  "host": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "memory_gib": 128,
+    "macos": "26.7.1"
+  },
+  "build": {
+    "rust": "1.98.1",
+    "locked": true,
+    "production_bootstrap": false,
+    "command": "cargo +1.98.1 build --release --locked -p stark-generate -p stark-score --bin stark-generate --bin stark-score --bin stark-score-digest",
+    "test_bootstrap_scope": "custom Rust test harness only"
+  },
+  "tool_sha256": {
+    "scripts/benchmark_clean_qwen.py": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+    "scripts/benchmark_stock_engines.py": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+    "scripts/verify_stark_optimization.py": "8d261db769ff71be1c6f7bab9eb7bfaa029aecfd57fddc5402fb09607d44e2ca",
+    "docs/experiments/mlx-optimization-2026-10-20/analyze.py": "e77c30ca797ec4a4646c3fa5d62e87dcb8b562e8d1d67b9a209782e221ae5afa"
+  },
+  "patch_sha256": {
+    "argument-table-only.patch": "233a3eb5b2821aae42f0a64c83e7992b3e0947fa8e9c2cab650cbff937bd2604",
+    "argument-table-only.unified.patch": "5e3552196f2e07f5f29ac396a0a0d848552f3f0634a79d8c9fa88c4d0a9fe626",
+    "combined.patch": "d8183b8c654959caf1d6a07bd1f99a56f1f965ba77f1e8f574b64d3f0f690d9f",
+    "combined.unified.patch": "a1ca9ec05d36ea1de46c12491b6e7f238c7f6746312eed743f5e7437785b834e",
+    "token-handoff-only.patch": "670fce955db18624d930ff7baca0bcb3e6b68e9dc9f20adeb2cb1895c06c1789",
+    "token-handoff-only.unified.patch": "a1ae8801d8cb84a7f85c61ee03bcb2ec04b338c86076648a5ca36b5fab2894a9"
+  },
+  "private_artifacts_excluded": [
+    "model weights",
+    "native binaries",
+    "runtime configurations with local paths",
+    "build logs",
+    "prompt and response payloads",
+    "token vectors and vocabulary logits"
+  ],
+  "source_note": "independently written Rust adaptations; existing Stark/Uzu licensing unchanged",
+  "patch_format_note": "Original runtime .patch artifacts are display diffs from the configured external formatter. Historical ablation source IDs fingerprint those bytes. Separate .unified.patch files are applicable replay artifacts; both are preserved and bound here.",
+  "replay_patches": {
+    "combined": {
+      "historical_display_diff_file": "combined.patch",
+      "historical_display_diff_sha256": "d8183b8c654959caf1d6a07bd1f99a56f1f965ba77f1e8f574b64d3f0f690d9f",
+      "replay_patch_file": "combined.unified.patch",
+      "replay_patch_sha256": "a1ca9ec05d36ea1de46c12491b6e7f238c7f6746312eed743f5e7437785b834e",
+      "format": "standard unified diff; generated with --no-ext-diff --no-color",
+      "base_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+      "target_file_sha256": {
+        "crates/stark-engine/src/backends/metal/command_buffer.rs": "e71579d49e16458ef8de8e9dd8cd5b956d2dbd2eade67606c8ab7029cefa5534",
+        "crates/stark-engine/src/engine/language_model/stream/stream.rs": "054609a9af741958f04116f8b67173e795946ad0d7c9c66ef78220178fe81153",
+        "crates/stark-engine/unit/backends/metal/command_buffer_test.rs": "6c502115c98a18b9b2a4a91b10ff8272a630100d6043f50fb913f8fcd1eff80c"
+      },
+      "git_apply_cached_check": true,
+      "alternate_index_target_bytes_match_candidate": true
+    },
+    "argument-table-only": {
+      "historical_display_diff_file": "argument-table-only.patch",
+      "historical_display_diff_sha256": "233a3eb5b2821aae42f0a64c83e7992b3e0947fa8e9c2cab650cbff937bd2604",
+      "replay_patch_file": "argument-table-only.unified.patch",
+      "replay_patch_sha256": "5e3552196f2e07f5f29ac396a0a0d848552f3f0634a79d8c9fa88c4d0a9fe626",
+      "format": "standard unified diff; generated with --no-ext-diff --no-color",
+      "base_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+      "target_file_sha256": {
+        "crates/stark-engine/src/backends/metal/command_buffer.rs": "e71579d49e16458ef8de8e9dd8cd5b956d2dbd2eade67606c8ab7029cefa5534"
+      },
+      "git_apply_cached_check": true,
+      "alternate_index_target_bytes_match_candidate": true
+    },
+    "token-handoff-only": {
+      "historical_display_diff_file": "token-handoff-only.patch",
+      "historical_display_diff_sha256": "670fce955db18624d930ff7baca0bcb3e6b68e9dc9f20adeb2cb1895c06c1789",
+      "replay_patch_file": "token-handoff-only.unified.patch",
+      "replay_patch_sha256": "a1ae8801d8cb84a7f85c61ee03bcb2ec04b338c86076648a5ca36b5fab2894a9",
+      "format": "standard unified diff; generated with --no-ext-diff --no-color",
+      "base_commit": "8be4b52d770a526ebce8d05ddeb24d9c901403c9",
+      "target_file_sha256": {
+        "crates/stark-engine/src/engine/language_model/stream/stream.rs": "054609a9af741958f04116f8b67173e795946ad0d7c9c66ef78220178fe81153"
+      },
+      "git_apply_cached_check": true,
+      "alternate_index_target_bytes_match_candidate": true
+    }
+  }
+}

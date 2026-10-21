@@ -1,0 +1,104 @@
+diff --git a/crates/stark-engine/src/backends/metal/command_buffer.rs b/crates/stark-engine/src/backends/metal/command_buffer.rs
+index 194b581d..3f5741f8 100644
+--- a/crates/stark-engine/src/backends/metal/command_buffer.rs
++++ b/crates/stark-engine/src/backends/metal/command_buffer.rs
+@@ -55,15 +55,27 @@ impl MetalCommandBufferEncoding {
+         name: Option<&str>,
+         allocation_pool: Option<Arc<<Metal as Backend>::AllocationPool>>,
+     ) -> Result<Self, MetalError> {
+-        let (command_allocator, command_buffer) = if let mut command_buffer_cache = context.command_buffer_cache.lock()
++        let (command_allocator, command_buffer, argument_table) = if let mut command_buffer_cache =
++            context.command_buffer_cache.lock()
+             && let Some(command_buffer_cached) = command_buffer_cache.pop()
+         {
+             command_buffer_cached.command_allocator.reset();
+-            (command_buffer_cached.command_allocator, command_buffer_cached.command_buffer)
++            (
++                command_buffer_cached.command_allocator,
++                command_buffer_cached.command_buffer,
++                command_buffer_cached.argument_table,
++            )
+         } else {
++            let argument_table_descriptor = MTL4ArgumentTableDescriptor::new();
++            argument_table_descriptor.set_max_buffer_bind_count(31);
++            let argument_table = context
++                .device
++                .new_argument_table_with_descriptor(&argument_table_descriptor)
++                .map_err(|error| MetalError::CannotCreateArgumentTable(error.to_string()))?;
+             (
+                 context.device.new_command_allocator().ok_or(MetalError::CannotCreateCommandBuffer)?,
+                 context.device.new_mtl4_command_buffer().ok_or(MetalError::CannotCreateCommandBuffer)?,
++                argument_table,
+             )
+         };
+ 
+@@ -79,12 +91,8 @@ impl MetalCommandBufferEncoding {
+             MTL4VisibilityOptions::Device,
+         );
+ 
+-        let argument_table_descriptor = MTL4ArgumentTableDescriptor::new();
+-        argument_table_descriptor.set_max_buffer_bind_count(31);
+-        let argument_table = context
+-            .device
+-            .new_argument_table_with_descriptor(&argument_table_descriptor)
+-            .map_err(|error| MetalError::CannotCreateArgumentTable(error.to_string()))?;
++        // Each encoding owns its table. Dispatches overwrite their required
++        // bindings; completed tables can be rebound without allocating again.
+         compute_encoder.set_argument_table(Some(&argument_table));
+ 
+         let constant_allocator = BumpAllocator::new(256 * 1024);
+@@ -220,6 +228,7 @@ impl CommandBufferEncoding for MetalCommandBufferEncoding {
+         MetalCommandBufferExecutable {
+             command_allocator: self.command_allocator.clone(),
+             command_buffer: self.command_buffer.clone(),
++            argument_table: self.argument_table.clone(),
+             constant_allocator,
+             allocation_pool: self.allocation_pool.clone(),
+             context: self.context.clone(),
+@@ -242,6 +251,7 @@ impl Drop for MetalCommandBufferEncoding {
+ pub struct MetalCommandBufferExecutable {
+     command_allocator: Retained<ProtocolObject<dyn MTL4CommandAllocator>>,
+     command_buffer: Retained<ProtocolObject<dyn MTL4CommandBuffer>>,
++    argument_table: Retained<ProtocolObject<dyn MTL4ArgumentTable>>,
+     constant_allocator: BumpAllocator<<Metal as Backend>::GlobalBuffer>,
+     allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
+     context: Arc<MetalContext>,
+@@ -255,6 +265,7 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
+ 
+         let command_allocator = self.command_allocator.clone();
+         let command_buffer = self.command_buffer.clone();
++        let argument_table = self.argument_table.clone();
+         let context_clone = self.context.clone();
+ 
+         let constant_allocator = self.constant_allocator;
+@@ -265,11 +276,16 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
+             } else {
+                 Ok(Duration::from_secs_f64(feedback.gpu_end_time() - feedback.gpu_start_time()))
+             };
++            // Publish only successfully completed resources, before waking a
++            // waiter that may immediately start the next encoding.
++            if message.is_ok() {
++                context_clone.command_buffer_cache.lock().push(MetalCommandBufferCache {
++                    command_allocator: command_allocator.clone(),
++                    command_buffer: command_buffer.clone(),
++                    argument_table: argument_table.clone(),
++                });
++            }
+             let _ = sender.send(message);
+-            context_clone.command_buffer_cache.lock().push(MetalCommandBufferCache {
+-                command_allocator: command_allocator.clone(),
+-                command_buffer: command_buffer.clone(),
+-            });
+             let _keep_alive = (&constant_allocator, &allocation_pool);
+         };
+ 
+@@ -320,4 +336,9 @@ impl CommandBufferCompleted for MetalCommandBufferCompleted {
+ pub struct MetalCommandBufferCache {
+     command_allocator: Retained<ProtocolObject<dyn MTL4CommandAllocator>>,
+     command_buffer: Retained<ProtocolObject<dyn MTL4CommandBuffer>>,
++    argument_table: Retained<ProtocolObject<dyn MTL4ArgumentTable>>,
+ }
++
++#[cfg(test)]
++#[path = "../../../unit/backends/metal/command_buffer_test.rs"]
++mod tests;

@@ -1,0 +1,1298 @@
+{
+  "schema": 1,
+  "analysis_harness_sha256": "e77c30ca797ec4a4646c3fa5d62e87dcb8b562e8d1d67b9a209782e221ae5afa",
+  "rate_definition": "actual output tokens / complete client request seconds",
+  "ratio_definition": "geometric mean of paired-load median-rate ratios; performance fixtures only",
+  "receipts": {
+    "combined-results.json": {
+      "receipt_sha256": "8afce7c0d5d858c52dbed047b2f397bb7489a2bffe0dc403ab01a9fbee182b72",
+      "status": "complete",
+      "timing_accepted": false,
+      "failures": [],
+      "all_engine_common_accepted_blocks": [
+        0,
+        2
+      ],
+      "engines": {
+        "stark_reference": {
+          "block_statuses": {
+            "0": "complete",
+            "1": "complete",
+            "2": "complete",
+            "3": "excluded_interference",
+            "4": "excluded_interference",
+            "5": "complete"
+          },
+          "samples_by_fixture_all_blocks": {
+            "fibonacci-module": 30,
+            "gpu-explanation": 30,
+            "copy-edit": 30,
+            "context-medium": 30,
+            "context-long": 30,
+            "long-output": 30,
+            "arithmetic": 6,
+            "prime": 6,
+            "sorting": 6,
+            "python": 6
+          },
+          "hashes": {
+            "fibonacci-module": {
+              "token_sha256": [
+                "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+              ],
+              "text_sha256": [
+                "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+              ]
+            },
+            "gpu-explanation": {
+              "token_sha256": [
+                "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+              ],
+              "text_sha256": [
+                "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+              ]
+            },
+            "copy-edit": {
+              "token_sha256": [
+                "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+              ],
+              "text_sha256": [
+                "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+              ]
+            },
+            "context-medium": {
+              "token_sha256": [
+                "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+              ],
+              "text_sha256": [
+                "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+              ]
+            },
+            "context-long": {
+              "token_sha256": [
+                "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+              ],
+              "text_sha256": [
+                "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+              ]
+            },
+            "long-output": {
+              "token_sha256": [
+                "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+              ],
+              "text_sha256": [
+                "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+              ]
+            },
+            "arithmetic": {
+              "token_sha256": [
+                "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba"
+              ],
+              "text_sha256": [
+                "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36"
+              ]
+            },
+            "prime": {
+              "token_sha256": [
+                "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e"
+              ],
+              "text_sha256": [
+                "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0"
+              ]
+            },
+            "sorting": {
+              "token_sha256": [
+                "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+              ],
+              "text_sha256": [
+                "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3"
+              ]
+            },
+            "python": {
+              "token_sha256": [
+                "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e"
+              ],
+              "text_sha256": [
+                "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+              ]
+            }
+          },
+          "performance": {
+            "fibonacci-module": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 359.08294400807017,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 359.13455749282775,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 360.6457528459056,
+                "1": 358.98347381469466,
+                "2": 359.0091487598269,
+                "5": 359.8990451190779
+              }
+            },
+            "gpu-explanation": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 359.17803632894925,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 359.1367459611929,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 360.6261506252185,
+                "1": 358.83985328366845,
+                "2": 358.76651585676217,
+                "5": 360.5112919954429
+              }
+            },
+            "copy-edit": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 331.1496277024453,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 331.1496277024453,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 332.0573838716585,
+                "1": 330.37974017738446,
+                "2": 330.7673025665037,
+                "5": 332.16836531930466
+              }
+            },
+            "context-medium": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 316.30400135281775,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 316.3601424418449,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 317.3482908059704,
+                "1": 315.8135947477214,
+                "2": 315.35025900380737,
+                "5": 316.739137344366
+              }
+            },
+            "context-long": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 235.36172653994777,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 239.37063507457026,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 243.1424257250905,
+                "1": 225.26499423498888,
+                "2": 229.10505230337392,
+                "5": 236.40692850753214
+              }
+            },
+            "long-output": {
+              "accepted_samples": 20,
+              "accepted_median_tokens_per_second": 343.0194662700379,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 345.573523641487,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 364.1768522712475,
+                "1": 332.71218761459943,
+                "2": 328.9412396552883,
+                "5": 344.28379748394576
+              }
+            }
+          }
+        },
+        "stark_deepinfer": {
+          "block_statuses": {
+            "0": "complete",
+            "1": "excluded_interference",
+            "2": "complete",
+            "3": "excluded_interference",
+            "4": "complete",
+            "5": "excluded_interference"
+          },
+          "samples_by_fixture_all_blocks": {
+            "fibonacci-module": 30,
+            "gpu-explanation": 30,
+            "copy-edit": 30,
+            "context-medium": 30,
+            "context-long": 30,
+            "long-output": 30,
+            "arithmetic": 6,
+            "prime": 6,
+            "sorting": 6,
+            "python": 6
+          },
+          "hashes": {
+            "fibonacci-module": {
+              "token_sha256": [
+                "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+              ],
+              "text_sha256": [
+                "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+              ]
+            },
+            "gpu-explanation": {
+              "token_sha256": [
+                "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+              ],
+              "text_sha256": [
+                "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+              ]
+            },
+            "copy-edit": {
+              "token_sha256": [
+                "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+              ],
+              "text_sha256": [
+                "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+              ]
+            },
+            "context-medium": {
+              "token_sha256": [
+                "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+              ],
+              "text_sha256": [
+                "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+              ]
+            },
+            "context-long": {
+              "token_sha256": [
+                "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+              ],
+              "text_sha256": [
+                "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+              ]
+            },
+            "long-output": {
+              "token_sha256": [
+                "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+              ],
+              "text_sha256": [
+                "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+              ]
+            },
+            "arithmetic": {
+              "token_sha256": [
+                "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba"
+              ],
+              "text_sha256": [
+                "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36"
+              ]
+            },
+            "prime": {
+              "token_sha256": [
+                "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e"
+              ],
+              "text_sha256": [
+                "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0"
+              ]
+            },
+            "sorting": {
+              "token_sha256": [
+                "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+              ],
+              "text_sha256": [
+                "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3"
+              ]
+            },
+            "python": {
+              "token_sha256": [
+                "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e"
+              ],
+              "text_sha256": [
+                "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+              ]
+            }
+          },
+          "performance": {
+            "fibonacci-module": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 358.8293752248471,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 358.83394373182773,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 359.6896131549679,
+                "2": 358.8293752248471,
+                "4": 358.62583193793836
+              }
+            },
+            "gpu-explanation": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 358.99186360157523,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 359.066946663405,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 359.2523622042099,
+                "2": 358.5853950535655,
+                "4": 358.7387802320529
+              }
+            },
+            "copy-edit": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 330.3344804086621,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 330.4316875272467,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 330.6008894337543,
+                "2": 330.3344804086621,
+                "4": 329.9621767189436
+              }
+            },
+            "context-medium": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 315.50299775281457,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 315.4451054428496,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 315.6179408110766,
+                "2": 315.37114016273785,
+                "4": 315.50299775281457
+              }
+            },
+            "context-long": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 233.94855521420791,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 229.8335429042359,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 229.6419290409194,
+                "2": 230.02515676755246,
+                "4": 238.35373928808218
+              }
+            },
+            "long-output": {
+              "accepted_samples": 15,
+              "accepted_median_tokens_per_second": 337.9152641196704,
+              "common_samples": 10,
+              "common_median_tokens_per_second": 337.48162845604827,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 337.93753043869714,
+                "2": 327.9843346363212,
+                "4": 339.91187848868464
+              }
+            }
+          }
+        }
+      },
+      "cross_engine": [
+        {
+          "left": "stark_reference",
+          "right": "stark_deepinfer",
+          "token_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          },
+          "text_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          }
+        }
+      ],
+      "paired_performance": [
+        {
+          "left": "stark_reference",
+          "right": "stark_deepinfer",
+          "paired_accepted_blocks": [
+            0,
+            2
+          ],
+          "fixtures": {
+            "fibonacci-module": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9973488120034891,
+                "2": 0.9994992508252204
+              },
+              "geomean_ratio": 0.998423452453372
+            },
+            "gpu-explanation": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9961905468623757,
+                "2": 0.999495156891205
+              },
+              "geomean_ratio": 0.9978414838689288
+            },
+            "copy-edit": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9956137266971086,
+                "2": 0.9986914602668304
+              },
+              "geomean_ratio": 0.997151406044657
+            },
+            "context-medium": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9945474734069019,
+                "2": 1.000066215765912
+              },
+              "geomean_ratio": 0.9973030272337436
+            },
+            "context-long": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9444749444943209,
+                "2": 1.0040160810725385
+              },
+              "geomean_ratio": 0.9737905485485014
+            },
+            "long-output": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.92794895757678,
+                "2": 0.997090954542611
+              },
+              "geomean_ratio": 0.9618989093855198
+            }
+          },
+          "all_fixture_block_geomean_ratio": 0.987627695103192
+        }
+      ]
+    },
+    "ablation-results.json": {
+      "receipt_sha256": "9f3fa61ee13a3ff0e9b1b2d08c4fa6253064b079d711f645e8acd1a9ca543788",
+      "status": "complete",
+      "timing_accepted": false,
+      "failures": [],
+      "all_engine_common_accepted_blocks": [
+        2,
+        3
+      ],
+      "engines": {
+        "stark_reference": {
+          "block_statuses": {
+            "0": "complete",
+            "1": "complete",
+            "2": "complete",
+            "3": "complete"
+          },
+          "samples_by_fixture_all_blocks": {
+            "fibonacci-module": 12,
+            "gpu-explanation": 12,
+            "copy-edit": 12,
+            "context-medium": 12,
+            "context-long": 12,
+            "long-output": 12,
+            "arithmetic": 4,
+            "prime": 4,
+            "sorting": 4,
+            "python": 4
+          },
+          "hashes": {
+            "fibonacci-module": {
+              "token_sha256": [
+                "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+              ],
+              "text_sha256": [
+                "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+              ]
+            },
+            "gpu-explanation": {
+              "token_sha256": [
+                "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+              ],
+              "text_sha256": [
+                "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+              ]
+            },
+            "copy-edit": {
+              "token_sha256": [
+                "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+              ],
+              "text_sha256": [
+                "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+              ]
+            },
+            "context-medium": {
+              "token_sha256": [
+                "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+              ],
+              "text_sha256": [
+                "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+              ]
+            },
+            "context-long": {
+              "token_sha256": [
+                "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+              ],
+              "text_sha256": [
+                "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+              ]
+            },
+            "long-output": {
+              "token_sha256": [
+                "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+              ],
+              "text_sha256": [
+                "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+              ]
+            },
+            "arithmetic": {
+              "token_sha256": [
+                "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba"
+              ],
+              "text_sha256": [
+                "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36"
+              ]
+            },
+            "prime": {
+              "token_sha256": [
+                "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e"
+              ],
+              "text_sha256": [
+                "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0"
+              ]
+            },
+            "sorting": {
+              "token_sha256": [
+                "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+              ],
+              "text_sha256": [
+                "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3"
+              ]
+            },
+            "python": {
+              "token_sha256": [
+                "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e"
+              ],
+              "text_sha256": [
+                "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+              ]
+            }
+          },
+          "performance": {
+            "fibonacci-module": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 358.2649144876318,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 358.42476343658143,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 360.3765082743718,
+                "1": 357.5486409168363,
+                "2": 358.1762115502697,
+                "3": 358.6733153228931
+              }
+            },
+            "gpu-explanation": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 358.69760903697,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 358.69760903697,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 360.5249159378977,
+                "1": 358.54111552815505,
+                "2": 358.491617783678,
+                "3": 358.89443626009125
+              }
+            },
+            "copy-edit": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 330.40975180094046,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 330.40975180094046,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 331.9183584818296,
+                "1": 330.0963764815596,
+                "2": 330.2530502366523,
+                "3": 330.67754318556274
+              }
+            },
+            "context-medium": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 315.8705610225811,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 315.5315479850643,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 317.38802902671296,
+                "1": 315.92382604798263,
+                "2": 315.5440579329251,
+                "3": 315.5190380372036
+              }
+            },
+            "context-long": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 242.66977762331678,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 242.28289233623792,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 243.4635926414234,
+                "1": 242.69474594683356,
+                "2": 242.29540825005694,
+                "3": 242.18276648024715
+              }
+            },
+            "long-output": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 365.0385209910279,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 364.74211389054904,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 367.2295777877698,
+                "1": 361.99006494319514,
+                "2": 364.4975149064249,
+                "3": 365.20418441307794
+              }
+            }
+          }
+        },
+        "stark_metadata": {
+          "block_statuses": {
+            "0": "excluded_interference",
+            "1": "excluded_interference",
+            "2": "complete",
+            "3": "complete"
+          },
+          "samples_by_fixture_all_blocks": {
+            "fibonacci-module": 12,
+            "gpu-explanation": 12,
+            "copy-edit": 12,
+            "context-medium": 12,
+            "context-long": 12,
+            "long-output": 12,
+            "arithmetic": 4,
+            "prime": 4,
+            "sorting": 4,
+            "python": 4
+          },
+          "hashes": {
+            "fibonacci-module": {
+              "token_sha256": [
+                "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+              ],
+              "text_sha256": [
+                "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+              ]
+            },
+            "gpu-explanation": {
+              "token_sha256": [
+                "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+              ],
+              "text_sha256": [
+                "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+              ]
+            },
+            "copy-edit": {
+              "token_sha256": [
+                "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+              ],
+              "text_sha256": [
+                "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+              ]
+            },
+            "context-medium": {
+              "token_sha256": [
+                "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+              ],
+              "text_sha256": [
+                "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+              ]
+            },
+            "context-long": {
+              "token_sha256": [
+                "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+              ],
+              "text_sha256": [
+                "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+              ]
+            },
+            "long-output": {
+              "token_sha256": [
+                "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+              ],
+              "text_sha256": [
+                "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+              ]
+            },
+            "arithmetic": {
+              "token_sha256": [
+                "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba"
+              ],
+              "text_sha256": [
+                "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36"
+              ]
+            },
+            "prime": {
+              "token_sha256": [
+                "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e"
+              ],
+              "text_sha256": [
+                "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0"
+              ]
+            },
+            "sorting": {
+              "token_sha256": [
+                "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+              ],
+              "text_sha256": [
+                "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3"
+              ]
+            },
+            "python": {
+              "token_sha256": [
+                "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e"
+              ],
+              "text_sha256": [
+                "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+              ]
+            }
+          },
+          "performance": {
+            "fibonacci-module": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 358.1462262078882,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 358.1462262078882,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 357.6739460741485,
+                "3": 359.00721846629307
+              }
+            },
+            "gpu-explanation": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 358.7413029466329,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 358.7413029466329,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 358.4824984267243,
+                "3": 359.14085370282334
+              }
+            },
+            "copy-edit": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 330.3929248365271,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 330.3929248365271,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 330.1616185967494,
+                "3": 330.62423107630474
+              }
+            },
+            "context-medium": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 315.43157515379716,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 315.43157515379716,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 315.2477388199067,
+                "3": 315.8231729816053
+              }
+            },
+            "context-long": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 242.63398470900879,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 242.63398470900879,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 242.60652310078635,
+                "3": 242.66144631723122
+              }
+            },
+            "long-output": {
+              "accepted_samples": 6,
+              "accepted_median_tokens_per_second": 364.39724534538817,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 364.39724534538817,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "2": 364.183749149182,
+                "3": 365.3969233632577
+              }
+            }
+          }
+        },
+        "stark_token_handoff": {
+          "block_statuses": {
+            "0": "complete",
+            "1": "complete",
+            "2": "complete",
+            "3": "complete"
+          },
+          "samples_by_fixture_all_blocks": {
+            "fibonacci-module": 12,
+            "gpu-explanation": 12,
+            "copy-edit": 12,
+            "context-medium": 12,
+            "context-long": 12,
+            "long-output": 12,
+            "arithmetic": 4,
+            "prime": 4,
+            "sorting": 4,
+            "python": 4
+          },
+          "hashes": {
+            "fibonacci-module": {
+              "token_sha256": [
+                "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+              ],
+              "text_sha256": [
+                "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+              ]
+            },
+            "gpu-explanation": {
+              "token_sha256": [
+                "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+              ],
+              "text_sha256": [
+                "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+              ]
+            },
+            "copy-edit": {
+              "token_sha256": [
+                "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+              ],
+              "text_sha256": [
+                "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+              ]
+            },
+            "context-medium": {
+              "token_sha256": [
+                "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+              ],
+              "text_sha256": [
+                "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+              ]
+            },
+            "context-long": {
+              "token_sha256": [
+                "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+              ],
+              "text_sha256": [
+                "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+              ]
+            },
+            "long-output": {
+              "token_sha256": [
+                "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+              ],
+              "text_sha256": [
+                "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+              ]
+            },
+            "arithmetic": {
+              "token_sha256": [
+                "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba"
+              ],
+              "text_sha256": [
+                "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36"
+              ]
+            },
+            "prime": {
+              "token_sha256": [
+                "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e"
+              ],
+              "text_sha256": [
+                "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0"
+              ]
+            },
+            "sorting": {
+              "token_sha256": [
+                "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+              ],
+              "text_sha256": [
+                "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3"
+              ]
+            },
+            "python": {
+              "token_sha256": [
+                "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e"
+              ],
+              "text_sha256": [
+                "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+              ]
+            }
+          },
+          "performance": {
+            "fibonacci-module": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 357.05721347157294,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 356.9864764597704,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 356.98730571176225,
+                "1": 357.1271212313836,
+                "2": 358.8582979712982,
+                "3": 356.1088427656397
+              }
+            },
+            "gpu-explanation": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 358.7769516364624,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 358.9346791770432,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 358.80749767861676,
+                "1": 358.67226814594096,
+                "2": 359.22690444323257,
+                "3": 358.8868067122182
+              }
+            },
+            "copy-edit": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 330.82531052560955,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 330.7481840551447,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 330.8212670117798,
+                "1": 331.0283117172185,
+                "2": 330.8348769448527,
+                "3": 329.9295031335264
+              }
+            },
+            "context-medium": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 315.81097062605033,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 315.9120549148866,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 316.146438876949,
+                "1": 315.6041603040653,
+                "2": 316.4302381892679,
+                "3": 315.59663788764044
+              }
+            },
+            "context-long": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 242.50210263679963,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 242.07527211891772,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 242.63162401448048,
+                "1": 242.94162433772726,
+                "2": 241.5666729577477,
+                "3": 242.11393856404777
+              }
+            },
+            "long-output": {
+              "accepted_samples": 12,
+              "accepted_median_tokens_per_second": 364.63253873913277,
+              "common_samples": 6,
+              "common_median_tokens_per_second": 364.6204871045247,
+              "non_fixed_work_samples_all_blocks": 0,
+              "load_medians": {
+                "0": 364.8559620749953,
+                "1": 364.4091154032702,
+                "2": 364.136868723114,
+                "3": 365.2267406496675
+              }
+            }
+          }
+        }
+      },
+      "cross_engine": [
+        {
+          "left": "stark_reference",
+          "right": "stark_metadata",
+          "token_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          },
+          "text_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          }
+        },
+        {
+          "left": "stark_reference",
+          "right": "stark_token_handoff",
+          "token_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          },
+          "text_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          }
+        },
+        {
+          "left": "stark_metadata",
+          "right": "stark_token_handoff",
+          "token_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          },
+          "text_sha256": {
+            "matching_fixtures": [
+              "fibonacci-module",
+              "gpu-explanation",
+              "copy-edit",
+              "context-medium",
+              "context-long",
+              "long-output",
+              "arithmetic",
+              "prime",
+              "sorting",
+              "python"
+            ],
+            "mismatch_or_missing_fixtures": []
+          }
+        }
+      ],
+      "paired_performance": [
+        {
+          "left": "stark_reference",
+          "right": "stark_metadata",
+          "paired_accepted_blocks": [
+            2,
+            3
+          ],
+          "fixtures": {
+            "fibonacci-module": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9985977140303447,
+                "3": 1.0009309394625563
+              },
+              "geomean_ratio": 0.9997636460931923
+            },
+            "gpu-explanation": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9999745618683915,
+                "3": 1.0006866014566844
+              },
+              "geomean_ratio": 1.0003305183084328
+            },
+            "copy-edit": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9997231467208634,
+                "3": 0.9998387791661193
+              },
+              "geomean_ratio": 0.9997809612717674
+            },
+            "context-medium": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.999060926341128,
+                "3": 1.0009639194715276
+              },
+              "geomean_ratio": 1.000011970238992
+            },
+            "context-long": {
+              "right_over_left_load_median_ratios": {
+                "2": 1.0012840311460147,
+                "3": 1.0019765231190516
+              },
+              "geomean_ratio": 1.0016302172869547
+            },
+            "long-output": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9991391827257767,
+                "3": 1.0005277566862754
+              },
+              "geomean_ratio": 0.9998332286486482
+            }
+          },
+          "all_fixture_block_geomean_ratio": 1.0002248742752693
+        },
+        {
+          "left": "stark_reference",
+          "right": "stark_token_handoff",
+          "paired_accepted_blocks": [
+            0,
+            1,
+            2,
+            3
+          ],
+          "fixtures": {
+            "fibonacci-module": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9905953843139265,
+                "1": 0.9988210843582798,
+                "2": 1.0019043319992589,
+                "3": 0.9928501161148697
+              },
+              "geomean_ratio": 0.9960324478222211
+            },
+            "gpu-explanation": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.995236339616603,
+                "1": 1.0003657951964386,
+                "2": 1.002051056769752,
+                "3": 0.9999787415264706
+              },
+              "geomean_ratio": 0.9994047729826614
+            },
+            "copy-edit": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9966946948187264,
+                "1": 1.002823221646939,
+                "2": 1.0017617602858881,
+                "3": 0.9977378565086998
+              },
+              "geomean_ratio": 0.9997510230688897
+            },
+            "context-medium": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9960881002551628,
+                "1": 0.9989881556325899,
+                "2": 1.0028084200417147,
+                "3": 1.0002459434806836
+              },
+              "geomean_ratio": 0.9995297279061754
+            },
+            "context-long": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.996582780127753,
+                "1": 1.0010172383004443,
+                "2": 0.9969923685406487,
+                "3": 0.9997158017591438
+              },
+              "geomean_ratio": 0.998575327624467
+            },
+            "long-output": {
+              "right_over_left_load_median_ratios": {
+                "0": 0.9935364255595276,
+                "1": 1.0066826432389924,
+                "2": 0.9990105661395154,
+                "3": 1.0000617633574649
+              },
+              "geomean_ratio": 0.9998119420224154
+            }
+          },
+          "all_fixture_block_geomean_ratio": 0.9988499946776943
+        },
+        {
+          "left": "stark_metadata",
+          "right": "stark_token_handoff",
+          "paired_accepted_blocks": [
+            2,
+            3
+          ],
+          "fixtures": {
+            "fibonacci-module": {
+              "right_over_left_load_median_ratios": {
+                "2": 1.0033112613041828,
+                "3": 0.9919266924129395
+              },
+              "geomean_ratio": 0.9976027370081302
+            },
+            "gpu-explanation": {
+              "right_over_left_load_median_ratios": {
+                "2": 1.0020765477248548,
+                "3": 0.999292625753974
+              },
+              "geomean_ratio": 1.0006836186240122
+            },
+            "copy-edit": {
+              "right_over_left_load_median_ratios": {
+                "2": 1.0020391781181737,
+                "3": 0.9978987385754615
+              },
+              "geomean_ratio": 0.9999668153730491
+            },
+            "context-medium": {
+              "right_over_left_load_median_ratios": {
+                "2": 1.0037510161810763,
+                "3": 0.9992827154137355
+              },
+              "geomean_ratio": 1.0015143738602668
+            },
+            "context-long": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9957138409563429,
+                "3": 0.997743738193715
+              },
+              "geomean_ratio": 0.9967282728241452
+            },
+            "long-output": {
+              "right_over_left_load_median_ratios": {
+                "2": 0.9998712726029716,
+                "3": 0.999534252472561
+              },
+              "geomean_ratio": 0.9997027483357238
+            }
+          },
+          "all_fixture_block_geomean_ratio": 0.9993650184163344
+        }
+      ]
+    }
+  }
+}

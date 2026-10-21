@@ -14,6 +14,8 @@ The [2026-10-20 MLX-informed optimization](docs/MLX_GENERATION_OPTIMIZATION_2026
 
 The [quiet-window Qwen3.5-2B follow-up](docs/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md) attributes interfering processes and records Stark's 7.36% throughput advantage over pinned MLX-LM across four clean paired loads, with rejected pairs and quality limits explicit.
 
+The [DeepInfer adoption study](docs/DEEPINFER_ADOPTION_2026_10_21.md) records two independently implemented resource-reuse experiments, exact-output checks and isolated measurements. Neither demonstrated a useful gain; both runtime changes were reverted, with patches and evidence retained.
+
 ## Why Stark
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).
