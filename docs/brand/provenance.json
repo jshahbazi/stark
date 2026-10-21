@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "source": "user-supplied stark-engine.jpg",
+  "date": "2026-10-21",
+  "sha256": "68e23223ec271709bf11e004b662802da68bb1d8dada8d3d30d60bc8fa883dc0",
+  "pixels_modified": false,
+  "copies": [
+    "docs/brand/stark-engine.jpg",
+    "website/public/assets/stark-engine.jpg"
+  ]
+}

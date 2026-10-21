@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "date": "2026-10-21",
+  "stark_source_commit": "2d878e47a72cb8faca0dad76481ee928884eddd4",
+  "site_source_commit": "9681eadb7cca4826f3a7f5ab1de01224231280f1",
+  "site_deployment": {
+    "id": "appgdep_6ad8f959253c81918d08f250383bdf85",
+    "project_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb",
+    "title": "Stark \u2014 native inference on Apple silicon",
+    "version_id": "appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_ac9f4e30a4cc8191a95d6b01ab83308f",
+    "type": "publish",
+    "status": "succeeded",
+    "url": "https://stark-inference.arcanepine32.chatgpt.site",
+    "has_mcp": false,
+    "screenshot_asset_pointer": null,
+    "provider_deployment_id": "site---6ad8f59df1f4819185403a1dff22a0fb",
+    "failure_message": null,
+    "env_set_revision": 0,
+    "updated_at": "2026-10-21T17:41:53.594341+00:00"
+  },
+  "audience": "owner-private",
+  "live_browser_check": "ChatGPT sign-in gate observed; deployment success verified by native Sites result",
+  "website_source_sha256": {
+    "README.md": "f43fb2a0aa454510de7ea91193a4a1dbd54d6cf95ea2ab28cea86d90a69de458",
+    ".gitignore": "5659a93772285503cea96a5707fae696a42cebfb52355be16729fa7abf4f9401",
+    "build.mjs": "7b6587769d747424c21e4fc5e4ec55aa9463ba6e9589d347c9aa46cb6bc28cfe",
+    "public/index.html": "5000fd9079ac986e8e5b1146468507c7a0e53201f4bbaceec0820dc25f8bfae2",
+    "public/styles.css": "5ef9302bfdd65ae2bf6372b07a12ea18d33882f9c2079e883c5508b6aa1f0e9a",
+    "public/app.js": "03b37c7017e30c8167b206283ef41d9727831e8aedcc566c1c0edb95fa32b8f5",
+    ".openai/hosting.json": "e74fbcc4e02cde20778eda1dbde84bbac93ae6b5d7c05175ff0b4b141721acaa",
+    "public/assets/stark-engine.jpg": "68e23223ec271709bf11e004b662802da68bb1d8dada8d3d30d60bc8fa883dc0"
+  },
+  "archive_sha256": "1a3951c9429d0f22a378dfd0490386bb6d0bfa121e395121de3aa996a15d1976",
+  "local_checks": {
+    "node_build": "passed",
+    "javascript_syntax": "passed",
+    "repository_policy": "passed",
+    "whitespace": "passed",
+    "archived_readme": "all original lines preserved after relative-link rebase",
+    "original_logo": "byte-identical copies",
+    "benchmark_table": "six rows and headline match immutable summary.json",
+    "native_source_and_locks": "unchanged"
+  },
+  "browser_checks": {
+    "desktop": {
+      "width": 1440,
+      "height": 1000,
+      "page_horizontal_overflow": false
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "page_horizontal_overflow": false,
+      "benchmark_scroll_region_width": 350,
+      "benchmark_table_width": 550
+    },
+    "controls": [
+      "command tabs",
+      "arrow-key tab selection",
+      "copy confirmation",
+      "rate/relative display",
+      "quality disclosure",
+      "build anchor navigation"
+    ],
+    "github_readme": "rendered original logo at 200px; image natural width1372"
+  },
+  "ci": {
+    "run": "https://github.com/jshahbazi/stark/actions/runs/39645908467",
+    "source_commit": "2d878e47a72cb8faca0dad76481ee928884eddd4",
+    "status": "existing dependency/security gates failed; not a wholly green CI claim",
+    "dependencies_changed_by_this_task": false
+  },
+  "cleanup": {
+    "owned_preview_server_stopped": true,
+    "unrelated_processes_stopped": false,
+    "browser_viewport_override_cleared": true
+  },
+  "limits": [
+    "native inference not rerun for design changes",
+    "copy-selection fallback reviewed but not forced in browser",
+    "fresh-machine source build not requalified",
+    "no public audience change",
+    "no PR or merge"
+  ]
+}
