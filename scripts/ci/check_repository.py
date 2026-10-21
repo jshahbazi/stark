@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
@@ -40,6 +41,19 @@ SCANNED_LOCKFILES = {
     "tools/stock_benchmark/vllm/uv.lock",
 }
 SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+SECRET_REFERENCE = re.compile(r"\bsecrets\s*(?:\.|\[)")
+WORKFLOW_EXPRESSION = re.compile(r"\$\{\{(.*?)\}\}", re.DOTALL)
+SIGNING_SECRETS = {
+    "MACOS_CERTIFICATE_P12_BASE64",
+    "MACOS_CERTIFICATE_PASSWORD",
+    "MACOS_SIGNING_IDENTITY",
+    "APPLE_API_KEY_P8_BASE64",
+    "APPLE_API_KEY_ID",
+    "APPLE_API_ISSUER_ID",
+}
+SIGNING_CONDITION = (
+    "github.repository == 'jshahbazi/stark' && github.ref == 'refs/heads/main'"
+)
 
 
 class UniqueKeyLoader(yaml.SafeLoader):
@@ -183,6 +197,116 @@ def has_secrets_mapping(value: object, seen: set[int] | None = None) -> bool:
     return False
 
 
+def expression(value: object) -> str:
+    result = str(value).strip()
+    if result.startswith("${{") and result.endswith("}}"):
+        result = result[3:-2].strip()
+    return " ".join(result.split())
+
+
+def has_secret_reference(value: str) -> bool:
+    return bool(SECRET_REFERENCE.search(value)) or any(
+        re.search(r"\bsecrets\b", item) for item in WORKFLOW_EXPRESSION.findall(value)
+    )
+
+
+def secret_references(value: object, path: tuple = (), ancestors: frozenset = frozenset()):
+    """Visit each alias location, rejecting recursive YAML objects."""
+    if isinstance(value, (dict, list)):
+        if id(value) in ancestors:
+            raise ValueError("recursive workflow object")
+        ancestors = ancestors | {id(value)}
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if isinstance(key, str) and has_secret_reference(key):
+                yield path + (key,), key
+            yield from secret_references(child, path + (key,), ancestors)
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from secret_references(child, path + (index,), ancestors)
+    elif isinstance(value, str) and has_secret_reference(value):
+        yield path, value
+
+
+def check_signing_workflow(document: object, triggers: object) -> list[str]:
+    """Allow Apple secrets only in the protected manual Stark signing job."""
+    errors: list[str] = []
+    if not isinstance(document, dict):
+        return ["signing workflow must be a mapping"]
+    if not isinstance(triggers, dict) or set(triggers) != {"workflow_dispatch"}:
+        errors.append("signing workflow must have only a manual dispatch trigger")
+    if document.get("permissions") != {"contents": "read"}:
+        errors.append("signing workflow must default to read-only repository access")
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict) or set(jobs) != {"sign", "publish"}:
+        return errors + ["signing workflow must separate sign and publish jobs"]
+    sign, publish = jobs["sign"], jobs["publish"]
+    if not isinstance(sign, dict) or not isinstance(publish, dict):
+        return errors + ["signing workflow jobs must be mappings"]
+    if expression(sign.get("if")) != SIGNING_CONDITION:
+        errors.append("signing job must require the Stark repository and main branch")
+    if sign.get("environment") != "macos-release":
+        errors.append("signing job must use the protected macos-release environment")
+    if sign.get("runs-on") != "macos-26":
+        errors.append("signing job must use the approved Mac runner")
+    if sign.get("permissions", {"contents": "read"}) != {"contents": "read"}:
+        errors.append("signing job must have read-only repository access")
+    if expression(publish.get("if")) != SIGNING_CONDITION:
+        errors.append("publishing job must require the Stark repository and main branch")
+    if publish.get("needs") not in ("sign", ["sign"]):
+        errors.append("publishing job must depend on successful signing")
+    if publish.get("permissions") != {"contents": "write"}:
+        errors.append("publishing job must have only release upload permission")
+    if "environment" in publish:
+        errors.append("publishing job must not enter a credential environment")
+
+    steps = sign.get("steps")
+    if not isinstance(steps, list):
+        return errors + ["signing job must contain credential setup and cleanup steps"]
+    allowed: dict[tuple, str] = {}
+    imports: list[int] = []
+    signing: list[int] = []
+    cleanup: list[int] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            continue
+        run = str(step.get("run", "")).strip()
+        environment = step.get("env", {})
+        if step.get("name") == "Import temporary Apple credentials":
+            imports.append(index)
+            if run != "python .github/scripts/apple_credentials.py setup":
+                errors.append("credential import must use the reviewed setup helper")
+            expected = {name: f"${{{{ secrets.{name} }}}}" for name in SIGNING_SECRETS}
+            if environment != expected:
+                errors.append("credential import must receive only the six Apple secrets")
+            for name in SIGNING_SECRETS:
+                allowed[("jobs", "sign", "steps", index, "env", name)] = f"secrets.{name}"
+        elif isinstance(environment, dict) and "MACOS_SIGNING_IDENTITY" in environment:
+            signing.append(index)
+            if "scripts/sign_distribution.py" not in run:
+                errors.append("signing identity must be scoped to the reviewed signer")
+            if environment["MACOS_SIGNING_IDENTITY"] != "${{ secrets.MACOS_SIGNING_IDENTITY }}":
+                errors.append("signer must receive the configured Apple signing identity")
+            allowed[("jobs", "sign", "steps", index, "env", "MACOS_SIGNING_IDENTITY")] = (
+                "secrets.MACOS_SIGNING_IDENTITY"
+            )
+        if run == "python .github/scripts/apple_credentials.py cleanup":
+            cleanup.append(index)
+            if expression(step.get("if")) != "always()":
+                errors.append("credential cleanup must run unconditionally")
+    if len(imports) != 1 or len(signing) != 1 or len(cleanup) != 1:
+        errors.append("signing job must have one credential import, signer and cleanup")
+    elif not imports[0] < signing[0] < cleanup[0]:
+        errors.append("credential cleanup must follow import and signing")
+    try:
+        for path, value in secret_references(document):
+            if allowed.get(path) != expression(value):
+                errors.append("Apple secrets must remain scoped to approved signing steps")
+    except ValueError:
+        errors.append("signing workflow must not contain recursive YAML objects")
+    return errors
+
+
 def check_workflows(paths: list[Path]) -> list[str]:
     errors: list[str] = []
     for path in paths:
@@ -214,8 +338,8 @@ def check_workflows(paths: list[Path]) -> list[str]:
                     if not job_is_disabled(definition):
                         errors.append(f"inherited workflow job is not disabled: {relative}:{job}")
 
-        # Disabled inherited jobs retain historical references. All active
-        # workflows must avoid untrusted pull_request_target and secrets.
+        # Disabled inherited jobs retain historical references. The dedicated
+        # protected manual signing job is the sole active Apple-secret consumer.
         disabled = path.parent.name == "workflows" and path.name in INHERITED_DISABLED
         if not disabled:
             if isinstance(document, dict) and True in document:
@@ -226,7 +350,9 @@ def check_workflows(paths: list[Path]) -> list[str]:
                 triggers = None
             if has_trigger(triggers, "pull_request_target"):
                 errors.append(f"pull_request_target is forbidden in active workflow: {relative}")
-            if re.search(r"\bsecrets\s*(?:\.[A-Za-z_][A-Za-z0-9_]*|\[['\"][A-Za-z_][A-Za-z0-9_]*['\"]\])", text):
+            if relative == ".github/workflows/signed-release.yml":
+                errors.extend(f"{error}: {relative}" for error in check_signing_workflow(document, triggers))
+            elif has_secret_reference(text):
                 errors.append(f"secrets reference is forbidden in active workflow: {relative}")
             if has_secrets_mapping(document):
                 errors.append(f"secrets mapping is forbidden in active workflow: {relative}")
@@ -236,7 +362,15 @@ def check_workflows(paths: list[Path]) -> list[str]:
     return errors
 
 
-def main() -> int:
+def main(arguments: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--test", action="store_true", help="run CI policy tests with the locked YAML parser")
+    options = parser.parse_args(arguments)
+    if options.test:
+        import unittest
+
+        suite = unittest.defaultTestLoader.discover(str(ROOT / "scripts" / "ci"), pattern="test_*.py")
+        return 0 if unittest.TextTestRunner().run(suite).wasSuccessful() else 1
     files = tracked_files()
     errors = check_tracked_policy(files)
     # git ls-files includes pending working-tree deletions until they are staged.
