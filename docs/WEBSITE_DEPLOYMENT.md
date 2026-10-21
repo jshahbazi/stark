@@ -70,3 +70,15 @@ The earlier Stark build stays paired with its original pilot results. The page i
 - Uploaded archive content hash: `sha256:598c45f5267c5dfaa8380874fa48fc918cceefaa2f9c7202cb90a790055c38b4`.
 
 Independent evidence review checked all 36 stock generation rates and eight scoring latencies against the retained report. Browser checks covered all six selector choices, tab click/ArrowRight/Home/End navigation, scoring disclosure, the existing relative-rate control and direct fragment navigation. All three panels had document width 390 at a 390-pixel viewport; desktop and mobile screenshots were inspected. Static build, JavaScript syntax, repository policy and whitespace checks passed. Anonymous GETs returned HTTP 200 for the public page and script, preserving the source body and exact script bytes. Native inference and benchmark acquisition were not rerun for this presentation update.
+
+## Withdrawal of historical front-page comparisons (2026-10-21, 20:47 UTC)
+
+The multi-engine expansion above was withdrawn from the marketing page because it used a pre-optimization Stark build and did not answer how the promoted build compares with the other engines. The historical reports and receipts remain unchanged. No old timing value was relabelled or replaced with a newer value from a different campaign. The public page again shows the newer Qwen3.5-2B Stark/MLX-LM comparison, with its original limitations.
+
+- Corrective Stark source commit: `cd15f068` on `codex/site-engine-benchmarks`.
+- Site source commit: `33c6727734db95828035d95b0dabc882a82624b9`.
+- Saved version 7: `appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_e67ea33e1978819182cfa02e6df8ddad`.
+- Deployment: `appgdep_6ad924e201948191b7b949cd0ff1934e`, succeeded at `2026-10-21T20:47:35.494516+00:00`.
+- Uploaded archive content hash: `sha256:493dc0c53b55624303ee9d101fd40c6db5050e797b4f1e3b26703dbfa211a9f7`.
+
+An immediate rollback to saved version 5 preceded the source correction, using deployment `appgdep_6ad9242d35208191857bda11fc5d727f`. Anonymous HTTP and browser checks confirmed the older table was absent and the newer Stark rates were restored. A [separate fresh campaign protocol](experiments/current-engines-2026-10-21/PROTOCOL.md) was frozen before any new admission or measurement, to obtain contemporaneous results rather than reusing the historical pilot.
