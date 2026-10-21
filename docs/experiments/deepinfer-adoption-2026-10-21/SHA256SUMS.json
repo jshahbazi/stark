@@ -1,0 +1,22 @@
+{
+  "ABLATION_PROTOCOL.md": "70f6ee9caaba78439b579539cbe661debc95f99d3cda00f8495ad3180389cb52",
+  "PROTOCOL.md": "51bfc54f07be29f52f3c8e6f5e745c22e4f53e4f61cddc8164dc2a2091645dcd",
+  "PROVENANCE.json": "fb91fca65920990872a9f76439b0d42619a79051a90db0c1c250b7f7f6f2137c",
+  "ablation-config.template.json": "32f403bb4105926723c411db52af7d35689f528d5853a0fe5bc5efbbf5255eb9",
+  "ablation-results.json": "9f3fa61ee13a3ff0e9b1b2d08c4fa6253064b079d711f645e8acd1a9ca543788",
+  "analysis.json": "ccd9bfe9f53cee717dc29b2f6dcbb704ae2853faeaba53a839d100b699e393b1",
+  "argument-table-only.patch": "233a3eb5b2821aae42f0a64c83e7992b3e0947fa8e9c2cab650cbff937bd2604",
+  "argument-table-only.unified.patch": "5e3552196f2e07f5f29ac396a0a0d848552f3f0634a79d8c9fa88c4d0a9fe626",
+  "argument-table-provenance.json": "222d1d8e7d9f68185dcbc469a152e9fee75aaf30516715521c384e73f0d51c95",
+  "candidate-binaries.json": "74a67394647fefcdb976f7c2c60010083bcfd1913034e986ffa8e44d10f9d4b6",
+  "combined-config.template.json": "21c7ce03cb4f676a66f6e1a8403cfcec024f54e7319ab9d205495549cde8feab",
+  "combined-results.json": "8afce7c0d5d858c52dbed047b2f397bb7489a2bffe0dc403ab01a9fbee182b72",
+  "combined.patch": "d8183b8c654959caf1d6a07bd1f99a56f1f965ba77f1e8f574b64d3f0f690d9f",
+  "combined.unified.patch": "a1ca9ec05d36ea1de46c12491b6e7f238c7f6746312eed743f5e7437785b834e",
+  "numerics.json": "dfd417cd2b94a6ac6f7f47f8776683369608192162aae84fe90153b3dce265e9",
+  "process-cleanup.json": "ae962fb3f1751013471b7bcae90214f86fc0b0d8db19449c41bfb26c490f35c2",
+  "token-handoff-only.patch": "670fce955db18624d930ff7baca0bcb3e6b68e9dc9f20adeb2cb1895c06c1789",
+  "token-handoff-only.unified.patch": "a1ae8801d8cb84a7f85c61ee03bcb2ec04b338c86076648a5ca36b5fab2894a9",
+  "token-handoff-provenance.json": "208bf3697c1575e2855576410d93edf4a1fcd50c58179c45e7e5a2f236ef1117",
+  "validation.json": "24026a447c7218eba2207a17597a18cd46a72395ebd37c02dc26604adc289c09"
+}
