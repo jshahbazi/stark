@@ -21,7 +21,7 @@
   <header class="site-header">
     <a class="wordmark" href="#" aria-label="Stark home">STARK<span>ENGINE / APPLE SILICON</span></a>
     <nav aria-label="Main navigation">
-      <a href="#engine">Engine</a><a href="#benchmarks">Benchmarks</a><a href="#start">Get started</a>
+      <a href="#benchmarks">Benchmarks</a><a href="#start">Get started</a><a href="#engine">Engine</a>
       <a class="repo-link" href="https://github.com/jshahbazi/stark">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
@@ -50,31 +50,9 @@
       </div>
     </section>
 
-    <section class="engine-section wrap section-pad" id="engine" aria-labelledby="engine-title">
-      <div class="section-heading"><p class="eyebrow">01 / THE ENGINE</p><h2 id="engine-title">Run models.<br>Build your app.</h2><p>The building blocks for assistants, local workflows and AI features on your Mac.</p></div>
-      <div class="engine-grid">
-        <div class="capabilities">
-          <article><span class="index">01</span><div><h3>Generate locally.</h3><p>Generate text on your Mac and connect it to your application. You control the chat experience and tools.</p></div></article>
-          <article><span class="index">02</span><div><h3>Score decisions directly.</h3><p>Get candidate scores and probabilities for applications that make structured decisions.</p></div></article>
-          <article><span class="index">03</span><div><h3>Prepare your models.</h3><p>Convert supported Hugging Face and MLX checkpoints for Stark. Check model compatibility before getting started.</p></div></article>
-        </div>
-        <div class="terminal">
-          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>BUILD COMMANDS</span></div>
-          <div class="code-tabs" role="tablist" aria-label="Worker commands"><button type="button" role="tab" id="tab-generate" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
-          <div id="command-panel" role="tabpanel" aria-labelledby="tab-generate" tabindex="0"><pre><code id="command-code">cargo +1.98.1 build --release --locked \
-  -p stark-generate
-
-./target/release/stark-generate \
-  --model-path /path/to/converted-model</code></pre></div>
-          <div class="terminal-bottom"><span>Run from the repository folder</span><button type="button" class="copy-button" id="copy-command">Copy commands</button></div>
-          <p class="copy-status" id="copy-status" aria-live="polite"></p>
-        </div>
-      </div>
-    </section>
-
     <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
       <div class="wrap">
-        <div class="benchmark-heading"><div><p class="eyebrow">02 / BENCHMARKS</p><h2 id="benchmark-title">More tokens.<br>Less waiting.</h2></div><p><strong>7.36% higher generation throughput overall</strong> in our Qwen3.5-2B comparison with MLX-LM. Stark led all six workloads.</p></div>
+        <div class="benchmark-heading"><div><p class="eyebrow">01 / BENCHMARKS</p><h2 id="benchmark-title">More tokens.<br>Less waiting.</h2></div><p><strong>7.36% higher generation throughput overall</strong> in our Qwen3.5-2B comparison with MLX-LM. Stark led all six workloads.</p></div>
         <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>QWEN3.5-2B / 4-BIT</span><span>ONE REQUEST AT A TIME</span></div>
         <div class="chart-toolbar"><div class="chart-key"><span><i class="key-stark"></i>Stark</span><span><i class="key-mlx"></i>MLX-LM</span></div><div class="view-switch" role="group" aria-label="Throughput display"><button type="button" class="active" aria-pressed="true" data-view="rate">Tokens / second</button><button type="button" aria-pressed="false" data-view="relative">Speedup</button></div></div>
         <div class="table-scroll" tabindex="0" role="region" aria-label="Benchmark results, scroll horizontally on small screens">
@@ -93,8 +71,30 @@
     </section>
 
     <section class="start-section section-pad wrap" id="start" aria-labelledby="start-title">
-      <div class="start-heading"><p class="eyebrow">03 / GET STARTED</p><h2 id="start-title">Build it on<br>your Mac.</h2><p>Stark currently requires a source build. You'll need Apple's Metal tools, Rust and <code>uv</code>. An installer isn't available yet.</p><a class="button primary" href="https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/README.md#quickstart">Open the setup guide <span aria-hidden="true">↗</span></a></div>
+      <div class="start-heading"><p class="eyebrow">02 / GET STARTED</p><h2 id="start-title">Build it on<br>your Mac.</h2><p>Stark currently requires a source build. You'll need Apple's Metal tools, Rust and <code>uv</code>. An installer isn't available yet.</p><a class="button primary" href="https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/README.md#quickstart">Open the setup guide <span aria-hidden="true">↗</span></a></div>
       <ol class="start-steps"><li><span>01</span><div><h3>Install the build tools.</h3><p>Use an Apple silicon Mac with Xcode's Metal tools, Rust 1.98.1 and <code>uv</code> for the converter.</p></div></li><li><span>02</span><div><h3>Convert a supported model.</h3><p>Choose a supported checkpoint and prepare it with Stark's converter. The documentation lists model compatibility and tested configurations.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/MODEL_CONVERSION_PLAN.md">Supported models <span aria-hidden="true">↗</span></a></div></li><li><span>03</span><div><h3>Connect Stark to your app.</h3><p>Build the generation or scoring worker, then connect it to your application using the documented interface.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/GENERATION.md">Generation guide <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div></li></ol>
+    </section>
+
+    <section class="engine-section wrap section-pad" id="engine" aria-labelledby="engine-title">
+      <div class="section-heading"><p class="eyebrow">03 / THE ENGINE</p><h2 id="engine-title">Run models.<br>Build your app.</h2><p>The building blocks for assistants, local workflows and AI features on your Mac.</p></div>
+      <div class="engine-grid">
+        <div class="capabilities">
+          <article><span class="index">01</span><div><h3>Generate locally.</h3><p>Generate text on your Mac and connect it to your application. You control the chat experience and tools.</p></div></article>
+          <article><span class="index">02</span><div><h3>Score decisions directly.</h3><p>Get candidate scores and probabilities for applications that make structured decisions.</p></div></article>
+          <article><span class="index">03</span><div><h3>Prepare your models.</h3><p>Convert supported Hugging Face and MLX checkpoints for Stark. Check model compatibility before getting started.</p></div></article>
+        </div>
+        <div class="terminal">
+          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>BUILD COMMANDS</span></div>
+          <div class="code-tabs" role="tablist" aria-label="Worker commands"><button type="button" role="tab" id="tab-generate" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
+          <div id="command-panel" role="tabpanel" aria-labelledby="tab-generate" tabindex="0"><pre><code id="command-code">cargo +1.98.1 build --release --locked \
+  -p stark-generate
+
+./target/release/stark-generate \
+  --model-path /path/to/converted-model</code></pre></div>
+          <div class="terminal-bottom"><span>Run from the repository folder</span><button type="button" class="copy-button" id="copy-command">Copy commands</button></div>
+          <p class="copy-status" id="copy-status" aria-live="polite"></p>
+        </div>
+      </div>
     </section>
 
     <section class="evidence-section wrap"><div><p class="eyebrow">BUILT IN THE OPEN</p><h2>Inspect the work.</h2></div><div class="evidence-links"><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/STARK_BENCHMARK_BRIEF_2026_10_21.md"><span>01</span> Benchmark write-up <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/INFERENCE_COMPARISON_EVIDENCE.md"><span>02</span> Comparison inventory <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/VALIDATION.md"><span>03</span> Validation &amp; provenance <span aria-hidden="true">↗</span></a></div></section>
