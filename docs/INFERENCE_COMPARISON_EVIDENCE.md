@@ -1,5 +1,7 @@
 # Stark comparisons: evidence inventory and future benchmark plan
 
+Follow-up: [2026-10-20 MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) adds source investigation, before/after Stark measurements, current MLX-LM results, rejected kernel experiments and explicit timing exclusions. Its modified Stark build is a separate comparison from the earlier stock pilot.
+
 Compiled: **2026-10-19**. Status: historical evidence and research for a future
 benchmark. No new model runs or article publication were performed for this
 document.

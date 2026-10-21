@@ -1,0 +1,67 @@
+{
+  "python": "3.13.13",
+  "implementation": "CPython",
+  "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+  "mlx_lm_direct_url": {
+    "url": "https://github.com/ml-explore/mlx-lm.git",
+    "vcs_info": {
+      "vcs": "git",
+      "commit_id": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+      "requested_revision": "72be8c955d9a0d3099bd01865af288e0e947c3fa"
+    }
+  },
+  "package_versions": {
+    "Jinja2": "3.1.6",
+    "MarkupSafe": "3.0.4",
+    "PyYAML": "6.0.3",
+    "Pygments": "2.21.0",
+    "annotated-doc": "0.0.5",
+    "anyio": "4.15.1",
+    "click": "8.5.0",
+    "filelock": "4.2.2",
+    "fsspec": "2026.9.0",
+    "h11": "0.16.0",
+    "hf-xet": "1.7.0",
+    "httpcore2": "2.13.1",
+    "httpx2": "2.13.1",
+    "huggingface_hub": "2.2.0",
+    "idna": "3.20",
+    "markdown-it-py": "4.2.0",
+    "mdurl": "0.1.2",
+    "mlx": "0.32.4",
+    "mlx-lm": "0.32.3.dev6+g72be8c955",
+    "mlx-metal": "0.32.4",
+    "numpy": "2.5.4",
+    "packaging": "26.3",
+    "protobuf": "7.36.2",
+    "regex": "2026.9.29",
+    "rich": "15.0.0",
+    "safetensors": "0.8.0",
+    "sentencepiece": "0.2.2",
+    "shellingham": "1.5.4",
+    "tokenizers": "0.23.3",
+    "tqdm": "4.70.1",
+    "transformers": "5.20.1",
+    "truststore": "0.10.5",
+    "typer": "0.27.3",
+    "typing_extensions": "4.16.0"
+  },
+  "package_differences_from_stock_venv": [
+    {
+      "name": "filelock",
+      "old": "4.2.1",
+      "current": "4.2.2"
+    },
+    {
+      "name": "mlx-lm",
+      "old": "0.32.2",
+      "current": "0.32.3.dev6+g72be8c955"
+    }
+  ],
+  "files": {
+    "pyproject.toml": "a3192142ea7baa55a9abbb0ab715d856984248a926dc97e44f9f5803217378f0",
+    "uv.lock": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac",
+    "source-comparison.json": "0c2384ad5861720aa81345c4767b4ff6fe9fbc09e04873e5cd8d73c76154f2e5"
+  },
+  "no_gpu_or_model_execution": true
+}

@@ -85,6 +85,7 @@ jobs:
             -L tools/uv.lock \
             -L tools/converter/uv.lock \
             -L tools/stock_benchmark/mlx/uv.lock \
+            -L tools/stock_benchmark/mlx_current/uv.lock \
             -L tools/stock_benchmark/vllm/uv.lock \
             -L crates/legacy/stark/bindings/python/uv.lock \
             -L crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \
@@ -104,6 +105,7 @@ jobs:
             --lockfile tools/uv.lock \
             --lockfile tools/converter/uv.lock \
             --lockfile tools/stock_benchmark/mlx/uv.lock \
+            --lockfile tools/stock_benchmark/mlx_current/uv.lock \
             --lockfile tools/stock_benchmark/vllm/uv.lock \
             --lockfile crates/legacy/stark/bindings/python/uv.lock \
             --lockfile crates/legacy/stark/bindings/typescript/pnpm-lock.yaml \

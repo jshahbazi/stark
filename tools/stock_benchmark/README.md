@@ -1,6 +1,6 @@
 # Stock benchmark runtimes
 
-These directories preserve the exact dependency locks used for the
+The `mlx` and `vllm` projects preserve the exact dependency locks used for the
 [2026-10-19 stock-engine pilot](../../docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md).
 They are separate projects so the root
 tool environment and application dependencies remain unchanged.
@@ -19,6 +19,15 @@ The MLX runtime uses stock `mlx_lm.utils.load` and `stream_generate`; its
 worker keeps prompt and output payloads on a private pipe and writes only
 aggregate hashes and scalar timings. Flat JevK5 admission must fail closed if
 the stock loader does not support its exact `qwen3_5_text` configuration.
+
+The separate `mlx_current` project pins upstream MLX-LM revision
+`72be8c955d9a0d3099bd01865af288e0e947c3fa` for the 2026-10-20 optimization
+comparison. It preserves that run's lock byte for byte and uses Python 3.13.
+Replay it in a separate task-owned environment:
+
+```sh
+UV_PROJECT_ENVIRONMENT=/absolute/path/to/task-runtime/mlx-current/.venv UV_CACHE_DIR=/absolute/path/to/task-runtime/uv-cache uv run --project tools/stock_benchmark/mlx_current --locked python -c 'import importlib.metadata; print(importlib.metadata.version("mlx-lm"))'
+```
 
 The vLLM lock was admitted on Apple silicon for the exact Qwen checkpoint in the
 report. Its worker RPC sockets must use an owned short temporary directory

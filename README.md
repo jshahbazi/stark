@@ -10,6 +10,8 @@ The [comparison evidence inventory](docs/INFERENCE_COMPARISON_EVIDENCE.md) colle
 
 The [2026-10-19 stock engine pilot](docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md) records current Qwen3.5-2B generation, JevK5 scoring and vLLM Metal concurrency results, including support failures and excluded timings.
 
+The [2026-10-20 MLX-informed optimization](docs/MLX_GENERATION_OPTIMIZATION_2026_10_20.md) records two decode changes, bounded bitwise validation and modest Qwen3.5-2B throughput gains, with timing exclusions and the unresolved current MLX ranking retained.
+
 ## Why Stark
 
 - **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md).

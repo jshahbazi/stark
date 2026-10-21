@@ -13,7 +13,9 @@ from benchmark_stock_engines import Pipe, generation_fixtures, save, sha
 
 
 def score_token_sha(ids):
-    return hashlib.sha256(b"".join(value.to_bytes(4, "little") for value in ids)).hexdigest()
+    return hashlib.sha256(
+        b"".join(value.to_bytes(4, "little") for value in ids)
+    ).hexdigest()
 
 
 def run(args):
@@ -30,7 +32,11 @@ def run(args):
         rows = []
         with contextlib.ExitStack() as stack:
             worker = Pipe(
-                [str(binary.resolve()), "--score-model-path", str(args.model.resolve())],
+                [
+                    str(binary.resolve()),
+                    "--score-model-path",
+                    str(args.model.resolve()),
+                ],
                 stack,
                 Path.cwd(),
                 dict(os.environ),
@@ -101,13 +107,18 @@ def main():
     args = parser.parse_args()
     try:
         return run(args)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - native diagnostics must stay private
         category = str(exc) if isinstance(exc, RuntimeError) else type(exc).__name__
         if not category.replace("_", "").isalnum() or len(category) > 80:
             category = "verification_failed"
         save(
             args.output,
-            {"schema": 1, "status": "failed", "error": category, "harness_sha256": sha(__file__)},
+            {
+                "schema": 1,
+                "status": "failed",
+                "error": category,
+                "harness_sha256": sha(__file__),
+            },
         )
         print(json.dumps({"status": "failed", "error": category}))
         return 2
