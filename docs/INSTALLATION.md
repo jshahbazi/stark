@@ -2,16 +2,16 @@
 
 Stark runs on an Apple silicon Mac with macOS 26.4 or newer. The native engine currently compiles Metal 4 kernels for that minimum OS. Use a native arm64 terminal; Intel Macs and Rosetta terminals are rejected.
 
-Install the [v0.1.0 prebuilt release](https://github.com/jshahbazi/stark/releases/tag/v0.1.0) without a source checkout or developer tools:
+Install the [v0.1.1 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.1) without a source checkout or developer tools:
 
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.0/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.0
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.1/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.1
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 ```
 
-The installer downloads and verifies the versioned archive and installs to `~/.local`, without sudo. Add `~/.local/bin` to your shell profile to keep it on PATH. The runtime includes Python and the converter; Rust, Xcode and uv are only needed to build Stark itself.
+The installer downloads and verifies the versioned archive and installs to `~/.local`, without sudo. Add `~/.local/bin` to your shell profile to keep it on PATH. The runtime includes Python and the converter; Rust, Xcode and uv are only needed to build Stark itself. The signed release includes Developer ID signatures, hardened runtime and secure timestamps for every runtime-loadable native component, including the private Python interpreter and extensions.
 
 The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
 
@@ -44,7 +44,7 @@ stark doctor
 
 ## Install a prebuilt archive
 
-A bundle contains the native scoring and generation workers, embedded Metal kernels, a private Python runtime, the converter with locked dependencies, provenance and license notices. No compiler, package manager or Python setup is needed on the receiving Mac. Installing a local archive requires no network access.
+A bundle contains the native scoring and generation workers, embedded Metal kernels, a private Python runtime, the converter with locked dependencies, provenance and license notices. No compiler, package manager or Python setup is needed on the receiving Mac. A local archive supplies the installation files; macOS may need a network connection to retrieve its notarization tickets on first execution.
 
 Keep the archive, its adjacent `.sha256` file and the companion `install.sh` together. The builder emits all three; the receiving Mac does not need a source checkout:
 
@@ -59,7 +59,7 @@ sh install.sh --archive /path/to/stark-VERSION-aarch64-apple-darwin.tar.gz \
   --sha256 SHA256
 ```
 
-Replace `VERSION` and `SHA256` with the archive's actual version and hash. Checksums detect corruption and can verify an independently obtained expected hash. An adjacent checksum has the same publisher trust as the archive. Archives are not Developer ID signed or notarized by this tooling. If macOS blocks a downloaded executable, use the normal macOS approval flow only after verifying its source; the installer does not remove quarantine attributes or change Gatekeeper settings.
+Replace `VERSION` and `SHA256` with the archive's actual version and hash. Checksums detect corruption and can verify an independently obtained expected hash. An adjacent checksum has the same publisher trust as the archive. Release `v0.1.0` and direct source builds remain unsigned. The separate signing action creates signed releases and records Apple's acceptance in an attached notarization receipt. Apple issues online tickets for standalone executables but cannot staple tickets to them or to ZIP files. The installer does not remove quarantine attributes or change Gatekeeper settings. See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
 
 For a published GitHub release tagged `vVERSION` containing the three files, download its installer, then let it download and verify the archive and checksum:
 
@@ -137,7 +137,7 @@ The builder uses separate Cargo invocations for the optimized scorer and default
 
 Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
-The builder creates local archives. The [manual tagged release workflow](RELEASING.md) builds and verifies an archive on a GitHub-hosted Mac, then creates a draft for publication. The inherited Uzu release, cloud and signing workflows remain disabled.
+The builder creates local archives. The [release workflows](RELEASING.md) build unsigned input archives or sign and notarize a pinned reviewed input on a GitHub-hosted Mac, then create a draft for publication. The signing action retains the engine's original source identity and records its signing recipe separately. The inherited Uzu release, cloud and signing workflows remain disabled.
 
 ## What other engines do
 
