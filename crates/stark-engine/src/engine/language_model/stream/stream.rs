@@ -684,26 +684,15 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             .create_command_buffer(Some("decode"), Some(self.allocation_pool.clone()))
             .map_err(LanguageModelStreamError::Backend)?;
 
-        let direct_chained_token = self.model.speculator.is_none();
-        #[cfg(grammar)]
-        let direct_chained_token = direct_chained_token && self.options.grammar.is_none();
-
         let scratch_token_ids;
         let mut constant_token_ids = None;
         let token_ids: &dyn Buffer<Backend = B> = if let Some(chain_copy) = chain_copy.as_deref() {
-            if direct_chained_token {
-                // Ordinary decode only reads the preceding pass's one-token
-                // output. Keep that allocation in _input_token_source until
-                // this pass completes instead of copying it into scratch.
-                chain_copy
-            } else {
-                let mut token_ids = command_buffer
-                    .allocate_scratch(DataType::U32.size_in_bytes())
-                    .map_err(LanguageModelStreamError::Backend)?;
-                command_buffer.encode_copy(chain_copy, &mut token_ids);
-                scratch_token_ids = token_ids;
-                &scratch_token_ids
-            }
+            let mut token_ids = command_buffer
+                .allocate_scratch(DataType::U32.size_in_bytes())
+                .map_err(LanguageModelStreamError::Backend)?;
+            command_buffer.encode_copy(chain_copy, &mut token_ids);
+            scratch_token_ids = token_ids;
+            &scratch_token_ids
         } else {
             constant_token_ids.insert(
                 command_buffer
