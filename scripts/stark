@@ -68,7 +68,7 @@ case "$command" in
         ;;
     convert)
         [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
-        exec "$python" -I -B -m stark_convert.cli "$@"
+        exec "$python" -I -B -c 'import sys; from stark_convert.cli import main; sys.argv[0] = "stark-convert"; raise SystemExit(main())' "$@"
         ;;
     score|generate)
         case "$command" in

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -633,6 +634,33 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             environment,
             cwd=relocated,
         )
+        converter_version = tomllib.loads(
+            (ROOT / "tools" / "converter" / "pyproject.toml").read_text()
+        )["project"]["version"]
+        version_reply = run(
+            [str(launcher), "convert", "--version"],
+            "relocated_launcher_converter_version",
+            environment,
+            cwd=relocated,
+        )
+        if (
+            version_reply.stdout.decode().strip()
+            != f"stark-convert {converter_version}"
+            or version_reply.stderr
+        ):
+            raise BuildError("relocated_launcher_converter_version_identity")
+        help_reply = run(
+            [str(launcher), "convert", "--help"],
+            "relocated_launcher_converter_help",
+            environment,
+            cwd=relocated,
+        )
+        if (
+            re.search(r"(?m)^usage: stark-convert(?:\s|$)", help_reply.stdout.decode())
+            is None
+            or help_reply.stderr
+        ):
+            raise BuildError("relocated_launcher_converter_help_identity")
         for name in ("stark-score", "stark-generate"):
             verify_native(relocated / "libexec" / name, environment)
     finally:
