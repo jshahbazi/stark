@@ -4,6 +4,8 @@ Stark runs on an Apple silicon Mac with macOS 26.4 or newer. The native engine c
 
 The installer and bundle builder are available in this source tree. This change does not publish a public binary release. Today, use the source installer or install a locally built archive. Once a version is published, the same installer can download its exact release assets.
 
+The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
+
 ## Install from a source checkout
 
 The source build requires Xcode with its Metal Toolchain, [rustup](https://rustup.rs), and [uv 0.12.24](https://github.com/astral-sh/uv/releases/tag/0.12.24). Select Xcode in **Xcode > Settings > Locations > Command Line Tools**. Command Line Tools alone do not provide the required Metal compiler.
