@@ -107,6 +107,13 @@ The reply contains:
 | `finish_reason` | `eos`, `stop_token`, `length` or `context` |
 | `stop_token_id` | Terminal stop ID, otherwise `null` |
 | `generation_seconds` | Generation, cleanup and decoding duration in seconds |
+| `prefill_seconds` | Native state/stream setup through receipt of the first sampled token; wall-clock prefill proxy |
+| `decode_seconds` | Time between receipt of the first and last sampled tokens; `null` when fewer than two tokens were sampled |
+| `input_tokens_per_second` | `input_tokens / prefill_seconds`; `null` for an unmeasurable duration |
+| `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`; `null` when there are no subsequent samples or the duration is unmeasurable |
+| `timing_method` | `first-token-wall-clock-v1` for these stage metrics |
+
+Stage metrics describe the last completed request and exclude prompt tokenization. The input rate is a first-token wall-clock proxy: it includes native state allocation, prefill command encoding, GPU waiting, sampling, and any lookahead decode encoding performed before the iterator returns its first token. It is not isolated GPU prefill timing. The output rate counts subsequent sampling steps, including a terminal EOS or caller stop when present; the first sample belongs to prefill. Stream draining, state cleanup, and text decoding remain included in `generation_seconds` and are excluded from `decode_seconds`. These additive measurements do not extend existing source-bound performance qualification to a new worker build.
 
 `length` means the requested output limit was reached; `context` means fewer output slots were available than requested. Returned prompt-plus-sampled counts stay within `context_tokens`. There is no silent input truncation.
 
