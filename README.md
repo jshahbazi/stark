@@ -17,7 +17,7 @@
   <a href="website/README.md">Website source</a>
 </p>
 
-Stark is an experimental, open-source engine for applications that run models locally on a Mac. Its native workers expose a JSON-lines interface; your application controls the chat template, tools and user experience. Build from source with Rust 1.98.1 and Xcode's Metal tools.
+Stark is an experimental, open-source engine for applications that run models locally on a Mac. Its native workers expose a JSON-lines interface; your application controls the chat template, tools and user experience. Install the prebuilt Mac release below, or [build from source](docs/INSTALLATION.md#install-from-a-source-checkout).
 
 | Generate | Score | Prepare |
 | --- | --- | --- |
@@ -43,17 +43,20 @@ Four of six planned pairs passed the frozen host guards; two were excluded for i
 
 ## Quickstart
 
-Use an Apple silicon Mac, Xcode's Metal tools, Rust **1.98.1** and `uv`. Run from the repository root. Stark currently ships as source; the commands below prepare a model and launch the native generation worker.
+Use an Apple silicon Mac with **macOS 26.4 or newer**. The [v0.1.0 prebuilt release](https://github.com/jshahbazi/stark/releases/tag/v0.1.0) includes the workers, converter and a private Python runtime. No source checkout, Rust, Xcode, uv or system Python setup is required.
 
 ```sh
-uv sync --project tools/converter --locked
-uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
-  --output models/qwen3
-cargo +1.98.1 build --release --locked -p stark-generate
-./target/release/stark-generate --model-path "$PWD/models/qwen3"
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.0/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.0
+export PATH="$HOME/.local/bin:$PATH"
+stark doctor
+stark convert Qwen/Qwen3-0.6B --output models/qwen3
+stark generate --model-path "$PWD/models/qwen3"
 ```
 
-Use a new output directory for each conversion. The worker exposes `tokenize`, `decode` and `generate` over private stdin/stdout pipes. The caller renders the model's exact chat template. See [request examples and the generation contract](docs/GENERATION.md), or follow the [scoring setup](docs/TECHNICAL_OVERVIEW.md#run-the-scoring-worker) for decision models such as JevK5.
+Installation defaults to `~/.local` without sudo and verifies the archive checksum before installing. Add `~/.local/bin` to your shell profile to keep it on PATH. See [installation, updates and uninstall](docs/INSTALLATION.md).
+
+Use a new output directory for each conversion. The worker exposes `tokenize`, `decode` and `generate` over private stdin/stdout pipes. The caller renders the model's exact chat template. See [request examples and the generation contract](docs/GENERATION.md), or use `stark score --score-model-path /absolute/path/to/model` for decision models such as JevK5.
 
 For downloaded or fine-tuned checkpoints, follow the [offline conversion and generic-model instructions](tools/converter/README.md#future-checkpoints-and-architecture-tracking). Generic outputs start native-unverified; check the exact model/configuration's qualification before relying on it.
 
