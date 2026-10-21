@@ -1,6 +1,6 @@
 # Public website deployment
 
-## Public addresses
+## Initial domain setup snapshot (2026-10-21, 18:29 UTC)
 
 | Address | Observed status on 2026-10-21 |
 | --- | --- |
@@ -56,3 +56,17 @@ curl -q -I https://starkengine.io/
 The static build, JavaScript syntax, repository policy, 28 repository-policy tests, README relative links and whitespace checks passed. Anonymous HTTP checks confirmed the `.app` page and logo load; the served page preserves the source body, all six benchmark rows and the `.app` canonical URL. The logo matches the original asset hash. Browser verification confirmed the custom-domain page renders with the expected headline and collapsed methodology notes.
 
 The merge's [Security run](https://github.com/jshahbazi/stark/actions/runs/39652388275) reproduced the existing 12 blocking dependency advisories in Rust/Python lockfiles. [CI](https://github.com/jshahbazi/stark/actions/runs/39652388227) was still running for scorer and inherited dependency compatibility checks when this receipt was prepared; repository, TypeScript binding and both process-lifecycle jobs had passed. These checks are separate from successful website publication. Native benchmarks were not rerun for domain configuration.
+
+## Benchmark expansion (2026-10-21, 18:44 UTC)
+
+The public site now includes three comparison views: the Oct-20 Stark/MLX-LM follow-up, the Oct-19 multi-engine generation pilot and JevK5 BF16 scoring. The [multi-engine view](https://starkengine.app/#bench-engines) opens directly through its fragment URL. Its selector covers all six workloads for Stark, MLX-LM, vLLM Metal, llama.cpp and TensorFold with default drafting or drafting disabled.
+
+The earlier Stark build stays paired with its original pilot results. The page identifies llama.cpp's different quantizer, MetalRT's unmeasured status and the low JevK5 public accuracy. vLLM's separate concurrency-eight diagnostic is excluded from the cross-engine chart. Methodology, excluded-run counts and quality details remain in closed disclosure controls and linked immutable reports.
+
+- Stark website source commit: `d426e2697a96d5658e62da69cd972e159f17b6be` on `codex/site-engine-benchmarks`.
+- Site source commit: `260b8347fcec4ada6f1e0ed6bfd549ef9afb2046`.
+- Saved version 6: `appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_71af78f860c48191a5b24758fd7b0082`.
+- Deployment: `appgdep_6ad907f5a0b48191980f83102a5ab438`, succeeded at `2026-10-21T18:44:13.193734+00:00`.
+- Uploaded archive content hash: `sha256:598c45f5267c5dfaa8380874fa48fc918cceefaa2f9c7202cb90a790055c38b4`.
+
+Independent evidence review checked all 36 stock generation rates and eight scoring latencies against the retained report. Browser checks covered all six selector choices, tab click/ArrowRight/Home/End navigation, scoring disclosure, the existing relative-rate control and direct fragment navigation. All three panels had document width 390 at a 390-pixel viewport; desktop and mobile screenshots were inspected. Static build, JavaScript syntax, repository policy and whitespace checks passed. Anonymous GETs returned HTTP 200 for the public page and script, preserving the source body and exact script bytes. Native inference and benchmark acquisition were not rerun for this presentation update.
