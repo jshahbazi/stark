@@ -1,0 +1,113 @@
+name: Prebuilt release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version without v, matching the selected tag'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stark-prebuilt-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-draft:
+    name: Build, verify and draft Apple silicon release
+    runs-on: macos-26
+    timeout-minutes: 90
+    # The token is supplied to the final gh step only. Build and verification
+    # commands receive no publishing credential, and checkout retains none.
+    permissions:
+      contents: write
+    env:
+      STARK_RELEASE_VERSION: ${{ inputs.version }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Require an existing version tag merged into main
+        run: |
+          set -euo pipefail
+          case "$STARK_RELEASE_VERSION" in
+            ''|*[!0-9A-Za-z.-]*) echo 'Invalid release version.' >&2; exit 1 ;;
+          esac
+          printf '%s\n' "$STARK_RELEASE_VERSION" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'
+          test "$GITHUB_REF" = "refs/tags/v$STARK_RELEASE_VERSION"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse "refs/tags/v$STARK_RELEASE_VERSION^{commit}")" = "$GITHUB_SHA"
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Check Apple silicon and Metal tools
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Build the standalone release bundle
+        run: |
+          set -euo pipefail
+          uv run --no-project --python 3.13.13 python scripts/build_distribution.py \
+            --version "$STARK_RELEASE_VERSION"
+      - name: Verify standalone installation without a model
+        run: |
+          set -euo pipefail
+          archive="artifacts/distributions/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz"
+          uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
+            --archive "$archive" --version "$STARK_RELEASE_VERSION" \
+            --expected-source "$GITHUB_SHA" --output "$RUNNER_TEMP/verification.json"
+      - name: Create an immutable draft with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="v$STARK_RELEASE_VERSION"
+          if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo 'A release already exists for this tag; existing assets are never replaced.' >&2
+            exit 1
+          fi
+          archive="artifacts/distributions/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz"
+          printf '%s\n' \
+            "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
+            '' \
+            'Includes the scoring and generation workers, embedded Metal kernels, and the converter with its own Python runtime. Rust, Xcode, uv and system Python are not required to install this bundle.' \
+            '' \
+            'Install without a source checkout:' \
+            '' \
+            '```sh' \
+            "curl -fL https://github.com/$GH_REPO/releases/download/$tag/install.sh -o stark-install.sh" \
+            "sh stark-install.sh --version $STARK_RELEASE_VERSION" \
+            '```' \
+            '' \
+            'The installer verifies the archive checksum and checks the installed workers and converter before activating the version.' \
+            '' \
+            'Installation, offline synthetic conversion, file hashes, relocation and uninstall were checked without loading a model. These checks do not qualify model outputs or performance on other Macs.' \
+            '' \
+            'This preview is not Developer ID signed or notarized. The inherited release, cloud and signing workflows remain disabled.' \
+            '' \
+            "Source commit: $GITHUB_SHA" \
+            > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$tag" \
+            "$archive" "$archive.sha256" artifacts/distributions/install.sh \
+            --repo "$GH_REPO" --verify-tag --draft \
+            --title "Stark $STARK_RELEASE_VERSION" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"
