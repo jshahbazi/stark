@@ -1,0 +1,7 @@
+[project]
+name = "stark-mlx-current-comparison"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "mlx-lm @ git+https://github.com/ml-explore/mlx-lm.git@72be8c955d9a0d3099bd01865af288e0e947c3fa",
+]

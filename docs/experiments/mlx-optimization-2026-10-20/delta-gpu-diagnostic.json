@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "scope": "Synthetic DeltaNet update GPU-duration diagnostic; not end-to-end generation",
+  "source_patch": "rejected-packed-delta.patch",
+  "test": "benchmark_delta_net_update_packed_gpu_time",
+  "runner": "Rust 1.98.1 custom engine lib test harness, CPU+Metal, BF16 activations, float state",
+  "test_binary_sha256": null,
+  "binary_hash_coverage_gap": "Not captured before the lib test executable was rebuilt",
+  "measurement": "Command-buffer GPU duration divided by 256 recurrent updates; six alternating-order samples after warmup",
+  "qualification": "Diagnostic only: no sampled host guard or continuous GPU-clock, thermal or power controls",
+  "samples": [
+    {"heads": 16, "key_heads": 16, "variant": "reference", "sample_count": 6, "updates_per_sample": 256, "median_us": 11.817953, "min_us": 9.697266, "max_us": 22.242023},
+    {"heads": 16, "key_heads": 16, "variant": "packed", "sample_count": 6, "updates_per_sample": 256, "median_us": 15.892984, "min_us": 12.113281, "max_us": 28.401855},
+    {"heads": 16, "key_heads": 16, "variant": "split", "sample_count": 6, "updates_per_sample": 256, "median_us": 9.057779, "min_us": 8.495117, "max_us": 12.790852},
+    {"heads": 48, "key_heads": 16, "variant": "reference", "sample_count": 6, "updates_per_sample": 256, "median_us": 6.223471, "min_us": 6.075848, "max_us": 27.870441},
+    {"heads": 48, "key_heads": 16, "variant": "packed", "sample_count": 6, "updates_per_sample": 256, "median_us": 9.932941, "min_us": 7.654133, "max_us": 29.849773},
+    {"heads": 48, "key_heads": 16, "variant": "split", "sample_count": 6, "updates_per_sample": 256, "median_us": 7.290201, "min_us": 5.940430, "max_us": 20.948078}
+  ]
+}

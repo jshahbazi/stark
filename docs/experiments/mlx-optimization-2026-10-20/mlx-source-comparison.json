@@ -1,0 +1,93 @@
+{
+  "source_url": "https://github.com/ml-explore/mlx-lm",
+  "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+  "reference_tag": "v0.32.2",
+  "reference_commit": "93e6d4a6447b3080861985947f0820e76fcb957d",
+  "source_clean": true,
+  "files": [
+    {
+      "path": "mlx_lm/models/qwen3_5.py",
+      "v0322_sha256": "851449fd9989d6bf4b3c4fed92ddc3be5f1e781eb2246f89c54d7eff2518d9c6",
+      "current_sha256": "851449fd9989d6bf4b3c4fed92ddc3be5f1e781eb2246f89c54d7eff2518d9c6",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/models/qwen3_next.py",
+      "v0322_sha256": "67ca08a4d08cb7be124965e95399735e556f1eaeb21a16bc23cb88d1ac035e11",
+      "current_sha256": "67ca08a4d08cb7be124965e95399735e556f1eaeb21a16bc23cb88d1ac035e11",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/models/gated_delta.py",
+      "v0322_sha256": "f69e837ea68641dbb06fdb5dcc024a9a7e1d9353f08ae58c05275253a0c39428",
+      "current_sha256": "f69e837ea68641dbb06fdb5dcc024a9a7e1d9353f08ae58c05275253a0c39428",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/models/base.py",
+      "v0322_sha256": "63d8e58a4b6f8c0902719499c693647fbf486bbd5d22b09868a07d37e08c83d6",
+      "current_sha256": "63d8e58a4b6f8c0902719499c693647fbf486bbd5d22b09868a07d37e08c83d6",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/models/cache.py",
+      "v0322_sha256": "c96cb169fd5e0ec4584a162dd61dc62ab08ccdca03a9850f8a491ce6809145e6",
+      "current_sha256": "c96cb169fd5e0ec4584a162dd61dc62ab08ccdca03a9850f8a491ce6809145e6",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/models/activations.py",
+      "v0322_sha256": "6f7d756897deb322af4fe98e040df76e9358a91d76521e51f14d734fdd0fb05f",
+      "current_sha256": "6f7d756897deb322af4fe98e040df76e9358a91d76521e51f14d734fdd0fb05f",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/utils.py",
+      "v0322_sha256": "2803ff8d2298b0854797d78b16387c394801d16c57bfb30cf42ac4efbdee2873",
+      "current_sha256": "2803ff8d2298b0854797d78b16387c394801d16c57bfb30cf42ac4efbdee2873",
+      "identical": true
+    },
+    {
+      "path": "mlx_lm/tokenizer_utils.py",
+      "v0322_sha256": "a6c3b727ae30989c5d65d4c1e81b8616cd3e960f02cf6e9cd5474c14926fe49f",
+      "current_sha256": "59b2da204db859d64baf60efea842a217445cec82d910b132367e5fc86eea6ec",
+      "identical": false
+    },
+    {
+      "path": "mlx_lm/generate.py",
+      "v0322_sha256": "9d46803799f99d6fc7c35fff2d4357c79b1a25ae98cc63efeaaebeb50a7b5f33",
+      "current_sha256": "67ca2f215ad6f7fd30d6915f960ad40edab75b9d777cbf6b2f3c9c31fbc888c6",
+      "identical": false
+    }
+  ],
+  "generation_api": [
+    {
+      "symbol": "GenerationResponse",
+      "ast_identical": true,
+      "current_line": 287
+    },
+    {
+      "symbol": "generate_step",
+      "ast_identical": true,
+      "current_line": 324
+    },
+    {
+      "symbol": "stream_generate",
+      "ast_identical": true,
+      "current_line": 678
+    },
+    {
+      "symbol": "generate",
+      "ast_identical": true,
+      "current_line": 785
+    }
+  ],
+  "changed_generate_top_level_symbols": [
+    "TextStateMachine",
+    "_build_trie",
+    "_check_state",
+    "make_stop_sequences",
+    "make_text_state_machine"
+  ],
+  "interpretation": "The serial worker uses structurally identical GenerationResponse and stream_generate APIs. TextStateMachine and tokenizer thinking-marker inference changed; no runtime benchmark or model admission is claimed by this source-only comparison."
+}

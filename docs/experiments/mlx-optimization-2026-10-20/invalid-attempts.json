@@ -1,0 +1,17 @@
+{
+  "invalid_interpreter": {
+    "status": "interrupted_invalid_configuration",
+    "receipt": "invalid-interpreter-results.json",
+    "cause": "The venv interpreter symlink was resolved to base Python. MLX workers failed before measurement.",
+    "disposition": "Owned driver and worker processes were stopped. The full corrected campaign is separate.",
+    "eligible_for_speed_or_model_admission_claims": false
+  },
+  "invalid_digest_request": {
+    "receipt": "gemv-numerics-invalid-candidate-attempt.json",
+    "cause": "The initial diagnostic submitted one candidate; Stark's scoring contract requires two to sixteen.",
+    "disposition": "Corrected to two distinct valid candidates; separate corrected and final receipts retain 23 matches.",
+    "original_harness_sha256": null,
+    "original_harness_hash_gap": "Not captured in the initial failed diagnostic receipt.",
+    "eligible_for_numerical_regression_claims": false
+  }
+}
