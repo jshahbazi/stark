@@ -137,7 +137,7 @@ The builder uses separate Cargo invocations for the optimized scorer and default
 
 Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
-The builder creates local archives. The v0.1.0 assets are published through a manual GitHub release. The inherited Uzu release, cloud and signing workflows remain disabled.
+The builder creates local archives. The [manual tagged release workflow](RELEASING.md) builds and verifies an archive on a GitHub-hosted Mac, then creates a draft for publication. The inherited Uzu release, cloud and signing workflows remain disabled.
 
 ## What other engines do
 

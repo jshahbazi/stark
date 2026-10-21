@@ -422,6 +422,14 @@ def build_python(
         "converter_install",
         environment,
     )
+    # The consumer invokes the converter directly and never installs packages.
+    # Do not ship the managed interpreter's vendored bootstrap tooling
+    # (including ensurepip's bundled wheel) in the standalone runtime.
+    shutil.rmtree(site_packages / "pip", ignore_errors=True)
+    for entry in site_packages.glob("pip-*.dist-info"):
+        if entry.is_dir():
+            shutil.rmtree(entry)
+    shutil.rmtree(runtime / "lib" / "python3.13" / "ensurepip", ignore_errors=True)
     # Local wheel URLs and uv's timestamp-bearing install caches are useful only
     # in a development environment. Source/artifact hashes live in our receipts.
     for metadata_name in ("direct_url.json", "uv_cache.json"):
@@ -655,6 +663,9 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             "import sysconfig; "
             "assert sysconfig.get_config_var('prefix') == sys.base_prefix; "
             "assert Path(sysconfig.get_config_var('LIBDIR')).resolve() == (Path(sys.base_prefix) / 'lib').resolve(); "
+            "import importlib.util; "
+            "assert importlib.util.find_spec('pip') is None; "
+            "assert importlib.util.find_spec('ensurepip') is None; "
             "import numpy, tokenizers, ml_dtypes, huggingface_hub, psutil; "
             "assert not any(n.split('.')[0] in {'lalamo','jax','torch'} for n in sys.modules)"
         )

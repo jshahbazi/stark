@@ -99,6 +99,34 @@ class BundleConstructionTests(unittest.TestCase):
                         metadata.write_text("synthetic staging metadata\n")
                 if stage == "python_version":
                     output = b"Python 3.13.13\n"
+                if stage == "python_download":
+                    site_packages = (
+                        work
+                        / "managed-python"
+                        / "cpython-3.13.13-test"
+                        / "lib"
+                        / "python3.13"
+                        / "site-packages"
+                    )
+                    (site_packages / "pip").mkdir(parents=True, exist_ok=True)
+                    (site_packages / "pip" / "__init__.py").write_text("bootstrap\n")
+                    (site_packages / "pip-26.1.2.dist-info").mkdir()
+                    (site_packages / "pip-26.1.2.dist-info" / "METADATA").write_text(
+                        "bootstrap\n"
+                    )
+                    ensurepip = (
+                        work
+                        / "managed-python"
+                        / "cpython-3.13.13-test"
+                        / "lib"
+                        / "python3.13"
+                        / "ensurepip"
+                    )
+                    ensurepip.mkdir(parents=True, exist_ok=True)
+                    (ensurepip / "__init__.py").write_text("bootstrap\n")
+                    converter = site_packages / "stark_convert"
+                    converter.mkdir()
+                    (converter / "__init__.py").write_text("converter\n")
                 if stage == "converter_locked_requirements":
                     export_commands.append(command)
                     destination = Path(command[command.index("--output-file") + 1])
@@ -128,6 +156,46 @@ class BundleConstructionTests(unittest.TestCase):
             )
             self.assertFalse(
                 any((bundle / "libexec" / "python").rglob("uv_cache.json"))
+            )
+            self.assertFalse(
+                (
+                    bundle
+                    / "libexec"
+                    / "python"
+                    / "lib"
+                    / "python3.13"
+                    / "site-packages"
+                    / "pip"
+                ).exists()
+            )
+            self.assertFalse(
+                any(
+                    (
+                        bundle
+                        / "libexec"
+                        / "python"
+                        / "lib"
+                        / "python3.13"
+                        / "site-packages"
+                    ).glob("pip-*.dist-info")
+                )
+            )
+            self.assertFalse(
+                (
+                    bundle / "libexec" / "python" / "lib" / "python3.13" / "ensurepip"
+                ).exists()
+            )
+            self.assertTrue(
+                (
+                    bundle
+                    / "libexec"
+                    / "python"
+                    / "lib"
+                    / "python3.13"
+                    / "site-packages"
+                    / "stark_convert"
+                    / "__init__.py"
+                ).exists()
             )
             self.assertEqual(
                 (bundle / "share" / "stark" / "converter-requirements.txt").read_text(),
