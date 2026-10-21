@@ -20,7 +20,7 @@ Use this description when updating GitHub's About panel:
 
 Suggested topics: `apple-silicon`, `metal`, `rust`, `llm-inference`, `local-ai`, `model-conversion`.
 
-Use the supplied logo for the repository's visual identity. A dedicated wide social-preview card would improve link previews; retain the full cat/wordmark and keep benchmark qualifiers readable if including a speed claim. Set the official homepage only after selecting a public site audience and URL. A private preview should not be advertised as a public homepage.
+Use the supplied logo for the repository's visual identity. A dedicated wide social-preview card would improve link previews; retain the full cat/wordmark and keep benchmark qualifiers readable if including a speed claim. Set the official homepage only after selecting a public site audience and URL. The site is now configured for public access, and the repository README links to it.
 
 ## Remaining work before a broader launch
 
@@ -29,7 +29,7 @@ Use the supplied logo for the repository's visual identity. A dedicated wide soc
 3. **Make first use easier.** Verify the exact fresh-machine build and model-preparation path, then consider signed packages through a separately scoped distribution plan. Current instructions require Rust, Xcode's Metal tools and `uv`.
 4. **Strengthen the public performance claim.** Repeat the frozen comparison in a fully accepted campaign, add independent hardware/model replication and investigate quality failures. Benchmark HTTP serving or concurrency separately if advertising those workloads.
 5. **Show a small real integration.** Publish a documented generation or scoring example with application-specific acceptance checks. Keep hypothetical examples clearly labelled and private evaluation payloads outside Git.
-6. **Finish the public launch configuration.** Choose the site's audience/domain, set GitHub About/topics/social preview, and verify outbound links against the released revision.
+6. **Finish the public launch configuration.** The public site and README link are in place. Consider a custom domain, set GitHub About/topics/social preview, and verify outbound links against the released revision.
 
 These are follow-up recommendations. The existing benchmark remains a preliminary local result and the source-build setup remains the current entry path.
 
@@ -37,4 +37,4 @@ These are follow-up recommendations. The existing benchmark remains a preliminar
 
 The presentation changes use dependency-free static site generation. Verification covers source-bound table values, archived README preservation, local/immutable links, original-logo hashes, JavaScript syntax, repository policy, desktop/mobile browser layout and the implemented controls. Native inference benchmarks are not rerun for this documentation and design change.
 
-The [owner-private preview](https://stark-inference.arcanepine32.chatgpt.site) was deployed successfully through Sites. It requires ChatGPT sign-in and is not the public project homepage. The [deployment and validation receipt](experiments/presentation-2026-10-21/validation.json) pins the source snapshots and verification scope.
+The [Stark site](https://stark-inference.arcanepine32.chatgpt.site/) was initially deployed owner-private and is being updated to public access at the project owner's request. The [initial deployment receipt](experiments/presentation-2026-10-21/validation.json) preserves that earlier snapshot. The public update keeps technical run-level detail in expandable methodology notes and makes benchmarks and the source-build setup the primary content.
