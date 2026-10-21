@@ -24,7 +24,7 @@ Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the so
 
 ## Hosting
 
-The Site identity is stored in `.openai/hosting.json`, with `dist` as its static directory. The project owner has requested public access without ChatGPT sign-in. The public URL is https://stark-inference.arcanepine32.chatgpt.site/.
+The Site identity is stored in `.openai/hosting.json`, with `dist` as its static directory. The project owner has requested public access without ChatGPT sign-in. The primary public URL is [starkengine.app](https://starkengine.app/), also used as the page's canonical URL. The generated [Sites URL](https://stark-inference.arcanepine32.chatgpt.site/) remains available. The requested `starkengine.io` alias is configured with the same hosting targets; its new registry delegation must finish propagating before it can serve traffic. The repository's custom-domain receipt records the observed status separately from configuration.
 
 The source is mirrored into a separate ignored publication checkout. The Sites workflow opens that checkout, synchronizes only website source, builds it, commits and pushes its exact source state, then packages `dist/` with the hosting manifest for deployment. It does not publish the Stark repository, benchmark runtime data, models or local secrets. Credentials remain in session memory and are supplied only through the workflow's stdin.
 
