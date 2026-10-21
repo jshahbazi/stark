@@ -363,6 +363,10 @@ code {
   margin-top:3px
 }
 
+.engine-section {
+  border-top: 1px solid var(--line);
+}
+
 .section-heading {
   display:grid;
   grid-template-columns:1fr 1.3fr;
