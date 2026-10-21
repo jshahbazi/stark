@@ -15,6 +15,17 @@ The installer downloads and verifies the versioned archive and installs to `~/.l
 
 The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
 
+## Menu bar application
+
+Stark also has a native menu bar controller with model installation, Run/Stop controls, a prompt window, status and last-request input/output token speeds. From a configured source checkout with the standalone CLI runtime already installed:
+
+```sh
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
+uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
+```
+
+This installs a self-contained `~/Applications/Stark.app` using a copy of the existing runtime. See the [menu bar guide](../apps/menu-bar/README.md) for model support, timing definitions, build inputs and installation details.
+
 ## Install from a source checkout
 
 The source build requires Xcode with its Metal Toolchain, [rustup](https://rustup.rs), and [uv 0.12.24](https://github.com/astral-sh/uv/releases/tag/0.12.24). Select Xcode in **Xcode > Settings > Locations > Command Line Tools**. Command Line Tools alone do not provide the required Metal compiler.
