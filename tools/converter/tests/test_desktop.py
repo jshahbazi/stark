@@ -13,7 +13,7 @@ from unittest.mock import patch
 import psutil
 import pytest
 
-from stark_convert.desktop import Desktop, DesktopError, metric
+from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric
 
 
 @pytest.fixture
@@ -208,6 +208,231 @@ def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, g
     assert desktop.models[0]["name"] == repo.split("/")[-1]
     assert Path(desktop.models[0]["path"]).parent == desktop.model_dir
     assert not list(desktop.model_dir.glob(".install-*"))
+
+
+def progress_events(desktop, phase=None):
+    return [e for e in events(desktop) if e["event"] == "progress" and (phase is None or e["phase"] == phase)]
+
+
+def progress_spawn(model, lines, *, exit_code=0, pause=False):
+    original = subprocess.Popen
+
+    def spawn(command, **kwargs):
+        descriptor = command[command.index("--progress-fd") + 1]
+        target = command[command.index("--output") + 1]
+        script = (
+            "import os,shutil,sys,time\n"
+            "stream=os.fdopen(int(sys.argv[1]),'wb',buffering=0)\n"
+            "for line in " + repr(lines) + ": stream.write(line+b'\\n')\n"
+            "print('private diagnostic fixture',flush=True)\n"
+        )
+        if pause:
+            script += "time.sleep(30)\n"
+        if exit_code == 0:
+            script += "shutil.copytree(sys.argv[2],sys.argv[3])\n"
+        script += f"raise SystemExit({exit_code})\n"
+        return original([sys.executable, "-c", script, descriptor, str(model), target], **kwargs)
+
+    return spawn
+
+
+def progress_line(phase, state, completed, total):
+    return json.dumps({"phase": phase, "state": state, "completed_bytes": completed, "total_bytes": total}).encode()
+
+
+def test_converter_progress_is_numeric_private_bounded_and_completed_after_publication(desktop, model):
+    lines = [
+        b"{malformed",
+        b"private fixture" * 1000,
+        json.dumps({"phase": "download", "state": ["private fixture"]}).encode(),
+        json.dumps(
+            {
+                "phase": "download",
+                "state": "running",
+                "completed_bytes": 1,
+                "total_bytes": 2,
+                "private": "private fixture",
+            }
+        ).encode(),
+        progress_line("download", "running", 10, 100),
+        progress_line("download", "running", 50, 100),
+        progress_line("download", "running", 20, 100),
+        progress_line("download", "complete", 100, 100),
+        progress_line("conversion", "running", 100, 200),
+        progress_line("conversion", "complete", 200, 200),
+    ]
+    original_persist = desktop.persist
+
+    def persist():
+        assert not any(e["state"] == "complete" for e in progress_events(desktop, "conversion"))
+        original_persist()
+
+    with (
+        patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines)),
+        patch.object(desktop, "persist", side_effect=persist),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    assert len(desktop.models) == 1
+    assert "private fixture" not in desktop.output.getvalue()
+    assert "private diagnostic" not in desktop.output.getvalue()
+    download = progress_events(desktop, "download")
+    assert [e["completed_bytes"] for e in download] == [0, 10, 50, 100]
+    conversion = progress_events(desktop, "conversion")
+    assert [e["state"] for e in conversion] == ["waiting", "running", "running", "complete"]
+    assert conversion[-1]["completed_bytes"] == conversion[-1]["total_bytes"] == 200
+    for event in progress_events(desktop):
+        assert set(event) == {"event", "phase", "state", "completed_bytes", "total_bytes"}
+    all_events = events(desktop)
+    assert all_events.index(conversion[-1]) < next(i for i, e in enumerate(all_events) if e["event"] == "installed")
+
+
+def test_progress_skips_local_converted_and_duplicate_models(desktop, model):
+    installed(desktop, model)
+    assert [e["state"] for e in progress_events(desktop, "download")] == ["skipped"]
+    assert progress_events(desktop, "conversion")[-1]["state"] == "skipped"
+    desktop.output = io.StringIO()
+    installed(desktop, model)
+    assert progress_events(desktop, "download")[-1]["state"] == "skipped"
+    assert progress_events(desktop, "conversion")[-1]["state"] == "skipped"
+
+
+def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, model):
+    lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "running", 5, 100)]
+    with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=2)):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    assert not desktop.models
+    assert progress_events(desktop, "conversion")[-1]["state"] == "failed"
+    assert not any(e["state"] == "complete" for e in progress_events(desktop, "conversion"))
+    assert not list(desktop.model_dir.iterdir())
+
+
+def test_registry_failure_keeps_conversion_progress_failed(desktop, model):
+    lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "complete", 200, 200)]
+    with (
+        patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines)),
+        patch.object(desktop, "persist", side_effect=OSError("private fixture")),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    assert not desktop.models
+    assert progress_events(desktop, "conversion")[-1]["state"] == "failed"
+    assert not any(e["event"] == "installed" for e in events(desktop))
+    assert "private fixture" not in desktop.output.getvalue()
+    assert not list(desktop.model_dir.iterdir())
+
+
+def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desktop, model):
+    lines = [progress_line("download", "running", 5, 100)]
+    with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, pause=True)):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        deadline = time.monotonic() + 3
+        while not any(e["completed_bytes"] == 5 for e in progress_events(desktop)) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        process = desktop.converter
+        old_epoch = desktop.epoch
+        assert process is not None
+        desktop.stop()
+        desktop.progress(old_epoch, "download", "complete", 100, 100)
+    assert process.poll() is not None
+    assert desktop.converter is None
+    assert not desktop.models
+    assert progress_events(desktop, "download")[-1]["state"] == "cancelled"
+    assert progress_events(desktop, "conversion")[-1]["state"] == "cancelled"
+    assert not any(e["state"] == "complete" for e in progress_events(desktop))
+    assert not list(desktop.model_dir.iterdir())
+
+
+def test_progress_pipe_descriptors_close_when_converter_spawn_fails(desktop, model):
+    original_pipe = os.pipe
+    descriptors = []
+
+    def pipe():
+        result = original_pipe()
+        descriptors.extend(result)
+        return result
+
+    with (
+        patch("stark_convert.desktop.os.pipe", side_effect=pipe),
+        patch("stark_convert.desktop.subprocess.Popen", side_effect=OSError("private fixture")),
+    ):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+        finish(desktop)
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert progress_events(desktop, "download")[-1]["state"] == "failed"
+    assert "private fixture" not in desktop.output.getvalue()
+    assert not list(desktop.model_dir.iterdir())
+
+
+def test_exited_converter_cannot_leave_a_descendant_holding_progress_pipe(desktop, model, tmp_path):
+    original = subprocess.Popen
+    child_pid_file = tmp_path / "descendant.pid"
+    child_pid = None
+
+    def spawn(command, **kwargs):
+        descriptor = command[command.index("--progress-fd") + 1]
+        target = command[command.index("--output") + 1]
+        script = (
+            "import os,shutil,subprocess,sys\n"
+            "from pathlib import Path\n"
+            "fd=int(sys.argv[1])\n"
+            "code='import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(30)'\n"
+            "child=subprocess.Popen([sys.executable,'-c',code],pass_fds=(fd,))\n"
+            "Path(sys.argv[4]).write_text(str(child.pid))\n"
+            "shutil.copytree(sys.argv[2],sys.argv[3])\n"
+        )
+        return original([sys.executable, "-c", script, descriptor, str(model), target, str(child_pid_file)], **kwargs)
+
+    try:
+        with patch("stark_convert.desktop.subprocess.Popen", side_effect=spawn):
+            desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
+            finish(desktop)
+        child_pid = int(child_pid_file.read_text())
+        deadline = time.monotonic() + 3
+        while psutil.pid_exists(child_pid) and time.monotonic() < deadline:
+            try:
+                if psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE:
+                    break
+            except psutil.NoSuchProcess:
+                break
+            time.sleep(0.01)
+        assert not psutil.pid_exists(child_pid) or psutil.Process(child_pid).status() == psutil.STATUS_ZOMBIE
+        assert len(desktop.models) == 1
+        assert desktop.converter is None
+    finally:
+        if child_pid is None and child_pid_file.exists():
+            child_pid = int(child_pid_file.read_text())
+        if child_pid is not None:
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize(
+    "patch_value",
+    [
+        {"phase": []},
+        {"phase": "other"},
+        {"state": []},
+        {"state": "other"},
+        {"completed_bytes": True},
+        {"completed_bytes": -1},
+        {"completed_bytes": 3.5},
+        {"completed_bytes": 11},
+        {"total_bytes": False},
+        {"total_bytes": float("nan")},
+        {"total_bytes": -1},
+        {"state": "complete"},
+        {"private": "private fixture"},
+    ],
+)
+def test_converter_progress_rejects_invalid_schema(patch_value):
+    value = {"phase": "download", "state": "running", "completed_bytes": 5, "total_bytes": 10, **patch_value}
+    assert converter_progress(value) is None
 
 
 @pytest.mark.parametrize("payload", [None, [], {}, {"command": "wat"}, {"command": "generate", "text": 3}])

@@ -20,6 +20,7 @@ from pathlib import Path
 from . import __version__
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
 from .profiles import GENERIC_PROFILE, generic_entry
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
 from .provenance import file_hash, toolchain_provenance
 from .registry import (
     CONFIG_ADAPTERS,
@@ -233,6 +234,7 @@ def convert(
     model_kind: str = "language",
     architecture: str | None = None,
     metadata_profile: str | None = None,
+    progress: ProgressCallback | ProgressReporter | None = None,
 ) -> dict:
     """Publish complete independently converted outputs; unsupported inputs fail."""
     from .metadata import write_metadata
@@ -245,11 +247,17 @@ def convert(
         repo, dtype, model_kind, backend, chunk_bytes, require_native_support, architecture, metadata_profile
     )
     _validate_request(request)
+    progress = reporter(progress)
     snapshot = (
         source
         if isinstance(source, SourceSnapshot)
         else resolve_source(
-            source, repo=repo, revision=source_revision, architecture=architecture, metadata_profile=metadata_profile
+            source,
+            repo=repo,
+            revision=source_revision,
+            architecture=architecture,
+            metadata_profile=metadata_profile,
+            **({"progress": progress} if progress is not None else {}),
         )
     )
     output = output.absolute()
@@ -262,6 +270,8 @@ def convert(
     started = time.perf_counter()
     try:
         os.chmod(staging, 0o700)
+        if progress is not None:
+            progress.emit("conversion", "running", force=True)
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
         entry = get_model(repo)
@@ -290,7 +300,12 @@ def convert(
                 **fragments,
             }
         (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
-        stats = write_plan(planned.tensors, staging / "model.safetensors", chunk_bytes=chunk_bytes)
+        stats = write_plan(
+            planned.tensors,
+            staging / "model.safetensors",
+            chunk_bytes=chunk_bytes,
+            **({"progress": progress} if progress is not None else {}),
+        )
         elapsed = time.perf_counter() - started
         if provenance != toolchain_provenance():
             raise ConversionError("Converter tooling changed during conversion")
@@ -345,6 +360,8 @@ def convert(
         if provenance != toolchain_provenance():
             raise ConversionError("Converter tooling changed during qualification")
         _publish(staging, output)
+        if progress is not None:
+            progress.emit("conversion", "complete", stats["output_bytes"], stats["output_bytes"], force=True)
         return receipt
     finally:
         if staging.exists():
@@ -387,8 +404,16 @@ def main() -> int:
     parser.add_argument("--source-manifest", type=Path)
     parser.add_argument("--write-source-manifest", type=Path)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
+    progress_sink = None
+    progress = None
     try:
+        if args.progress_fd is not None:
+            progress_sink = FDProgressSink(args.progress_fd)
+            progress = ProgressReporter(progress_sink)
+            progress.emit("download", "waiting", force=True)
+            progress.emit("conversion", "waiting", force=True)
         repo = args.repo or (args.source if args.source and not Path(args.source).expanduser().is_dir() else None)
         request = ConversionRequest(
             repo,
@@ -438,6 +463,7 @@ def main() -> int:
             offline=args.offline,
             architecture=args.architecture,
             metadata_profile=args.metadata_profile,
+            **({"progress": progress} if progress is not None else {}),
         )
         if args.write_source_manifest:
             snapshot.write_manifest(args.write_source_manifest)
@@ -452,11 +478,15 @@ def main() -> int:
             model_kind=args.model_kind,
             architecture=args.architecture,
             metadata_profile=args.metadata_profile,
+            **({"progress": progress} if progress is not None else {}),
         )
     except BaseException as error:
         category = "interrupted" if isinstance(error, KeyboardInterrupt) else type(error).__name__
         print(json.dumps({"status": "error", "error_category": category}), file=sys.stderr)
         return 130 if isinstance(error, KeyboardInterrupt) else 1
+    finally:
+        if progress_sink is not None:
+            progress_sink.close()
     print(json.dumps(result, sort_keys=True))
     return 0
 
