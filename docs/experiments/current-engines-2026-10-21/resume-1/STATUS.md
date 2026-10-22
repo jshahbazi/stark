@@ -9,3 +9,7 @@ Campaign 1 began timing and completed the first Stark load. Its load and quiet g
 The aggregate receipt is preserved in `campaign-1.json`, and the existing summarizer generated `campaign-1-summary.json`. The summary reports `timing_accepted: false`, `allow_public_table: false`, and `diagnostic_only_reason: timing_or_completeness_gate_failed`. No cells from this attempt may be reused, and no public all-engine table or ranking may be produced from it.
 
 This campaign is retained as diagnostic evidence only. A fresh complete retry awaits the user's ready signal and manual hiding of Codex. The computer-control tool blocks controlling Codex itself. No benchmark worker remains active while waiting.
+
+Campaign 2 is also retained as diagnostic evidence only. Stark and MLX-LM completed their first loads, TensorFold drafting-on completed its first load, and llama.cpp was excluded after a mobile asset daemon deletion caused CPU interference. The owned driver stopped cleanly with SIGTERM (PID 58508). The aggregate receipt is preserved in `campaign-2.json`; `campaign-2-summary.json` reports `timing_accepted: false` and `allow_public_table: false`. No campaign-2 rates were examined or pooled, and no performance claim is made.
+
+Campaign 2 did not change code or guards. The final retry is governed by `RETRY_AMENDMENT.md`: one complete 24-load run after host maintenance, owned cache headroom, and a 120-second contiguous quiet preflight. No automatic retry follows a failure.
