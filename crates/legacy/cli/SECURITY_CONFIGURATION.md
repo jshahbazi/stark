@@ -4,6 +4,11 @@ The inherited CLI server uses one operator-owned model and admits one inference
 request at a time. Concurrent requests receive HTTP 429 before their bodies are
 read. Request bodies are limited to 64 MiB and generation to 4096 output tokens;
 smaller client limits are preserved. Response channels apply backpressure.
+The complete request body must arrive within 30 seconds, or the server returns
+HTTP 408 and releases admission. Each wait for response-channel capacity is
+limited to 30 seconds; a stalled or disconnected consumer cancels the active
+turn and releases admission after the session finishes cancellation cleanup.
+These deadlines apply to client I/O and do not cap model inference duration.
 
 Set `STARK_SERVER_API_KEY` in the server environment and send it using the
 `Authorization: Bearer <key>` header. This key authorizes use of the configured

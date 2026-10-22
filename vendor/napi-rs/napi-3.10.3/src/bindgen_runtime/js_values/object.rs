@@ -533,17 +533,21 @@ pub trait JsObjectValue<'env>: JsValue<'env> {
   fn wrap<T: 'static>(&mut self, native_object: T, size_hint: Option<usize>) -> Result<()> {
     let env = self.value().env;
     let value = self.raw();
+    let native_object = Box::into_raw(Box::new(TaggedObject::new(native_object))).cast();
+    let finalize_hint = Box::into_raw(Box::new(size_hint.unwrap_or(0) as i64)).cast();
     check_status!(unsafe {
-      sys::napi_wrap(
+      sys::napi_wrap(env, value, native_object, Some(raw_finalize::<TaggedObject<T>>), finalize_hint, ptr::null_mut())
+    })?;
+    unsafe {
+      crate::bindgen_runtime::tag_native_type_or_rollback::<TaggedObject<()>>(
         env,
         value,
-        Box::into_raw(Box::new(TaggedObject::new(native_object))).cast(),
-        Some(raw_finalize::<TaggedObject<T>>),
-        Box::into_raw(Box::new(size_hint.unwrap_or(0) as i64)).cast(),
+        native_object,
+        raw_finalize::<TaggedObject<T>>,
+        finalize_hint,
         ptr::null_mut(),
       )
-    })?;
-    unsafe { crate::bindgen_runtime::tag_native_type::<TaggedObject<()>>(env, value) }
+    }
   }
 
   /// Get the wrapped native value from the `Object`

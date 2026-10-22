@@ -30,6 +30,10 @@ The runtime registry gives each native Rust `TypeId` a unique process-lifetime
 tag; JavaScript cannot copy or inherit it. Every native class creation path tags
 the object immediately after successful `napi_wrap`. Tagging must follow a
 successful wrap so a failed attempt cannot label an unrelated allocation.
+If tagging fails, the runtime detaches that newly installed wrap and runs its
+matching finalizer before returning the error. Native reference bookkeeping is
+published only after tagging succeeds. A caller-retained object therefore keeps
+its prior identity and remains usable after a failed factory or wrapper call.
 Generated class references, mutable references, validation, method receivers,
 property accessors, direct `ClassInstance`, and `Reference` conversions check
 the tag before `napi_unwrap` or a typed pointer cast. The runtime's generic

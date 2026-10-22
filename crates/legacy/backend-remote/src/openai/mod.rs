@@ -60,24 +60,6 @@ impl Backend {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use async_openai::config::Config as _;
-
-    use super::explicit_client_config;
-
-    #[test]
-    fn provider_credentials_are_explicit() {
-        let local = explicit_client_config("http://127.0.0.1:11434/v1", None);
-        let headers = local.headers();
-        assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer ");
-        assert!(!headers.contains_key("OpenAI-Organization"));
-        assert!(!headers.contains_key("OpenAI-Project"));
-        let cloud = explicit_client_config("https://example.invalid/v1", Some("synthetic-key"));
-        assert_eq!(cloud.headers()[reqwest::header::AUTHORIZATION], "Bearer synthetic-key");
-    }
-}
-
 impl BackendTrait for Backend {
     fn identifier(&self) -> String {
         self.config.identifier.clone()
@@ -103,5 +85,23 @@ impl chat_message::Backend for Backend {
         Box::pin(
             async move { Ok(Box::new(Instance::new(client, reference, api_type)) as Box<dyn chat_message::Instance>) },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_openai::config::Config as _;
+
+    use super::explicit_client_config;
+
+    #[test]
+    fn provider_credentials_are_explicit() {
+        let local = explicit_client_config("http://127.0.0.1:11434/v1", None);
+        let headers = local.headers();
+        assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer ");
+        assert!(!headers.contains_key("OpenAI-Organization"));
+        assert!(!headers.contains_key("OpenAI-Project"));
+        let cloud = explicit_client_config("https://example.invalid/v1", Some("synthetic-key"));
+        assert_eq!(cloud.headers()[reqwest::header::AUTHORIZATION], "Bearer synthetic-key");
     }
 }

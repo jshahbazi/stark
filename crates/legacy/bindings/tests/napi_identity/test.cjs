@@ -72,6 +72,30 @@ rejects(() => addon.readOwned(wrapped));
 addon.genericRemove(wrapped);
 equal(addon.genericUnwrap(addon.genericWrap(wrapped)), 'wrapped');
 
+// A rejected factory must detach its new payload from a caller-retained object.
+// remove_wrap preserves the generic tag, so tagging Dynamic must fail safely.
+const returned = addon.genericWrap({});
+addon.genericRemove(returned);
+function ReturnRemoved() { return returned; }
+for (let attempt = 0; attempt < 2; attempt++) {
+  rejects(() => addon.Dynamic.factory.call(ReturnRemoved, 'rejected'));
+  equal(addon.genericUnwrap(addon.genericWrap(returned)), 'wrapped');
+  addon.genericRemove(returned);
+}
+rejects(() => addon.signal(returned));
+equal(addon.genericUnwrap(addon.genericWrap(returned)), 'wrapped');
+
+// Custom constructors returning fresh objects remain valid factory receivers.
+function ReturnFresh() { return { marker: 'fresh' }; }
+const custom = addon.Dynamic.factory.call(ReturnFresh, 'custom');
+equal(addon.readDynamic(custom), 'custom');
+equal(custom.marker, 'fresh');
+function Custom() {}
+equal(addon.readDynamic(addon.Dynamic.factory.call(Custom, 'constructor')), 'constructor');
+function ReturnExisting() { return dynamic; }
+rejects(() => addon.Dynamic.factory.call(ReturnExisting, 'rejected'));
+equal(addon.readDynamic(dynamic), 'dynamic');
+
 // Reusing another class as an AbortSignal may not reinterpret its payload.
 const controller = new AbortController();
 addon.signal(controller.signal);
