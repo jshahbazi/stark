@@ -7,6 +7,12 @@ struct InstalledModel: Identifiable, Equatable {
     let path: String
 }
 
+struct ChatMessage: Identifiable {
+    let id = UUID()
+    let text: String
+    let isUser: Bool
+}
+
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
@@ -14,7 +20,8 @@ final class EngineController: ObservableObject {
     @Published var state = "idle"
     @Published var message = "Starting Stark…"
     @Published var errorMessage: String?
-    @Published var response = ""
+    @Published var messages: [ChatMessage] = []
+    @Published var draft = ""
     @Published var finishReason = ""
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
@@ -27,6 +34,7 @@ final class EngineController: ObservableObject {
     private var pending = Data()
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
+    private var pendingMessageID: UUID?
 
     var busy: Bool { ["loading", "generating", "installing", "stopping"].contains(state) }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
@@ -64,6 +72,8 @@ final class EngineController: ObservableObject {
                 self.message = "Stark stopped. Quit and reopen the app to restart."
                 self.loadedID = ""
                 self.input = nil
+                self.discardPendingMessage()
+                self.clearConversation()
             }
         }
         output = outgoing.fileHandleForReading
@@ -111,7 +121,11 @@ final class EngineController: ObservableObject {
         case "status":
             state = event["state"] as? String ?? "idle"
             message = event["message"] as? String ?? ""
-            if state == "idle" || state == "error" { loadedID = "" }
+            if state == "idle" || state == "error" {
+                loadedID = ""
+                discardPendingMessage()
+                clearConversation()
+            }
         case "ready":
             loadedID = event["model_id"] as? String ?? selectedID
             state = "ready"
@@ -123,7 +137,9 @@ final class EngineController: ObservableObject {
             }
             onInstalled?()
         case "reply":
-            response = event["text"] as? String ?? ""
+            guard pendingMessageID != nil, let text = event["text"] as? String else { return }
+            messages.append(ChatMessage(text: text, isUser: false))
+            pendingMessageID = nil
             finishReason = event["finish_reason"] as? String ?? ""
             inputTokens = event["input_tokens"] as? Int ?? 0
             outputTokens = event["output_tokens"] as? Int ?? 0
@@ -131,6 +147,7 @@ final class EngineController: ObservableObject {
             outputSpeed = rate(event["output_tokens_per_second"])
         case "error":
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+            discardPendingMessage()
         default: break
         }
     }
@@ -140,24 +157,28 @@ final class EngineController: ObservableObject {
         return number
     }
 
-    func send(_ value: [String: Any]) {
-        guard let input = input, var bytes = try? JSONSerialization.data(withJSONObject: value) else { return }
+    @discardableResult
+    func send(_ value: [String: Any]) -> Bool {
+        guard let input = input, var bytes = try? JSONSerialization.data(withJSONObject: value) else {
+            state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."
+            return false
+        }
         guard bytes.count < 1024 * 1024 else {
             errorMessage = "The prompt is too large. Send a shorter message."
             state = loadedID.isEmpty ? "idle" : "ready"
             message = loadedID.isEmpty ? "Stopped" : "Ready"
-            return
+            return false
         }
         bytes.append(10)
-        do { try input.write(contentsOf: bytes) }
-        catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark." }
+        do { try input.write(contentsOf: bytes); return true }
+        catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
     }
 
     func run() {
         guard !selectedID.isEmpty, !busy else { return }
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
         errorMessage = nil
-        response = ""; finishReason = ""; inputSpeed = nil; outputSpeed = nil
+        clearConversation()
         state = "loading"; message = "Loading model…"
         send(["command": "run", "model_id": selectedID])
     }
@@ -168,24 +189,45 @@ final class EngineController: ObservableObject {
         send(["command": "install", "source": source, "kind": kind])
     }
 
-    func generate(_ text: String) {
-        guard state == "ready", !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+    func generate() {
+        let text = draft
+        guard state == "ready", loadedID == selectedID,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         errorMessage = nil
-        state = "generating"; message = "Generating…"; response = ""; finishReason = ""
-        send(["command": "generate", "text": text])
+        state = "generating"; message = "Generating…"; finishReason = ""
+        if send(["command": "generate", "text": text]) {
+            let entry = ChatMessage(text: text, isUser: true)
+            messages.append(entry)
+            pendingMessageID = entry.id
+            draft = ""
+        }
     }
 
     func reset() {
         guard !busy else { return }
         errorMessage = nil
-        response = ""; finishReason = ""; inputSpeed = nil; outputSpeed = nil
-        send(["command": "reset"])
+        if send(["command": "reset"]) { clearConversation(); draft = "" }
     }
 
     func stop() {
         errorMessage = nil
+        discardPendingMessage()
+        clearConversation()
         state = "stopping"; message = "Stopping…"
         send(["command": "stop"])
+    }
+
+    private func discardPendingMessage() {
+        guard let id = pendingMessageID else { return }
+        if let entry = messages.first(where: { $0.id == id }) { draft = entry.text }
+        messages.removeAll { $0.id == id }
+        pendingMessageID = nil
+    }
+
+    private func clearConversation() {
+        messages.removeAll(); pendingMessageID = nil
+        finishReason = ""; inputSpeed = nil; outputSpeed = nil
+        inputTokens = 0; outputTokens = 0
     }
 
     func shutdown() {
@@ -274,7 +316,7 @@ struct MenuView: View {
             }
             Divider()
             HStack {
-                Button("Open Prompt Window", action: console).buttonStyle(.link)
+                Button("Open Chat", action: console).buttonStyle(.link)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.link)
             }.font(.caption)
@@ -328,47 +370,96 @@ struct InstallView: View {
     }
 }
 
-struct PromptView: View {
+struct ChatBubble: View {
+    let message: ChatMessage
+    var body: some View {
+        HStack {
+            if message.isUser { Spacer(minLength: 40) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(message.isUser ? "You" : "Stark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(message.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .background(message.isUser ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.045),
+                        in: RoundedRectangle(cornerRadius: 12))
+            if !message.isUser { Spacer(minLength: 40) }
+        }.frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
+    }
+}
+
+struct ChatView: View {
     @ObservedObject var engine: EngineController
-    @State private var text = ""
+    @FocusState private var composerFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(engine.activeName).font(.title3.weight(.semibold))
+                    Text("Stark Chat").font(.title3.weight(.semibold))
                     StatusLine(engine: engine)
                 }
                 Spacer()
+                Button("New Chat") { engine.reset(); composerFocused = true }
+                    .disabled(engine.busy || engine.messages.isEmpty || engine.loadedID != engine.selectedID)
+            }
+            HStack {
+                Picker("Model", selection: $engine.selectedID) {
+                    if engine.models.isEmpty { Text("Install a model to begin").tag("") }
+                    ForEach(engine.models) { Text($0.name).tag($0.id) }
+                }.disabled(engine.busy)
+                if engine.loadedID != engine.selectedID || engine.loadedID.isEmpty {
+                    Button("Run", action: engine.run).disabled(engine.selectedID.isEmpty || engine.busy)
+                }
                 if !engine.loadedID.isEmpty || engine.busy {
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
-                } else {
-                    Button("Run", action: engine.run).disabled(engine.selectedID.isEmpty)
                 }
-                Button("Clear", action: engine.reset).disabled(engine.busy)
+            }
+            if !engine.loadedID.isEmpty && engine.loadedID != engine.selectedID {
+                Text("Run switches models and starts a new chat.").font(.caption).foregroundStyle(.secondary)
             }
             SpeedView(engine: engine)
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            ScrollView {
-                Text(engine.response.isEmpty ? "Run a model, then send a prompt. Replies stay in memory for this session." : engine.response)
-                    .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .topLeading)
-                    .foregroundStyle(engine.response.isEmpty ? .secondary : .primary).padding(12)
-            }.frame(maxHeight: .infinity).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+            ScrollViewReader { scroll in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        if engine.messages.isEmpty {
+                            VStack(spacing: 10) {
+                                Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
+                                Text("Try a conversation").font(.headline)
+                                Text("Choose a model, select Run, and send a message.")
+                                    .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                            }.frame(maxWidth: .infinity).padding(.vertical, 36)
+                        }
+                        ForEach(engine.messages) { ChatBubble(message: $0) }
+                        if engine.state == "generating" {
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text("Stark is thinking…").font(.callout).foregroundStyle(.secondary)
+                            }.padding(.horizontal, 4)
+                        }
+                        Color.clear.frame(height: 1).id("latest")
+                    }.padding(14)
+                }
+                .onChange(of: engine.messages.count) { withAnimation(.easeOut(duration: 0.15)) { scroll.scrollTo("latest", anchor: .bottom) } }
+                .onChange(of: engine.state) { if engine.state == "generating" { scroll.scrollTo("latest", anchor: .bottom) } }
+            }.frame(maxHeight: .infinity).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
                 Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
             }
-            TextEditor(text: $text).font(.body).frame(height: 95).padding(4)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
-                .disabled(engine.state != "ready")
-                .accessibilityLabel("Prompt")
+            ZStack(alignment: .topLeading) {
+                if engine.draft.isEmpty { Text("Message the model…").foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 12).allowsHitTesting(false) }
+                TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
+                    .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
+            }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
             HStack {
                 Text("Conversation stays in memory").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if engine.state == "generating" { Button("Stop", action: engine.stop) }
-                Button("Send") { let prompt = text; text = ""; engine.generate(prompt) }
+                Button("Send") { engine.generate(); composerFocused = true }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-                    .disabled(engine.state != "ready" || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(engine.state != "ready" || engine.loadedID != engine.selectedID || engine.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(20).frame(minWidth: 540, minHeight: 570)
+        }.padding(20).frame(minWidth: 500, minHeight: 600)
+            .onAppear { composerFocused = true }
+            .onChange(of: engine.state) { if engine.state == "ready" { composerFocused = true } }
     }
 }
 
@@ -440,7 +531,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPrompt() {
         popover.performClose(nil)
-        if promptWindow == nil { promptWindow = window(title: "Stark", view: PromptView(engine: engine), resizable: true) }
+        if promptWindow == nil { promptWindow = window(title: "Stark — Chat", view: ChatView(engine: engine), resizable: true) }
         present(promptWindow)
     }
 

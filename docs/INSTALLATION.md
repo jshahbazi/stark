@@ -17,7 +17,7 @@ The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) 
 
 ## Menu bar application
 
-Stark also has a native menu bar controller with model installation, Run/Stop controls, a prompt window, status and last-request input/output token speeds. From a configured source checkout with the standalone CLI runtime already installed:
+Stark also has a native menu bar controller with model installation, Run/Stop controls, a small chat window, status and last-request input/output token speeds. From a configured source checkout with the standalone CLI runtime already installed:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
