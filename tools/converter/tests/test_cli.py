@@ -457,6 +457,30 @@ def test_offline_replay_publishes_identical_model_artifacts(source, tmp_path):
     assert get_model(replay.repo)["metadata_profile"] == "qwen3"
 
 
+@pytest.mark.parametrize("value", ["{repo}", "https://huggingface.co/{repo}"])
+@pytest.mark.parametrize("repo, generic", [(REPOS["qwen3"], False), ("synthetic-model", True)])
+def test_cli_converts_repository_names_and_urls(source, tmp_path, monkeypatch, capsys, value, repo, generic):
+    import huggingface_hub
+
+    hub = Hub({repo: source})
+    monkeypatch.setattr(huggingface_hub, "HfApi", hub.HfApi)
+    monkeypatch.setattr(huggingface_hub, "list_repo_files", hub.list_repo_files)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", hub.hf_hub_download)
+    output = tmp_path / "output"
+    options = ["--metadata-profile", "hf-generic"] if generic else []
+    monkeypatch.setattr("sys.argv", ["stark-convert", value.format(repo=repo), "--output", str(output), *options])
+    assert cli.main() == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    receipt = json.loads(captured.out)
+    assert receipt["status"] == "ok"
+    assert receipt["catalogued"] is not generic
+    assert receipt["metadata_profile"] == ("hf-generic" if generic else "qwen3")
+    assert {record["repo"] for record in receipt["sources"]} == {repo}
+    assert (output / "model.safetensors").is_file()
+    assert all(event[1] == repo for event in hub.events)
+
+
 @pytest.mark.parametrize("generic", [False, True])
 def test_local_cli_conversion_is_offline_and_needs_no_hub_account(source, tmp_path, monkeypatch, capsys, generic):
     import huggingface_hub

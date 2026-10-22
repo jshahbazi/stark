@@ -185,8 +185,13 @@ def test_raw_conversion_is_offline_and_cancel_reaps_converter(desktop, tmp_path)
     assert not list(desktop.model_dir.iterdir())
 
 
-@pytest.mark.parametrize("repo, generic", [("example/model", True), ("Qwen/Qwen3-0.6B", False)])
-def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, generic):
+@pytest.mark.parametrize(
+    "repo, generic", [("example/model", True), ("synthetic-model", True), ("Qwen/Qwen3-0.6B", False)]
+)
+@pytest.mark.parametrize(
+    "source", ["{repo}", "https://huggingface.co/{repo}", " https://huggingface.co/{repo}/?download=true#model-card "]
+)
+def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, generic, source):
     original = subprocess.Popen
     commands = []
 
@@ -199,12 +204,19 @@ def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, g
         )
 
     with patch("stark_convert.desktop.subprocess.Popen", side_effect=spawn):
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": source.format(repo=repo)})
+        finish(desktop)
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": repo})
         finish(desktop)
+        desktop.dispatch({"command": "install", "kind": "huggingface", "source": f"https://huggingface.co/{repo}"})
+        finish(desktop)
+    assert len(commands) == 1
+    assert commands[0][commands[0].index("stark_convert.cli") + 1] == repo
     assert "--offline" not in commands[0]
     assert ("--metadata-profile" in commands[0]) is generic
     assert ("hf-generic" in commands[0]) is generic
     assert len(desktop.models) == 1
+    assert desktop.models[0]["source"] == "huggingface:" + repo
     assert desktop.models[0]["name"] == repo.split("/")[-1]
     assert Path(desktop.models[0]["path"]).parent == desktop.model_dir
     assert not list(desktop.model_dir.glob(".install-*"))

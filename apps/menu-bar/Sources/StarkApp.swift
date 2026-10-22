@@ -438,7 +438,7 @@ struct InstallView: View {
                     }.disabled(engine.busy)
                 }
             } else {
-                TextField("Repository, e.g. Qwen/Qwen3-0.6B", text: $source).textFieldStyle(.roundedBorder).disabled(engine.busy)
+                TextField("Repository name or full Hugging Face URL", text: $source).textFieldStyle(.roundedBorder).disabled(engine.busy)
                 Text("Downloads and converts a supported model. Gated repositories use your existing Hugging Face sign-in.")
                     .font(.callout).foregroundStyle(.secondary)
             }
