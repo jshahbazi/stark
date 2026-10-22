@@ -1,7 +1,7 @@
 const commands = {
-  generate: 'cargo +1.98.1 build --release --locked \\\n  -p stark-generate\n\n./target/release/stark-generate \\\n  --model-path /path/to/converted-model',
-  score: 'cargo +1.98.1 build --release --locked \\\n  -p stark-score --features optimized\n\n./target/release/stark-score \\\n  --score-model-path /path/to/converted-model',
-  convert: 'uv sync --project tools/converter --locked\n\nuv run --project tools/converter --locked \\\n  stark-convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3',
+  generate: 'stark generate \\\n  --model-path /path/to/converted-model',
+  score: 'stark score \\\n  --score-model-path /path/to/converted-model',
+  convert: 'stark convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3',
 };
 const tabs = [...document.querySelectorAll('[data-command]')];
 const code = document.querySelector('#command-code');
@@ -30,19 +30,23 @@ for (const tab of tabs) {
     tabs[next].focus();
   });
 }
-document.querySelector('#copy-command').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(code.textContent);
-    copyStatus.textContent = 'Commands copied.';
-  } catch {
-    const selection = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(code);
-    selection.removeAllRanges();
-    selection.addRange(range);
-    copyStatus.textContent = 'Commands selected. Use your keyboard to copy.';
-  }
-});
+for (const button of document.querySelectorAll('[data-copy]')) {
+  button.addEventListener('click', async () => {
+    const target = document.getElementById(button.dataset.copy);
+    const status = document.getElementById(button.dataset.copyStatus);
+    try {
+      await navigator.clipboard.writeText(target.textContent);
+      status.textContent = 'Commands copied.';
+    } catch {
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(target);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      status.textContent = 'Commands selected. Use your keyboard to copy.';
+    }
+  });
+}
 for (const button of document.querySelectorAll('[data-view]')) {
   button.addEventListener('click', () => {
     const relative = button.dataset.view === 'relative';
