@@ -57,7 +57,9 @@ cache_identity=$({
     xcrun --find clang
     xcrun clang --version
     if test "$cache_metal" = true; then
-      xcrun -sdk macosx metal --version
+      # Metal's cryptex mount has a random suffix on every hosted runner.
+      # Keep compiler build/target identity, excluding its temporary location.
+      xcrun -sdk macosx metal --version | sed '/^[[:space:]]*InstalledDir:/d'
     fi
   fi
 } | hash_stream)
