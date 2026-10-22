@@ -74,7 +74,7 @@ jobs:
           archive="artifacts/distributions/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz"
           uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
             --archive "$archive" --version "$STARK_RELEASE_VERSION" \
-            --expected-source "$GITHUB_SHA" --output "$RUNNER_TEMP/verification.json"
+            --expected-source "$GITHUB_SHA" --require-application --output "$RUNNER_TEMP/verification.json"
       - name: Create an immutable draft with verified assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -89,7 +89,7 @@ jobs:
           printf '%s\n' \
             "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
             '' \
-            'Includes the scoring and generation workers, embedded Metal kernels, and the converter with its own Python runtime. Rust, Xcode, uv and system Python are not required to install this bundle.' \
+            'Includes terminal chat, the menu bar app, scoring and generation workers, embedded Metal kernels, and the converter with private Python runtimes. Rust, Xcode, uv and system Python are not required to install this bundle.' \
             '' \
             'Install without a source checkout:' \
             '' \

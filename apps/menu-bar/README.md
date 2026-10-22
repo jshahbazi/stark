@@ -4,6 +4,10 @@ Stark's native macOS controller lives in the menu bar. Click the cat icon to ins
 
 ## Build and install
 
+For normal installation, use the [signed release installer](../../docs/INSTALLATION.md). It installs `~/Applications/Stark.app` together with the terminal CLI. No developer tools are required. Open the app, choose **Install Model**, select a supported model, then choose **Run** to chat.
+
+The following commands are for rebuilding the app from source during development.
+
 Use an Apple silicon Mac with macOS 26.4 or later. Building the Swift app requires Xcode's command line tools, uv and an existing [standalone Stark CLI installation](../../docs/INSTALLATION.md). The resulting app includes that private runtime and runs without a source checkout, system Python, Rust or uv.
 
 Build the current generation worker with the locked toolchain, then build and install the app:

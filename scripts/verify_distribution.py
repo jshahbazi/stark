@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import plistlib
 import subprocess
 import sys
 import tarfile
@@ -53,6 +54,7 @@ def verify(
     expected_distribution_source: str | None = None,
     expected_signer: str | None = None,
     require_notarized: bool = False,
+    require_application: bool = False,
 ) -> dict:
     archive = archive.resolve()
     with archive.open("rb") as archive_stream:
@@ -119,8 +121,54 @@ def verify(
         )
         checks.append("isolated_doctor_and_cli_identity")
         bundle = (prefix / "lib/stark/current").resolve()
+        app = Path(environment["HOME"]) / "Applications/Stark.app"
+        bundled_app = bundle / "app/Stark.app"
+        has_app = bundled_app.is_dir()
+        require(not require_application or has_app, "application_required")
+        if has_app:
+            require(app.is_dir() and not app.is_symlink(), "application_not_installed")
+            metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+            require(
+                metadata.get("CFBundleIdentifier") == "com.starkengine.menubar"
+                and metadata.get("CFBundleExecutable") == "Stark"
+                and metadata.get("CFBundleShortVersionString") == version.split("-")[0],
+                "application_identity",
+            )
+            from build_distribution import file_manifest
+
+            require(
+                file_manifest(app) == file_manifest(bundled_app),
+                "installed_application_integrity",
+            )
+            run([launcher, "chat", "--help"], environment, working)
+            runtime = app / "Contents/Resources/runtime"
+            run([runtime / "bin/stark", "doctor"], environment, working)
+            run([runtime / "bin/stark", "chat", "--help"], environment, working)
+            run(
+                [
+                    runtime / "libexec/python/bin/python3.13",
+                    "-I",
+                    "-B",
+                    "-m",
+                    "stark_convert.desktop",
+                    "--help",
+                ],
+                environment,
+                working,
+            )
+            checks.extend(
+                [
+                    "terminal_chat_without_developer_tools",
+                    "standalone_menu_bar_runtime_and_identity",
+                    "installed_application_file_hashes",
+                ]
+            )
         if expected_signer is not None:
-            from sign_distribution import macho_files, verify_signature
+            from sign_distribution import (
+                macho_files,
+                verify_application,
+                verify_signature,
+            )
 
             signing = manifest.get("signing", {})
             require(
@@ -149,6 +197,26 @@ def verify(
                     notarized=require_notarized
                     and path.relative_to(bundle).as_posix() in executables,
                 )
+            if has_app:
+                verify_application(
+                    bundle, identity, environment, notarized=require_notarized
+                )
+                verify_signature(
+                    app, identity, environment, notarized=require_notarized
+                )
+                run(
+                    ["/usr/bin/codesign", "--verify", "--deep", "--strict", app],
+                    environment,
+                    working,
+                )
+                if require_notarized:
+                    run(
+                        ["/usr/bin/xcrun", "stapler", "validate", app],
+                        environment,
+                        working,
+                    )
+                    checks.append("installed_application_notarization_ticket_stapled")
+                checks.append("installed_application_developer_id_and_resource_seal")
             checks.append("all_native_developer_id_signatures_and_hardened_runtime")
             if require_notarized:
                 checks.append("standalone_executable_notarization_tickets_online")
@@ -229,6 +297,9 @@ def verify(
         launcher = moved / "bin/stark"
         run([launcher, "doctor"], environment, working)
         run([launcher, "convert", "--version"], environment, working)
+        if has_app:
+            run([launcher, "chat", "--help"], environment, working)
+            require(app.is_dir(), "application_lost_on_prefix_relocation")
         checks.append("complete_prefix_relocation")
         model_marker = moved / "models/kept"
         model_marker.parent.mkdir()
@@ -238,6 +309,8 @@ def verify(
             model_marker.is_file() and not (moved / "lib/stark").exists(),
             "uninstall_preservation",
         )
+        if app.exists():
+            raise VerificationFailed("managed_application_not_removed")
         checks.append("uninstall_preserves_models")
     return {
         "status": "passed",
@@ -247,6 +320,7 @@ def verify(
         "manifest_sha256": hashlib.sha256(raw_manifest).hexdigest(),
         "source_files_manifest_sha256": manifest["source"]["files_manifest_sha256"],
         "file_count": len(manifest["files_sha256"]),
+        "menu_bar_application": has_app,
         "checks": checks,
         "models_loaded": 0,
         "native_inference_calls": 0,
@@ -262,6 +336,7 @@ def main() -> int:
     parser.add_argument("--expected-distribution-source")
     parser.add_argument("--expected-signer")
     parser.add_argument("--require-notarized", action="store_true")
+    parser.add_argument("--require-application", action="store_true")
     parser.add_argument("--output", type=Path, required=True)
     options = parser.parse_args()
     try:
@@ -272,6 +347,7 @@ def main() -> int:
             expected_distribution_source=options.expected_distribution_source,
             expected_signer=options.expected_signer,
             require_notarized=options.require_notarized,
+            require_application=options.require_application,
         )
         options.output.parent.mkdir(parents=True, exist_ok=True)
         options.output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
