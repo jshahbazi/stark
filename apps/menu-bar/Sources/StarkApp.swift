@@ -574,6 +574,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let showMenu = NSMenuItem(title: "Show Stark Menu", action: #selector(toggle), keyEquivalent: "")
         showMenu.target = self
         applicationMenu.addItem(showMenu)
+        let installMenu = NSMenuItem(title: "Install Model…", action: #selector(showInstall), keyEquivalent: "i")
+        installMenu.target = self
+        applicationMenu.addItem(installMenu)
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit Stark", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
@@ -619,7 +622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
     }
 
-    private func showInstall() {
+    @objc private func showInstall() {
         popover.performClose(nil)
         if installWindow == nil { installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine), resizable: false) }
         present(installWindow)
