@@ -667,11 +667,18 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             "assert importlib.util.find_spec('pip') is None; "
             "assert importlib.util.find_spec('ensurepip') is None; "
             "import numpy, tokenizers, ml_dtypes, huggingface_hub, psutil; "
+            "import stark_convert.chat; "
             "assert not any(n.split('.')[0] in {'lalamo','jax','torch'} for n in sys.modules)"
         )
         run(
             [str(python), "-I", "-B", "-c", inspection],
             "relocated_python_imports",
+            environment,
+            cwd=relocated,
+        )
+        run(
+            [str(python), "-I", "-B", "-m", "stark_convert.chat", "--help"],
+            "relocated_chat_help",
             environment,
             cwd=relocated,
         )

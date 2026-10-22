@@ -52,11 +52,14 @@ export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 stark convert Qwen/Qwen3-0.6B --output models/qwen3
 stark generate --model-path "$PWD/models/qwen3"
+stark chat --model-path "$PWD/models/qwen3"
 ```
 
 Installation defaults to `~/.local` without sudo and verifies the archive checksum before installing. Add `~/.local/bin` to your shell profile to keep it on PATH. See [installation, updates and uninstall](docs/INSTALLATION.md).
 
 Use a new output directory for each conversion. The worker exposes `tokenize`, `decode` and `generate` over private stdin/stdout pipes. The caller renders the model's exact chat template. See [request examples and the generation contract](docs/GENERATION.md), or use `stark score --score-model-path /absolute/path/to/model` for decision models such as JevK5.
+
+`stark chat` provides an interactive terminal conversation using the converted model's chat template. Enter one message per line; use `/reset` to clear history and `/exit` to quit. See [CLI chat options](docs/GENERATION.md#interactive-cli-chat). This command requires a build containing the chat client; the existing v0.1.0 release predates it.
 
 For downloaded or fine-tuned checkpoints, follow the [offline conversion and generic-model instructions](tools/converter/README.md#future-checkpoints-and-architecture-tracking). Generic outputs start native-unverified; check the exact model/configuration's qualification before relying on it.
 
