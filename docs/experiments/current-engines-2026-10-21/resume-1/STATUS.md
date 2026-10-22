@@ -13,3 +13,7 @@ This campaign is retained as diagnostic evidence only. A fresh complete retry aw
 Campaign 2 is also retained as diagnostic evidence only. Stark and MLX-LM completed their first loads, TensorFold drafting-on completed its first load, and llama.cpp was excluded after a mobile asset daemon deletion caused CPU interference. The owned driver stopped cleanly with SIGTERM (PID 58508). The aggregate receipt is preserved in `campaign-2.json`; `campaign-2-summary.json` reports `timing_accepted: false` and `allow_public_table: false`. No campaign-2 rates were examined or pooled, and no performance claim is made.
 
 Campaign 2 did not change code or guards. The final retry is governed by `RETRY_AMENDMENT.md`: one complete 24-load run after host maintenance, owned cache headroom, and a 120-second contiguous quiet preflight. No automatic retry follows a failure.
+
+## User pause
+
+The user explicitly paused testing on 2026-10-22 during final campaign 3. The owned driver (PID 61917) received SIGTERM and exited through its cleanup handler. The receipt is `status: interrupted`, `timing_accepted: false`; 14 load outcomes were retained (11 passed, 3 excluded). No automatic retry or continued testing is scheduled. The partial campaign is diagnostic evidence only and must not replace public benchmark claims. Runtime environments and borrowed models are retained for an explicitly requested future resume.
