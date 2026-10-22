@@ -12,7 +12,7 @@ from test_gemma import gemma_fixture
 from test_gguf_import import gguf_fixture
 from test_granite_smollm import fixture as granite_fixture
 from test_lfm2 import lfm2_fixture
-from test_sources import PRIMARY, files
+from test_sources import PRIMARY, Hub, files
 from test_streaming import qwen_fixture
 
 from stark_convert import benchmark, gguf_import, provenance, sources, streaming
@@ -153,13 +153,25 @@ def test_local_sidecars_cannot_escape_source_root(tmp_path, filename, repo):
     root = files(tmp_path / "source")
     if repo is None:
         (root / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    external = files(tmp_path / "external")
+    (external / "chat_template.json").write_text("{}")
+    hub = Hub(
+        {
+            "mistralai/Mistral-Small-3.1-24B-Base-2503": external,
+            "mistralai/Mistral-Small-3.1-24B-Instruct-2503": external,
+        }
+    )
+    arguments = {"repo": repo, "metadata_profile": "hf-generic" if repo is None else None, "hub": hub}
+    sidecar = root / filename
+    if not sidecar.exists():
+        sidecar.write_text("synthetic sidecar")
+    assert resolve_source(root, **arguments).resolve_file(filename) == sidecar
     private = tmp_path / "outside.txt"
     private.write_text("synthetic outside text")
-    sidecar = root / filename
-    sidecar.unlink(missing_ok=True)
+    sidecar.unlink()
     sidecar.symlink_to(private)
     with pytest.raises(ConversionError, match="authorized"):
-        resolve_source(root, repo=repo, metadata_profile="hf-generic" if repo is None else None)
+        resolve_source(root, **arguments)
 
 
 def test_canonical_hf_blob_metadata_links_remain_supported(tmp_path):

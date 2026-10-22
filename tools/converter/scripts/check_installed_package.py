@@ -1,4 +1,4 @@
-"""Build and exercise the installed wheel outside the checkout using tiny local files."""
+"""Check isolated editable builds and the installed wheel using tiny local files."""
 
 import json
 import os
@@ -56,6 +56,21 @@ def check():
             HF_HUB_DISABLE_IMPLICIT_TOKEN="1",
             TOKENIZERS_PARALLELISM="false",
         )
+        editable_venv = root / "editable-venv"
+        run([uv, "venv", "--python", sys.executable, str(editable_venv)], cwd=root, environment=environment)
+        editable_python = str(editable_venv / "bin" / "python")
+        run(
+            [uv, "pip", "install", "--python", editable_python, "--no-deps", "--editable", str(PROJECT)],
+            cwd=root,
+            environment=environment,
+        )
+        inspect_editable = (
+            "import importlib.util; from pathlib import Path; import stark_convert; "
+            f"assert Path(stark_convert.__file__).resolve().parent == Path({str(PROJECT / 'stark_convert')!r}); "
+            "assert importlib.util.find_spec('numpy') is None; "
+            "assert importlib.util.find_spec('tokenizers') is None"
+        )
+        run([editable_python, "-I", "-c", inspect_editable], cwd=root, environment=environment)
         build = root / "dist"
         run(
             [uv, "build", str(PROJECT), "--python", sys.executable, "--out-dir", str(build), "--no-build-logs"],
@@ -186,6 +201,7 @@ def check():
     return {
         "status": "passed",
         "checks": [
+            "isolated_editable",
             "sdist",
             "wheel",
             "license",
