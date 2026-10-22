@@ -13,6 +13,32 @@ struct ChatMessage: Identifiable {
     let isUser: Bool
 }
 
+struct InstallProgress {
+    var state = "waiting"
+    var completedBytes: Int64 = 0
+    var totalBytes: Int64?
+
+    var fraction: Double {
+        if state == "complete" || state == "skipped" { return 1 }
+        guard let total = totalBytes, total > 0 else { return 0 }
+        return min(1, max(0, Double(completedBytes) / Double(total)))
+    }
+
+    func detail(for phase: String) -> String {
+        switch state {
+        case "complete": return "Complete"
+        case "skipped": return "Not needed"
+        case "cancelled": return "Cancelled"
+        case "failed": return "Failed"
+        case "waiting": return "Waiting"
+        default:
+            guard let total = totalBytes, total > 0 else { return "Preparing…" }
+            if completedBytes >= total { return phase == "download" ? "Verifying…" : "Finalizing…" }
+            return String(format: "%.0f%%", fraction * 100)
+        }
+    }
+}
+
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
@@ -27,6 +53,8 @@ final class EngineController: ObservableObject {
     @Published var outputSpeed: Double?
     @Published var inputTokens = 0
     @Published var outputTokens = 0
+    @Published var downloadProgress = InstallProgress()
+    @Published var conversionProgress = InstallProgress()
     var onInstalled: (() -> Void)?
     private var process: Process?
     private var input: FileHandle?
@@ -68,6 +96,7 @@ final class EngineController: ObservableObject {
         child.terminationHandler = { [weak self] _ in
             DispatchQueue.main.async {
                 guard let self = self, !self.shuttingDown else { return }
+                if self.state == "installing" { self.endInstallProgress("failed") }
                 self.state = "error"
                 self.message = "Stark stopped. Quit and reopen the app to restart."
                 self.loadedID = ""
@@ -147,7 +176,17 @@ final class EngineController: ObservableObject {
             outputSpeed = rate(event["output_tokens_per_second"])
         case "error":
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+            if state == "installing" { endInstallProgress("failed") }
             discardPendingMessage()
+        case "progress":
+            guard let phase = event["phase"] as? String, ["download", "conversion"].contains(phase),
+                  let progressState = event["state"] as? String,
+                  ["waiting", "running", "complete", "skipped", "cancelled", "failed"].contains(progressState),
+                  let completed = event["completed_bytes"] as? Int64, completed >= 0 else { return }
+            let total = event["total_bytes"] as? Int64
+            guard total == nil || (total! >= 0 && completed <= total!) else { return }
+            let progress = InstallProgress(state: progressState, completedBytes: completed, totalBytes: total)
+            if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
         default: break
         }
     }
@@ -185,8 +224,10 @@ final class EngineController: ObservableObject {
 
     func install(source: String, kind: String) {
         errorMessage = nil
+        resetInstallProgress(kind: kind)
+        if kind == "huggingface" { downloadProgress.state = "running" }
         state = "installing"; message = kind == "local" ? "Installing local model…" : "Downloading and converting model…"
-        send(["command": "install", "source": source, "kind": kind])
+        if !send(["command": "install", "source": source, "kind": kind]) { endInstallProgress("failed") }
     }
 
     func generate() {
@@ -211,10 +252,22 @@ final class EngineController: ObservableObject {
 
     func stop() {
         errorMessage = nil
+        if state == "installing" { endInstallProgress("cancelled") }
         discardPendingMessage()
         clearConversation()
         state = "stopping"; message = "Stopping…"
         send(["command": "stop"])
+    }
+
+    func resetInstallProgress(kind: String) {
+        guard state != "installing" else { return }
+        downloadProgress = InstallProgress(state: kind == "local" ? "skipped" : "waiting")
+        conversionProgress = InstallProgress()
+    }
+
+    private func endInstallProgress(_ state: String) {
+        if ["waiting", "running"].contains(downloadProgress.state) { downloadProgress.state = state }
+        if ["waiting", "running"].contains(conversionProgress.state) { conversionProgress.state = state }
     }
 
     private func discardPendingMessage() {
@@ -306,7 +359,8 @@ struct MenuView: View {
             Text("Last request").font(.caption2).foregroundStyle(.secondary)
                 .padding(.top, -10)
             HStack {
-                Button("Install Model…", action: install).disabled(engine.busy)
+                Button(engine.state == "installing" ? "Installation Progress…" : "Install Model…", action: install)
+                    .disabled(engine.busy && engine.state != "installing")
                 Spacer()
                 if engine.busy || !engine.loadedID.isEmpty {
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
@@ -324,6 +378,40 @@ struct MenuView: View {
     }
 }
 
+struct InstallStageView: View {
+    let title: String
+    let phase: String
+    let progress: InstallProgress
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title).font(.callout.weight(.medium))
+                Spacer()
+                Text(progress.detail(for: phase)).font(.caption.monospacedDigit())
+                    .foregroundStyle(progress.state == "failed" ? Color.red : .secondary)
+            }
+            Group {
+                if progress.state == "running" && progress.totalBytes == nil {
+                    ProgressView()
+                } else {
+                    ProgressView(value: progress.fraction)
+                }
+            }
+            .progressViewStyle(.linear)
+            .tint(progress.state == "failed" ? .red : .accentColor)
+            .accessibilityLabel("\(title) progress")
+            .accessibilityValue(progress.detail(for: phase))
+            if let total = progress.totalBytes, total > 0 {
+                Text("\(bytes(progress.completedBytes)) of \(bytes(total))")
+                    .font(.caption2.monospacedDigit()).foregroundStyle(.secondary)
+            }
+        }
+    }
+    private func bytes(_ count: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: count, countStyle: .file)
+    }
+}
+
 struct InstallView: View {
     @ObservedObject var engine: EngineController
     @State private var kind = "local"
@@ -334,7 +422,7 @@ struct InstallView: View {
             Picker("Source", selection: $kind) {
                 Text("Local Folder").tag("local")
                 Text("Hugging Face").tag("huggingface")
-            }.pickerStyle(.segmented).onChange(of: kind) { source = "" }.disabled(engine.busy)
+            }.pickerStyle(.segmented).onChange(of: kind) { source = ""; engine.resetInstallProgress(kind: kind) }.disabled(engine.busy)
             if kind == "local" {
                 Text("Choose a converted Stark model or a supported Safetensors checkpoint folder. Converted models stay in the selected folder; keep that folder available.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -356,6 +444,12 @@ struct InstallView: View {
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 14) {
+                InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
+                InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
+            }
+            .padding(14)
+            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
             if engine.state == "installing" || engine.state == "error" { StatusLine(engine: engine) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             Spacer(minLength: 0)
@@ -366,7 +460,9 @@ struct InstallView: View {
                     .buttonStyle(.borderedProminent).disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
                     .keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 470, height: 320)
+        }.padding(24).frame(width: 470, height: 500)
+            .onAppear { engine.resetInstallProgress(kind: kind) }
+            .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
     }
 }
 
@@ -478,6 +574,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let showMenu = NSMenuItem(title: "Show Stark Menu", action: #selector(toggle), keyEquivalent: "")
         showMenu.target = self
         applicationMenu.addItem(showMenu)
+        let installMenu = NSMenuItem(title: "Install Model…", action: #selector(showInstall), keyEquivalent: "i")
+        installMenu.target = self
+        applicationMenu.addItem(installMenu)
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit Stark", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
@@ -523,7 +622,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         else { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
     }
 
-    private func showInstall() {
+    @objc private func showInstall() {
         popover.performClose(nil)
         if installWindow == nil { installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine), resizable: false) }
         present(installWindow)
