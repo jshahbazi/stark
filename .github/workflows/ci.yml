@@ -113,9 +113,9 @@ jobs:
         run: uv run --python 3.12.13 python scripts/test_scoring_process.py --reaper "$RUNNER_TEMP/stark-validation-reap"
       - name: Test generation validation contracts
         run: uv run --no-project --python 3.12.13 python -m unittest scripts/test_colgrep_generation_validation.py
-      - name: Test installer relocation and upgrades
+      - name: Test installer and menu bar contracts
         if: matrix.os == 'macos-26'
-        run: uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py
+        run: uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py scripts/test_build_menubar.py
 
   scoring:
     name: Scorer (${{ matrix.configuration }})

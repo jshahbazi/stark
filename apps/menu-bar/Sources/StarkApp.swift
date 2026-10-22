@@ -227,7 +227,7 @@ final class EngineController: ObservableObject {
         resetInstallProgress(kind: kind)
         if kind == "huggingface" { downloadProgress.state = "running" }
         state = "installing"; message = kind == "local" ? "Installing local model…" : "Downloading and converting model…"
-        send(["command": "install", "source": source, "kind": kind])
+        if !send(["command": "install", "source": source, "kind": kind]) { endInstallProgress("failed") }
     }
 
     func generate() {
