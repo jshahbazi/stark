@@ -1,0 +1,148 @@
+#!/bin/sh
+# Standalone bundle entry point. Inference stays on the workers' private pipes.
+set -eu
+
+fail() {
+    printf 'stark: %s\n' "$1" >&2
+    exit 1
+}
+
+usage() {
+    printf '%s\n' \
+        'Usage: stark COMMAND [OPTIONS]' \
+        '' \
+        'Commands:' \
+        '  convert     Convert a supported Hugging Face model or local checkpoint' \
+        '  score       Start the scoring worker on private JSON-lines pipes' \
+        '  generate    Start the generation worker on private JSON-lines pipes' \
+        '  chat        Chat interactively with a converted local model' \
+        '  doctor      Check this installation without loading a model' \
+        '  version     Show the installed bundle version' \
+        '  uninstall   Remove this installed bundle and its command links' \
+        '  help        Show this help' \
+        '' \
+        'Examples:' \
+        '  stark convert Qwen/Qwen3-0.6B --output models/qwen3' \
+        '  stark score --score-model-path /absolute/path/to/model' \
+        '  stark generate --model-path /absolute/path/to/model' \
+        '  stark chat --model-path /absolute/path/to/model' \
+        '' \
+        'Use stark convert --help for conversion options.' \
+        'Scoring and generation use the documented worker protocols.'
+}
+
+# Resolve every link, including the installed current link, without readlink -f.
+invoked_as=$(basename "$0")
+self=$0
+case "$self" in
+    */*) ;;
+    *) self=$(command -v "$self") || fail 'cannot locate the launcher' ;;
+esac
+link_count=0
+while :; do
+    directory=$(CDPATH= cd -P "$(dirname "$self")" && pwd) || fail 'cannot locate the bundle'
+    self=$directory/$(basename "$self")
+    [ -L "$self" ] || break
+    link_count=$((link_count + 1))
+    [ "$link_count" -le 40 ] || fail 'launcher link loop'
+    destination=$(readlink "$self") || fail 'cannot resolve the launcher'
+    case "$destination" in
+        /*) self=$destination ;;
+        *) self=$directory/$destination ;;
+    esac
+done
+bundle=$(CDPATH= cd -P "$directory/.." && pwd) || fail 'cannot locate the bundle'
+python=$bundle/libexec/python/bin/python3.13
+
+case "$invoked_as" in
+    stark-convert) command=convert ;;
+    *) command=${1:-help}; [ "$#" -eq 0 ] || shift ;;
+esac
+
+case "$command" in
+    help|--help|-h)
+        usage
+        ;;
+    version|--version|-V)
+        [ "$#" -eq 0 ] || fail 'version accepts no arguments'
+        [ -f "$bundle/share/stark/VERSION" ] || fail 'bundle version is missing; reinstall Stark'
+        printf 'stark %s\n' "$(cat "$bundle/share/stark/VERSION")"
+        ;;
+    convert)
+        [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
+        exec "$python" -I -B -c 'import sys; from stark_convert.cli import main; sys.argv[0] = "stark-convert"; raise SystemExit(main())' "$@"
+        ;;
+    chat)
+        if [ -f "$bundle/tools/converter/pyproject.toml" ] && [ -f "$bundle/Cargo.toml" ]; then
+            [ -x "$bundle/target/release/stark-generate" ] || fail 'build the release stark-generate worker first'
+            command -v uv >/dev/null 2>&1 || fail 'install uv to run chat from a source checkout'
+            exec uv run --project "$bundle/tools/converter" --locked python -m stark_convert.chat \
+                --worker "$bundle/target/release/stark-generate" "$@"
+        fi
+        [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
+        exec "$python" -I -B -m stark_convert.chat --worker "$bundle/libexec/stark-generate" "$@"
+        ;;
+    score|generate)
+        case "$command" in
+            score) worker=$bundle/libexec/stark-score ;;
+            generate) worker=$bundle/libexec/stark-generate ;;
+        esac
+        [ -x "$worker" ] || fail 'native worker is missing; reinstall Stark'
+        exec "$worker" "$@"
+        ;;
+    doctor)
+        [ "$#" -eq 0 ] || fail 'doctor accepts no arguments'
+        [ "$(uname -s)" = Darwin ] || fail 'Stark requires an Apple silicon Mac with macOS 26.4 or newer'
+        [ "$(uname -m)" = arm64 ] || fail 'Stark requires native arm64 execution; open Terminal outside Rosetta'
+        macos=$(sw_vers -productVersion) || fail 'cannot determine the macOS version'
+        printf '%s\n' "$macos" | awk -F . '($1 > 26 || ($1 == 26 && $2 >= 4)) { ok = 1 } END { exit !ok }' \
+            || fail 'Stark requires macOS 26.4 or newer'
+        [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
+        [ -x "$bundle/libexec/stark-score" ] && [ -x "$bundle/libexec/stark-generate" ] \
+            || fail 'native worker is missing; reinstall Stark'
+        printf 'Platform: macOS %s (arm64)\n' "$macos"
+        # Capture only the workers' fixed invalid-argument replies. Never print
+        # subprocess diagnostics or execute a model as part of installation QA.
+        "$python" -I -B -c '
+import importlib.metadata
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+try:
+    import stark_convert.cli
+    version = importlib.metadata.version("stark-convert")
+    root = Path(sys.argv[1])
+    for name in ("stark-score", "stark-generate"):
+        result = subprocess.run(
+            [str(root / "libexec" / name)], input=b"", stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, timeout=15, check=False,
+        )
+        if result.returncode != 1 or json.loads(result.stdout) != {"ready": False, "error": "invalid_arguments"}:
+            raise ValueError("worker_check_failed")
+except BaseException:
+    print("stark: bundled converter or native worker check failed; reinstall Stark", file=sys.stderr)
+    raise SystemExit(1)
+print("Converter: stark-convert " + version + " (Python " + sys.version.split()[0] + ")")
+print("Workers: scoring and generation executables respond correctly")
+' "$bundle"
+        printf '%s\n' 'Installation checks passed. No model was loaded.'
+        ;;
+    uninstall)
+        [ "$#" -eq 0 ] || fail 'uninstall accepts no arguments'
+        case "$bundle" in
+            */lib/stark/releases/*)
+                prefix=${bundle%/lib/stark/releases/*}
+                [ -f "$prefix/lib/stark/INSTALL_FORMAT" ] || fail 'installation marker is missing'
+                exec sh "$bundle/share/stark/install.sh" --uninstall --prefix "$prefix"
+                ;;
+            *) fail 'this is an extracted bundle; remove its folder to uninstall' ;;
+        esac
+        ;;
+    *)
+        printf 'stark: unknown command\n\n' >&2
+        usage >&2
+        exit 2
+        ;;
+esac

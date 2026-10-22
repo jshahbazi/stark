@@ -1,7 +1,7 @@
 use std::{
     collections::HashSet,
     io::{BufRead, Read, Write},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize};
@@ -110,14 +110,37 @@ pub(crate) struct GeneratedTokens {
     pub sampled_tokens: usize,
     pub finish_reason: FinishReason,
     pub stop_token_id: Option<u32>,
+    pub prefill_seconds: Option<f64>,
+    pub decode_seconds: Option<f64>,
+}
+
+fn tokens_per_second(
+    tokens: usize,
+    seconds: Option<f64>,
+) -> Option<f64> {
+    seconds.filter(|seconds| *seconds > 0.0 && seconds.is_finite()).and_then(|seconds| {
+        let rate = tokens as f64 / seconds;
+        (tokens > 0 && rate.is_finite()).then_some(rate)
+    })
 }
 
 /// Own the stream so its Drop drains native work before the result is observable.
 pub(crate) fn collect_tokens(
+    stream: impl Iterator<Item = Result<u64, &'static str>>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+    vocab_size: usize,
+    started: Instant,
+) -> Result<GeneratedTokens, &'static str> {
+    collect_tokens_with_clock(stream, input_tokens, options, vocab_size, || started.elapsed())
+}
+
+fn collect_tokens_with_clock(
     mut stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
     options: &GenerationOptions,
     vocab_size: usize,
+    mut elapsed: impl FnMut() -> Duration,
 ) -> Result<GeneratedTokens, &'static str> {
     let capacity = options.context_tokens as usize - input_tokens;
     let budget = capacity.min(options.max_new_tokens as usize);
@@ -130,13 +153,20 @@ pub(crate) fn collect_tokens(
             FinishReason::Length
         },
         stop_token_id: None,
+        prefill_seconds: None,
+        decode_seconds: None,
     };
+    let mut first_sample = None;
+    let mut last_sample = None;
     for _ in 0..budget {
         let token = stream.next().ok_or("invalid_generation_output")??;
+        let sample_time = elapsed();
         if token >= vocab_size as u64 {
             return Err("invalid_generation_output");
         }
         let token = token as u32;
+        first_sample.get_or_insert(sample_time);
+        last_sample = Some(sample_time);
         result.sampled_tokens += 1;
         if options.eos_token_ids.contains(&token) {
             result.finish_reason = FinishReason::Eos;
@@ -149,6 +179,11 @@ pub(crate) fn collect_tokens(
             break;
         }
         result.generated_token_ids.push(token);
+    }
+    result.prefill_seconds = first_sample.map(|time| time.as_secs_f64());
+    if result.sampled_tokens > 1 {
+        result.decode_seconds =
+            last_sample.zip(first_sample).map(|(last, first)| last.saturating_sub(first).as_secs_f64());
     }
     drop(stream);
     Ok(result)
@@ -299,7 +334,11 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 Ok(json!({"generated_token_ids":generated.generated_token_ids,"text":text,
                     "input_tokens":input.len(),"output_tokens":generated.generated_token_ids.len(),
                     "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
-                    "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64()}))
+                    "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64(),
+                    "prefill_seconds":generated.prefill_seconds,"decode_seconds":generated.decode_seconds,
+                    "input_tokens_per_second":tokens_per_second(input.len(), generated.prefill_seconds),
+                    "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
+                    "timing_method":"first-token-wall-clock-v1"}))
             },
         }
     }
@@ -475,6 +514,7 @@ mod tests {
                 input.len(),
                 options,
                 self.vocab_size(),
+                Instant::now(),
             )
         }
     }
@@ -501,6 +541,55 @@ mod tests {
         let mut output = Vec::new();
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
         serde_json::from_slice(&output).unwrap()
+    }
+
+    #[test]
+    fn stage_timing_separates_first_sample_from_subsequent_samples_and_cleanup() {
+        let options = GenerationOptions {
+            context_tokens: 16,
+            max_new_tokens: 8,
+            seed: 0,
+            sampling: Sampling::Greedy {},
+            eos_token_ids: vec![1],
+            extra_stop_token_ids: Vec::new(),
+        };
+        let drained = Arc::new(AtomicBool::new(false));
+        let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();
+        let result = collect_tokens_with_clock(
+            TestStream {
+                tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)].into(),
+                drained: drained.clone(),
+            },
+            4,
+            &options,
+            8,
+            || clock.next().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.prefill_seconds, Some(2.0));
+        assert_eq!(result.decode_seconds, Some(4.0));
+        assert_eq!(result.sampled_tokens, 3);
+        assert_eq!(result.generated_token_ids.len(), 2);
+        assert_eq!(tokens_per_second(4, result.prefill_seconds), Some(2.0));
+        // The first sample belongs to prefill; terminal EOS is a decode sample.
+        assert_eq!(tokens_per_second(result.sampled_tokens - 1, result.decode_seconds), Some(0.5));
+        assert!(drained.load(Ordering::SeqCst));
+        assert!(clock.next().is_none());
+    }
+
+    #[test]
+    fn one_sample_and_unmeasurable_durations_do_not_invent_decode_throughput() {
+        let mut worker = worker();
+        worker.backend.tokens = vec![Ok(1)];
+        let value = post(&mut worker, standard());
+        assert_eq!(value["timing_method"], "first-token-wall-clock-v1");
+        assert!(value["prefill_seconds"].is_number());
+        assert!(value["decode_seconds"].is_null());
+        assert!(value["output_tokens_per_second"].is_null());
+        for seconds in [None, Some(0.0), Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(tokens_per_second(2, seconds), None);
+        }
+        assert_eq!(tokens_per_second(0, Some(1.0)), None);
     }
 
     #[test]
