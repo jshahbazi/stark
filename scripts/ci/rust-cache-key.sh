@@ -15,10 +15,18 @@ esac
 hash_stream() { shasum -a 256 | cut -d ' ' -f 1; }
 
 hash_files() {
+  local cache_regular_files=()
   while IFS= read -r -d '' cache_file; do
     printf '%s\0' "$cache_file"
-    git hash-object -- "$cache_file" || return 1
+    if test -L "$cache_file"; then
+      readlink "$cache_file" || return 1
+    else
+      cache_regular_files+=("$cache_file")
+    fi
   done
+  if test "${#cache_regular_files[@]}" -gt 0; then
+    printf '%s\0' "${cache_regular_files[@]}" | xargs -0 git hash-object -- || return 1
+  fi
 }
 
 cache_identity=$({
@@ -65,9 +73,9 @@ cache_inputs=$({
   while IFS= read -r -d '' cache_file; do
     case "$cache_file" in
       (*.rs) ;;
-      (*) printf '%s\0' "$cache_file"; git hash-object -- "$cache_file" || exit 1 ;;
+      (*) printf '%s\0' "$cache_file" ;;
     esac
-  done < <(git ls-files -z -- crates/stark-engine vendor/cxx)
+  done < <(git ls-files -z -- crates/stark-engine vendor/cxx) | hash_files
 } | hash_stream)
 
 cache_source=$(git ls-files -z -- '*.rs' | hash_files | hash_stream)

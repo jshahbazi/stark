@@ -109,6 +109,15 @@ class RustCacheTests(unittest.TestCase):
         self.git("add", "vendor/cxx/new.cc")
         self.assertNotEqual(before["restore-prefix"], self.key()["restore-prefix"])
 
+    def test_tracked_directory_symlinks_are_hashed_without_following_them(self):
+        link = self.root / "vendor/cxx/gen"
+        link.symlink_to("include", target_is_directory=True)
+        self.git("add", "vendor/cxx/gen")
+        before = self.key()
+        link.unlink()
+        link.symlink_to("different-target", target_is_directory=True)
+        self.assertNotEqual(before["restore-prefix"], self.key()["restore-prefix"])
+
     def test_docs_and_untracked_runtime_files_do_not_affect_cache(self):
         before = self.key()
         self.write("README.md", "Documentation\n")
