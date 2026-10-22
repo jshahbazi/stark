@@ -38,7 +38,14 @@ jobs:
       - name: Check repository security policy
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
       - name: Test dependency-report gate
-        run: uv run --no-project --python 3.12.13 python -m unittest discover -s scripts/ci -p 'test_*.py'
+        run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
+      - name: Test standalone installation contracts
+        run: |
+          sh -n install.sh
+          sh -n scripts/install-from-source.sh
+          sh -n scripts/stark
+          uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py scripts/test_build_distribution.py scripts/test_build_menubar.py
+          uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py
       - name: Test model-free converter contracts
         env:
           HF_HUB_OFFLINE: '1'
@@ -48,6 +55,12 @@ jobs:
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/build_distribution.py scripts/test_build_distribution.py scripts/test_install.py scripts/test_stark_cli.py scripts/build_menubar.py scripts/test_build_menubar.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/build_distribution.py scripts/test_build_distribution.py scripts/test_install.py scripts/test_stark_cli.py scripts/build_menubar.py scripts/test_build_menubar.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/verify_distribution.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/verify_distribution.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/sign_distribution.py scripts/test_sign_distribution.py .github/scripts/apple_credentials.py scripts/test_apple_credentials.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/sign_distribution.py scripts/test_sign_distribution.py .github/scripts/apple_credentials.py scripts/test_apple_credentials.py
       - name: Check installed converter outside the checkout
         env:
           HF_HUB_OFFLINE: '1'
@@ -100,6 +113,9 @@ jobs:
         run: uv run --python 3.12.13 python scripts/test_scoring_process.py --reaper "$RUNNER_TEMP/stark-validation-reap"
       - name: Test generation validation contracts
         run: uv run --no-project --python 3.12.13 python -m unittest scripts/test_colgrep_generation_validation.py
+      - name: Test installer relocation and upgrades
+        if: matrix.os == 'macos-26'
+        run: uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py
 
   scoring:
     name: Scorer (${{ matrix.configuration }})
@@ -217,7 +233,7 @@ jobs:
           pnpm exec publint dist
 
   completed:
-    name: CI completed
+    name: ${{ github.event_name == 'pull_request' && 'CI completed' || 'Branch CI completed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}

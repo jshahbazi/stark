@@ -4,6 +4,8 @@ Convert supported Hugging Face models into Stark's `config.json`, `tokenizer.jso
 
 ## Set up
 
+For an installed `stark convert` command with its own Python runtime, use the [Stark installer](../../docs/INSTALLATION.md). The following commands are for working in the converter source checkout.
+
 Install `uv`, then run these commands from the repository root. The converter uses Python 3.13.13.
 
 ```sh

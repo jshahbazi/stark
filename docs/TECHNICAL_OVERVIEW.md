@@ -103,6 +103,8 @@ The proposed [Pi-assisted adapter builder](PI_ADAPTER_BUILDER_PLAN.md) would gen
 
 ## Quickstart
 
+For the prebuilt CLI and private Python runtime, follow the [installation guide](INSTALLATION.md). The commands below are for development in a source checkout.
+
 Run these commands from the repository root.
 
 ### Set up the converter
