@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, 'codex/**']
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -187,12 +187,23 @@ jobs:
       - name: Test model-free server contracts
         run: |
           cargo test --release --locked -p cli --no-default-features --features backend-cpu --bin cli server:: -- --test-threads=1
+
+  cxx:
+    name: CXX panic safety and grammar compatibility
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal
       - name: Test CXX panic safety and grammar compatibility
         run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
 
   typescript:
     name: Model-free TypeScript binding checks
-    runs-on: macos-26
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     defaults:
       run:
@@ -237,12 +248,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [quality, lifecycle, scoring, compatibility, typescript]
+    needs: [quality, lifecycle, scoring, compatibility, cxx, typescript]
     env:
       QUALITY_RESULT: ${{ needs.quality.result }}
       LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
       SCORING_RESULT: ${{ needs.scoring.result }}
       COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+      CXX_RESULT: ${{ needs.cxx.result }}
       TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
     steps:
       - run: |
@@ -250,4 +262,5 @@ jobs:
           test "$LIFECYCLE_RESULT" = success
           test "$SCORING_RESULT" = success
           test "$COMPATIBILITY_RESULT" = success
+          test "$CXX_RESULT" = success
           test "$TYPESCRIPT_RESULT" = success
