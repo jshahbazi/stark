@@ -31,6 +31,17 @@ The inherited Tests, Release, Run Benchmark, and Run Stark Cargo Command workflo
 
 Pull requests emit the required `CI completed` gate. Push and manual runs emit `Branch CI completed`, using the same aggregate checks. Distinct names prevent a cancelled duplicate branch run from blocking a passing pull request.
 
+## CI timing evidence
+
+The scheduling change was validated on 2026-10-22 UTC with identical native and TypeScript source, feature flags, test commands and toolchain pins. Only the workflows and this document changed between these commits.
+
+| CI run | Source commit | Elapsed time |
+| --- | --- | --- |
+| [Before: pull request](https://github.com/jshahbazi/stark/actions/runs/39704758381) | `a60e554ce65eadd2f8f679729ed6590d161a74fd` | 31m26s |
+| [After: manual branch validation](https://github.com/jshahbazi/stark/actions/runs/39708539187) | `09ede8daec2f8debf764a44c1be2f36254011b37` | 16m24s |
+
+Both CI runs passed. Elapsed time includes runner queues and the completion gate; the observed reduction was 48%. The CXX test step took 12m31s in both runs. In the second run its separate job queued for 2m35s and finished while the inherited compatibility job was still running. TypeScript passed on Ubuntu in 23s, compared with 33s on macOS. These are individual hosted-run measurements; runner availability and image changes affect subsequent timings.
+
 ## Download a development build
 
 Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
