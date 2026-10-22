@@ -1,4 +1,4 @@
-use std::{collections::HashSet, fs::File, path::Path};
+use std::{collections::HashSet, fs::File, path::Path, time::Instant};
 
 use serde_json::Value;
 use stark_engine::{
@@ -87,6 +87,10 @@ impl GenerationBackend for NativeBackend {
         input: &[u32],
         options: &GenerationOptions,
     ) -> Result<GeneratedTokens, &'static str> {
+        // Include native state allocation, stream setup and the first GPU wait.
+        // The engine's iterator can encode one lookahead decode before returning
+        // its first token, so this is a wall-clock prefill proxy, not GPU time.
+        let started = Instant::now();
         let mut state = self
             .model
             .create_empty_state(Some(options.context_tokens), options.seed)
@@ -115,6 +119,7 @@ impl GenerationBackend for NativeBackend {
             input.len(),
             options,
             self.vocab_size,
+            started,
         );
         // collect_tokens has dropped and drained the stream, including its lookahead.
         drop(state);

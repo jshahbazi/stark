@@ -115,6 +115,55 @@ class LauncherTests(unittest.TestCase):
                 result.stdout, "--model-path\nmodel folder\nsynthetic input\n"
             )
 
+    def test_chat_uses_bundled_runtime_and_worker(self):
+        self.fake_argument_echo(
+            self.bundle / "libexec" / "python" / "bin" / "python3.13"
+        )
+        result = self.run_cli("chat", "--model-path", "model folder")
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "-I",
+                "-B",
+                "-m",
+                "stark_convert.chat",
+                "--worker",
+                str(self.bundle.resolve() / "libexec" / "stark-generate"),
+                "--model-path",
+                "model folder",
+            ],
+        )
+
+    def test_chat_from_source_uses_locked_environment(self):
+        (self.bundle / "Cargo.toml").touch()
+        converter = self.bundle / "tools" / "converter"
+        converter.mkdir(parents=True)
+        (converter / "pyproject.toml").touch()
+        target = self.bundle / "target" / "release"
+        target.mkdir(parents=True)
+        self.fake_executable(target / "stark-generate", "exit 0\n")
+        commands = self.directory / "commands"
+        commands.mkdir()
+        self.fake_argument_echo(commands / "uv")
+        self.environment["PATH"] = str(commands) + os.pathsep + os.defpath
+        result = self.run_cli("chat", "--model-path", "model folder")
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "run",
+                "--project",
+                str(converter.resolve()),
+                "--locked",
+                "python",
+                "-m",
+                "stark_convert.chat",
+                "--worker",
+                str(target.resolve() / "stark-generate"),
+                "--model-path",
+                "model folder",
+            ],
+        )
+
     def test_relocation_through_current_and_path_command(self):
         prefix = self.directory / "install prefix"
         release = prefix / "lib" / "stark" / "releases" / "0.1.0-preview.1"

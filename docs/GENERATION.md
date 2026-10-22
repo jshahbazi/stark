@@ -37,6 +37,26 @@ Model files, source downloads and private IPC artifacts stay outside Git. Preser
 
 For this checkpoint, the app must render the exact Hugging Face/upstream MiniCPM5 XML chat template with the upstream tools and `enable_thinking=False`. The validation harness pins upstream agent assets at revision `c6c091d7ee14c81206bb28af90d8ff506fd0235e` and checks their hashes. Pass the complete rendered string to the worker, including the generation prefix. The worker tokenizes that string with `add_special_tokens=false` and performs inference.
 
+## Interactive CLI chat
+
+With an updated source installation (`./install.sh --from-source`), start a terminal conversation:
+
+```sh
+stark chat --model-path /absolute/path/to/converted/model
+```
+
+For development without rebuilding the bundle:
+
+```sh
+./scripts/stark chat --model-path "$PWD/models/gguf-experiment/qwen3-dense"
+```
+
+The client renders `token_codec_config.prompt_template` from the converted model and keeps message history only in memory. It loads one worker for the session and sends each complete conversation through its private pipes. Replies appear after generation completes. Messages are single lines; `/help` lists commands, `/reset` clears history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C closes the chat and worker. No transcript or input history is saved.
+
+The checkout launcher uses `uv` with locked Python dependencies and the existing `target/release/stark-generate` binary. Build that worker first if it is missing. Installed bundles use their private Python runtime and bundled worker.
+
+Options include `--system "Your system message"`, `--context-tokens 8192`, `--max-new-tokens 512`, `--thinking`, and `--timeout 300` (seconds per worker reply, including startup). Generation uses greedy sampling. Thinking is disabled by default when the model template supports that setting. The default context budget is the smaller of 8192 and the worker's advertised limit. The client reserves room for the full reply budget and rejects an oversized turn without changing history; use `/reset` or restart with a larger context. Templates run in a Jinja sandbox. Models must have a compatible text chat template; this client does not execute tools or accept multimodal input.
+
 ## Private JSON-lines protocol
 
 Start the worker with exactly `--model-path PATH`. Read its readiness reply before sending requests. Readiness includes `ready`, `engine`, `version`, `mode` (`text-generation-v1`), supported `operations`, `state_policy` (`fresh-per-request`), `vocab_size`, context/output bounds, `eos_token_ids` and `sampling_modes`.
@@ -87,6 +107,13 @@ The reply contains:
 | `finish_reason` | `eos`, `stop_token`, `length` or `context` |
 | `stop_token_id` | Terminal stop ID, otherwise `null` |
 | `generation_seconds` | Generation, cleanup and decoding duration in seconds |
+| `prefill_seconds` | Native state/stream setup through receipt of the first sampled token; wall-clock prefill proxy |
+| `decode_seconds` | Time between receipt of the first and last sampled tokens; `null` when fewer than two tokens were sampled |
+| `input_tokens_per_second` | `input_tokens / prefill_seconds`; `null` for an unmeasurable duration |
+| `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`; `null` when there are no subsequent samples or the duration is unmeasurable |
+| `timing_method` | `first-token-wall-clock-v1` for these stage metrics |
+
+Stage metrics describe the last completed request and exclude prompt tokenization. The input rate is a first-token wall-clock proxy: it includes native state allocation, prefill command encoding, GPU waiting, sampling, and any lookahead decode encoding performed before the iterator returns its first token. It is not isolated GPU prefill timing. The output rate counts subsequent sampling steps, including a terminal EOS or caller stop when present; the first sample belongs to prefill. Stream draining, state cleanup, and text decoding remain included in `generation_seconds` and are excluded from `decode_seconds`. These additive measurements do not extend existing source-bound performance qualification to a new worker build.
 
 `length` means the requested output limit was reached; `context` means fewer output slots were available than requested. Returned prompt-plus-sampled counts stay within `context_tokens`. There is no silent input truncation.
 
