@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
 from .progress import DownloadProgress, ProgressCallback, ProgressReporter, reporter
@@ -27,6 +28,21 @@ _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 _PARALLEL_HASH_MIN_BYTES = 8 * 1024 * 1024
 _HASH_WORKERS = 4
+
+
+def huggingface_repository(value: str) -> str:
+    """Normalize a model repository ID or HTTPS repository page URL."""
+    value = value.strip()
+    if any(character.isspace() for character in value):
+        raise ValueError("invalid_huggingface_repository")
+    if "://" in value:
+        url = urlsplit(value)
+        if url.scheme != "https" or url.netloc.lower() != "huggingface.co":
+            raise ValueError("invalid_huggingface_repository")
+        value = url.path.removeprefix("/").removesuffix("/")
+    if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError("invalid_huggingface_repository")
+    return value
 
 
 def _relative(name: str) -> Path:
@@ -418,6 +434,8 @@ def resolve_source(
 ) -> SourceSnapshot:
     """Resolve all repositories before any file downloads or conversion starts."""
     progress = reporter(progress)
+    if repo is not None:
+        repo = huggingface_repository(repo)
     if source_manifest is not None:
         snapshot = _replay(
             Path(source_manifest),
@@ -436,9 +454,10 @@ def resolve_source(
     if not local and (path.exists() or str(value).startswith(("/", ".", "~"))):
         raise ValueError("invalid_source")
     if not local:
-        if repo is not None and repo != str(value):
+        repository = huggingface_repository(str(value))
+        if repo is not None and repo != repository:
             raise ValueError("conflicting_repository")
-        repo = str(value)
+        repo = repository
     entry = get_model(repo) if repo else None
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
