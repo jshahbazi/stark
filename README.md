@@ -43,23 +43,28 @@ Four of six planned pairs passed the frozen host guards; two were excluded for i
 
 ## Quickstart
 
-Use an Apple silicon Mac with **macOS 26.4 or newer**. The [v0.1.1 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.1) includes the workers, converter and a private Python runtime. Its native components are Developer ID signed and notarized by Apple. No source checkout, Rust, Xcode, uv or system Python setup is required.
+Use an Apple silicon Mac with **macOS 26.4 or newer**. The [v0.1.2 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.2) includes terminal chat, the native menu bar app, workers, converter and private Python runtimes. Its native components are Developer ID signed and notarized by Apple; the app includes its notarization ticket. No source checkout, Rust, Xcode, uv or system Python setup is required.
 
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.1/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.1
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.2
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
+open "$HOME/Applications/Stark.app"
+```
+
+In the menu bar, choose **Install Model**, select a supported local folder or Hugging Face repository, then choose **Run** to open chat. To chat in Terminal:
+
+```sh
 stark convert Qwen/Qwen3-0.6B --output models/qwen3
-stark generate --model-path "$PWD/models/qwen3"
 stark chat --model-path "$PWD/models/qwen3"
 ```
 
-Installation defaults to `~/.local` without sudo and verifies the archive checksum before installing. Add `~/.local/bin` to your shell profile to keep it on PATH. See [installation, updates and uninstall](docs/INSTALLATION.md).
+Installation puts the CLI in `~/.local` and the app in `~/Applications`, without sudo. It verifies the archive checksum and stages both components before activation. Add `~/.local/bin` to your shell profile to keep it on PATH. Models download separately. See [installation, updates and uninstall](docs/INSTALLATION.md).
 
 Use a new output directory for each conversion. The worker exposes `tokenize`, `decode` and `generate` over private stdin/stdout pipes. The caller renders the model's exact chat template. See [request examples and the generation contract](docs/GENERATION.md), or use `stark score --score-model-path /absolute/path/to/model` for decision models such as JevK5.
 
-`stark chat` provides an interactive terminal conversation using the converted model's chat template. Enter one message per line; use `/reset` to clear history and `/exit` to quit. See [CLI chat options](docs/GENERATION.md#interactive-cli-chat). This command requires a build containing the chat client; the existing v0.1.0 release predates it.
+`stark chat` provides an interactive terminal conversation using the converted model's chat template. Enter one message per line; use `/reset` to clear history and `/exit` to quit. See [CLI chat options](docs/GENERATION.md#interactive-cli-chat).
 
 For downloaded or fine-tuned checkpoints, follow the [offline conversion and generic-model instructions](tools/converter/README.md#future-checkpoints-and-architecture-tracking). Generic outputs start native-unverified; check the exact model/configuration's qualification before relying on it.
 
