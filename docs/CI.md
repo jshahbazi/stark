@@ -1,10 +1,11 @@
 # Continuous integration and security checks
 
-Public checks run for pull requests to `main`, pushes to `main` and `codex/**`, and manual workflow dispatches. Security and CodeQL also run weekly on the default branch after these files are merged. All test inputs are synthetic. Workflows upload no model, scoring, or native validation artifacts.
+Public checks run for pull requests to `main`, pushes to `main` and `codex/**`, and manual workflow dispatches. Security and CodeQL also run weekly on the default branch after these files are merged. All test inputs are synthetic. Build artifacts contain the standalone distribution and aggregate installation checks; models, scoring payloads and private native validation artifacts stay outside public CI.
 
 | Workflow | Coverage |
 | --- | --- |
 | CI | Tracked-file and workflow policy, native crate formatting, locked dependency resolution, workflow syntax, model-free converter tests and Ruff lint, Linux/macOS process lifecycle tests, Apple silicon scorer builds/Clippy/tests with default and optimized features, inherited Python binding and HTTP/1.1 server compatibility, synthetic server tests, and model-free TypeScript lint/type/test/package checks. |
+| Build | Standalone Apple silicon development bundle, checksum, installer and aggregate installation verification; downloadable from the run for seven days. Runs on source/build changes pushed to `main` or `codex/**`, and manually on a selected branch. |
 | Security | RustSec advisories, transitive soundness advisories, licenses and sources across all Cargo features; OSV checks of all seven dependency lockfiles, including the independent streaming converter; and dependency review for new vulnerabilities in pull requests. |
 | CodeQL | Extended security queries for Rust, C/C++, Python, JavaScript/TypeScript, and GitHub Actions, using build mode `none`. Metal kernels and Swift bindings are not covered by these scans. |
 | Prebuilt release | Manual version-tag dispatch on a merged commit; standalone Mac build, model-free archive verification and draft release upload. See [release operations](RELEASING.md). |
@@ -27,6 +28,24 @@ Standalone installation checks cover the launcher, bundle manifests and archive 
 Formatting uses `nightly-2026-10-01` because the upstream import configuration requires nightly rustfmt. Scoring compilation still uses Rust 1.98.1. Legacy crate formatting is not a gate. Actionlint suppresses only the constant-false-condition diagnostic used by deliberately disabled inherited jobs; the repository checker independently requires those jobs to remain disabled.
 
 The inherited Tests, Release, Run Benchmark, and Run Stark Cargo Command workflows stay disabled. Their action references are pinned for repository policy compliance; this does not qualify or enable their infrastructure.
+
+Pull requests emit the required `CI completed` gate. Push and manual runs emit `Branch CI completed`, using the same aggregate checks. Distinct names prevent a cancelled duplicate branch run from blocking a passing pull request.
+
+## Download a development build
+
+Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
+
+The artifact contains four files: `stark-VERSION-aarch64-apple-darwin.tar.gz`, its `.sha256` checksum, `install.sh` and `verification.json`. After extracting the artifact, install the exact archive locally:
+
+```sh
+sh install.sh --archive "$PWD/stark-VERSION-aarch64-apple-darwin.tar.gz"
+```
+
+Replace `VERSION` with the version in the filename. The bundle supports Apple silicon and macOS 26.4 or newer. It includes both workers, the converter and its Python runtime. The workflow checks installation, offline synthetic conversion, file hashes, relocation and uninstall before uploading these four files. Failed verification uploads no artifact. Artifacts expire after seven days; download any build you need to keep.
+
+Development builds are unsigned. Use the [published signed release](INSTALLATION.md) for normal installation. This read-only workflow uses no Apple credentials and creates no GitHub release. It reuses the release builder without repeating the scorer lint/test jobs already covered by CI.
+
+## Release workflows
 
 The separate manual prebuilt release job has `contents: write` for its draft upload. Checkout persists no credential, and only the final upload step receives `GH_TOKEN`; build and verification processes receive no publishing token. The workflow requires an existing matching version tag on a commit merged into `main`. Publication follows verification of the actual draft assets.
 
@@ -72,6 +91,6 @@ Keep secret scanning, push protection, Dependabot alerts, private vulnerability 
 
 The repository's live configuration was hardened on 2026-10-11: private reporting and Dependabot alerts were enabled, SHA pinning became mandatory, and the Actions allowlist was limited to checkout, dependency review, CodeQL, setup-uv, and setup-node. `main` requires a pull request and conversation resolution, blocks force pushes and deletion, and applies its protections to administrators. The sole maintainer can merge without a second reviewer. Required `CI completed` and `Security completed` checks are installed with strict branch freshness and are restricted to the GitHub Actions app (ID 15368). These workflow definitions must be included when integrating this branch; scheduled scanning and default-branch dependency alerts use `main` after integration.
 
-The signing addition permits the exact reviewed upload-artifact and download-artifact commits for transfer between the signing and publishing jobs. It preserves the other Actions restrictions and restricts the `macos-release` environment to protected branches.
+The signing addition permits the exact reviewed upload-artifact and download-artifact commits for transfer between the signing and publishing jobs. Build uses the same permitted upload-artifact commit. The other Actions restrictions remain in place, and the `macos-release` environment is restricted to protected branches.
 
 To update a tool or action, resolve its release to an immutable commit or verified archive hash, update the pin and any lockfile together, and record a new validation run. Never add an advisory exception solely to make CI pass; document any independently reviewed exception with its scope, rationale, and expiry.
