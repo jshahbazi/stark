@@ -8,7 +8,7 @@ from setuptools import setup
 from setuptools.command.build_py import build_py
 
 ROOT = Path(__file__).resolve().parent
-SOURCE_INPUTS = run_path(str(ROOT / "stark_convert" / "provenance.py"))["SOURCE_INPUTS"]
+SOURCE_INPUTS = run_path(str(ROOT / "stark_convert" / "_build_metadata.py"))["SOURCE_INPUTS"]
 
 
 class ProvenanceBuild(build_py):

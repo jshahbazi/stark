@@ -5,19 +5,12 @@ import json
 import os
 from pathlib import Path
 
+from ._build_metadata import SOURCE_INPUTS
 from .streaming import ConversionError, _signature, open_regular
 
 PROJECT = Path(__file__).resolve().parents[1]
 ENGINE_UPSTREAM_REVISION = "8d01581474760bd1fc7f4a547ff1d02f7dada437"
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
-SOURCE_INPUTS = (
-    "pyproject.toml",
-    ".python-version",
-    "LICENSE.lalamo",
-    "setup.py",
-    "MANIFEST.in",
-    "scripts/export_conversion_catalog.py",
-)
 
 
 def file_hash(path: Path) -> str:
