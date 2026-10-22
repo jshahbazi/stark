@@ -24,7 +24,7 @@ members = [
     "crates/legacy/kiban",
 ]
 resolver = "3"
-exclude = ["vendor/cxx"]
+exclude = ["vendor/cxx", "vendor/napi-rs/napi-3.10.3", "vendor/napi-rs/napi-derive-backend-5.1.1", "vendor/napi-rs/napi-sys-3.2.2"]
 
 [workspace.package]
 edition = "2024"
@@ -217,6 +217,11 @@ web-time = "1.1"
 [patch."https://github.com/trymirai/cxx.git"]
 cxx = { path = "vendor/cxx" }
 cxx-build = { path = "vendor/cxx/gen/build" }
+
+[patch.crates-io]
+napi = { path = "vendor/napi-rs/napi-3.10.3" }
+napi-derive-backend = { path = "vendor/napi-rs/napi-derive-backend-5.1.1" }
+napi-sys = { path = "vendor/napi-rs/napi-sys-3.2.2" }
 
 [workspace.lints.clippy]
 # TODO: add large_stack_frames, large_stack_arrays, trivially_copy_pass_by_ref, needless_pass_by_value, map_err_ignore, use_self, cloned_instead_of_copied, manual_let_else, semicolon_if_nothing_returned, uninlined_format_args, lossy_float_literal

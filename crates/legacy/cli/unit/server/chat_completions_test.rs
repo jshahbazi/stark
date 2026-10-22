@@ -1,4 +1,42 @@
 use super::*;
+
+#[test]
+fn schemas_cannot_retrieve_local_or_remote_resources() {
+    for schema in [
+        serde_json::json!({"$schema": "file:///synthetic-private-marker.json"}),
+        serde_json::json!({"$schema": "http://127.0.0.1:9/private-marker"}),
+        serde_json::json!({"$ref": "file:///synthetic-private-marker.json"}),
+        serde_json::json!({"$defs": {"nested": {"$ref": "https://example.invalid/private-marker"}}, "$ref": "#/$defs/nested"}),
+        serde_json::json!({"properties": {"child": {"$schema": "file:///private-marker"}}}),
+        serde_json::json!({"items": {"$dynamicRef": "https://example.invalid/private-marker"}}),
+    ] {
+        let error = validate_local_json_schema(&schema).expect_err("external resources must be rejected");
+        assert!(!error.message().contains("private-marker"));
+    }
+    validate_local_json_schema(&serde_json::json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$defs": {"text": {"type": "string"}},
+        "type": "object", "properties": {"name": {"$ref": "#/$defs/text"}}
+    }))
+    .expect("bundled drafts and internal references remain valid");
+    validate_local_json_schema(&serde_json::json!({
+        "$schema": "https://json-schema.org/draft-07/schema#", "type":"object",
+        "properties": {"$ref": {"type":"string"}}, "default": {"$ref":"literal annotation"}
+    }))
+    .expect("schema property names and annotations remain ordinary data");
+    validate_local_json_schema(&serde_json::json!({
+        "$defs": {"text": {"$id":"https://example.invalid/inline-text", "type":"string"}},
+        "$ref":"https://example.invalid/inline-text"
+    }))
+    .expect("references to supplied inline resources do not require external retrieval");
+}
+
+#[test]
+fn server_owns_output_token_limit() {
+    assert_eq!(reply_config(r#"{"messages":[]}"#).token_limit, Some(4096));
+    assert_eq!(reply_config(r#"{"messages":[],"max_tokens":9000}"#).token_limit, Some(4096));
+    assert_eq!(reply_config(r#"{"messages":[],"max_completion_tokens":7}"#).token_limit, Some(7));
+}
 use crate::common::thinking::ReasoningEffortSet;
 
 fn request(json: &str) -> ChatCompletionRequest {
@@ -73,8 +111,15 @@ fn response_format_json_schema_rejects_invalid_schema() {
         r#"{"messages":[],"response_format":{"type":"json_schema","json_schema":{"schema":{"type":"not-a-json-schema-type"}}}}"#,
     ))
     .expect_err("an invalid JSON Schema should be rejected");
-    assert!(matches!(error, ResponseFormatError::InvalidJsonSchema(_)), "expected InvalidJsonSchema, got {error:?}");
-    assert_eq!(error.code(), "invalid_json_schema");
+    if cfg!(feature = "capability-grammar") {
+        assert!(
+            matches!(error, ResponseFormatError::InvalidJsonSchema(_)),
+            "expected InvalidJsonSchema, got {error:?}"
+        );
+        assert_eq!(error.code(), "invalid_json_schema");
+    } else {
+        assert_eq!(error, ResponseFormatError::GrammarUnsupported);
+    }
 }
 
 #[test]

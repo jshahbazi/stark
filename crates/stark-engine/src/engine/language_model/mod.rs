@@ -28,6 +28,7 @@ pub mod stream;
 pub mod grammar;
 
 pub struct LanguageModel<B: Backend> {
+    pub(super) model_identity: Arc<()>,
     engine: Arc<Engine<B>>,
     decoder: Decoder<B>,
     speculator: Option<DFlashTfmSpeculator<B>>,
@@ -42,6 +43,8 @@ pub struct LanguageModel<B: Backend> {
 
 #[derive(Debug, Error)]
 pub enum EngineLoadLanguageModelError<B: Backend> {
+    #[error("Tokenizer vocabulary exceeds decoder vocabulary")]
+    InvalidTokenizerVocabulary,
     #[error("I/O error: {0}")]
     IO(#[from] io::Error),
     #[error("Serde error: {0}")]
@@ -74,6 +77,11 @@ impl<B: Backend> Engine<B> {
         let speculator_path = speculator_path.exists().then_some(speculator_path);
 
         let tokenizer = Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?);
+        if config.decoder_config.vocab_size == 0
+            || tokenizer.get_vocab(true).values().any(|&id| id >= config.decoder_config.vocab_size)
+        {
+            return Err(EngineLoadLanguageModelError::InvalidTokenizerVocabulary);
+        }
 
         let data_type = DataType::BF16;
 
@@ -112,6 +120,7 @@ impl<B: Backend> Engine<B> {
         let vocab_size = config.decoder_config.vocab_size as usize;
 
         Ok(LanguageModel {
+            model_identity: Arc::new(()),
             engine: self.clone(),
             decoder,
             speculator,

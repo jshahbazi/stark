@@ -17,6 +17,7 @@ use tokio::sync::{
 };
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
 
+use super::path_policy::{checked_join, prepare_root, safe_component, safe_relative};
 use crate::{
     helpers::same_origin,
     storage::{Config, StorageError, model_tasks::ModelTasks},
@@ -27,6 +28,7 @@ pub struct Storage {
     download_manager: DownloadManager,
     tasks: TokioMutex<ModelTasks>,
     events: TokioBroadcastSender<(ModelIdentifier, DownloadState)>,
+    models_root: PathBuf,
 }
 
 impl Storage {
@@ -39,11 +41,19 @@ impl Storage {
             path: cache_path.to_string_lossy().to_string(),
         })?;
         let (events, _) = tokio_broadcast_channel(256);
+        let models_path =
+            checked_join(&cache_path, "models/mirai").map_err(|_| StorageError::UnableToCreateDirectory {
+                path: "model cache".to_string(),
+            })?;
+        let models_root = prepare_root(&models_path).map_err(|_| StorageError::UnableToCreateDirectory {
+            path: "model cache".to_string(),
+        })?;
         Ok(Self {
             download_manager: DownloadManager::new(config.download_manager_type, runtime_handle),
             config,
             tasks: TokioMutex::new(ModelTasks::new()),
             events,
+            models_root,
         })
     }
 
@@ -57,7 +67,11 @@ impl Storage {
         model: &Model,
     ) -> Option<PathBuf> {
         let checkpoint_version = model.checkpoint_version()?;
-        Some(self.models_path().join(model.cache_identifier()).join(checkpoint_version))
+        let identifier = model.cache_identifier();
+        if !safe_component(&identifier) || !safe_component(&checkpoint_version) {
+            return None;
+        }
+        checked_join(&self.models_path(), &format!("{identifier}/{checkpoint_version}")).ok()
     }
 
     pub async fn refresh(
@@ -81,6 +95,12 @@ impl Storage {
         let destinations: Vec<&Path> = requests.values().map(|request| request.destination.as_path()).collect();
         let is_listed = |path: &Path| destinations.iter().any(|destination| destination.starts_with(path));
         for model_path in fs::asyn::read_dir(self.models_path()).await.unwrap_or_default() {
+            let Some(relative) = model_path.strip_prefix(self.models_path()).ok().and_then(Path::to_str) else {
+                continue;
+            };
+            if checked_join(&self.models_path(), relative).is_err() {
+                continue;
+            }
             let old_paths = if is_listed(&model_path) {
                 fs::asyn::read_dir(&model_path).await.unwrap_or_default()
             } else if complete && !destinations.is_empty() {
@@ -89,6 +109,12 @@ impl Storage {
                 continue;
             };
             for old_path in old_paths {
+                let Some(relative) = old_path.strip_prefix(self.models_path()).ok().and_then(Path::to_str) else {
+                    continue;
+                };
+                if checked_join(&self.models_path(), relative).is_err() {
+                    continue;
+                }
                 if is_listed(&old_path)
                     || fs::asyn::is_file(&old_path).await
                     || DestinationLock::held_within(&old_path).await
@@ -184,7 +210,7 @@ impl Storage {
     }
 
     fn models_path(&self) -> PathBuf {
-        Self::cache_path(&self.config).join("models").join("mirai")
+        self.models_root.clone()
     }
 
     fn request(
@@ -198,6 +224,20 @@ impl Storage {
         let subrequests = files
             .iter()
             .map(|file| {
+                if !safe_relative(&file.name) || checked_join(&cache_path, &file.name).is_err() {
+                    return Err(StorageError::UnsupportedModel {
+                        identifier: model.identifier.clone(),
+                    });
+                }
+                // Sidecar paths are also filesystem inputs, including preexisting links.
+                for suffix in [".part", ".resume_data", ".checksum", ".lock"] {
+                    let sidecar = cache_path.join(format!("{}{suffix}", file.name));
+                    if std::fs::symlink_metadata(sidecar).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                        return Err(StorageError::UnsupportedModel {
+                            identifier: model.identifier.clone(),
+                        });
+                    }
+                }
                 // Other origins reject a foreign bearer token: the Mirai CDN answers 401 to one.
                 let bearer_token = self
                     .config

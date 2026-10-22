@@ -54,6 +54,8 @@ pub struct Attention<B: Backend> {
 
 #[derive(Debug, Error)]
 pub enum AttentionNewError<B: Backend> {
+    #[error(transparent)]
+    InvalidInput(#[from] crate::backends::common::InvalidInput),
     #[error("Backend error: {0}")]
     Backend(#[source] B::Error),
     #[error("Parameter loader error: {0}")]
@@ -73,6 +75,7 @@ impl<B: Backend> Attention<B> {
         parameter_tree: &ParameterTree<B>,
         context: &B::Context,
     ) -> Result<(Self, Option<B::GlobalBuffer>), AttentionNewError<B>> {
+        crate::config::validation::validate_attention(config, rope_config)?;
         let is_kv_sharing = config.is_kv_sharing;
 
         let head_dim = config.head_dim;
@@ -84,17 +87,22 @@ impl<B: Backend> Attention<B> {
         let sliding_window_size = config.sliding_window_size;
         let max_rope_length = rope_config.map(|rope_config| *rope_config.max_sequence_length());
 
-        let q_dim = num_q_heads * head_dim;
+        let q_dim = crate::config::validation::checked_product(&[num_q_heads, head_dim])?;
 
         let projection_tree = parameter_tree.subtree("qkvg_projection");
         let qkv_dim = if let Some(num_kv_heads) = num_kv_heads {
-            let kv_dim = num_kv_heads * head_dim;
-            q_dim + kv_dim + kv_dim
+            let kv_dim = crate::config::validation::checked_product(&[num_kv_heads, head_dim])?;
+            q_dim
+                .checked_add(kv_dim)
+                .and_then(|dim| dim.checked_add(kv_dim))
+                .ok_or(crate::backends::common::InvalidInput("attention projection overflow"))?
         } else {
             q_dim
         };
         let projection_dim = if config.has_gate {
-            qkv_dim + q_dim
+            qkv_dim
+                .checked_add(q_dim)
+                .ok_or(crate::backends::common::InvalidInput("attention gate projection overflow"))?
         } else {
             qkv_dim
         };

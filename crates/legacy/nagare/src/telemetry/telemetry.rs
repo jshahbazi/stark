@@ -53,8 +53,8 @@ impl Telemetry {
         };
         let client = match Client::builder().base_url(base_url).retry(retry).build() {
             Ok(client) => client,
-            Err(error) => {
-                tracing::warn!(%error, "telemetry disabled: failed to build client");
+            Err(_) => {
+                tracing::warn!("telemetry disabled: failed to build client");
                 return Self::disabled();
             },
         };

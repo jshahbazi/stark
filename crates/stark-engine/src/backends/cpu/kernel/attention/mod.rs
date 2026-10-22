@@ -28,6 +28,7 @@ impl AttentionKernel for AttentionCpuKernel {
         _context: &CpuContext,
         config: AttentionKernelConfig,
     ) -> Result<Self, CpuError> {
+        crate::config::validation::validate_heads(config.num_q_heads, config.num_groups, config.head_dim)?;
         Ok(Self {
             config,
         })

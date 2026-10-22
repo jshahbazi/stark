@@ -8,6 +8,32 @@ use json_transform::{
 };
 use serde_json::json;
 
+#[test]
+fn cyclic_calls_return_structured_errors() {
+    for pipelines in [
+        json!({"root":[{"type":"call","name":"root"}]}),
+        json!({"root":[{"type":"call","name":"other"}],"other":[{"type":"call","name":"root"}]}),
+    ] {
+        let schema: TransformSchema = serde_json::from_value(pipelines).unwrap();
+        assert!(matches!(schema.execute("root", json!(null)), Err(json_transform::TransformError::CyclicPipeline)));
+    }
+    let dynamic: TransformSchema = serde_json::from_value(json!({"root":[{"type":"call","key":"target"}]})).unwrap();
+    assert!(matches!(
+        dynamic.execute("root", json!({"target":"root"})),
+        Err(json_transform::TransformError::ExecutionLimit)
+    ));
+}
+
+#[test]
+fn work_limit_covers_empty_nested_pipelines_and_resets_between_executions() {
+    let schema: TransformSchema = serde_json::from_value(json!({"root":[{"type":"each","apply":[]}]})).unwrap();
+    assert!(matches!(
+        schema.execute("root", json!(vec![0; 65_536])),
+        Err(json_transform::TransformError::ExecutionLimit)
+    ));
+    assert_eq!(schema.execute("root", json!([1, 2, 3])).unwrap(), json!([1, 2, 3]));
+}
+
 // Switch
 
 #[test]

@@ -152,6 +152,12 @@ PUBLIC KERNEL(UnifiedSampling) (
   );
 
   for (uint32_t iteration = 0; iteration < MAX_ITERS; iteration++) {
+    // Empty/nonfinite candidate sets and exhausted filters have no readable index.
+    // A bounded vocabulary token is the deterministic fallback for this case.
+    if (candidate_logit_post_gumbel.index >= vocab_size) {
+      *output = 0;
+      return;
+    }
     Logit candidate_logit_pre_filter = Logit::load(logits, candidate_logit_post_gumbel.index);
     if (has_temperature) {
       candidate_logit_pre_filter.value *= recip_temperature;

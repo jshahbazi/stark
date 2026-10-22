@@ -29,6 +29,20 @@ use crate::{
 pub const DATA_TYPE: DataType = DataType::BF16;
 pub const ROPE_DATA_TYPE: DataType = DataType::F32;
 
+fn allocate_node_candidates<B: Backend>(
+    command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    rows: u32,
+    candidates: u32,
+) -> Result<(B::ScratchBuffer, B::ScratchBuffer), B::Error> {
+    let mut ids = command_buffer.allocate_scratch_for_shape(&[rows, candidates], DataType::U32)?;
+    let mut logits = command_buffer.allocate_scratch_for_shape(&[rows, candidates], DataType::F32)?;
+    // Terminal and inactive rows skip frontier writes but still reach gathered
+    // readout. Every row needs a valid vocabulary ID and initialized logit.
+    command_buffer.encode_fill(&mut ids, 0);
+    command_buffer.encode_fill(&mut logits, 0);
+    Ok((ids, logits))
+}
+
 pub struct WeaverTreeShape {
     pub tree_budget: u32,
     pub max_depth: u32,
@@ -147,6 +161,8 @@ pub enum WeaverNewError<B: Backend> {
     InvalidHeadConfig,
     #[error("candidate_pool_size must be in 1..={max}, got {0}", max = CANDIDATES_MAX)]
     InvalidCandidatePoolSize(u32),
+    #[error("Weaver requires a nonempty vocabulary covering its candidate pool")]
+    InvalidVocabulary,
     #[error("rope head_dim {actual} does not match model_dim / num_heads = {expected}")]
     InvalidRopeHeadDim {
         expected: u32,
@@ -185,7 +201,13 @@ impl<B: Backend> Weaver<B> {
         if config.candidate_pool_size == 0 || config.candidate_pool_size > CANDIDATES_MAX {
             return Err(WeaverNewError::InvalidCandidatePoolSize(config.candidate_pool_size));
         }
+        if vocab_size == 0 || config.candidate_pool_size > vocab_size {
+            return Err(WeaverNewError::InvalidVocabulary);
+        }
         let head_dim = config.model_dim / config.num_heads;
+        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+            return Err(WeaverNewError::InvalidHeadConfig);
+        }
         if *config.rope_config.head_dim() != head_dim {
             return Err(WeaverNewError::InvalidRopeHeadDim {
                 expected: head_dim,
@@ -661,12 +683,9 @@ impl<B: Backend> Weaver<B> {
         command_buffer.encode_fill(&mut node_valid, 0);
         command_buffer.encode_copy(root.subrange(word_bytes..), node_valid.subrange_mut(..word_bytes));
 
-        let mut node_candidate_ids = command_buffer
-            .allocate_scratch_for_shape(&[shape.expand_per_round, self.candidate_pool_size], DataType::U32)
-            .map_err(WeaverEncodeError::Backend)?;
-        let mut node_candidate_logits = command_buffer
-            .allocate_scratch_for_shape(&[shape.expand_per_round, self.candidate_pool_size], DataType::F32)
-            .map_err(WeaverEncodeError::Backend)?;
+        let (mut node_candidate_ids, mut node_candidate_logits) =
+            allocate_node_candidates::<B>(command_buffer, shape.expand_per_round, self.candidate_pool_size)
+                .map_err(WeaverEncodeError::Backend)?;
         let depth_seeds_buffer =
             command_buffer.allocate_constant_from_slice(depth_seeds).map_err(WeaverEncodeError::Backend)?;
 
@@ -719,3 +738,7 @@ impl<B: Backend> Weaver<B> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "../../unit/encodable_block/weaver_buffer_test.rs"]
+mod buffer_tests;

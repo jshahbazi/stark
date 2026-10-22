@@ -114,11 +114,17 @@ def _tensor_manifest(path: Path) -> tuple[dict[str, dict[str, object]], object]:
             if not name or not isinstance(spec, dict) or set(spec) != {"dtype", "shape", "data_offsets"}:
                 raise BenchmarkError("invalid_output_header")
             dtype, shape, offsets = spec.get("dtype"), spec.get("shape"), spec.get("data_offsets")
-            if not isinstance(dtype, str) or dtype not in DTYPE_BYTES or not isinstance(shape, list):
+            if (
+                not isinstance(dtype, str)
+                or dtype not in DTYPE_BYTES
+                or not isinstance(shape, list)
+                or len(shape) > 32
+                or any(type(dimension) is not int or dimension < 0 for dimension in shape)
+            ):
                 raise BenchmarkError("invalid_output_header")
-            expected_bytes = DTYPE_BYTES[dtype]
+            expected_bytes = 0 if 0 in shape else DTYPE_BYTES[dtype]
             for dimension in shape:
-                if type(dimension) is not int or dimension < 0:
+                if expected_bytes and dimension > data_bytes // expected_bytes:
                     raise BenchmarkError("invalid_output_header")
                 expected_bytes *= dimension
             if (

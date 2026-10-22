@@ -21,7 +21,7 @@ pub struct FileLogger {
 
 impl FileLogger {
     pub fn new(logs_dir_path: PathBuf) -> io::Result<Self> {
-        fs::create_dir_all(&logs_dir_path)?;
+        ensure_private_directory(&logs_dir_path)?;
         Self::remove_expired_log_files(&logs_dir_path)?;
 
         let date = Local::now().format(LOG_FILE_DATE_FORMAT);
@@ -70,10 +70,59 @@ impl FileLogger {
     }
 }
 
+fn ensure_private_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)?;
+        let metadata = fs::symlink_metadata(path)?;
+        // SAFETY: geteuid has no arguments and cannot invalidate Rust state.
+        let owner = unsafe { geteuid() };
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.mode() & 0o077 != 0
+            || metadata.uid() != owner
+        {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "log directory must be private"));
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+}
+
 impl<'a> MakeWriter<'a> for FileLogger {
     type Writer = <LogFile as MakeWriter<'a>>::Writer;
 
     fn make_writer(&'a self) -> Self::Writer {
         self.file.make_writer()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    use super::*;
+
+    #[test]
+    fn logger_requires_an_owned_private_directory() {
+        let root = std::env::temp_dir().join(format!("stark-directory-test-{}", Uuid::new_v4()));
+        let directory = root.join("logs");
+        let logger = FileLogger::new(directory.clone()).unwrap();
+        assert_eq!(fs::metadata(&directory).unwrap().mode() & 0o777, 0o700);
+        drop(logger);
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(FileLogger::new(directory.clone()).is_err());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let link = root.join("linked");
+        symlink(&directory, &link).unwrap();
+        assert!(FileLogger::new(link).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 }

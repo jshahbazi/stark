@@ -81,6 +81,7 @@ jobs:
             --no-call-analysis=go --no-call-analysis=rust \
             --all-packages --all-vulns --format=json --output-file "$report" \
             -L Cargo.lock \
+            -L crates/legacy/bindings/tests/napi_identity/Cargo.lock \
             -L crates/legacy/download-manager/examples/wasm/Cargo.lock \
             -L tools/uv.lock \
             -L tools/converter/uv.lock \
@@ -101,6 +102,7 @@ jobs:
           uv run --no-project --python 3.12.13 python scripts/ci/check_osv_report.py "$report" \
             --exceptions scripts/ci/dependency-exceptions.toml \
             --lockfile Cargo.lock \
+            --lockfile crates/legacy/bindings/tests/napi_identity/Cargo.lock \
             --lockfile crates/legacy/download-manager/examples/wasm/Cargo.lock \
             --lockfile tools/uv.lock \
             --lockfile tools/converter/uv.lock \

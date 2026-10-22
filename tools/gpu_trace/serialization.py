@@ -57,7 +57,27 @@ def to_json(export: TraceExport, indent: int | None = 2) -> str:
 
 
 def from_dict(data: dict[str, Any]) -> TraceExport:
-    return _converter.structure(data, TraceExport)
+    # Validate the input before cattrs can coerce strings, booleans or floats.
+    utilization = data.get("utilization")
+    if not isinstance(utilization, dict) or any(
+        type(utilization.get(name)) is not int or not 0 <= utilization[name] <= 2**63 - 1
+        for name in GpuUtilization.__dataclass_fields__
+    ):
+        raise ValueError("Invalid GPU utilization durations or counts")
+    duration = utilization["run_duration_ns"]
+    if (
+        utilization["global_active_ns"] + utilization["global_idle_ns"] > utilization["global_coverage_ns"]
+        or utilization["global_coverage_ns"] > duration
+        or utilization["target_active_ns"] > utilization["global_active_ns"]
+        or utilization["window_start_ns"] > utilization["window_end_ns"]
+        or utilization["window_end_ns"] > duration
+        or utilization["target_active_ns"] > utilization["window_end_ns"] - utilization["window_start_ns"]
+    ):
+        raise ValueError("Inconsistent GPU utilization durations")
+    export = _converter.structure(data, TraceExport)
+    if type(data.get("metadata", {}).get("duration_ns")) is not int or export.metadata.duration_ns < 0:
+        raise ValueError("Invalid trace duration")
+    return export
 
 
 def from_json(json_str: str) -> TraceExport:

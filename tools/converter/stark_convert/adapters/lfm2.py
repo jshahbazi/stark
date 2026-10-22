@@ -21,6 +21,7 @@ from ..streaming import (
     load_checkpoint,
     read_json,
     tensor_sha256,
+    validate_planning_layers,
 )
 from .dense import _DTYPES, _bool, _positive_float, _positive_int
 
@@ -94,6 +95,7 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
     unsupported: list[str] = []
     model_dim = _positive_int(config, "hidden_size")
     layers = _positive_int(config, "num_hidden_layers")
+    validate_planning_layers(layers)
     heads = _positive_int(config, "num_attention_heads")
     groups = _positive_int(config, "num_key_value_heads")
     if heads != _positive_int(config, "num_heads") or heads % groups or model_dim % heads:
@@ -141,14 +143,18 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
             raise ConversionError("LFM2 adjusted intermediate dimension is invalid")
     else:
         hidden_dim = config.get("intermediate_size") or ff_dim
+    tensors = load_checkpoint(source)
+    validate_planning_layers(layers, tensors)
     indices = config.get("full_attn_idxs")
     if indices is not None:
         if (
             not isinstance(indices, list)
+            or len(indices) > layers
             or any(type(index) is not int or not 0 <= index < layers for index in indices)
             or len(set(indices)) != len(indices)
         ):
             raise ConversionError("LFM2 full_attn_idxs is malformed")
+    index_set = set(indices) if indices is not None else set()
     layer_types = config.get("layer_types")
     if layer_types is not None:
         if (
@@ -157,12 +163,12 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
             or any(layer not in ("conv", "full_attention") for layer in layer_types)
         ):
             raise ConversionError("LFM2 layer_types is malformed")
-        if indices is not None and set(indices) != {
+        if indices is not None and index_set != {
             index for index, layer in enumerate(layer_types) if layer == "full_attention"
         }:
             unsupported.append("LFM2 layer_types contradicts full_attn_idxs")
     elif indices is not None:
-        layer_types = ["full_attention" if index in indices else "conv" for index in range(layers)]
+        layer_types = ["full_attention" if index in index_set else "conv" for index in range(layers)]
     else:
         raise ConversionError("LFM2 requires explicit layer_types or full_attn_idxs")
     nested_rope = config.get("rope_parameters")
@@ -187,7 +193,6 @@ def build_lfm2_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
     if config.get("architectures", ["Lfm2ForCausalLM"]) != ["Lfm2ForCausalLM"] or set(config) - _KEYS:
         unsupported.append("LFM2 config options are outside implemented coverage")
     quantization = parse_mlx_quantization(config)
-    tensors = load_checkpoint(source)
     expected: set[str] = set()
     operations: list[TensorOperation] = []
     metadata: dict[str, str] = {}

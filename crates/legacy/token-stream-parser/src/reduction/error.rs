@@ -3,6 +3,8 @@ use crate::types::TokenValue;
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum ReductionParserError {
+    #[error("Parser resource limit exceeded")]
+    ResourceLimit,
     #[error("Invalid state: expected group at index {index}")]
     InvalidState {
         index: usize,

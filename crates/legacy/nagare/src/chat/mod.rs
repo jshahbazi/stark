@@ -28,7 +28,7 @@ use shoji::{
         },
     },
 };
-use tokio::sync::{Mutex, mpsc, mpsc::UnboundedSender};
+use tokio::sync::{Mutex, mpsc, mpsc::Sender};
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -41,6 +41,41 @@ use crate::{
 };
 
 const DEFAULT_TOOL_TURN_LIMIT: u32 = 10;
+
+async fn send_chunk(
+    sender: &Sender<Result<Vec<ChatReply>, ChatSessionError>>,
+    chunk: Result<Vec<ChatReply>, ChatSessionError>,
+    cancel_token: &CancellationToken,
+) -> Result<(), ()> {
+    tokio::select! {
+        _ = cancel_token.cancelled() => Err(()),
+        result = sender.send(chunk) => result.map_err(|_| ()),
+    }
+}
+
+#[cfg(test)]
+mod backpressure_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_full_channel_applies_backpressure_and_cancellation_releases_the_producer() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let cancellation = CancellationToken::new();
+        send_chunk(&sender, Ok(Vec::new()), &cancellation).await.unwrap();
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                send_chunk(&sender, Ok(Vec::new()), &cancellation)
+            )
+            .await
+            .is_err()
+        );
+        assert!(receiver.recv().await.unwrap().is_ok());
+        send_chunk(&sender, Ok(Vec::new()), &cancellation).await.unwrap();
+        cancellation.cancel();
+        assert!(send_chunk(&sender, Ok(Vec::new()), &cancellation).await.is_err());
+    }
+}
 
 #[bindings::export(Enumeration)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,7 +91,7 @@ pub enum ChatSessionStreamChunk {
 #[bindings::export(Class(Stream))]
 #[derive(Clone)]
 pub struct ChatSessionStream {
-    receiver: Arc<Mutex<mpsc::UnboundedReceiver<Result<Vec<ChatReply>, ChatSessionError>>>>,
+    receiver: Arc<Mutex<mpsc::Receiver<Result<Vec<ChatReply>, ChatSessionError>>>>,
     cancel_token: CancelToken,
 }
 
@@ -259,7 +294,7 @@ impl ChatSession {
     /// Returns the turn's replies, or `None` when the turn must not continue (the stream errored or the receiver was dropped).
     async fn send_input(
         &self,
-        sender: &UnboundedSender<Result<Vec<ChatReply>, ChatSessionError>>,
+        sender: &Sender<Result<Vec<ChatReply>, ChatSessionError>>,
         input: Vec<ChatMessage>,
         config: ChatReplyConfig,
         cancel_token: CancellationToken,
@@ -286,15 +321,15 @@ impl ChatSession {
         });
 
         let mut outputs: IndexMap<u32, ChatReply> = IndexMap::new();
-        let mut error_value: Option<serde_json::Value> = None;
+        let mut failed = false;
         let mut interrupted = false;
         let mut generated_tool_call_identifiers: Vec<Option<String>> = Vec::new();
         let mut latest_stats: Option<ChatReplyStats> = None;
 
         let mut instance = self.instance.lock().await;
         let mut stream = match &mut *instance {
-            Instance::Token(session) => session.stream(&all_messages, config, cancel_token).await,
-            Instance::Message(session) => session.stream(&all_messages, config, cancel_token),
+            Instance::Token(session) => session.stream(&all_messages, config, cancel_token.clone()).await,
+            Instance::Message(session) => session.stream(&all_messages, config, cancel_token.clone()),
         };
         while let Some(partial_output) = stream.next().await {
             match partial_output {
@@ -320,7 +355,7 @@ impl ChatSession {
                     drop(messages_guard);
 
                     // send new output
-                    if sender.send(Ok(outputs.values().cloned().collect())).is_err() {
+                    if send_chunk(sender, Ok(outputs.values().cloned().collect()), &cancel_token).await.is_err() {
                         interrupted = true;
                         break;
                     }
@@ -332,8 +367,8 @@ impl ChatSession {
                     }
                 },
                 Err(error) => {
-                    error_value = Some(serde_json::json!({ "message": error.to_string() }));
-                    let _ = sender.send(Err(error));
+                    failed = true;
+                    let _ = send_chunk(sender, Err(error), &cancel_token).await;
                     interrupted = true;
                     break;
                 },
@@ -343,9 +378,9 @@ impl ChatSession {
         drop(instance);
 
         // telemetry report result
-        if let Some(error) = error_value {
+        if failed {
             self.telemetry.report(TelemetryEvent::ModelInferenceFailed {
-                error,
+                error: serde_json::json!({ "category": "inference_failed" }),
             });
         } else if let Some(stats) = latest_stats.as_ref() {
             self.telemetry.report(TelemetryEvent::ModelInferenceFinished {
@@ -363,14 +398,16 @@ impl ChatSession {
 
     async fn execute_turn(
         &self,
-        sender: UnboundedSender<Result<Vec<ChatReply>, ChatSessionError>>,
+        sender: Sender<Result<Vec<ChatReply>, ChatSessionError>>,
         input: Vec<ChatMessage>,
         config: ChatReplyConfig,
         cancel_token: CancellationToken,
     ) {
         // check state
         if !self.try_transition(ChatSessionState::Idle, ChatSessionState::Generation).await {
-            let _ = sender.send(Err(ChatSessionError::UnableToPerformOperationInCurrentState {}));
+            let _ =
+                send_chunk(&sender, Err(ChatSessionError::UnableToPerformOperationInCurrentState {}), &cancel_token)
+                    .await;
             return;
         }
 
@@ -418,9 +455,14 @@ impl ChatSession {
                 }
 
                 if tool_turns >= tool_turn_limit {
-                    let _ = sender.send(Err(ChatSessionError::ToolTurnLimitExceeded {
-                        limit: tool_turn_limit,
-                    }));
+                    let _ = send_chunk(
+                        &sender,
+                        Err(ChatSessionError::ToolTurnLimitExceeded {
+                            limit: tool_turn_limit,
+                        }),
+                        &cancel_token,
+                    )
+                    .await;
                     break;
                 }
                 tool_turns += 1;
@@ -637,7 +679,7 @@ impl ChatSession {
     ) -> ChatSessionStream {
         let cancel_token_to_return = CancelToken::new();
         let cancel_token = cancel_token_to_return.inner().clone();
-        let (sender, receiver) = mpsc::unbounded_channel::<Result<Vec<ChatReply>, ChatSessionError>>();
+        let (sender, receiver) = mpsc::channel::<Result<Vec<ChatReply>, ChatSessionError>>(8);
         let session = self.clone();
         let turn = async move { session.execute_turn(sender, input, config, cancel_token).await }.in_current_span();
         #[cfg(feature = "bindings-pyo3")]

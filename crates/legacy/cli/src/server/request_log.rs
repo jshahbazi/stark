@@ -23,7 +23,7 @@ impl RequestLog {
         tracing::info!(
             "received: {messages} messages, {}, {tools} tools, reasoning_effort={}",
             stream,
-            reasoning_effort.unwrap_or("default"),
+            reasoning_effort_category(reasoning_effort),
         );
         Self {
             started: Instant::now(),
@@ -70,8 +70,34 @@ impl RequestLog {
 
     pub fn fail(
         &self,
-        error: &str,
+        _error: &str,
     ) {
-        tracing::info!("failed in {:.2}s: {error}", self.started.elapsed().as_secs_f64());
+        tracing::info!("failed in {:.2}s", self.started.elapsed().as_secs_f64());
+    }
+}
+
+fn reasoning_effort_category(value: Option<&str>) -> &'static str {
+    match value {
+        None | Some("unspecified") => "unspecified",
+        Some("default") => "default",
+        Some("disabled") => "disabled",
+        Some("minimal") => "minimal",
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        Some("xhigh") => "xhigh",
+        Some(_) => "invalid",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reasoning_effort_category;
+
+    #[test]
+    fn reasoning_diagnostics_allow_only_fixed_categories() {
+        assert_eq!(reasoning_effort_category(Some("high")), "high");
+        assert_eq!(reasoning_effort_category(Some("high\nforged private-marker")), "invalid");
+        assert_eq!(reasoning_effort_category(Some("\u{1b}[2J")), "invalid");
     }
 }

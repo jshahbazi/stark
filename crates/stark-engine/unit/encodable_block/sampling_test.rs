@@ -180,3 +180,86 @@ fn test_sampling_prop() {
         });
     });
 }
+
+#[stark_test]
+fn native_sampling_options_reject_invalid_effective_values() {
+    let method = |temperature, top_k, top_p, min_p| SamplingMethod::Stochastic {
+        temperature,
+        top_k,
+        top_p,
+        min_p,
+        repetition_penalty: None,
+        suffix_repetition_length: None,
+    };
+    for temperature in [0.0, -1.0, f32::NAN, f32::INFINITY, f32::from_bits(1)] {
+        assert!(method(Some(temperature), None, None, None).validate(63).is_err());
+    }
+    for top_k in [0, 64, u32::MAX] {
+        assert!(method(None, Some(top_k), None, None).validate(63).is_err());
+    }
+    for top_p in [0.0, -1.0, 1.1, f32::NAN, f32::INFINITY] {
+        assert!(method(None, None, Some(top_p), None).validate(63).is_err());
+    }
+    for min_p in [-1.0, 1.1, f32::NAN, f32::INFINITY] {
+        assert!(method(None, None, None, Some(min_p)).validate(63).is_err());
+    }
+    assert!(SamplingMethod::Greedy.validate(0).is_err());
+    assert!(SamplingMethod::Greedy.validate(63).is_ok());
+    assert!(method(None, None, None, None).validate(63).is_ok());
+    assert!(method(Some(0.7), Some(63), Some(1.0), Some(0.0)).validate(63).is_ok());
+    assert!(method(Some(0.7), Some(1), Some(0.9), Some(1.0)).validate(63).is_ok());
+}
+
+#[stark_test]
+fn native_sampling_keeps_nonfinite_candidates_within_vocabulary() {
+    let contexts = TestContextes::new();
+    let check = || -> Result<(), TestCaseError> {
+        for logits in [[f32::NAN; 3], [f32::NEG_INFINITY; 3], [1.0, 3.0, 2.0]] {
+            for_each_context!(contexts, |context: C| do_sampling_backend::<<C as Context>::Backend, f32>(
+                context,
+                &logits,
+                None,
+                None,
+                3,
+                &SamplingMethod::Greedy,
+                1,
+            ))
+            .compare_results()?;
+        }
+        Ok(())
+    };
+    check().unwrap();
+}
+
+fn repetition_penalty_backend<B: Backend>(context: &B::Context) {
+    use crate::backends::common::{BufferMut, Kernels, kernel::RepetitionPenaltyKernel};
+
+    let kernel = <B::Kernels as Kernels>::RepetitionPenaltyKernel::new(context, DataType::F32).unwrap();
+    for (ring, suffix, token, expected) in [
+        (vec![0u32, 0], 1, 2, [2.0f32, 4.0]),
+        (vec![0, 0], 1, u32::MAX, [2.0, 4.0]),
+        (vec![0, 0], 1, 1, [2.0, 2.0]),
+        (vec![0, 1, u32::MAX, 0], 2, 0, [1.0, 4.0]),
+    ] {
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let logits = commands.allocate_constant_from_slice(&[2.0f32, 4.0]).unwrap();
+        let ring = commands.allocate_constant_from_slice(&ring).unwrap();
+        let token = commands.allocate_constant_from_slice(&[token]).unwrap();
+        let mut output = context.create_buffer(8).unwrap();
+        output.copyin(&[2.0f32, 4.0]);
+        kernel.encode(&logits, &mut output, &ring, &token, 2.0, suffix, 2, 0, 1, &mut commands);
+        drop(logits);
+        drop(ring);
+        drop(token);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        assert_eq!(output.copyout::<f32>(), expected);
+    }
+}
+
+#[stark_test]
+fn native_repetition_penalty_handles_invalid_input_and_retained_ring_tokens() {
+    let contexts = TestContextes::new();
+    repetition_penalty_backend::<crate::backends::cpu::Cpu>(&contexts.cpu);
+    #[cfg(backend = "metal")]
+    repetition_penalty_backend::<crate::backends::metal::Metal>(&contexts.metal);
+}

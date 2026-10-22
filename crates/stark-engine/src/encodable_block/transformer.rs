@@ -106,6 +106,8 @@ impl<B: Backend> TransformerState<B> {
 
 #[derive(Debug, Error)]
 pub enum TransformerNewError<B: Backend> {
+    #[error(transparent)]
+    InvalidInput(#[from] crate::backends::common::InvalidInput),
     #[error("Backend error: {0}")]
     Backend(#[source] B::Error),
     #[error("Layer error: {0}")]
@@ -133,6 +135,7 @@ impl<B: Backend> Transformer<B> {
         transformer_config: &TransformerConfig,
         parameter_tree: &ParameterTree<B>,
     ) -> Result<Self, TransformerNewError<B>> {
+        crate::config::validation::validate_transformer(transformer_config)?;
         let mut ropes: Vec<AnyRoPEConfig> = Vec::new();
 
         let num_layers = transformer_config.layer_configs.len() as u32;

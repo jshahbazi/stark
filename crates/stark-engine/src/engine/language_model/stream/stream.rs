@@ -198,6 +198,17 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
         model_state: &'a mut LanguageModelState<B>,
         options: LanguageModelStreamOptions,
     ) -> Result<Self, LanguageModelStreamError<B>> {
+        if !Arc::ptr_eq(&model.model_identity, &model_state.model_identity) {
+            return Err(LanguageModelStreamError::ForeignState);
+        }
+        let vocab_size = model.sampling.vocab_size();
+        if !valid_stream_tokens(
+            vocab_size,
+            input.iter().chain(&model_state.tokens).chain(model_state.last_output_token.iter()),
+        ) {
+            return Err(LanguageModelStreamError::InvalidToken);
+        }
+        options.sampling_method.validate(vocab_size).map_err(|_| LanguageModelStreamError::InvalidSampling)?;
         #[cfg(grammar)]
         let mut options = options;
         if model_state.tokens.is_empty() && input.is_empty() {
@@ -871,6 +882,13 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
     }
 }
 
+fn valid_stream_tokens<'a>(
+    vocab_size: u32,
+    tokens: impl IntoIterator<Item = &'a u64>,
+) -> bool {
+    vocab_size != 0 && tokens.into_iter().all(|&token| token < u64::from(vocab_size))
+}
+
 impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
     type Item = Result<u64, LanguageModelStreamError<B>>;
 
@@ -964,7 +982,19 @@ mod decode_pool_tests {
 
     use stark_engine_macros::stark_test;
 
-    use super::SubmittedScratchPool;
+    use super::{SubmittedScratchPool, valid_stream_tokens};
+
+    #[stark_test]
+    fn stream_tokens_reject_vocabulary_edges_and_narrowing() {
+        for invalid in [64, 65, u32::MAX as u64, u64::from(u32::MAX) + 1, u64::MAX] {
+            assert!(!valid_stream_tokens(64, [0, invalid, 63].iter()));
+        }
+        assert!(!valid_stream_tokens(0, [].iter()));
+        assert!(valid_stream_tokens(64, [0, 1, 63].iter()));
+        assert!(valid_stream_tokens(64, [].iter()));
+        // The same guard covers retained state and an uncommitted output token.
+        assert!(!valid_stream_tokens(64, [1].iter().chain([64].iter()).chain([2].iter())));
+    }
 
     struct Pool {
         outstanding: Cell<usize>,

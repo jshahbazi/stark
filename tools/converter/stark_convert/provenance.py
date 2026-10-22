@@ -2,7 +2,10 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
+
+from .streaming import ConversionError, _signature, open_regular
 
 PROJECT = Path(__file__).resolve().parents[1]
 ENGINE_UPSTREAM_REVISION = "8d01581474760bd1fc7f4a547ff1d02f7dada437"
@@ -19,9 +22,17 @@ SOURCE_INPUTS = (
 
 def file_hash(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(8 * 1024 * 1024):
+    with open_regular(path.resolve(strict=True)) as handle:
+        before = _signature(os.fstat(handle.fileno()))
+        remaining = before[2]
+        while remaining:
+            chunk = handle.read(min(8 * 1024 * 1024, remaining))
+            if not chunk:
+                raise ConversionError("Source changed while hashing")
+            remaining -= len(chunk)
             digest.update(chunk)
+        if handle.read(1) or _signature(os.fstat(handle.fileno())) != before:
+            raise ConversionError("Source changed while hashing")
     return digest.hexdigest()
 
 

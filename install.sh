@@ -157,6 +157,12 @@ if [ -z "$expected_hash" ]; then
         || fail 'checksum file must contain exactly one checksum'
     valid_hash "$expected_hash" || fail 'invalid SHA-256 checksum file'
 fi
+if [ "$mode" = archive ]; then
+    # Hash, inspect and execute only the private snapshot of caller-owned bytes.
+    # Replacing the external pathname after this copy cannot change the bundle.
+    cp -- "$archive" "$stage/archive.tar.gz" || fail 'cannot stage local archive'
+    archive=$stage/archive.tar.gz
+fi
 actual_hash=$(shasum -a 256 -- "$archive" | awk '{print $1}')
 [ "$actual_hash" = "$expected_hash" ] || fail 'SHA-256 mismatch; installation stopped'
 

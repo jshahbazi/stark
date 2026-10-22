@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod model_tasks;
+mod path_policy;
 mod storage;
 
 pub use config::Config;

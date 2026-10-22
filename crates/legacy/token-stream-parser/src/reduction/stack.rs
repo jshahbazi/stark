@@ -132,18 +132,25 @@ impl ReductionParserStackEntry {
 pub(crate) struct ReductionParserGroupStack {
     entries: Vec<ReductionParserStackEntry>,
     root_groups: Vec<ReductionParserGroup>,
+    nodes: usize,
 }
+
+pub(crate) const MAX_DEPTH: usize = 32;
+pub(crate) const MAX_TOKENS: usize = 262_144;
+const MAX_NODES: usize = 262_144;
 
 impl ReductionParserGroupStack {
     pub fn new(root_groups: Vec<ReductionParserGroup>) -> Self {
         Self {
             entries: Vec::new(),
             root_groups,
+            nodes: 0,
         }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.nodes = 0;
     }
 }
 
@@ -151,7 +158,7 @@ impl ReductionParserGroupStack {
 
 impl ReductionParserGroupStack {
     /// Is this token a close token for any ancestor? If yes, close all groups down to that ancestor
-    #[tracing::instrument(skip_all, fields(token = %token))]
+    #[tracing::instrument(skip_all)]
     pub fn close_groups_matching_token(
         &mut self,
         token: &Token,
@@ -166,7 +173,7 @@ impl ReductionParserGroupStack {
     }
 
     /// Is this token an open token? Close any greedy that yields to siblings, then check child groups and root groups
-    #[tracing::instrument(skip_all, fields(token = %token))]
+    #[tracing::instrument(skip_all)]
     pub fn open_group_matching_token(
         &mut self,
         token: &Token,
@@ -180,6 +187,11 @@ impl ReductionParserGroupStack {
         }
 
         if let Some(group) = self.find_matching_root_group(&token.value) {
+            // A new root is a sibling. Never retain the previous root as an
+            // ancestor, including when its close marker was omitted.
+            while !self.entries.is_empty() {
+                self.close_top_group(None, state)?;
+            }
             self.open_group(group, Some(token.clone()), state)?;
             return Ok(true);
         }
@@ -273,6 +285,7 @@ impl ReductionParserGroupStack {
         state: &mut ReductionParserState,
     ) -> Result<(), ReductionParserError> {
         let count = tokens.len();
+        self.reserve_node()?;
         let sections = self.current_sections(state)?;
         sections.push(ReductionParserSection::Frame(FramingParserSection::Text(tokens)));
         self.record_captured_items(count);
@@ -280,12 +293,13 @@ impl ReductionParserGroupStack {
     }
 
     /// Push a new marker frame, record capture, check if greedy is full
-    #[tracing::instrument(skip_all, fields(token = %token))]
+    #[tracing::instrument(skip_all)]
     pub fn append_frame_marker(
         &mut self,
         token: Token,
         state: &mut ReductionParserState,
     ) -> Result<(), ReductionParserError> {
+        self.reserve_node()?;
         let sections = self.current_sections(state)?;
         sections.push(ReductionParserSection::Frame(FramingParserSection::Marker(token)));
         self.record_captured_items(1);
@@ -293,12 +307,14 @@ impl ReductionParserGroupStack {
     }
 
     /// Append token to last text frame (or create new one), record capture, check if greedy is full
-    #[tracing::instrument(skip_all, fields(token = %token))]
+    #[tracing::instrument(skip_all)]
     pub fn extend_frame_text(
         &mut self,
         token: Token,
         state: &mut ReductionParserState,
     ) -> Result<(), ReductionParserError> {
+        // Reserve conservatively even when an existing frame can be extended.
+        self.reserve_node()?;
         let sections = self.current_sections(state)?;
         match sections.last_mut() {
             Some(ReductionParserSection::Frame(FramingParserSection::Text(tokens))) => {
@@ -323,6 +339,10 @@ impl ReductionParserGroupStack {
         open_token: Option<Token>,
         state: &mut ReductionParserState,
     ) -> Result<(), ReductionParserError> {
+        if self.entries.len() >= MAX_DEPTH {
+            return Err(ReductionParserError::ResourceLimit);
+        }
+        self.reserve_node()?;
         let name = definition.name().to_string();
         let has_greedy_children =
             definition.groups().iter().any(|group| matches!(group, ReductionParserGroup::Greedy { .. }));
@@ -394,8 +414,16 @@ impl ReductionParserGroupStack {
 
 // Greedy capture management
 impl ReductionParserGroupStack {
+    fn reserve_node(&mut self) -> Result<(), ReductionParserError> {
+        if self.nodes >= MAX_NODES {
+            return Err(ReductionParserError::ResourceLimit);
+        }
+        self.nodes += 1;
+        Ok(())
+    }
+
     /// While the top entry is an unlimited greedy and the token is a sibling, keep closing
-    #[tracing::instrument(skip_all, fields(token_value = token_value))]
+    #[tracing::instrument(skip_all)]
     fn close_greedy_on_sibling_token(
         &mut self,
         token_value: &str,

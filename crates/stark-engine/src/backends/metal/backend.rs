@@ -2,13 +2,12 @@ use crate::backends::{
     common::{
         Backend,
         allocator::{
-            block::BlockAllocation,
             bump::BumpAllocation,
             pool::{PoolAllocation, PoolAllocator},
         },
     },
     metal::{
-        buffer::{dense::MetalDenseBuffer, sparse::MetalSparseBuffer},
+        buffer::{global::MetalGlobalBuffer, sparse::MetalSparseBuffer},
         command_buffer::MetalCommandBuffer,
         context::MetalContext,
         error::MetalError,
@@ -22,7 +21,7 @@ pub struct Metal;
 impl Backend for Metal {
     type Context = MetalContext;
     type CommandBuffer = MetalCommandBuffer;
-    type GlobalBuffer = BlockAllocation<MetalDenseBuffer>;
+    type GlobalBuffer = MetalGlobalBuffer;
     type ConstantBuffer = BumpAllocation<Self::GlobalBuffer>;
     type ScratchBuffer = PoolAllocation<Self::GlobalBuffer>;
     type SparseBuffer = MetalSparseBuffer;

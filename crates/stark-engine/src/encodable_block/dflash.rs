@@ -94,6 +94,8 @@ impl<B: Backend> DFlash<B> {
         parameter_tree: &ParameterTree<B>,
         data_type: DataType,
     ) -> Result<Self, DFlashNewError<B>> {
+        crate::config::validation::validate_draft_geometry(config)
+            .map_err(|_| DFlashNewError::InvalidAttentionConfig("invalid DFlash attention geometry"))?;
         let mask_token_id = config.mask_token_id as u32;
         assert!(config.block_size <= ATTENTION_SUFFIX_CAPACITY, "DFlash block_size exceeds attention suffix capacity");
         let target_feature_projection = <dyn Linear<B>>::new(
@@ -242,7 +244,7 @@ impl<B: Backend> DFlash<B> {
             command_buffer,
         )?;
         let token_positions = (state.context_length..state.context_length + num_tokens).collect::<Box<[_]>>();
-        let rope = PrecalculatedRoPE::precalculate(&self.rope_config, &token_positions, command_buffer)?;
+        let rope = PrecalculatedRoPE::<B>::precalculate(&self.rope_config, &token_positions, command_buffer)?;
 
         let projected_kv = self.state_kv_projection.encode(normalized_features, num_tokens, command_buffer)?;
         let layer_kv_bytes = size_for_shape(&[self.layer_kv_dim], self.data_type);

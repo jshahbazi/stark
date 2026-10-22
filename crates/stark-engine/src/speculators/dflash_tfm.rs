@@ -218,6 +218,14 @@ impl<B: Backend> DFlashTfmSpeculator<B> {
         prng: &PRng,
         allocation_pool: Arc<B::AllocationPool>,
     ) -> Result<TrieNode, DFlashTreeError<B>> {
+        crate::config::validation::validate_target_geometry(
+            &self.config,
+            target_embedding.vocab_size(),
+            target_embedding.model_dim(),
+        )
+        .map_err(|_| {
+            DFlashTreeError::InvalidTreeShape("draft/target vocabulary or embedding geometry differs".into())
+        })?;
         assert!(shape.tree_budget >= 2, "tree budget needs at least a root and one draft token");
 
         let block_size = self.dflash.block_size();

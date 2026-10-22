@@ -6,6 +6,8 @@ use crate::backends::{common::kernel::matmul::MatmulError, cpu::Cpu};
 
 #[derive(Debug, Error)]
 pub enum CpuError {
+    #[error(transparent)]
+    InvalidInput(#[from] crate::backends::common::InvalidInput),
     #[error("Not supported")]
     NotSupported,
     #[error("Command buffer execution failed")]

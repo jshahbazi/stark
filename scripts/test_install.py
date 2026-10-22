@@ -131,6 +131,25 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("SHA-256 mismatch", result.stderr)
         self.assertFalse((self.prefix / "lib/stark/current").exists())
 
+    @unittest.skipUnless(
+        platform.system() == "Darwin", "uses BSD mv -h for installation"
+    )
+    def test_local_archive_replacement_after_hash_cannot_replace_verified_bytes(self):
+        archive = self.bundle()
+        replacement = self.bundle(version="0.1.0-malicious.1", doctor_ok=False)
+        self.environment["TEST_EXTERNAL_ARCHIVE"] = str(archive)
+        self.environment["TEST_REPLACEMENT_ARCHIVE"] = str(replacement)
+        self.command(
+            "shasum",
+            '/usr/bin/shasum "$@"\n'
+            '/bin/cp "$TEST_REPLACEMENT_ARCHIVE" "$TEST_EXTERNAL_ARCHIVE"',
+        )
+        self.run_install("--archive", archive)
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(),
+            Path("releases/0.1.0-test.1"),
+        )
+
     def test_missing_release_is_actionable(self):
         self.command("curl", "exit 22")
         self.assertIn(

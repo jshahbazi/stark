@@ -20,7 +20,7 @@ from typing import Any
 
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
 from .registry import architecture_for_config, get_model, required_files
-from .streaming import ConversionError, UnsupportedConversion, read_json
+from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, open_regular, read_json
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -38,15 +38,27 @@ def _relative(name: str) -> Path:
 
 
 def _signature(path: Path) -> tuple[int, int, int, int]:
-    stat = path.stat()
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+    with open_regular(path) as handle:
+        stat = os.fstat(handle.fileno())
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 def _hash(path: Path) -> str:
-    # The pinned CPython 3.13 file_digest uses one reusable 256 KiB buffer.
-    # Unbuffered file handles avoid an additional BufferedReader allocation.
-    with path.open("rb", buffering=0) as handle:
-        return hashlib.file_digest(handle, "sha256").hexdigest()
+    # A finite reader uses one 256 KiB buffer and checks source growth.
+    with open_regular(path) as handle:
+        before = os.fstat(handle.fileno())
+        remaining = before.st_size
+        digest = hashlib.sha256()
+        while remaining:
+            chunk = handle.read(min(256 * 1024, remaining))
+            if not chunk:
+                raise ConversionError("Source changed while hashing")
+            remaining -= len(chunk)
+            digest.update(chunk)
+        after = os.fstat(handle.fileno())
+        if handle.read(1) or (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise ConversionError("Source changed while hashing")
+        return digest.hexdigest()
 
 
 def _hash_all(paths: list[Path], signatures: list[tuple[int, int, int, int]]) -> list[str]:
@@ -157,7 +169,10 @@ class SourceSnapshot:
         effective_repo = repo if repo is not None else self.repo
         for record in self.manifest["files"]:
             if record["repo"] == effective_repo and record["filename"] == filename:
-                return Path(record["path"])
+                path = Path(record["path"])
+                if effective_repo == self.repo:
+                    return authorize_source_path(self.root, path)
+                return path.resolve(strict=True)
         raise FileNotFoundError("source_file_not_in_manifest")
 
     def _assert_selection(self) -> None:
@@ -229,11 +244,19 @@ class SourceSnapshot:
             and self.config_path.resolve() != (self.root / config_rule["filename"]).resolve()
         ):
             raise ConversionError("Source config does not match checkpoint root")
-        if config_rule["repo"] != self.repo and (
-            Path(os.path.abspath(self.config_path)).is_relative_to(Path(os.path.abspath(self.root)))
-            or self.config_path.resolve().is_relative_to(self.root.resolve())
-        ):
-            raise ConversionError("External model config must be outside checkpoint root")
+        if config_rule["repo"] != self.repo:
+            # Preserve the manifest's lexical route even though resolve_file
+            # returns a canonical target for safe reads. A primary-tree alias
+            # must not become an authorized external-repository descriptor.
+            declared_path = next(
+                Path(record["path"])
+                for record in self.manifest["files"]
+                if record["repo"] == config_rule["repo"] and record["filename"] == config_rule["filename"]
+            )
+            if Path(os.path.abspath(declared_path)).is_relative_to(
+                Path(os.path.abspath(self.root))
+            ) or self.config_path.resolve().is_relative_to(self.root.resolve()):
+                raise ConversionError("External model config must be outside checkpoint root")
 
     def assert_unchanged(self, *, verify_content: bool = True) -> None:
         """Check bindings and signatures, with full content verification by default.
@@ -247,7 +270,7 @@ class SourceSnapshot:
         try:
             self._assert_selection()
             records = self.manifest["files"]
-            paths = [Path(record["path"]) for record in records]
+            paths = [self.resolve_file(record["filename"], repo=record["repo"]) for record in records]
             expected = [tuple(record["signature"]) for record in records]
             if verify_content:
                 _, hashes = _verified_hashes(paths, expected_signatures=expected)
@@ -479,7 +502,7 @@ def resolve_source(
         names = tuple(sorted(file.relative_to(root).as_posix() for file in root.rglob("*") if file.is_file()))
 
         def loader(filename: str) -> Path:
-            return root / _relative(filename)
+            return authorize_source_path(root, root / _relative(filename))
     else:
         names = tuple(sorted(hub.list_repo_files(repo_id=repo, revision=revisions[repo])))
 
@@ -520,7 +543,7 @@ def resolve_source(
             continue
         known.add((effective_repo, filename))
         if effective_repo == repo:
-            resolved_path = loader(filename)
+            resolved_path = authorize_source_path(root, loader(filename))
         else:
             resolved_path = Path(
                 hub.hf_hub_download(
@@ -530,6 +553,7 @@ def resolve_source(
                     local_files_only=False,
                 )
             )
+            resolved_path = resolved_path.resolve(strict=True)
         records.append(
             {
                 "repo": effective_repo,
