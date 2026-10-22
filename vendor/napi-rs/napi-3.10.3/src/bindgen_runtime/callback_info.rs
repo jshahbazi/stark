@@ -101,13 +101,6 @@ impl<const N: usize> CallbackInfo<N> {
       value_ref = Box::into_raw(Box::new(EmptyStructPlaceholder(0))).cast();
     }
     let mut object_ref = ptr::null_mut();
-    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
-    // `Reference` needs atomic ref-counting for its `unsafe impl Sync`, so the finalize
-    // callbacks slot is an `Arc`. The inner `Cell` is only ever accessed on the JS thread
-    // (see `Reference`), so the non-`Send`/`Sync` interior is sound here.
-    #[allow(clippy::arc_with_non_send_sync)]
-    let finalize_callbacks_ptr =
-      Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
     unsafe {
       check_status!(
         sys::napi_wrap(
@@ -122,12 +115,22 @@ impl<const N: usize> CallbackInfo<N> {
       )?;
     };
 
-    unsafe { tag_native_type::<T>(self.env, this)? };
-    Reference::<T>::add_ref(
-      self.env,
-      value_ref.cast(),
-      (value_ref.cast(), object_ref, finalize_callbacks_ptr),
-    );
+    unsafe {
+      super::tag_native_type_or_rollback::<T>(
+        self.env,
+        this,
+        value_ref.cast(),
+        raw_finalize_unchecked::<T>,
+        ptr::null_mut(),
+        object_ref,
+      )?
+    };
+    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
+    // `Reference` needs atomic ref-counting for its `unsafe impl Sync`; the
+    // inner `Cell` is accessed only on the JS thread.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let finalize_callbacks_ptr = Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
+    Reference::<T>::add_ref(self.env, value_ref.cast(), (value_ref.cast(), object_ref, finalize_callbacks_ptr));
     Ok((this, value_ref))
   }
 
@@ -230,12 +233,6 @@ impl<const N: usize> CallbackInfo<N> {
     }
     check_status!(status, "Failed to create instance of class `{}`", js_name)?;
     let obj = Box::new(obj);
-    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
-    // See `_construct`: `Arc` is required for `Reference`'s `Sync` impl; the `Cell` is
-    // only touched on the JS thread.
-    #[allow(clippy::arc_with_non_send_sync)]
-    let finalize_callbacks_ptr =
-      Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
     let mut object_ref = ptr::null_mut();
     let mut value_ref = Box::into_raw(obj);
 
@@ -259,12 +256,21 @@ impl<const N: usize> CallbackInfo<N> {
       js_name,
     )?;
 
-    unsafe { tag_native_type::<T>(self.env, instance)? };
-    Reference::<T>::add_ref(
-      self.env,
-      value_ref.cast(),
-      (value_ref.cast(), object_ref, finalize_callbacks_ptr),
-    );
+    unsafe {
+      super::tag_native_type_or_rollback::<T>(
+        self.env,
+        instance,
+        value_ref.cast(),
+        raw_finalize_unchecked::<T>,
+        ptr::null_mut(),
+        object_ref,
+      )?
+    };
+    let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
+    // See `_construct`: `Arc` is required for `Reference`'s `Sync` impl.
+    #[allow(clippy::arc_with_non_send_sync)]
+    let finalize_callbacks_ptr = Arc::into_raw(Arc::new(Cell::new(Box::into_raw(initial_finalize))));
+    Reference::<T>::add_ref(self.env, value_ref.cast(), (value_ref.cast(), object_ref, finalize_callbacks_ptr));
     Ok((instance, value_ref))
   }
 

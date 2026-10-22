@@ -7,6 +7,7 @@ pub use env::*;
 pub use iterator::Generator;
 pub use js_values::*;
 pub use module_register::*;
+pub(crate) use native_type::tag_native_type_or_rollback;
 pub use native_type::{tag_native_type, validate_native_type};
 
 use super::sys;

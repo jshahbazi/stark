@@ -1,4 +1,4 @@
-use std::{collections::HashMap, pin::Pin, str::FromStr, sync::Arc};
+use std::{collections::HashMap, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use rocket::{
     Request, State,
@@ -16,13 +16,16 @@ use serde::{Deserialize, Serialize};
 use stark::{
     session::chat::{ChatSession, ChatSessionStream, ChatSessionStreamChunk, UNPARSED_ARGUMENTS_KEY},
     types::{
-        basic::{Grammar, ReasoningEffort, SamplingMethod},
+        basic::{CancelToken, Grammar, ReasoningEffort, SamplingMethod},
         session::chat::{
             ChatContentBlock, ChatMessage, ChatReplyConfig, ChatReplyFinishReason, ChatReplyStats, ChatRole,
         },
     },
 };
-use tokio::sync::{Mutex, mpsc};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    sync::{Mutex, mpsc},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::Instrument;
 
@@ -39,6 +42,77 @@ use crate::{
         request_log::RequestLog,
     },
 };
+
+const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+const RESPONSE_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum RequestBodyError {
+    Timeout,
+    TooLarge,
+    InvalidBody,
+}
+
+async fn read_request_body(
+    source: impl AsyncRead + Unpin,
+    limit: u64,
+    deadline: Duration,
+) -> Result<String, RequestBodyError> {
+    let read = async {
+        let mut body = String::new();
+        source.take(limit + 1).read_to_string(&mut body).await.map_err(|_| RequestBodyError::InvalidBody)?;
+        if body.len() as u64 > limit {
+            return Err(RequestBodyError::TooLarge);
+        }
+        Ok(body)
+    };
+    tokio::time::timeout(deadline, read).await.map_err(|_| RequestBodyError::Timeout)?
+}
+
+/// Bounds only waits for an HTTP consumer, leaving model execution uncapped.
+struct ResponseSender<T> {
+    sender: mpsc::Sender<T>,
+    deadline: Duration,
+    cancel_token: Option<CancelToken>,
+}
+
+impl<T> ResponseSender<T> {
+    fn new(
+        sender: mpsc::Sender<T>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            sender,
+            deadline,
+            cancel_token: None,
+        }
+    }
+
+    fn set_cancel_token(
+        &mut self,
+        token: CancelToken,
+    ) {
+        self.cancel_token = Some(token);
+    }
+
+    async fn send(
+        &self,
+        value: T,
+    ) -> Result<(), ()> {
+        if matches!(tokio::time::timeout(self.deadline, self.sender.send(value)).await, Ok(Ok(()))) {
+            return Ok(());
+        }
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+        Err(())
+    }
+
+    async fn closed(&self) {
+        self.sender.closed().await;
+    }
+}
 
 fn deserialize_message_content<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -695,7 +769,7 @@ fn oai_error_body(
 }
 
 async fn send_error_body(
-    sender: &mpsc::Sender<Vec<u8>>,
+    sender: &ResponseSender<Vec<u8>>,
     body: &OaiErrorResponse,
 ) {
     let _ = sender.send(serde_json::to_vec(body).unwrap_or_default()).await;
@@ -810,7 +884,7 @@ async fn prepare_input(
 }
 
 async fn send_response(
-    sender: &mpsc::Sender<Vec<u8>>,
+    sender: &ResponseSender<Vec<u8>>,
     response: &ChatCompletionResponse,
 ) {
     let _ = sender.send(serde_json::to_vec(response).unwrap_or_default()).await;
@@ -833,7 +907,7 @@ async fn run_blocking(
     created: i64,
     prefix_cache: bool,
     parameter_types: ToolParameterTypes,
-    sender: mpsc::Sender<Vec<u8>>,
+    mut sender: ResponseSender<Vec<u8>>,
     log: RequestLog,
 ) {
     // A blocking response writes nothing until generation finishes, and Rocket
@@ -854,7 +928,10 @@ async fn run_blocking(
                 return;
             },
             _ = keepalive.tick() => {
-                let _ = sender.send(b"\n".to_vec()).await;
+                if sender.send(b"\n".to_vec()).await.is_err() {
+                    log.fail("client unavailable");
+                    return;
+                }
             },
         }
     };
@@ -873,6 +950,7 @@ async fn run_blocking(
     // notices a disconnect mid-generation. Cancelling stops the backend at the
     // next token boundary and lets the session run its cancelled-turn cleanup.
     let stream = session.reply_with_stream(input, config).await;
+    sender.set_cancel_token(stream.cancel_token());
     let mut final_replies = Vec::new();
     loop {
         let chunk = tokio::select! {
@@ -883,7 +961,11 @@ async fn run_blocking(
                 return;
             },
             _ = keepalive.tick() => {
-                let _ = sender.send(b"\n".to_vec()).await;
+                if sender.send(b"\n".to_vec()).await.is_err() {
+                    cancel_and_drain(&stream).await;
+                    log.fail("client unavailable");
+                    return;
+                }
                 continue;
             },
         };
@@ -902,6 +984,7 @@ async fn run_blocking(
                 log.fail(&error.to_string());
                 send_error_body(&sender, &oai_error_body(Status::BadRequest, "backend_error", &error.to_string()))
                     .await;
+                cancel_and_drain(&stream).await;
                 return;
             },
         }
@@ -966,7 +1049,7 @@ async fn run_stream(
     created: i64,
     prefix_cache: bool,
     parameter_types: ToolParameterTypes,
-    sender: mpsc::Sender<Event>,
+    mut sender: ResponseSender<Event>,
     log: RequestLog,
 ) {
     // Same as the blocking path: don't start generating for a client that
@@ -992,7 +1075,7 @@ async fn run_stream(
         },
     };
 
-    let _ = sender
+    if sender
         .send(Event::data(chunk_json(
             &id,
             &model,
@@ -1004,9 +1087,15 @@ async fn run_stream(
             None,
             None,
         )))
-        .await;
+        .await
+        .is_err()
+    {
+        log.fail("client unavailable");
+        return;
+    }
 
     let stream = session.reply_with_stream(input, config).await;
+    sender.set_cancel_token(stream.cancel_token());
     let mut emitted = 0usize;
     let mut emitted_reasoning = 0usize;
     let mut emitted_tool_calls = 0usize;
@@ -1182,6 +1271,7 @@ async fn run_stream(
                 // Committed 200 stream: report as an OpenAI-style error event.
                 let body = oai_error_body(Status::BadRequest, "backend_error", &error.to_string());
                 let _ = sender.send(Event::data(serde_json::to_string(&body).unwrap_or_default())).await;
+                cancel_and_drain(&stream).await;
                 break;
             },
         }
@@ -1261,13 +1351,25 @@ pub async fn handle_chat_completions(
             ));
         },
     };
-    let body = match body.open(ByteUnit::Mebibyte(64)).into_string().await {
-        Ok(body) if body.is_complete() => body.into_inner(),
-        Ok(_) => {
+    let body = match read_request_body(
+        body.open(ByteUnit::Byte(MAX_REQUEST_BODY_BYTES + 1)),
+        MAX_REQUEST_BODY_BYTES,
+        REQUEST_BODY_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(RequestBodyError::Timeout) => {
+            return ChatCompletionResult::Error(status::Custom(
+                Status::RequestTimeout,
+                Json(oai_error_body(Status::RequestTimeout, "request_timeout", "request body read timed out")),
+            ));
+        },
+        Err(RequestBodyError::TooLarge) => {
             return invalid_request_response("body", "request_too_large", "request body exceeds 64 MiB".to_string());
         },
-        Err(error) => {
-            return invalid_request_response("body", "invalid_body", format!("failed to read request body: {error}"));
+        Err(RequestBodyError::InvalidBody) => {
+            return invalid_request_response("body", "invalid_body", "failed to read request body".to_string());
         },
     };
     tracing::debug!("--> {} {} bytes={}", request_info.method, request_info.uri, body.len());
@@ -1324,6 +1426,7 @@ pub async fn handle_chat_completions(
     if is_stream {
         let session = Arc::clone(&state.session);
         let (sender, receiver) = mpsc::channel::<Event>(8);
+        let sender = ResponseSender::new(sender, RESPONSE_BACKPRESSURE_TIMEOUT);
         let prefix_cache = state.prefix_cache;
         tokio::spawn(
             async move {
@@ -1338,6 +1441,7 @@ pub async fn handle_chat_completions(
     } else {
         let session = Arc::clone(&state.session);
         let (sender, receiver) = mpsc::channel::<Vec<u8>>(8);
+        let sender = ResponseSender::new(sender, RESPONSE_BACKPRESSURE_TIMEOUT);
         let prefix_cache = state.prefix_cache;
         tokio::spawn(
             async move {

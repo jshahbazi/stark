@@ -6,6 +6,38 @@ use std::sync::{LazyLock, Mutex};
 
 use crate::{check_status, sys, Error, Result, Status};
 
+/// Finish a newly installed wrap, or detach it before returning a tagging error.
+/// A removed wrap keeps its old type tag, so a failed tag must never leave the
+/// new allocation reachable under that old identity.
+///
+/// # Safety
+/// The wrap must have just succeeded with these data, finalizer and reference
+/// values. No reference-map entry may have been published for the allocation.
+pub(crate) unsafe fn tag_native_type_or_rollback<T: 'static>(
+  env: sys::napi_env,
+  value: sys::napi_value,
+  native_object: *mut std::ffi::c_void,
+  finalize: unsafe extern "C" fn(sys::napi_env, *mut std::ffi::c_void, *mut std::ffi::c_void),
+  finalize_hint: *mut std::ffi::c_void,
+  object_ref: sys::napi_ref,
+) -> Result<()> {
+  if let Err(error) = unsafe { tag_native_type::<T>(env, value) } {
+    let mut removed = std::ptr::null_mut();
+    let status = unsafe { sys::napi_remove_wrap(env, value, &mut removed) };
+    // These calls cannot run JavaScript. A successful wrap must still be ours;
+    // continuing after a failed detach would expose storage under a wrong tag.
+    if status != sys::Status::napi_ok || removed != native_object {
+      std::process::abort();
+    }
+    if !object_ref.is_null() {
+      unsafe { sys::napi_delete_reference(env, object_ref) };
+    }
+    unsafe { finalize(env, removed, finalize_hint) };
+    return Err(error);
+  }
+  Ok(())
+}
+
 // A leaked allocation gives each Rust TypeId a distinct process-lifetime identity.
 // The registry address also separates this runtime from other loaded addon copies.
 #[cfg(feature = "napi8")]

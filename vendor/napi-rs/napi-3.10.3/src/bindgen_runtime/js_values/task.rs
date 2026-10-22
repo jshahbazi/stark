@@ -108,12 +108,13 @@ impl FromNapiValue for AbortSignal {
       stack = Box::new(AbortSignalStack(vec![abort_signal]));
     }
     let mut signal_ref = ptr::null_mut();
+    let stack = Box::into_raw(stack).cast();
     check_status!(
       unsafe {
         sys::napi_wrap(
           env,
           signal.0.value,
-          Box::into_raw(stack).cast(),
+          stack,
           Some(async_task_abort_controller_finalize),
           ptr::null_mut(),
           &mut signal_ref,
@@ -121,11 +122,17 @@ impl FromNapiValue for AbortSignal {
       },
       "Wrap AbortSignal failed"
     )?;
-    unsafe { crate::bindgen_runtime::tag_native_type::<AbortSignalStack>(env, signal.0.value)? };
-    signal.set_named_property(
-      "onabort",
-      js_env.create_function::<(), Unknown>("onabort", on_abort)?,
-    )?;
+    unsafe {
+      crate::bindgen_runtime::tag_native_type_or_rollback::<AbortSignalStack>(
+        env,
+        signal.0.value,
+        stack,
+        async_task_abort_controller_finalize,
+        ptr::null_mut(),
+        signal_ref,
+      )?
+    };
+    signal.set_named_property("onabort", js_env.create_function::<(), Unknown>("onabort", on_abort)?)?;
 
     Ok(AbortSignal {
       raw_work: async_work_inner,

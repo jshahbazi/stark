@@ -86,7 +86,7 @@ async fn registry_refresh_rejects_escaping_paths_without_deleting_the_victim() -
         assert_eq!(std::fs::read(&victim)?, b"synthetic-victim");
     }
     let valid = synthetic_registry_model("nested/model.safetensors".into(), "1");
-    test_storage.storage.refresh(&[valid.clone()], false).await?;
+    test_storage.storage.refresh(std::slice::from_ref(&valid), false).await?;
     assert!(test_storage.storage.cache_model_path(&valid).is_some());
     Ok(())
 }
@@ -112,7 +112,7 @@ async fn registry_refresh_rejects_symlinked_destinations_and_sidecars() -> Resul
         "model.safetensors.resume_data",
     ] {
         symlink(&victim, cache.join(name))?;
-        assert!(test_storage.storage.refresh(&[model.clone()], true).await.is_err());
+        assert!(test_storage.storage.refresh(std::slice::from_ref(&model), true).await.is_err());
         assert_eq!(std::fs::read(&victim)?, b"synthetic-victim");
         std::fs::remove_file(cache.join(name))?;
     }

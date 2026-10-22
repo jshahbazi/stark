@@ -1,5 +1,80 @@
 use super::*;
 
+#[tokio::test]
+async fn unfinished_request_body_times_out_and_releases_admission() {
+    use tokio::{io::AsyncWriteExt, sync::Semaphore};
+
+    let admission = Arc::new(Semaphore::new(1));
+    let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+    let (mut client, server) = tokio::io::duplex(64);
+    client.write_all(b"{\"messages\":").await.unwrap();
+    let request = tokio::spawn(async move {
+        let _permit = permit;
+        read_request_body(server, 64, Duration::from_millis(10)).await
+    });
+
+    assert!(admission.try_acquire().is_err());
+    assert_eq!(request.await.unwrap(), Err(RequestBodyError::Timeout));
+    assert!(admission.try_acquire().is_ok());
+    // Keep the incomplete upload open until after the deadline has fired.
+    drop(client);
+}
+
+#[tokio::test]
+async fn request_body_deadline_preserves_exact_limit_and_rejects_oversize_or_invalid_utf8() {
+    let deadline = Duration::from_secs(1);
+    let ordinary = b"{\"messages\":[]}";
+    assert_eq!(
+        read_request_body(ordinary.as_slice(), ordinary.len() as u64, deadline).await.unwrap(),
+        std::str::from_utf8(ordinary).unwrap()
+    );
+    assert_eq!(read_request_body(b"12345".as_slice(), 4, deadline).await, Err(RequestBodyError::TooLarge));
+    assert_eq!(read_request_body([0xff].as_slice(), 4, deadline).await, Err(RequestBodyError::InvalidBody));
+}
+
+#[tokio::test]
+async fn stalled_response_send_cancels_generation_and_releases_admission() {
+    use tokio::sync::Semaphore;
+
+    let admission = Arc::new(Semaphore::new(1));
+    let permit = Arc::clone(&admission).try_acquire_owned().unwrap();
+    let cancel_token = CancelToken::new();
+    let cancellation = cancel_token.clone();
+    let (sender, mut receiver) = mpsc::channel(1);
+    let mut response = ResponseSender::new(sender, Duration::from_millis(10));
+    response.set_cancel_token(cancel_token);
+    response.send(b"first".to_vec()).await.unwrap();
+    let request = tokio::spawn(async move {
+        let _permit = permit;
+        response.send(b"blocked".to_vec()).await
+    });
+
+    assert!(admission.try_acquire().is_err());
+    assert!(request.await.unwrap().is_err());
+    assert!(cancellation.is_cancelled());
+    assert!(admission.try_acquire().is_ok());
+    // The receiver remains connected, so disconnect handling cannot explain success.
+    assert_eq!(receiver.recv().await.unwrap(), b"first");
+    assert!(receiver.recv().await.is_none());
+}
+
+#[tokio::test]
+async fn response_deadline_preserves_bytes_and_does_not_limit_generation_wait() {
+    let cancel_token = CancelToken::new();
+    let (sender, mut receiver) = mpsc::channel(1);
+    let mut response = ResponseSender::new(sender, Duration::from_millis(10));
+    response.set_cancel_token(cancel_token.clone());
+    // Model work can take longer than the write deadline before it produces a chunk.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let ordinary = b"synthetic response\n".to_vec();
+    response.send(ordinary.clone()).await.unwrap();
+    assert_eq!(receiver.recv().await.unwrap(), ordinary);
+    assert!(!cancel_token.is_cancelled());
+    drop(receiver);
+    assert!(response.send(Vec::new()).await.is_err());
+    assert!(cancel_token.is_cancelled());
+}
+
 #[test]
 fn schemas_cannot_retrieve_local_or_remote_resources() {
     for schema in [

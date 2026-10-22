@@ -101,25 +101,6 @@ impl Drop for ResponseBodyLogger<'_> {
     }
 }
 
-#[cfg(test)]
-mod body_logger_tests {
-    use tokio::io::AsyncReadExt;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn response_logging_retains_only_a_count_and_preserves_transport_bytes() {
-        let payload = b"synthetic private reply\n".repeat(65_536);
-        let mut response = Response::build().streamed_body(std::io::Cursor::new(payload.clone())).finalize();
-        let body = response.body_mut().take();
-        let mut logger = ResponseBodyLogger::new(body, "response".into(), false, tracing::Span::none());
-        let mut transported = Vec::new();
-        logger.read_to_end(&mut transported).await.unwrap();
-        assert_eq!(transported, payload);
-        assert_eq!(logger.bytes, payload.len() as u64);
-    }
-}
-
 struct RequestLoggingFairing;
 
 #[rocket::async_trait]
@@ -260,4 +241,23 @@ pub async fn run_server(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod body_logger_tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn response_logging_retains_only_a_count_and_preserves_transport_bytes() {
+        let payload = b"synthetic private reply\n".repeat(65_536);
+        let mut response = Response::build().streamed_body(std::io::Cursor::new(payload.clone())).finalize();
+        let body = response.body_mut().take();
+        let mut logger = ResponseBodyLogger::new(body, "response".into(), false, tracing::Span::none());
+        let mut transported = Vec::new();
+        logger.read_to_end(&mut transported).await.unwrap();
+        assert_eq!(transported, payload);
+        assert_eq!(logger.bytes, payload.len() as u64);
+    }
 }

@@ -262,13 +262,6 @@ pub unsafe fn new_instance<T: 'static + ObjectFinalize>(
   )?;
   crate::__private::___CALL_FROM_FACTORY.with(|inner| inner.set(false));
   let mut object_ref = std::ptr::null_mut();
-  let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
-  // `Arc` (not `Rc`) is required so it matches `Reference`'s `Arc<Cell<..>>` field and its
-  // `Sync` impl; the `Cell` is only accessed on the JS thread.
-  #[allow(clippy::arc_with_non_send_sync)]
-  let finalize_callbacks_ptr = std::sync::Arc::into_raw(std::sync::Arc::new(std::cell::Cell::new(
-    Box::into_raw(initial_finalize),
-  )));
   check_status!(
     sys::napi_wrap(
       env,
@@ -281,11 +274,20 @@ pub unsafe fn new_instance<T: 'static + ObjectFinalize>(
     "Failed to wrap native object of class `{}`",
     type_name::<T>(),
   )?;
-  crate::bindgen_runtime::tag_native_type::<T>(env, result)?;
-  Reference::<T>::add_ref(
+  crate::bindgen_runtime::tag_native_type_or_rollback::<T>(
     env,
+    result,
     wrapped_value,
-    (wrapped_value, object_ref, finalize_callbacks_ptr),
-  );
+    raw_finalize_unchecked::<T>,
+    std::ptr::null_mut(),
+    object_ref,
+  )?;
+  let initial_finalize: Box<dyn FnOnce()> = Box::new(|| {});
+  // `Arc` is required for `Reference`'s `Sync` impl; the `Cell` is accessed
+  // only on the JS thread. Publish it only after wrapping and tagging succeed.
+  #[allow(clippy::arc_with_non_send_sync)]
+  let finalize_callbacks_ptr =
+    std::sync::Arc::into_raw(std::sync::Arc::new(std::cell::Cell::new(Box::into_raw(initial_finalize))));
+  Reference::<T>::add_ref(env, wrapped_value, (wrapped_value, object_ref, finalize_callbacks_ptr));
   Ok(result)
 }

@@ -840,17 +840,28 @@ impl Env {
     native_object: T,
     size_hint: Option<usize>,
   ) -> Result<()> {
+    let native_object = Box::into_raw(Box::new(TaggedObject::new(native_object))).cast();
+    let finalize_hint = Box::into_raw(Box::new(size_hint.unwrap_or(0) as i64)).cast();
     check_status!(unsafe {
       sys::napi_wrap(
         self.0,
         js_object.0.value,
-        Box::into_raw(Box::new(TaggedObject::new(native_object))).cast(),
+        native_object,
         Some(raw_finalize::<TaggedObject<T>>),
-        Box::into_raw(Box::new(size_hint.unwrap_or(0) as i64)).cast(),
+        finalize_hint,
         ptr::null_mut(),
       )
     })?;
-    unsafe { crate::bindgen_runtime::tag_native_type::<TaggedObject<()>>(self.0, js_object.0.value) }
+    unsafe {
+      crate::bindgen_runtime::tag_native_type_or_rollback::<TaggedObject<()>>(
+        self.0,
+        js_object.0.value,
+        native_object,
+        raw_finalize::<TaggedObject<T>>,
+        finalize_hint,
+        ptr::null_mut(),
+      )
+    }
   }
 
   #[cfg(feature = "compat-mode")]

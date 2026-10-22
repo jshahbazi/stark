@@ -21,6 +21,8 @@ owned/shared/mutable arguments, `ClassInstance`, `Reference`, method receivers,
 getters/setters, prototype mutations, `Symbol.hasInstance`, generic object
 wrappers and reused abort signals. Ordinary inputs must continue to work and
 foreign native classes must raise JavaScript errors before field access.
+Synchronous and asynchronous factory rejection must also detach newly installed
+storage, so caller-retained objects remain reusable under their original tag.
 
 For pre-patch comparison, build the same fixture with Cargo configuration
 overriding its three `patch.crates-io` paths to pristine sources for exactly
