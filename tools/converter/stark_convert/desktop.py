@@ -7,7 +7,6 @@ import argparse
 import json
 import math
 import os
-import re
 import select
 import shutil
 import signal
@@ -20,6 +19,7 @@ from pathlib import Path
 
 from .chat import Worker, load_template
 from .registry import get_model
+from .sources import huggingface_repository
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -367,8 +367,10 @@ class Desktop:
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
         elif kind == "huggingface":
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", source):
-                raise DesktopError("Enter a Hugging Face repository as owner/model.")
+            try:
+                source = huggingface_repository(source)
+            except ValueError:
+                raise DesktopError("Enter a model name or a https://huggingface.co/owner/model URL.") from None
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
