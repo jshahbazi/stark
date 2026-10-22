@@ -15,6 +15,7 @@ usage() {
         '  convert     Convert a supported Hugging Face model or local checkpoint' \
         '  score       Start the scoring worker on private JSON-lines pipes' \
         '  generate    Start the generation worker on private JSON-lines pipes' \
+        '  chat        Chat interactively with a converted local model' \
         '  doctor      Check this installation without loading a model' \
         '  version     Show the installed bundle version' \
         '  uninstall   Remove this installed bundle and its command links' \
@@ -24,6 +25,7 @@ usage() {
         '  stark convert Qwen/Qwen3-0.6B --output models/qwen3' \
         '  stark score --score-model-path /absolute/path/to/model' \
         '  stark generate --model-path /absolute/path/to/model' \
+        '  stark chat --model-path /absolute/path/to/model' \
         '' \
         'Use stark convert --help for conversion options.' \
         'Scoring and generation use the documented worker protocols.'
@@ -69,6 +71,16 @@ case "$command" in
     convert)
         [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
         exec "$python" -I -B -c 'import sys; from stark_convert.cli import main; sys.argv[0] = "stark-convert"; raise SystemExit(main())' "$@"
+        ;;
+    chat)
+        if [ -f "$bundle/tools/converter/pyproject.toml" ] && [ -f "$bundle/Cargo.toml" ]; then
+            [ -x "$bundle/target/release/stark-generate" ] || fail 'build the release stark-generate worker first'
+            command -v uv >/dev/null 2>&1 || fail 'install uv to run chat from a source checkout'
+            exec uv run --project "$bundle/tools/converter" --locked python -m stark_convert.chat \
+                --worker "$bundle/target/release/stark-generate" "$@"
+        fi
+        [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
+        exec "$python" -I -B -m stark_convert.chat --worker "$bundle/libexec/stark-generate" "$@"
         ;;
     score|generate)
         case "$command" in
