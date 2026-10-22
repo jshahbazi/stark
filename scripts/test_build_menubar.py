@@ -5,7 +5,9 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 import zipfile
@@ -368,6 +370,97 @@ class ConverterPackageTests(unittest.TestCase):
             self.assertEqual(
                 len(list(stale_package.parent.glob("stark_convert-*.dist-info"))), 1
             )
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin" and shutil.which("swiftc"),
+    "native controller regression requires macOS and swiftc",
+)
+class NativeControllerTests(unittest.TestCase):
+    def test_failed_install_requests_finish_progress_and_retry_resets_counts(self):
+        source = (builder.ROOT / "apps/menu-bar/Sources/StarkApp.swift").read_text()
+        controller, separator, _views = source.partition("struct StatusLine: View {")
+        self.assertTrue(separator, "cannot locate the native controller source")
+        harness = r"""
+extension EngineController {
+    func receiveTestEvent(_ event: [String: Any]) {
+        let bytes = try! JSONSerialization.data(withJSONObject: event)
+        apply(try! JSONSerialization.jsonObject(with: bytes) as! [String: Any])
+    }
+}
+
+func snapshot(_ engine: EngineController) -> [String: Any] {
+    func stage(_ value: InstallProgress) -> [String: Any] {
+        ["state": value.state, "completed_bytes": value.completedBytes,
+         "total_bytes": value.totalBytes.map { $0 as Any } ?? NSNull(), "fraction": value.fraction]
+    }
+    return ["status": engine.state, "download": stage(engine.downloadProgress),
+            "conversion": stage(engine.conversionProgress)]
+}
+
+let remote = EngineController()
+remote.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
+let local = EngineController()
+local.install(source: "/unavailable/model", kind: "local")
+let retry = EngineController()
+retry.receiveTestEvent(["event": "status", "state": "error", "message": "Operation failed"])
+for phase in ["download", "conversion"] {
+    retry.receiveTestEvent(["event": "progress", "phase": phase, "state": "failed",
+                            "completed_bytes": 75, "total_bytes": 100])
+}
+let beforeReset = snapshot(retry)
+retry.resetInstallProgress(kind: "huggingface")
+let afterReset = snapshot(retry)
+retry.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
+let result: [String: Any] = ["remote": snapshot(remote), "local": snapshot(local),
+                           "before_reset": beforeReset, "after_reset": afterReset,
+                           "retry": snapshot(retry)]
+print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding: .utf8)!)
+"""
+        with tempfile.TemporaryDirectory(prefix="stark-controller-test-") as temporary:
+            root = Path(temporary)
+            swift = root / "main.swift"
+            executable = root / "controller-check"
+            swift.write_text(controller + harness)
+            compiled = subprocess.run(
+                ["swiftc", str(swift), "-o", str(executable)],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(
+                compiled.returncode, 0, "native controller harness failed to compile"
+            )
+            checked = subprocess.run(
+                [str(executable)], capture_output=True, timeout=10, check=False
+            )
+            self.assertEqual(
+                checked.returncode, 0, "native controller harness failed to run"
+            )
+            result = json.loads(checked.stdout)
+
+        for name in ("remote", "local", "retry"):
+            with self.subTest(install=name):
+                self.assertEqual(result[name]["status"], "error")
+                self.assertEqual(result[name]["conversion"]["state"], "failed")
+                self.assertEqual(
+                    result[name]["download"]["state"],
+                    "skipped" if name == "local" else "failed",
+                )
+        for phase in ("download", "conversion"):
+            self.assertEqual(result["before_reset"][phase]["completed_bytes"], 75)
+            self.assertEqual(result["before_reset"][phase]["total_bytes"], 100)
+            self.assertEqual(
+                result["after_reset"][phase],
+                {
+                    "state": "waiting",
+                    "completed_bytes": 0,
+                    "total_bytes": None,
+                    "fraction": 0,
+                },
+            )
+            self.assertEqual(result["retry"][phase]["completed_bytes"], 0)
+            self.assertIsNone(result["retry"][phase]["total_bytes"])
 
 
 class InstallTests(unittest.TestCase):
