@@ -1,6 +1,6 @@
 # Stark menu bar app
 
-Stark's native macOS controller lives in the menu bar. Click the cat icon to install a model, choose a model and run it, or stop the loaded worker. Run opens a small prompt window. Status and the last request's input/output token speeds appear in the dropdown and prompt window.
+Stark's native macOS controller lives in the menu bar. Click the cat icon to install a model, choose a model and run it, or stop the loaded worker. Run opens a small chat window. Status and the last request's input/output token speeds appear in the dropdown and chat window.
 
 ## Build and install
 
@@ -22,6 +22,8 @@ The local app is ad-hoc signed. This workflow adds no Developer ID signing, nota
 **Install Model** offers a local folder or a Hugging Face repository ID. A converted Stark folder is registered in place. A supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted with Stark's existing converter. Conversion receipts remain with managed models. Model support is governed by the [converter's supported formats](../../tools/converter/README.md); choosing a repository does not guarantee compatibility.
 
 Run loads one model into one persistent worker. Requests are serialized. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies and conversation history stay in memory and private process pipes. The app exposes no HTTP listener.
+
+Open Chat shows user and model messages in a scrollable conversation. Choose a model and select Run, then enter a message and select Send or press Command-Return. Return inserts a new line. New Chat clears the visible conversation and the worker's conversation context while keeping the model loaded. Switching models and selecting Run starts a fresh conversation; Stop also clears the session. Failed or cancelled messages return to the composer for retry. Chat history is never saved to disk. Replies appear when generation completes.
 
 Input throughput uses first-token wall time as a prefill proxy, including native setup and scheduling. Output throughput measures sampling after the first token, including a terminal stop token when sampled. These are last-request measurements; short replies may not produce an output rate. See the [generation timing contract](../../docs/GENERATION.md). Stop or a worker failure clears the running session; starting again loads a fresh worker.
 
