@@ -369,34 +369,14 @@ fn describe_reprefill(
     } else {
         "rendered text changed"
     };
-    let token_difference_description = if token_difference == cached.len() && token_difference == rendered.len() {
-        "none (token IDs match)".to_string()
-    } else {
-        let describe = |token: Option<&Token>| {
-            token.map_or_else(|| "<end>".to_string(), |token| format!("{} ({:?})", token.id, token.value))
-        };
-        format!(
-            "{token_difference} (0-based), cached={}, rendered={}",
-            describe(cached.get(token_difference)),
-            describe(rendered.get(token_difference)),
-        )
-    };
-    let context = |label: &str, tokens: &[Token]| {
-        let start = token_difference.saturating_sub(3);
-        let end = (token_difference + 4).min(tokens.len());
-        let window: Vec<_> = tokens[start..end].iter().map(|token| (token.id, token.value.as_str())).collect();
-        format!("{label}[{start}..{end}]={window:?}")
-    };
     format!(
         "{reason}; discarding {} cached tokens, prefilling {} tokens; \
          first_text_difference_byte={text_difference} (0-based), cached_bytes={}, rendered_bytes={}; \
-         first_token_difference={token_difference_description}; {}; {}",
+         first_token_difference={token_difference} (0-based)",
         cached.len(),
         rendered.len(),
         cached_text.len(),
         rendered_text.len(),
-        context("cached_tokens", cached),
-        context("rendered_tokens", rendered),
     )
 }
 
@@ -426,8 +406,8 @@ impl Drop for StreamingState<'_> {
     fn drop(&mut self) {
         // Emit once per generated message, including streams stopped early.
         tracing::debug!(
-            "Decoded tokens: {:?}",
-            self.encoding.state().tokens[self.output_tokens_start..].iter().map(|token| token.id).collect::<Vec<_>>()
+            decoded_tokens = self.encoding.state().tokens.len().saturating_sub(self.output_tokens_start),
+            "Decoded output"
         );
     }
 }
@@ -531,4 +511,28 @@ fn calculate_rate(
     }
 
     Some((tokens - 1) as f64 / duration.as_secs_f64())
+}
+
+#[cfg(test)]
+mod privacy_tests {
+    use super::{Token, describe_reprefill};
+
+    #[test]
+    fn reprefill_keeps_offsets_without_token_content() {
+        let cached = vec![Token {
+            id: 918273,
+            value: "synthetic-private-marker".into(),
+            is_special: false,
+        }];
+        let rendered = vec![Token {
+            id: 827364,
+            value: "other-private-marker".into(),
+            is_special: false,
+        }];
+        let diagnostic = describe_reprefill(&cached, &rendered, &cached[0].value, &rendered[0].value);
+        assert!(diagnostic.contains("first_token_difference=0"));
+        for private in ["synthetic-private-marker", "other-private-marker", "918273", "827364"] {
+            assert!(!diagnostic.contains(private));
+        }
+    }
 }

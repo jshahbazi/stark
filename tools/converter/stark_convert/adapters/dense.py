@@ -21,6 +21,7 @@ from ..streaming import (
     load_checkpoint,
     read_json,
     tensor_sha256,
+    validate_planning_layers,
 )
 
 _DTYPES = {"bfloat16": "BF16", "float16": "F16", "float32": "F32"}
@@ -193,6 +194,7 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     model_dim = _positive_int(config, "hidden_size")
     hidden_dim = _positive_int(config, "intermediate_size")
     layers = _positive_int(config, "num_hidden_layers")
+    validate_planning_layers(layers)
     heads = _positive_int(config, "num_attention_heads")
     groups = _positive_int(config, "num_key_value_heads", heads)
     if heads % groups:
@@ -251,6 +253,8 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     if pruned:
         unsupported.append("Pruned attention heads are outside qualified dense coverage")
     rope = _rope(config, family, head_dim, sequence_length, unsupported)
+    tensors = load_checkpoint(source)
+    validate_planning_layers(layers, tensors)
     windows: list[int | None] = [None] * layers
     if family == "qwen2":
         use_sliding = _bool(config, "use_sliding_window", False)
@@ -277,7 +281,6 @@ def build_dense_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if layer_types != expected_types:
             unsupported.append("Layer attention types disagree with qualified sliding-window semantics")
     quantization = parse_mlx_quantization(config) if family == "llama" else None
-    tensors = load_checkpoint(source)
     if family != "llama":
         for key in ("quantization", "quantization_config"):
             if config.get(key) is not None:

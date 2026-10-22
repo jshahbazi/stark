@@ -6,7 +6,15 @@ pub fn build_body(
     context: &TelemetryContext,
     record: &TelemetryRecord,
 ) -> Value {
-    let mut body = serde_json::to_value(&record.event).unwrap_or_else(|_| Value::Object(Default::default()));
+    // Enforce the boundary again for direct Telemetry callers and deserialized events.
+    let mut body = if matches!(&record.event, super::TelemetryEvent::ModelInferenceFailed { .. }) {
+        serde_json::json!({
+            "event_name": "model_inference_failed",
+            "payload": {"error": {"category": "inference_failed"}}
+        })
+    } else {
+        serde_json::to_value(&record.event).unwrap_or_else(|_| Value::Object(Default::default()))
+    };
     if let Value::Object(map) = &mut body {
         if let Ok(Value::Object(context)) = serde_json::to_value(context) {
             for (key, value) in context {
@@ -72,6 +80,26 @@ mod tests {
         };
         let body = build_body(&context(), &record);
         assert_eq!(body["event_name"], json!("model_inference_failed"));
-        assert_eq!(body["payload"]["error"]["message"], json!("boom"));
+        assert_eq!(body["payload"]["error"], json!({ "category": "inference_failed" }));
+        assert!(!body.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn all_failure_representations_have_the_same_content_free_payload() {
+        for error in [
+            json!("synthetic-private-template-marker"),
+            json!({"message":"synthetic-private-sse-marker"}),
+            json!({"provider":{"status":500,"body":"synthetic-private-provider-marker"}}),
+        ] {
+            let record = TelemetryRecord {
+                event_time: "2026-06-04T16:24:29Z".into(),
+                event: TelemetryEvent::ModelInferenceFailed {
+                    error,
+                },
+            };
+            let body = build_body(&context(), &record);
+            assert_eq!(body["payload"]["error"], json!({"category":"inference_failed"}));
+            assert!(!body.to_string().contains("synthetic-private"));
+        }
     }
 }

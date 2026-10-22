@@ -43,6 +43,7 @@ from .streaming import (
     _signature,
     read_json,
     read_safetensors_header,
+    validate_planning_layers,
 )
 
 GGML_REFERENCE_REVISION = "1b70350c92563449576bcbbf552994b1d1ed847d"
@@ -185,6 +186,7 @@ def read_gguf(path: Path) -> GGUFSource:
 
 
 def _hf_names(config: dict) -> dict[str, str]:
+    validate_planning_layers(config.get("num_hidden_layers"))
     names = {"token_embd.weight": "model.embed_tokens.weight", "output_norm.weight": "model.norm.weight"}
     if not config.get("tie_word_embeddings", False):
         names["output.weight"] = "lm_head.weight"
@@ -281,6 +283,11 @@ def validate_metadata(source: GGUFSource, hf_source: Path, config: dict) -> None
 def build_import_plan(source: GGUFSource, hf_source: Path):
     config = read_json(hf_source / "config.json")
     validate_metadata(source, hf_source, config)
+    layers = config.get("num_hidden_layers")
+    validate_planning_layers(layers, source.tensors)
+    expected_count = 2 + (not config.get("tie_word_embeddings", False)) + 11 * layers
+    if expected_count != len(source.tensors):
+        raise ConversionError("GGUF tensor inventory disagrees with Qwen3 HF config")
     names = _hf_names(config)
     if set(source.tensors) != set(names):
         raise ConversionError("GGUF tensor inventory disagrees with Qwen3 HF config")

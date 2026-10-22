@@ -35,6 +35,8 @@ pub enum HeaderLoadingError {
         global_offset: usize,
         local_begin: usize,
     },
+    #[error("Tensor payload exceeds file length")]
+    TruncatedTensor,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

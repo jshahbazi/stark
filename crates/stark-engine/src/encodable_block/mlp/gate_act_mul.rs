@@ -36,9 +36,10 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
             gate_clipping,
             value_clipping,
         };
-        let fp_kernel = GatedActMul::full_precision(context, data_type, true, hadamard_factors.is_some(), settings)?;
+        let fp_kernel =
+            GatedActMul::<B>::full_precision(context, data_type, true, hadamard_factors.is_some(), settings)?;
         let quantized_kernel = activation_quantization
-            .map(|quantization| GatedActMul::quantized(context, data_type, quantization, settings))
+            .map(|quantization| GatedActMul::<B>::quantized(context, data_type, quantization, settings))
             .transpose()?;
         Ok(Self {
             fp_kernel,

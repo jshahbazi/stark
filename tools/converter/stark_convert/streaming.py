@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import struct
 import time
 from dataclasses import dataclass
@@ -49,6 +50,88 @@ DTYPE_BYTES = {
 }
 MAX_HEADER_BYTES = 100_000_000
 DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
+# Metadata planning is bounded independently of the tensor transform workspace.
+MAX_PLANNING_LAYERS = 4096
+MAX_SOURCE_TENSORS = 262_144
+MAX_TENSOR_RANK = 32
+
+
+def authorize_source_path(root: Path, path: Path) -> Path:
+    """Allow local files and canonical HF snapshot links to sibling blobs only."""
+    # The caller selects the root once. Resolving it again could turn a replaced
+    # root directory symlink into new authority over unrelated host files.
+    root = Path(os.path.abspath(root))
+    resolved = path.resolve(strict=True)
+    allowed = [root]
+    if (
+        len(root.name) == 40
+        and all(character in "0123456789abcdef" for character in root.name)
+        and root.parent.name == "snapshots"
+        and root.parent.parent.name.startswith("models--")
+    ):
+        allowed.append(root.parent.parent / "blobs")
+    if not any(resolved.is_relative_to(directory) for directory in allowed):
+        raise ConversionError("Source file is outside its authorized source roots")
+    # Opening the canonical target without following any newly introduced link
+    # prevents replacement between authorization and subsequent safe reads.
+    with open_regular(resolved):
+        pass
+    return resolved
+
+
+def open_regular(path: Path) -> BinaryIO:
+    """Open a canonical regular file without blocking on FIFOs or following races."""
+    resolved = Path(os.path.abspath(path))
+    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for component in resolved.parts[1:-1]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+            os.close(directory)
+            directory = child
+        descriptor = os.open(resolved.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+    finally:
+        os.close(directory)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ConversionError("Source must be a regular file")
+    return os.fdopen(descriptor, "rb", buffering=0)
+
+
+def read_regular_bytes(path: Path) -> bytes:
+    with open_regular(path) as stream:
+        before = _signature(os.fstat(stream.fileno()))
+        content = stream.read(before[2])
+        if len(content) != before[2] or stream.read(1) or _signature(os.fstat(stream.fileno())) != before:
+            raise ConversionError("Source changed while reading")
+        return content
+
+
+def validate_planning_layers(layers: int, tensors: dict | None = None) -> None:
+    """Bound topology work before creating any per-layer structures."""
+    if type(layers) is not int or not 1 <= layers <= MAX_PLANNING_LAYERS:
+        raise ConversionError("Layer count exceeds the metadata planning budget")
+    if tensors is not None and (len(tensors) > MAX_SOURCE_TENSORS or layers > len(tensors)):
+        raise ConversionError("Layer count disagrees with the bounded tensor inventory")
+
+
+def bounded_tensor_bytes(shape: object, itemsize: int, maximum: int) -> int:
+    """Check rank and byte products without constructing oversized integers."""
+    if (
+        not isinstance(shape, list)
+        or len(shape) > MAX_TENSOR_RANK
+        or any(type(dim) is not int or dim < 0 for dim in shape)
+    ):
+        raise ConversionError("Invalid safetensors tensor shape")
+    if 0 in shape:
+        return 0
+    result = itemsize
+    for dim in shape:
+        if dim > maximum // result:
+            raise ConversionError("Safetensors tensor exceeds its byte span")
+        result *= dim
+    if result > maximum:
+        raise ConversionError("Safetensors tensor exceeds its byte span")
+    return result
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -63,12 +146,14 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict:
 def read_json(path: Path) -> dict:
     """Read a JSON object while rejecting duplicate keys and nonfinite numbers."""
     try:
-        with path.open("r", encoding="utf-8") as stream:
-            result = json.load(
-                stream,
-                object_pairs_hook=_unique_object,
-                parse_constant=lambda _: (_ for _ in ()).throw(ConversionError("Nonfinite JSON number")),
-            )
+        # Select a directory alias once, then pin its canonical authority before
+        # resolving the untrusted sidecar itself.
+        parent = path.parent.resolve(strict=True)
+        result = json.loads(
+            read_regular_bytes(authorize_source_path(parent, parent / path.name)).decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=lambda _: (_ for _ in ()).throw(ConversionError("Nonfinite JSON number")),
+        )
     except (OSError, ValueError, UnicodeError) as exc:
         raise ConversionError("Cannot read checkpoint JSON") from exc
     if not isinstance(result, dict):
@@ -121,7 +206,7 @@ class ConversionPlan:
 def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, TensorInfo]]:
     """Validate the complete on-disk layout without loading tensor payloads."""
     try:
-        with path.open("rb") as stream:
+        with open_regular(path.resolve(strict=True)) as stream:
             signature = _signature(os.fstat(stream.fileno()))
             prefix = stream.read(8)
             if len(prefix) != 8:
@@ -153,15 +238,17 @@ def read_safetensors_header(path: Path) -> tuple[dict[str, str], dict[str, Tenso
         dtype, shape, offsets = info["dtype"], info["shape"], info["data_offsets"]
         if not isinstance(dtype, str) or dtype not in DTYPE_BYTES:
             raise UnsupportedConversion("Checkpoint dtype is outside streaming parser coverage")
-        if not isinstance(shape, list) or any(type(dim) is not int or dim < 0 for dim in shape):
-            raise ConversionError("Invalid safetensors tensor shape")
         if not isinstance(offsets, list) or len(offsets) != 2 or any(type(x) is not int for x in offsets):
             raise ConversionError("Invalid safetensors tensor offsets")
         start, end = offsets
-        nbytes = math.prod(shape) * DTYPE_BYTES[dtype]
+        if start < 0 or end < start or data_start + end > signature[2]:
+            raise ConversionError("Safetensors tensor byte size or offset mismatch")
+        nbytes = bounded_tensor_bytes(shape, DTYPE_BYTES[dtype], end - start)
         if start < 0 or end < start or end - start != nbytes or data_start + end > signature[2]:
             raise ConversionError("Safetensors tensor byte size or offset mismatch")
         tensors[name] = TensorInfo(path, dtype, tuple(shape), data_start + start, nbytes, signature)
+        if len(tensors) > MAX_SOURCE_TENSORS:
+            raise ConversionError("Tensor inventory exceeds the metadata planning budget")
         spans.append((start, end))
     cursor = 0
     for start, end in sorted(spans):
@@ -214,13 +301,15 @@ def load_checkpoint(source: Path) -> dict[str, TensorInfo]:
             if weight_map is not None and weight_map.get(name) != str(path.relative_to(source)):
                 raise ConversionError("Checkpoint shard index disagrees with its tensor headers")
             result[name] = tensor
+            if len(result) > MAX_SOURCE_TENSORS:
+                raise ConversionError("Tensor inventory exceeds the metadata planning budget")
     if weight_map is not None and set(result) != set(weight_map):
         raise ConversionError("Checkpoint shard index references missing tensors")
     return result
 
 
 def _open_tensor(tensor: TensorInfo) -> BinaryIO:
-    stream = tensor.path.open("rb")
+    stream = open_regular(tensor.path.resolve(strict=True))
     if _signature(os.fstat(stream.fileno())) != tensor.file_signature:
         stream.close()
         raise ConversionError("Checkpoint changed during conversion")

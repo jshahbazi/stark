@@ -249,6 +249,10 @@ The writer plans names, shapes, dtype/spec metadata, input consumption, and byte
 
 `--chunk-mib` sets the enforced live transformation workspace, defaulting to 8 MiB. Header JSON, tensor catalogs, tokenizer normalization, hashing, and interpreter costs contribute additional memory. Sampled process RSS is reported separately; this option does not impose a total-process memory ceiling.
 
+Metadata planning has separate fixed work limits: 4,096 layers, 262,144 source tensors and 32 tensor dimensions. Planners check the actual tensor inventory before constructing repeated layer settings; the declared layer count cannot exceed that inventory. Safetensors byte products are checked incrementally against their validated byte span. These limits bound metadata work independently of `--chunk-mib` and do not claim a total-process memory ceiling.
+
+Local metadata sidecars must resolve within the selected checkpoint. Canonical Hugging Face cache snapshots may also use regular files in their sibling `blobs` directory. Other escaping sidecar links and special files are rejected. Explicit private manifests and pinned external-repository descriptors retain their separately selected source authority.
+
 ```sh
 uv run --project tools/converter --locked pytest tools/converter/tests -q
 uv run --project tools/converter --locked ruff check tools/converter

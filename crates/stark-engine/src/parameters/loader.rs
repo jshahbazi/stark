@@ -40,6 +40,7 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         context: &'a B::Context,
     ) -> Result<Self, ParameterLoaderError<B>> {
         let (global_offset, st_metadata) = read_st_metadata(file)?;
+        let file_length = file.metadata()?.len();
         let index = st_metadata
             .tensors
             .into_iter()
@@ -57,6 +58,10 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
                         global_offset,
                         local_begin,
                     })?;
+                let absolute_end = global_offset.checked_add(local_end).ok_or(HeaderLoadingError::TruncatedTensor)?;
+                if u64::try_from(absolute_end).map_or(true, |end| end > file_length) {
+                    return Err(HeaderLoadingError::TruncatedTensor);
+                }
                 let weight_metadata = ParameterMetadata {
                     shape: value.shape.into(),
                     data_type: value.dtype.data_type()?,
@@ -210,5 +215,68 @@ impl<'loader, B: Backend> ParameterTree<'loader, B> {
                 keys: unvalidated_tensors.into_boxed_slice(),
             })
         }
+    }
+}
+
+#[cfg(all(test, backend = "cpu"))]
+mod payload_tests {
+    use std::{
+        fs::OpenOptions,
+        io::Write,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use stark_engine_macros::stark_test;
+
+    use super::ParameterLoader;
+    use crate::{
+        backends::{
+            common::{Backend, BufferRef, Context},
+            cpu::Cpu,
+        },
+        data_type::DataType,
+        parameters::{ParameterLoaderError, safetensors_metadata::HeaderLoadingError},
+    };
+
+    fn tensor_file(
+        end: usize,
+        payload: &[u8],
+    ) -> std::fs::File {
+        let path = std::env::temp_dir().join(format!(
+            "stark-payload-test-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut file = OpenOptions::new().read(true).write(true).create_new(true).open(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let shape = end.min(u32::MAX as usize);
+        let header = format!(r#"{{"weight":{{"dtype":"U8","shape":[{shape}],"data_offsets":[0,{end}]}}}}"#);
+        file.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+        file.write_all(header.as_bytes()).unwrap();
+        file.write_all(payload).unwrap();
+        file
+    }
+
+    #[stark_test]
+    fn tensor_payload_is_checked_before_any_tensor_allocation() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        for end in [1, 1 << 30, usize::MAX] {
+            let file = tensor_file(end, &[]);
+            assert!(matches!(
+                ParameterLoader::<Cpu>::new(&file, &context),
+                Err(ParameterLoaderError::HeaderLoadingError(HeaderLoadingError::TruncatedTensor))
+            ));
+        }
+    }
+
+    #[stark_test]
+    fn exact_tensor_payload_still_loads() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(3, &[4, 5, 6]);
+        let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        let tree = loader.tree();
+        let leaf = tree.leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap();
+        assert_eq!(&*leaf.read_slice::<u8>().unwrap(), &[4, 5, 6]);
+        assert_eq!(leaf.read_buffer().unwrap().copyout::<u8>(), [4, 5, 6]);
     }
 }

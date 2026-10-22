@@ -53,7 +53,7 @@ impl Context for CpuContext {
         &self,
         size: usize,
     ) -> Result<<Cpu as Backend>::GlobalBuffer, CpuError> {
-        Ok(CpuBuffer::new(size))
+        Ok(CpuBuffer::new(size, self.command_queue.clone()))
     }
 
     fn create_sparse_buffer(

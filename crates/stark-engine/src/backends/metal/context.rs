@@ -22,7 +22,7 @@ use crate::backends::{
     },
     metal::{
         Metal,
-        buffer::{dense::MetalDenseBuffer, sparse::MetalSparseBuffer},
+        buffer::{dense::MetalDenseBuffer, global::MetalGlobalBuffer, sparse::MetalSparseBuffer},
         command_buffer::{MetalCommandBufferCache, MetalCommandBufferEncoding},
         decompression,
         error::MetalError,
@@ -158,7 +158,9 @@ impl Context for MetalContext {
         &self,
         size: usize,
     ) -> Result<<Metal as Backend>::GlobalBuffer, MetalError> {
-        self.block_allocator.allocate(size, |size| MetalDenseBuffer::new(&self.weak_self.upgrade().unwrap(), size))
+        self.block_allocator
+            .allocate(size, |size| MetalDenseBuffer::new(&self.weak_self.upgrade().unwrap(), size))
+            .map(|allocation| MetalGlobalBuffer::new(allocation, self.command_queue.clone()))
     }
 
     fn create_sparse_buffer(

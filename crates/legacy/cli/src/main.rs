@@ -61,6 +61,10 @@ enum Commands {
         /// Print verbose information into the file log
         #[arg(long)]
         verbose_file_log: bool,
+        /// Allow native clients without a key, only on a loopback address.
+        /// Otherwise set STARK_SERVER_API_KEY and send Authorization: Bearer <key>.
+        #[arg(long)]
+        allow_unauthenticated_local: bool,
     },
     Storage {
         #[arg(long, value_enum, default_value_t = storage::DownloadManagerCliType::default())]
@@ -89,7 +93,18 @@ async fn main() -> Result<()> {
             prefix_cache,
             no_prefix_cache,
             verbose_file_log,
-        }) => server::run_server(model, host, port, prefix_cache || !no_prefix_cache, verbose_file_log).await?,
+            allow_unauthenticated_local,
+        }) => {
+            server::run_server(
+                model,
+                host,
+                port,
+                prefix_cache || !no_prefix_cache,
+                verbose_file_log,
+                allow_unauthenticated_local,
+            )
+            .await?
+        },
         Some(Commands::Storage {
             download_manager,
         }) => storage::run(download_manager).await?,

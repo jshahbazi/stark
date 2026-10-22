@@ -51,6 +51,10 @@ impl<B: Backend> Classifier<B> {
         parameter_tree: &ParameterTree<B>,
         data_type: DataType,
     ) -> Result<Self, ClassifierError<B>> {
+        crate::config::validation::validate_pooling_width(config.transformer_config.model_dim, config.hidden_dim)
+            .map_err(|_| {
+                ClassifierError::UnsupportedConfiguration("pooling width must match transformer output".into())
+            })?;
         let (embedding, _) = Embedding::new(
             context,
             config.vocab_size,

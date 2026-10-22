@@ -11,7 +11,7 @@ pub trait Backend: Clone + Send + Sync + 'static {
     type SparseBuffer: SparseBuffer<Backend = Self>;
     type AllocationPool: Send + Sync;
     type Kernels: Kernels<Backend = Self>;
-    type Error: Error;
+    type Error: Error + From<super::InvalidInput>;
 
     const NAME: &'static str;
 }

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use derive_more::Debug;
 use thiserror::Error;
 
@@ -7,7 +9,21 @@ use crate::{
     engine::language_model::LanguageModel,
 };
 
+fn effective_context_limit(
+    requested: Option<u32>,
+    maximum: Option<u32>,
+) -> Result<Option<u32>, crate::backends::common::InvalidInput> {
+    match (requested, maximum) {
+        (Some(0), _) => Err(crate::backends::common::InvalidInput("zero context capacity")),
+        (Some(requested), Some(maximum)) if requested > maximum => {
+            Err(crate::backends::common::InvalidInput("context exceeds model capacity"))
+        },
+        (requested, maximum) => Ok(requested.or(maximum)),
+    }
+}
+
 pub struct LanguageModelState<B: Backend> {
+    pub(super) model_identity: Arc<()>,
     pub(super) tokens: Vec<u64>,
     pub(super) last_output_token: Option<u64>, // TODO: this leaks previous LanguageModelStreamOptions
     pub(super) prng: PRng,
@@ -24,6 +40,8 @@ impl<B: Backend> LanguageModelState<B> {
 
 #[derive(Debug, Error)]
 pub enum LanguageModelCreateEmptyStateError<B: Backend> {
+    #[error("Invalid model state context")]
+    InvalidContext,
     #[error("Backend error: {0}")]
     Backend(#[source] B::Error),
 }
@@ -34,6 +52,11 @@ impl<B: Backend> LanguageModel<B> {
         max_context_length: Option<u32>,
         sampling_seed: u64,
     ) -> Result<LanguageModelState<B>, LanguageModelCreateEmptyStateError<B>> {
+        let max_context_length = effective_context_limit(max_context_length, self.max_context_length())
+            .map_err(|_| LanguageModelCreateEmptyStateError::InvalidContext)?;
+        if self.speculator.is_some() && max_context_length.is_none() {
+            return Err(LanguageModelCreateEmptyStateError::InvalidContext);
+        }
         let tokens = Vec::new();
         let last_output_token = None;
 
@@ -54,6 +77,7 @@ impl<B: Backend> LanguageModel<B> {
             .map_err(LanguageModelCreateEmptyStateError::Backend)?;
 
         Ok(LanguageModelState {
+            model_identity: self.model_identity.clone(),
             tokens,
             last_output_token,
             prng,
@@ -61,5 +85,22 @@ impl<B: Backend> LanguageModel<B> {
             speculator_state,
             max_context_length,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::effective_context_limit;
+
+    #[stark_test]
+    fn unspecified_context_retains_finite_model_capacity() {
+        assert_eq!(effective_context_limit(None, Some(4096)).unwrap(), Some(4096));
+        assert_eq!(effective_context_limit(Some(1024), Some(4096)).unwrap(), Some(1024));
+        assert_eq!(effective_context_limit(None, None).unwrap(), None);
+        assert_eq!(effective_context_limit(Some(1024), None).unwrap(), Some(1024));
+        assert!(effective_context_limit(Some(0), Some(4096)).is_err());
+        assert!(effective_context_limit(Some(4097), Some(4096)).is_err());
     }
 }

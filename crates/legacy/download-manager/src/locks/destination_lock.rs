@@ -49,6 +49,26 @@ impl DestinationLock {
         let mut directories = vec![directory.to_path_buf()];
         while let Some(directory) = directories.pop() {
             for path in fs::asyn::read_dir(&directory).await.unwrap_or_default() {
+                #[cfg(not(target_family = "wasm"))]
+                {
+                    let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+                        return true;
+                    };
+                    // A link is outside the pruning authority. Treat it as
+                    // protected instead of following it during lock discovery.
+                    if metadata.file_type().is_symlink() {
+                        return true;
+                    }
+                    if metadata.is_dir() {
+                        directories.push(path);
+                    } else if metadata.is_file()
+                        && path.extension().is_some_and(|extension| extension == "lock")
+                        && !matches!(FileLock::try_acquire(&path).await, Ok(Some(_)))
+                    {
+                        return true;
+                    }
+                }
+                #[cfg(target_family = "wasm")]
                 if !fs::asyn::is_file(&path).await {
                     directories.push(path);
                 } else if path.extension().is_some_and(|extension| extension == "lock")
@@ -74,6 +94,23 @@ impl DestinationLock {
 
     fn path_for(destination: &Path) -> PathBuf {
         PathBuf::from(format!("{}.lock", destination.display()))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn pruning_never_follows_links_outside_the_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), directory.path().join("linked")).unwrap();
+        assert!(DestinationLock::held_within(directory.path()).await);
+        std::fs::remove_file(directory.path().join("linked")).unwrap();
+        assert!(!DestinationLock::held_within(directory.path()).await);
     }
 }
 

@@ -4,5 +4,7 @@ use crate::reduction::ReductionParserError;
 #[non_exhaustive]
 pub enum TokenStreamParserError {
     #[error(transparent)]
+    Transform(#[from] json_transform::TransformError),
+    #[error(transparent)]
     Reduction(#[from] ReductionParserError),
 }

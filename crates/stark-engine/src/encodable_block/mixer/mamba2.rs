@@ -97,14 +97,25 @@ impl<B: Backend> Mamba2<B> {
         parameter_tree: &ParameterTree<B>,
         context: &B::Context,
     ) -> Result<(Self, Option<B::GlobalBuffer>), Mamba2NewError<B>> {
+        crate::config::validation::validate_heads(config.num_heads, config.num_groups, config.head_dim)
+            .map_err(|_| Mamba2NewError::UnsupportedConfiguration("invalid head/group geometry".into()))?;
+        crate::config::validation::validate_mamba_state_width(B::NAME, config.state_dim)
+            .map_err(|_| Mamba2NewError::UnsupportedConfiguration("unsupported backend state dimension".into()))?;
+        crate::config::validation::checked_product(&[config.num_heads, config.head_dim, config.state_dim])
+            .map_err(|_| Mamba2NewError::UnsupportedConfiguration("state layout overflow".into()))?;
         let kernel_size = config.kernel_size;
         let num_heads = config.num_heads;
         let num_groups = config.num_groups;
         let head_dim = config.head_dim;
         let state_dim = config.state_dim;
 
-        let inner_dim = num_heads * head_dim;
-        let conv_dim = inner_dim + 2 * num_groups * state_dim;
+        let inner_dim = crate::config::validation::checked_product(&[num_heads, head_dim])
+            .map_err(|_| Mamba2NewError::UnsupportedConfiguration("inner dimension overflow".into()))?;
+        let coefficients = crate::config::validation::checked_product(&[2, num_groups, state_dim])
+            .map_err(|_| Mamba2NewError::UnsupportedConfiguration("coefficient dimension overflow".into()))?;
+        let conv_dim = inner_dim
+            .checked_add(coefficients)
+            .ok_or_else(|| Mamba2NewError::UnsupportedConfiguration("convolution dimension overflow".into()))?;
 
         let activation_type = config.activation.act_type();
 

@@ -15,5 +15,6 @@ pub mod token_codec;
 pub mod token_mixer;
 pub mod transformer;
 pub mod transformer_layer;
+pub(crate) mod validation;
 pub mod weaver;
 pub mod weight_matrix;

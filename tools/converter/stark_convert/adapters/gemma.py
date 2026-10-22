@@ -21,6 +21,7 @@ from ..streaming import (
     load_checkpoint,
     read_json,
     tensor_sha256,
+    validate_planning_layers,
 )
 from .dense import _COMMON_KEYS
 
@@ -138,6 +139,7 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
     model_dim = _integer(config, "hidden_size")
     hidden_dim = _integer(config, "intermediate_size")
     layers = _integer(config, "num_hidden_layers")
+    validate_planning_layers(layers)
     heads = _integer(config, "num_attention_heads", 8 if family == "gemma3_text" else None)
     groups = _integer(config, "num_key_value_heads", 4 if family == "gemma3_text" else None)
     head_dim = _integer(config, "head_dim", 256 if family == "gemma3_text" else None)
@@ -180,6 +182,8 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
         if not isinstance(config["rope_parameters"], dict):
             raise ConversionError("Gemma config has malformed rope_parameters")
         unsupported.append("New Gemma RoPE parameters require a separate adapter")
+    tensors = load_checkpoint(source)
+    validate_planning_layers(layers, tensors)
     window = _integer(config, "sliding_window")
     if family == "gemma2":
         windows = [window if layer % 2 == 0 else None for layer in range(layers)]
@@ -225,7 +229,6 @@ def build_gemma_plan(source: Path, *, family: str, dtype: str = "bfloat16") -> C
             unsupported.append("Gemma layer types disagree with qualified window semantics")
     attention_softcap = _softcap(config, "attn_logit_softcapping", required=family == "gemma2")
     final_softcap = _softcap(config, "final_logit_softcapping", required=family == "gemma2")
-    tensors = load_checkpoint(source)
     for key in ("quantization", "quantization_config"):
         if family == "gemma2" and config.get(key) is not None:
             if not isinstance(config[key], dict) or not config[key]:

@@ -61,6 +61,15 @@ pub struct Engine {
 
 impl Engine {
     pub async fn new(config: EngineConfig) -> Result<Self, EngineError> {
+        Self::new_with_telemetry(config, false).await
+    }
+
+    /// Explicitly opt in before creating the engine. Existing constructors keep
+    /// telemetry disabled and the exported EngineConfig layout stays stable.
+    pub async fn new_with_telemetry(
+        config: EngineConfig,
+        allow_telemetry: bool,
+    ) -> Result<Self, EngineError> {
         let runtime_handle = RuntimeHandle::try_current().map_err(|error| EngineError::TokioError {
             message: error.to_string(),
         })?;
@@ -77,7 +86,7 @@ impl Engine {
 
         let device = Device::new()?;
 
-        let telemetry = SharedAccess::new({
+        let telemetry = SharedAccess::new(if allow_telemetry {
             let context = TelemetryContext::new(
                 Self::version(),
                 Self::toolchain_version(),
@@ -89,6 +98,8 @@ impl Engine {
                 },
             );
             Telemetry::builder().base_url(TELEMETRY_URL).context(context).build()
+        } else {
+            Telemetry::disabled()
         });
 
         let registry = SharedAccess::new(MergedRegistry::new(vec![]));

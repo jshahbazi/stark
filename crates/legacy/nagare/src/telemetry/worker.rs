@@ -9,8 +9,8 @@ pub(super) async fn run(
     mut receiver: mpsc::Receiver<TelemetryRecord>,
 ) {
     while let Some(record) = receiver.recv().await {
-        if let Err(error) = client.send::<Events>(&build_body(&context, &record)).await {
-            tracing::warn!(%error, "telemetry event dropped");
+        if client.send::<Events>(&build_body(&context, &record)).await.is_err() {
+            tracing::warn!("telemetry event dropped");
         }
     }
 }

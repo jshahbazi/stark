@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use metal::{
     MTL4CommandQueue, MTL4CommandQueueExt, MTL4UpdateSparseBufferMappingOperation, MTLBuffer, MTLDeviceExt,
-    MTLResidencySet, MTLResourceOptions, MTLSharedEventExt, MTLSharedEventListener, MTLSharedEventNotificationBlock,
-    MTLSparseTextureMappingMode,
+    MTLResidencySet, MTLResourceOptions, MTLSparseTextureMappingMode,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use parking_lot::Mutex;
 
+use super::retirement::retire_after_queue;
 use crate::backends::{
     common::{Buffer, SparseBuffer},
     metal::{
@@ -17,6 +17,20 @@ use crate::backends::{
         metal_extensions::SparsePageSizeExt,
     },
 };
+
+struct SparseRetirement {
+    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    _pages: Vec<MetalHeapPage>,
+    residency_set: Arc<Mutex<Retained<ProtocolObject<dyn MTLResidencySet>>>>,
+}
+
+impl Drop for SparseRetirement {
+    fn drop(&mut self) {
+        let residency_set = self.residency_set.lock();
+        residency_set.remove_allocation(self.buffer.as_ref());
+        residency_set.commit();
+    }
+}
 
 pub struct MetalSparseBuffer {
     buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -79,6 +93,9 @@ impl SparseBuffer for MetalSparseBuffer {
         &mut self,
         until: usize,
     ) -> Result<(), MetalError> {
+        if until > self.capacity {
+            return Err(crate::backends::common::InvalidInput("sparse mapping exceeds capacity").into());
+        }
         if until <= self.length {
             return Ok(());
         }
@@ -123,20 +140,14 @@ impl Drop for MetalSparseBuffer {
                     0,
                 )],
             );
-            let event = self.command_queue.device().new_shared_event().unwrap();
-            let retain = (self.buffer.clone(), std::mem::take(&mut self.pages), event.clone());
-            event.notify_listener_at_value(
-                &MTLSharedEventListener::shared_listener(),
-                1,
-                &MTLSharedEventNotificationBlock::new(move |_, _| {
-                    let _ = &retain;
-                }),
-            );
-            self.command_queue.signal_event_value(event.as_ref(), 1);
         }
-
-        let residency_set_locked = self.residency_set.lock();
-        residency_set_locked.remove_allocation(self.buffer.as_ref());
-        residency_set_locked.commit();
+        retire_after_queue(
+            &self.command_queue,
+            SparseRetirement {
+                buffer: self.buffer.clone(),
+                _pages: std::mem::take(&mut self.pages),
+                residency_set: self.residency_set.clone(),
+            },
+        );
     }
 }

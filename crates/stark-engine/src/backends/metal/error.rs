@@ -9,6 +9,8 @@ use crate::backends::{
 
 #[derive(Debug, Error)]
 pub enum MetalError {
+    #[error(transparent)]
+    InvalidInput(#[from] crate::backends::common::InvalidInput),
     #[error("Cannot open device")]
     CannotOpenDevice,
     #[error("Cannot create residency set: {0}")]

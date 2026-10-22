@@ -250,7 +250,9 @@ def write_classifier_metadata(
     bos_token = _optional_text(tokenizer_config.get("bos_token"))
     eos_token = _optional_text(tokenizer_config.get("eos_token"))
     try:
-        tokenizer = Tokenizer.from_file(str(_file_path(source, model_entry, "tokenizer", resolve_file)))
+        tokenizer = Tokenizer.from_str(
+            _read_text(_file_path(source, model_entry, "tokenizer", resolve_file), "tokenizer")
+        )
         _add_tokens(tokenizer, tokenizer_config)
         _validate_tokenizer(tokenizer, tokenizer_config, hf_config)
         if bos_token is None:

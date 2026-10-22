@@ -21,6 +21,7 @@ from .streaming import (
     load_checkpoint,
     read_json,
     tensor_sha256,
+    validate_planning_layers,
 )
 
 _DTYPES = {"bfloat16": "BF16", "float16": "F16", "float32": "F32"}
@@ -151,6 +152,7 @@ def build_qwen3_plan(
     model_dim = _positive_int(config, "hidden_size")
     hidden_dim = _positive_int(config, "intermediate_size")
     layers = _positive_int(config, "num_hidden_layers")
+    validate_planning_layers(layers)
     heads = _positive_int(config, "num_attention_heads")
     groups = _positive_int(config, "num_key_value_heads", heads)
     if heads % groups:
@@ -174,6 +176,8 @@ def build_qwen3_plan(
     if type(max_window_layers) is not int or not 0 <= max_window_layers <= layers:
         raise ConversionError("Qwen3 sliding window layer boundary is invalid")
     sliding = _positive_int(config, "sliding_window") if use_sliding else None
+    tensors = load_checkpoint(source) if tensors is None else tensors
+    validate_planning_layers(layers, tensors)
     windows = [sliding if use_sliding and layer >= max_window_layers else None for layer in range(layers)]
     if config.get("layer_types") is not None:
         expected = ["sliding_attention" if window is not None else "full_attention" for window in windows]
@@ -258,7 +262,6 @@ def build_qwen3_plan(
         "ple_model_config": None,
         "embedding_norm_config": None,
     }
-    tensors = load_checkpoint(source) if tensors is None else tensors
     operations = []
     expected = set()
     metadata = {}

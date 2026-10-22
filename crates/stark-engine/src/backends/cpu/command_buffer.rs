@@ -6,15 +6,10 @@ use std::{
 use crate::{
     backends::{
         common::{
-            Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferCompleted, CommandBufferEncoding,
-            CommandBufferExecutable, CommandBufferPending, allocator::bump::BumpAllocator,
+            Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferCompleted, CommandBufferEncoding,
+            CommandBufferExecutable, CommandBufferPending, Context, allocator::bump::BumpAllocator,
         },
-        cpu::{
-            Cpu,
-            buffer::{CpuBufferExt, dense::CpuBuffer},
-            context::CpuContext,
-            error::CpuError,
-        },
+        cpu::{Cpu, buffer::CpuBufferExt, context::CpuContext, error::CpuError},
     },
     utils::pointers::{SendPtr, SendPtrMut},
 };
@@ -70,14 +65,20 @@ impl CommandBufferEncoding for CpuCommandBufferEncoding {
         &mut self,
         size: usize,
     ) -> Result<<Cpu as Backend>::ConstantBuffer, CpuError> {
-        self.constant_allocator.allocate(size, |size| Ok(CpuBuffer::new(size)))
+        self.constant_allocator.allocate(size, |size| self.context.create_buffer(size))
     }
 
     fn allocate_scratch(
         &mut self,
         size: usize,
     ) -> Result<<Cpu as Backend>::ScratchBuffer, CpuError> {
-        self.allocation_pool.allocate(size, |size| Ok(CpuBuffer::new(size)))
+        let buffer = self.allocation_pool.allocate(size, |size| self.context.create_buffer(size))?;
+        // Recycled pages remain readable through the public buffer API.
+        // Clear the full page because PoolAllocation::page also exposes its padding.
+        unsafe {
+            buffer.page().cpu_address().as_ptr().cast::<u8>().write_bytes(0, Buffer::size(buffer.page()));
+        }
+        Ok(buffer)
     }
 
     fn encode_copy(
@@ -194,5 +195,75 @@ impl CommandBufferCompleted for CpuCommandBufferCompleted {
 
     fn gpu_execution_time(&self) -> Duration {
         self.gpu_execution_time
+    }
+}
+
+#[cfg(test)]
+mod initialized_scratch_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::CpuContext;
+    use crate::backends::common::{BufferMut, BufferRef, CommandBufferEncoding, Context};
+
+    #[stark_test]
+    fn recycled_scratch_clears_readable_page_padding() {
+        let context = CpuContext::new().unwrap();
+        let pool = context.create_allocation_pool();
+        let mut commands = context.create_command_buffer(None, Some(pool)).unwrap();
+        let mut previous = commands.allocate_scratch(64).unwrap();
+        previous.as_slice_mut::<u8>().fill(0xa5);
+        drop(previous);
+        let next = commands.allocate_scratch(33).unwrap();
+        assert!(next.as_slice::<u8>().iter().all(|&byte| byte == 0));
+        assert!(next.page().as_slice::<u8>().iter().all(|&byte| byte == 0));
+    }
+
+    #[stark_test]
+    fn queued_cpu_storage_survives_forgotten_wait_and_owner_drop() {
+        use std::sync::mpsc;
+
+        use crate::backends::common::{CommandBufferExecutable, CommandBufferPending};
+
+        let context = CpuContext::new().unwrap();
+        let (release, gate) = mpsc::channel();
+        context
+            .command_queue
+            .send(Box::new(move || {
+                let _ = gate.recv();
+            }))
+            .unwrap();
+        struct Release(Option<mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let release = Release(Some(release));
+
+        let mut source = context.create_buffer(4).unwrap();
+        source.copyin(&[42u32]);
+        let source_allocation = source.allocation_weak();
+        let mut state = context.create_buffer(4).unwrap();
+        let mut first = context.create_command_buffer(None, None).unwrap();
+        first.encode_copy(&source, &mut state);
+        let pending = first.end_encoding().submit();
+        std::mem::forget(pending);
+        drop(source);
+        assert!(source_allocation.upgrade().is_some(), "queued source allocation was freed before execution");
+
+        // A fresh caller can safely reuse the state after forgetting the old
+        // borrowed operation: its commands still run after the prior submission.
+        let mut original = context.create_buffer(4).unwrap();
+        let mut reused = context.create_buffer(4).unwrap();
+        let mut second = context.create_command_buffer(None, None).unwrap();
+        second.encode_copy(&state, &mut original);
+        second.encode_fill(&mut state, 7);
+        second.encode_copy(&state, &mut reused);
+        let pending = second.end_encoding().submit();
+        drop(release);
+        pending.wait_until_completed().unwrap();
+        assert_eq!(original.copyout::<u32>(), [42]);
+        assert!(reused.copyout::<u8>().iter().all(|&value| value == 7));
+        assert!(source_allocation.upgrade().is_none(), "retirement did not release completed storage");
     }
 }

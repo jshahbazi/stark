@@ -25,7 +25,7 @@ impl Parser for FramingParser {
         })
     }
 
-    #[tracing::instrument(skip_all, fields(token = %input))]
+    #[tracing::instrument(skip_all)]
     fn push(
         &mut self,
         input: &Token,
