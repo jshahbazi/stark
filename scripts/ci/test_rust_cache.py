@@ -164,6 +164,24 @@ class RustCacheTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.key(scope="../invalid")
 
+    def test_metal_temporary_mount_changes_reuse_cache_but_version_changes_do_not(self):
+        self.environment["RUNNER_OS"] = "macOS"
+        tool = self.root / "fake-tools/xcrun"
+        tool.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$0 $*"\n'
+            'if test "$*" = "-sdk macosx metal --version"; then\n'
+            '  printf "Apple metal version %s\\nInstalledDir: %s\\n" '
+            '"${CACHE_TEST_METAL_VERSION:-v1}" "${CACHE_TEST_METAL_PATH:-/mount/a}"\n'
+            "fi\n"
+        )
+        before = self.key(metal="true")
+        self.environment["CACHE_TEST_METAL_PATH"] = "/mount/random-b"
+        self.assertEqual(before, self.key(metal="true"))
+        self.environment["CACHE_TEST_METAL_VERSION"] = "v2"
+        self.assertNotEqual(
+            before["restore-prefix"], self.key(metal="true")["restore-prefix"]
+        )
+
     def test_missing_tracked_input_fails_closed(self):
         (self.root / "Cargo.lock").unlink()
         with self.assertRaises(subprocess.CalledProcessError):
