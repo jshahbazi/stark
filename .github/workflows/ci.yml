@@ -233,7 +233,7 @@ jobs:
           pnpm exec publint dist
 
   completed:
-    name: CI completed
+    name: ${{ github.event_name == 'pull_request' && 'CI completed' || 'Branch CI completed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}

@@ -29,6 +29,8 @@ Formatting uses `nightly-2026-10-01` because the upstream import configuration r
 
 The inherited Tests, Release, Run Benchmark, and Run Stark Cargo Command workflows stay disabled. Their action references are pinned for repository policy compliance; this does not qualify or enable their infrastructure.
 
+Pull requests emit the required `CI completed` gate. Push and manual runs emit `Branch CI completed`, using the same aggregate checks. Distinct names prevent a cancelled duplicate branch run from blocking a passing pull request.
+
 ## Download a development build
 
 Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
