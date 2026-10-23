@@ -46,12 +46,16 @@ def executable(tmp_path):
     path.write_text(
         f"#!{sys.executable}\n"
         "import json, sys, time\n"
-        "print(json.dumps({'ready':True,'mode':'text-generation-v1','max_context_tokens':8192,'max_new_tokens':4096}),flush=True)\n"
+        "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
+        "'max_context_tokens':8192,'max_new_tokens':4096,'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
-        "    if 'wait fixture' in request.get('rendered_prompt',''): time.sleep(30)\n"
-        "    if 'failure fixture' in request.get('rendered_prompt',''): raise SystemExit(2)\n"
-        "    reply={'token_count':20} if request['operation']=='tokenize' else {\n"
+        "    if request['operation']=='tokenize': last_prompt=request['text']\n"
+        "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
+        "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
+        "    if request.get('stream'):\n"
+        "        for chunk in ['synthetic ', 'answer']: print(json.dumps({'event':'delta','text':chunk}),flush=True)\n"
+        "    reply={'token_count':20,'token_ids':[2]*20} if request['operation']=='tokenize' else {\n"
         "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'finish_reason':'eos',\n"
         "        'input_tokens_per_second':100.0,'output_tokens_per_second':50.0,\n"
         "        'prefill_seconds':0.2,'decode_seconds':0.08}\n"
@@ -92,6 +96,299 @@ def running(desktop, model):
     finish(desktop)
     assert desktop.active_model == identifier
     return identifier
+
+
+def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
+    from stark_convert.local_api import APIError
+
+    with pytest.raises(APIError) as unavailable:
+        desktop.api_complete({"model": "missing", "messages": [{"role": "user", "content": "hello"}]})
+    assert unavailable.value.status == 503
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    history = list(desktop.messages)
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "synthetic API request"}]}
+    response = desktop.api_complete(payload)
+    assert response["model"] == identifier
+    assert response["choices"][0]["message"]["content"] == "synthetic answer"
+    assert response["usage"] == {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
+    assert desktop.messages == history
+    assert desktop.worker.process is process
+    assert desktop.api_models()[0]["id"] == identifier
+    assert desktop.job is None
+    assert all(e["event"] != "reply" for e in events(desktop))
+    desktop.dispatch({"command": "generate", "text": "synthetic desktop request"})
+    finish(desktop)
+    assert len(desktop.messages) == 3
+    assert desktop.worker.process is process
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"temperature": 3},
+        {"temperature": False},
+        {"n": 2},
+        {"tools": []},
+        {"max_tokens": True},
+        {"max_tokens": 4097},
+        {"max_tokens": 1, "max_completion_tokens": 1},
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "unsupported"}]}]},
+        {"model": "unknown"},
+    ],
+)
+def test_api_rejects_unsupported_requests_without_affecting_worker(desktop, model, extra):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    with pytest.raises(APIError) as error:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}], **extra})
+    assert error.value.status in (400, 404)
+    assert desktop.worker.process is process
+    assert desktop.job is None
+
+
+def test_api_busy_and_stop_fence_inflight_request(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    errors = []
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "wait fixture"}]}
+
+    def request():
+        try:
+            desktop.api_complete(payload)
+        except APIError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=request)
+    thread.start()
+    deadline = time.monotonic() + 2
+    while desktop.job is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    desktop.api_queue_timeout = 0.05
+    with pytest.raises(APIError) as busy:
+        desktop.api_complete(payload)
+    assert busy.value.status == 429
+    desktop.dispatch({"command": "generate", "text": "competing request"})
+    assert any("Wait for the current operation" in e.get("message", "") for e in events(desktop))
+    desktop.stop()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and errors[0].status == 503
+    assert desktop.worker is None
+    assert desktop.api_models() == []
+
+
+def test_api_live_http_uses_desktop_model(desktop, model):
+    import urllib.request
+
+    identifier = running(desktop, model)
+    desktop.start_api()
+    details = next(e for e in events(desktop) if e["event"] == "connection")
+    try:
+        request = urllib.request.Request(
+            details["base_url"] + "/chat/completions",
+            data=json.dumps(
+                {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True}
+            ).encode(),
+            headers={"Authorization": "Bearer " + details["api_key"], "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read()
+        chunks = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
+        text = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
+        assert text == "synthetic answer"
+        assert b"data: [DONE]" in body
+        assert details["api_key"] not in desktop.registry.read_text()
+    finally:
+        desktop.api.close()
+
+
+def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "failure fixture"}]})
+    assert failed.value.status == 503
+    assert desktop.job is None
+    assert desktop.worker is None
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert desktop.active_model == identifier
+
+
+def test_api_streams_native_deltas_and_retains_worker(desktop, model):
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    chunks = []
+    response = desktop.api_complete(
+        {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+        on_delta=chunks.append,
+    )
+    assert chunks == ["synthetic ", "answer"]
+    assert "".join(chunks) == response["choices"][0]["message"]["content"]
+    assert desktop.worker.process is process
+    assert desktop.job is None
+
+
+def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+
+    def disconnected(_):
+        raise BrokenPipeError
+
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete(
+            {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            on_delta=disconnected,
+        )
+    assert failed.value.status == 503
+    assert desktop.worker is None
+    assert desktop.job is None
+    assert process.poll() is not None
+
+
+def test_old_worker_streaming_is_explicitly_rejected(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    desktop.worker.streaming = False
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete(
+            {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            on_delta=lambda _: None,
+        )
+    assert failed.value.code == "streaming_unavailable"
+    assert desktop.worker is not None
+    assert desktop.job is None
+
+
+def test_api_context_rejection_keeps_loaded_worker(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    desktop.api_context = 21
+    with pytest.raises(APIError) as oversized:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}]})
+    assert oversized.value.code == "context_length_exceeded"
+    assert desktop.job is None
+    assert desktop.worker.process is process
+
+
+def test_api_sampling_limits_aliases_and_message_parts(desktop, model):
+    running(desktop, model)
+    seen = []
+    infer = desktop.infer
+
+    def capture(messages, maximum, **options):
+        seen.append((messages, maximum, options))
+        return infer(messages, maximum, **options)
+
+    desktop.infer = capture
+    result = desktop.api_complete(
+        {
+            "model": desktop.models[0]["name"],
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "seed": 42,
+            "max_tokens": 1000,
+            "messages": [
+                {"role": "developer", "content": "system"},
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            ],
+        }
+    )
+    assert result["model"] == desktop.active_model
+    assert seen[0][0] == [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}]
+    assert seen[0][1] == 1000
+    assert seen[0][2]["sampling"] == {"mode": "stochastic", "temperature": 0.7, "top_p": 0.8}
+    assert seen[0][2]["seed"] == 42
+
+
+def test_stale_epoch_and_expired_deadline_preserve_worker(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    process = desktop.worker.process
+    with patch.object(desktop.worker, "request") as request:
+        with pytest.raises(APIError) as stale:
+            desktop.infer([{"role": "user", "content": "hello"}], 16, epoch=desktop.epoch - 1)
+        assert stale.value.code == "model_changed"
+        request.assert_not_called()
+    control = threading.Event()
+    control.reason = "deadline"
+    control.set()
+    with pytest.raises(APIError) as expired:
+        desktop.api_complete({"messages": [{"role": "user", "content": "hello"}]}, cancelled=control)
+    assert expired.value.status == 504
+    assert desktop.worker.process is process and process.poll() is None
+
+
+def test_api_fifo_queue_and_waiter_cancellation(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    entered, release = threading.Event(), threading.Event()
+    order, errors = [], []
+
+    def infer(messages, maximum, **options):
+        text = messages[-1]["content"]
+        order.append(text)
+        if text == "first":
+            entered.set()
+            assert release.wait(2)
+        return {"text": "answer", "input_tokens": 1, "output_tokens": 1, "finish_reason": "eos"}
+
+    desktop.infer = infer
+
+    def call(text, control=None):
+        try:
+            desktop.api_complete({"messages": [{"role": "user", "content": text}]}, cancelled=control)
+        except APIError as error:
+            errors.append(error.code)
+
+    def queued(count):
+        deadline = time.monotonic() + 2
+        while len(desktop.api_queue) != count and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(desktop.api_queue) == count
+
+    first = threading.Thread(target=call, args=("first",))
+    cancelled = threading.Event()
+    second = threading.Thread(target=call, args=("cancelled", cancelled))
+    third = threading.Thread(target=call, args=("third",))
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    queued(1)
+    third.start()
+    queued(2)
+    desktop.api_queue_limit = 2
+    with pytest.raises(APIError) as full:
+        desktop.api_complete({"messages": [{"role": "user", "content": "over limit"}]})
+    assert full.value.status == 429 and full.value.code == "queue_full"
+    cancelled.set()
+    second.join(timeout=2)
+    release.set()
+    first.join(timeout=2)
+    third.join(timeout=2)
+    assert not any(t.is_alive() for t in (first, second, third))
+    assert order == ["first", "third"]
+    assert errors == ["request_cancelled"]
+    assert desktop.api_queue == [] and desktop.job is None
 
 
 @pytest.fixture
@@ -136,6 +433,22 @@ def running_decision(desktop, model, score_executable):
     finish(desktop)
     assert desktop.active_model == identifier and desktop.active_mode == "decision"
     return identifier
+
+
+def test_api_rejects_decision_worker_and_does_not_touch_protocol(desktop, model, score_executable):
+    from stark_convert.local_api import APIError
+
+    identifier = running_decision(desktop, model, score_executable)
+    assert desktop.api_models() == []
+    status = desktop.api_status()
+    assert status["model_loaded"] is False
+    assert status["capabilities"]["stop_sequences"] is False
+    assert status["capabilities"]["cancellation"] is False
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "fixture"}]})
+        assert error.value.code == "model_not_loaded"
+        request.assert_not_called()
 
 
 def decision_command(**overrides):
@@ -336,9 +649,11 @@ def test_advanced_options_render_reset_and_generate_without_reloading(desktop, m
         desktop.dispatch({"command": "generate", "text": "new turn fixture"})
         finish(desktop)
         payload = request.call_args_list[-1].args[0]
+        tokenization = request.call_args_list[0].args[0]
     assert payload["context_tokens"] == 2048
     assert payload["max_new_tokens"] == 128
-    assert payload["rendered_prompt"] == "system:custom system fixture;user:new turn fixture;thinking=True"
+    assert tokenization["text"] == "system:custom system fixture;user:new turn fixture;thinking=True"
+    assert payload["input_token_ids"] == [2] * 20
     desktop.dispatch({"command": "reset"})
     assert desktop.messages == [{"role": "system", "content": "custom system fixture"}]
     assert "custom system fixture" not in desktop.registry.read_text()
@@ -422,6 +737,24 @@ def test_model_change_clamps_options_to_advertised_limits(desktop, model):
     ready = [e for e in events(desktop) if e["event"] == "ready"][-1]
     assert ready["context_tokens"] == 512 and ready["max_new_tokens"] == 64
     assert ready["max_context_tokens"] == 512 and ready["max_output_tokens"] == 64
+
+
+def test_output_limit_metadata_reserves_prompt_capacity(desktop, model):
+    identifier = installed(desktop, model)
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": 512,
+            "max_new_tokens": 4096,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    ready = [event for event in events(desktop) if event["event"] == "ready"][-1]
+    assert ready["max_output_tokens"] == 511
+    assert desktop.api_models()[0]["max_output_tokens"] == 511
 
 
 def test_advanced_context_budget_rejection_leaves_history_unchanged(desktop, model):

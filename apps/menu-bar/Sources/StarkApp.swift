@@ -67,6 +67,11 @@ final class EngineController: ObservableObject {
     @Published var state = "idle"
     @Published var message = "Starting Stark…"
     @Published var errorMessage: String?
+    @Published var apiBaseURL = ""
+    @Published var apiKey = ""
+    @Published var apiMessage = "Starting the local API…"
+    @Published var apiContextTokens = 0
+    @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
     @Published var draft = ""
     @Published private(set) var mode = PlaygroundMode(rawValue: UserDefaults.standard.string(forKey: "playgroundMode") ?? "") ?? .chat
@@ -134,6 +139,9 @@ final class EngineController: ObservableObject {
                 self.state = "error"
                 self.message = "Stark stopped. Quit and reopen the app to restart."
                 self.loadedID = ""
+                self.apiBaseURL = ""
+                self.apiKey = ""
+                self.apiMessage = "Stark stopped. Reopen the app to reconnect."
                 self.loadedMode = nil
                 self.pendingOptions = nil
                 self.input = nil
@@ -177,6 +185,10 @@ final class EngineController: ObservableObject {
 
     private func apply(_ event: [String: Any]) {
         switch event["event"] as? String {
+        case "connection":
+            apiBaseURL = event["base_url"] as? String ?? ""
+            apiKey = event["api_key"] as? String ?? ""
+            apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
@@ -198,6 +210,8 @@ final class EngineController: ObservableObject {
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
                   event["model_id"] as? String == selectedID, state != "stopping" else { return }
             loadedID = event["model_id"] as? String ?? selectedID
+            apiContextTokens = event["max_context_tokens"] as? Int ?? 0
+            apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
             loadedMode = readyMode
             applyLimits(event)
             state = "ready"
@@ -486,6 +500,7 @@ struct MenuView: View {
     let install: () -> Void
     let run: () -> Void
     let console: () -> Void
+    let connection: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
@@ -520,6 +535,8 @@ struct MenuView: View {
                     .disabled(engine.selectedID.isEmpty || engine.busy)
             }
             Divider()
+            Button("Connection Details…", action: connection)
+                .frame(maxWidth: .infinity, alignment: .leading)
             HStack {
                 Button("Open Playground", action: console).buttonStyle(.link)
                 Spacer()
@@ -720,12 +737,14 @@ struct AdvancedOptionsView: View {
 
 struct PlaygroundView: View {
     @ObservedObject var engine: EngineController
+    let connection: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
+                Button("Connection Details…", action: connection)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
                     ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
@@ -888,6 +907,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var globalMenuMonitor: Any?
     private var installWindow: NSWindow?
     private var promptWindow: NSWindow?
+    private var connectionWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -932,7 +952,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
             engine: engine, install: { [weak self] in self?.showInstall() },
-            run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() })
+            run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() },
+            connection: { [weak self] in self?.showConnection() })
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
             .clipShape(RoundedRectangle(cornerRadius: 13)))
         engine.onInstalled = { [weak self] in self?.installWindow?.orderOut(nil); self?.showPrompt() }
@@ -1001,8 +1022,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPrompt() {
         dismissMenu()
-        if promptWindow == nil { promptWindow = window(title: "Stark — Playground", view: PlaygroundView(engine: engine), resizable: true) }
+        if promptWindow == nil { promptWindow = window(title: "Stark — Playground", view: PlaygroundView(engine: engine, connection: { [weak self] in self?.showConnection() }), resizable: true) }
         present(promptWindow)
+    }
+
+    private func showConnection() {
+        dismissMenu()
+        if connectionWindow == nil {
+            connectionWindow = window(title: "Stark — Connection Details", view: ConnectionDetailsView(engine: engine), resizable: false)
+        }
+        present(connectionWindow)
     }
 
     private func run() {
@@ -1028,7 +1057,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) { engine.shutdown() }
 }
 
-let application = NSApplication.shared
-let delegate = AppDelegate()
-application.delegate = delegate
-application.run()
+@main
+struct StarkApplication {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.run()
+        withExtendedLifetime(delegate) {}
+    }
+}

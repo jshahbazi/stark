@@ -167,3 +167,104 @@ def test_startup_failure_does_not_echo_worker_diagnostics(model, capsys):
         run_chat(options(model), worker)
     output = capsys.readouterr()
     assert "private marker" not in output.out + output.err
+
+
+def test_worker_dispatches_deltas_before_reading_final_response():
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    frames = iter(
+        [
+            {"event": "delta", "text": "é"},
+            {"event": "delta", "text": "界"},
+            {"text": "é界"},
+        ]
+    )
+    received = []
+    reads = []
+
+    def read():
+        reads.append(True)
+        return next(frames)
+
+    def on_delta(text):
+        assert len(reads) < 3
+        received.append(text)
+
+    worker.read = read
+    assert worker.request({"operation": "generate", "stream": True}, on_delta=on_delta) == {"text": "é界"}
+    assert received == ["é", "界"]
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [{"event": "delta", "text": 5}],
+        [{"event": "unexpected", "text": "hello"}],
+        [{"event": "delta", "text": "hello"}, {"text": "different"}],
+    ],
+)
+def test_worker_rejects_invalid_or_mismatched_streams(frames):
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    replies = iter(frames)
+    worker.read = lambda: next(replies)
+    with pytest.raises(ChatError, match="Invalid worker stream"):
+        worker.request({"operation": "generate", "stream": True}, on_delta=lambda _: None)
+
+
+def test_worker_cooperative_cancel_before_first_token_keeps_process(tmp_path):
+    import threading
+
+    from stark_convert.chat import ChatCancelled
+
+    executable = tmp_path / "cancel worker"
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json,os,sys\n"
+        "fd=int(os.environ['STARK_CANCEL_FD'])\n"
+        "print(json.dumps({'ready':True,'cancellation':'pipe-v1'}),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    p=json.loads(line)\n"
+        "    if p.get('request_id')==1:\n"
+        "        data=os.read(fd,8)\n"
+        "        assert int.from_bytes(data,'little')==1\n"
+        "        print(json.dumps({'error':'generation_cancelled'}),flush=True)\n"
+        "    else: print(json.dumps({'text':'next response'}),flush=True)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 2)
+    control, waiting = threading.Event(), threading.Event()
+    errors = []
+    try:
+        worker.read()
+        original = worker.read
+
+        def read(*args):
+            waiting.set()
+            return original(*args)
+
+        worker.read = read
+
+        def request():
+            try:
+                worker.request({"operation": "generate"}, cancelled=control)
+            except ChatCancelled:
+                errors.append("cancelled")
+
+        thread = threading.Thread(target=request)
+        thread.start()
+        assert waiting.wait(2)
+        control.set()
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+        assert errors == ["cancelled"]
+        assert worker.process.poll() is None
+        assert worker.request({"operation": "generate"}) == {"text": "next response"}
+    finally:
+        worker.close()

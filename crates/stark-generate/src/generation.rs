@@ -83,6 +83,12 @@ enum Request {
         sampling: Sampling,
         #[serde(default)]
         stop_token_ids: Vec<u32>,
+        #[serde(default)]
+        stream: bool,
+        #[serde(default)]
+        stop: Vec<String>,
+        #[serde(default)]
+        request_id: u64,
     },
 }
 
@@ -93,6 +99,8 @@ pub(crate) struct GenerationOptions {
     pub sampling: Sampling,
     pub eos_token_ids: Vec<u32>,
     pub extra_stop_token_ids: Vec<u32>,
+    pub stop: Vec<String>,
+    pub request_id: u64,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -100,6 +108,7 @@ pub(crate) struct GenerationOptions {
 pub(crate) enum FinishReason {
     Eos,
     StopToken,
+    StopSequence,
     Length,
     Context,
 }
@@ -112,6 +121,7 @@ pub(crate) struct GeneratedTokens {
     pub stop_token_id: Option<u32>,
     pub prefill_seconds: Option<f64>,
     pub decode_seconds: Option<f64>,
+    pub text: Option<String>,
 }
 
 fn tokens_per_second(
@@ -124,23 +134,74 @@ fn tokens_per_second(
     })
 }
 
-/// Own the stream so its Drop drains native work before the result is observable.
-pub(crate) fn collect_tokens(
+#[cfg(test)]
+pub(crate) fn collect_tokens_observed(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
     options: &GenerationOptions,
     vocab_size: usize,
     started: Instant,
+    on_token: &mut dyn FnMut(u32) -> Result<(), &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
-    collect_tokens_with_clock(stream, input_tokens, options, vocab_size, || started.elapsed())
+    collect_tokens_controlled(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        started,
+        &mut |token| on_token(token).map(|()| true),
+        &mut || Ok(false),
+    )
 }
 
+/// Own the stream so its Drop drains native work before the result is observable.
+pub(crate) fn collect_tokens_controlled(
+    stream: impl Iterator<Item = Result<u64, &'static str>>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+    vocab_size: usize,
+    started: Instant,
+    on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
+) -> Result<GeneratedTokens, &'static str> {
+    collect_tokens_with_clock_and_callback(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        || started.elapsed(),
+        on_token,
+        cancelled,
+    )
+}
+
+#[cfg(test)]
 fn collect_tokens_with_clock(
+    stream: impl Iterator<Item = Result<u64, &'static str>>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+    vocab_size: usize,
+    elapsed: impl FnMut() -> Duration,
+) -> Result<GeneratedTokens, &'static str> {
+    collect_tokens_with_clock_and_callback(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        elapsed,
+        &mut |_| Ok(true),
+        &mut || Ok(false),
+    )
+}
+
+fn collect_tokens_with_clock_and_callback(
     mut stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
     options: &GenerationOptions,
     vocab_size: usize,
     mut elapsed: impl FnMut() -> Duration,
+    on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
     let capacity = options.context_tokens as usize - input_tokens;
     let budget = capacity.min(options.max_new_tokens as usize);
@@ -155,11 +216,18 @@ fn collect_tokens_with_clock(
         stop_token_id: None,
         prefill_seconds: None,
         decode_seconds: None,
+        text: None,
     };
     let mut first_sample = None;
     let mut last_sample = None;
     for _ in 0..budget {
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
         let token = stream.next().ok_or("invalid_generation_output")??;
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
         let sample_time = elapsed();
         if token >= vocab_size as u64 {
             return Err("invalid_generation_output");
@@ -179,6 +247,10 @@ fn collect_tokens_with_clock(
             break;
         }
         result.generated_token_ids.push(token);
+        if !on_token(token)? {
+            result.finish_reason = FinishReason::StopSequence;
+            break;
+        }
     }
     result.prefill_seconds = first_sample.map(|time| time.as_secs_f64());
     if result.sampled_tokens > 1 {
@@ -207,8 +279,11 @@ pub(crate) trait GenerationBackend {
         &mut self,
         input: &[u32],
         options: &GenerationOptions,
+        on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str>;
 }
+
+pub(crate) type TextCallback<'a> = dyn FnMut(&str) -> Result<(), &'static str> + 'a;
 
 pub(crate) struct GenerationWorker<B> {
     backend: B,
@@ -258,6 +333,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     fn handle(
         &mut self,
         request: Request,
+        output: &mut impl Write,
     ) -> Result<Value, &'static str> {
         match request {
             Request::Tokenize {
@@ -285,12 +361,17 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 seed,
                 sampling,
                 stop_token_ids,
+                stream,
+                stop,
+                request_id,
             } => {
                 if context_tokens == 0
                     || context_tokens > MAX_CONTEXT_TOKENS
                     || max_new_tokens == 0
                     || max_new_tokens > MAX_NEW_TOKENS
                     || stop_token_ids.len() > MAX_EXTRA_STOPS
+                    || stop.len() > 4
+                    || stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
                     || !valid_ids(&stop_token_ids, self.backend.vocab_size())
                     || stop_token_ids.iter().collect::<HashSet<_>>().len() != stop_token_ids.len()
                 {
@@ -318,9 +399,29 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     sampling,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
+                    stop,
+                    request_id,
                 };
                 let started = Instant::now();
-                let generated = self.backend.generate(&input, &options)?;
+                let mut emitted = String::new();
+                let generated = {
+                    let mut on_text = |text: &str| {
+                        if !text.is_empty() {
+                            write_reply(output, &json!({"event":"delta","text":text}))?;
+                            emitted.push_str(text);
+                        }
+                        Ok(())
+                    };
+                    self.backend.generate(
+                        &input,
+                        &options,
+                        if stream {
+                            Some(&mut on_text)
+                        } else {
+                            None
+                        },
+                    )?
+                };
                 if !valid_ids(&generated.generated_token_ids, self.backend.vocab_size())
                     || generated.sampled_tokens > options.max_new_tokens as usize
                     || input.len() + generated.sampled_tokens > context_tokens as usize
@@ -330,7 +431,18 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     return Err("invalid_generation_output");
                 }
                 // Decode the complete vector, preserving UTF-8 boundaries and specials.
-                let text = self.backend.decode(&generated.generated_token_ids, false)?;
+                let text = match &generated.text {
+                    Some(text) => text.clone(),
+                    None => self.backend.decode(&generated.generated_token_ids, false)?,
+                };
+                if stream {
+                    // Byte-fallback decoders may retain an incomplete character at EOS.
+                    // Reconcile only after native cleanup; never retract emitted text.
+                    let suffix = text.strip_prefix(&emitted).ok_or("decoding_failed")?;
+                    if !suffix.is_empty() {
+                        write_reply(output, &json!({"event":"delta","text":suffix}))?;
+                    }
+                }
                 Ok(json!({"generated_token_ids":generated.generated_token_ids,"text":text,
                     "input_tokens":input.len(),"output_tokens":generated.generated_token_ids.len(),
                     "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
@@ -350,10 +462,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     ) -> Result<(), &'static str> {
         let result = serde_json::from_slice::<Request>(bytes)
             .map_err(|_| "invalid_request")
-            .and_then(|request| self.handle(request));
+            .and_then(|request| self.handle(request, output));
         match result {
             Ok(value) => write_reply(output, &value),
             Err(code) => {
+                if code == "protocol_write_failed" {
+                    return Err(code);
+                }
                 write_reply(output, &json!({"error":code}))?;
                 if matches!(
                     code,
@@ -361,6 +476,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                         | "invalid_generation_output"
                         | "invalid_tokenization_output"
                         | "decoding_failed"
+                        | "cancel_channel_failed"
                 ) {
                     Err("native_operation_failed")
                 } else {
@@ -383,7 +499,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":MAX_CONTEXT_TOKENS.min(worker.backend.max_context_length().unwrap_or(MAX_CONTEXT_TOKENS)),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
-        "sampling_modes":["greedy","stochastic"]}),
+        "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
+        "stop_sequences":true,"cancellation":"pipe-v1"}),
     )?;
     loop {
         let mut bytes = Vec::new();
@@ -500,13 +617,25 @@ mod tests {
             &mut self,
             input: &[u32],
             options: &GenerationOptions,
+            mut on_text: Option<&mut TextCallback<'_>>,
         ) -> Result<GeneratedTokens, &'static str> {
             self.generation_calls += 1;
             self.inputs.push(input.to_vec());
             self.seeds.push(options.seed);
             self.sampling.push(options.sampling.clone());
             self.drained.store(false, Ordering::SeqCst);
-            collect_tokens(
+            let mut on_token = |token| {
+                if let Some(callback) = on_text.as_deref_mut() {
+                    callback(match token {
+                        3 => "ré",
+                        4 => "sultat\n",
+                        7 => "<tool_call>",
+                        _ => "",
+                    })?;
+                }
+                Ok(())
+            };
+            collect_tokens_observed(
                 TestStream {
                     tokens: self.tokens.clone().into(),
                     drained: self.drained.clone(),
@@ -515,6 +644,7 @@ mod tests {
                 options,
                 self.vocab_size(),
                 Instant::now(),
+                &mut on_token,
             )
         }
     }
@@ -552,6 +682,8 @@ mod tests {
             sampling: Sampling::Greedy {},
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
+            stop: Vec::new(),
+            request_id: 0,
         };
         let drained = Arc::new(AtomicBool::new(false));
         let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();
@@ -610,6 +742,82 @@ mod tests {
         assert_eq!(value["finish_reason"], "stop_token");
         assert_eq!(value["stop_token_id"], 4);
         assert_eq!(value["sampled_tokens"], 2);
+    }
+
+    #[test]
+    fn streaming_flushes_deltas_before_native_cleanup_and_preserves_final_reply() {
+        struct LiveWriter {
+            pending: Vec<u8>,
+            frames: Vec<Value>,
+            drained: Arc<AtomicBool>,
+        }
+        impl Write for LiveWriter {
+            fn write(
+                &mut self,
+                bytes: &[u8],
+            ) -> io::Result<usize> {
+                self.pending.extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                let value: Value = serde_json::from_slice(&self.pending).unwrap();
+                if value.get("event").is_some() {
+                    assert!(!self.drained.load(Ordering::SeqCst));
+                } else {
+                    assert!(self.drained.load(Ordering::SeqCst));
+                }
+                self.frames.push(value);
+                self.pending.clear();
+                Ok(())
+            }
+        }
+        let mut worker = worker();
+        let mut output = LiveWriter {
+            pending: Vec::new(),
+            frames: Vec::new(),
+            drained: worker.backend.drained.clone(),
+        };
+        let mut request = standard();
+        request["stream"] = json!(true);
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        assert_eq!(output.frames.len(), 3);
+        assert_eq!(output.frames[0], json!({"event":"delta","text":"ré"}));
+        assert_eq!(output.frames[1], json!({"event":"delta","text":"sultat\n"}));
+        assert_eq!(output.frames[2]["text"], "résultat\n");
+        assert_eq!(output.frames[2]["generated_token_ids"], json!([3, 4]));
+        assert_eq!(output.frames[2]["finish_reason"], "eos");
+    }
+
+    #[test]
+    fn streaming_excludes_stops_and_observer_failures_drain_native_work() {
+        let mut worker = worker();
+        let mut request = standard();
+        request["stream"] = json!(true);
+        request["stop_token_ids"] = json!([4]);
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frames: Vec<Value> = output
+            .split(|b| *b == b'\n')
+            .filter(|b| !b.is_empty())
+            .map(|b| serde_json::from_slice(b).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0], json!({"event":"delta","text":"ré"}));
+        assert_eq!(frames[1]["finish_reason"], "stop_token");
+        for fail_flush in [false, true] {
+            let mut output = FailingWriter {
+                fail_flush,
+            };
+            assert_eq!(
+                worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output),
+                Err("protocol_write_failed")
+            );
+            assert!(worker.backend.drained.load(Ordering::SeqCst));
+        }
+        worker.backend.tokens = vec![Ok(1)];
+        let empty = post(&mut worker, request);
+        assert_eq!(empty["text"], "");
+        assert_eq!(empty["finish_reason"], "eos");
     }
 
     #[test]

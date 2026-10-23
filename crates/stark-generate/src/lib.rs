@@ -1,5 +1,7 @@
 //! Serialized, private JSONL text generation using a fresh native state per request.
+mod cancel;
 mod generation;
 #[cfg(feature = "metal")]
 mod native;
 pub mod protocol;
+mod text_stop;

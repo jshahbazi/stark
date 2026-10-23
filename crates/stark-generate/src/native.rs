@@ -9,16 +9,26 @@ use stark_engine::{
     },
 };
 
-use crate::generation::{GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, collect_tokens};
+use crate::{
+    cancel::CancelSignal,
+    generation::{
+        GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
+    },
+    text_stop::StopFilter,
+};
 
 pub(crate) struct NativeBackend {
     model: LanguageModel<Metal>,
     vocab_size: usize,
     eos_token_ids: Vec<u32>,
+    cancellation: Option<CancelSignal>,
 }
 
 impl NativeBackend {
-    pub(crate) fn load(path: &Path) -> Result<Self, &'static str> {
+    pub(crate) fn load(
+        path: &Path,
+        cancellation: Option<CancelSignal>,
+    ) -> Result<Self, &'static str> {
         if path.join("speculator").exists() {
             return Err("speculator_not_supported");
         }
@@ -50,6 +60,7 @@ impl NativeBackend {
             model,
             vocab_size,
             eos_token_ids,
+            cancellation,
         })
     }
 }
@@ -86,11 +97,20 @@ impl GenerationBackend for NativeBackend {
         &mut self,
         input: &[u32],
         options: &GenerationOptions,
+        mut on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         // Include native state allocation, stream setup and the first GPU wait.
         // The engine's iterator can encode one lookahead decode before returning
         // its first token, so this is a wall-clock prefill proxy, not GPU time.
         let started = Instant::now();
+        let cancellation = &mut self.cancellation;
+        let mut cancelled = || match cancellation.as_mut() {
+            Some(signal) => signal.check(options.request_id),
+            None => Ok(false),
+        };
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
         let mut state = self
             .model
             .create_empty_state(Some(options.context_tokens), options.seed)
@@ -114,15 +134,47 @@ impl GenerationBackend for NativeBackend {
             },
         };
         let stream = self.model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?;
-        let result = collect_tokens(
-            stream.map(|token| token.map_err(|_| "native_generation_failed")),
+        let tokens = stream.map(|token| token.map_err(|_| "native_generation_failed"));
+        let mut decoder = self.model.tokenizer().decode_stream(false);
+        let mut filter = StopFilter::new(options.stop.clone());
+        let mut raw = String::new();
+        let needs_text = on_text.is_some() || !options.stop.is_empty();
+        let result = collect_tokens_controlled(
+            tokens,
             input.len(),
             options,
             self.vocab_size,
             started,
+            &mut |token| {
+                if needs_text && let Some(text) = decoder.step(token).map_err(|_| "decoding_failed")? {
+                    raw.push_str(&text);
+                    let (text, stopped) = filter.push(&text);
+                    if let Some(callback) = on_text.as_deref_mut() {
+                        callback(&text)?;
+                    }
+                    return Ok(!stopped);
+                }
+                Ok(true)
+            },
+            &mut cancelled,
         );
         // collect_tokens has dropped and drained the stream, including its lookahead.
         drop(state);
-        result
+        let mut result = result?;
+        if needs_text {
+            let full =
+                self.model.tokenizer().decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
+            let suffix = full.strip_prefix(&raw).ok_or("decoding_failed")?;
+            let (tail, stopped) = filter.push(suffix);
+            if stopped {
+                result.finish_reason = crate::generation::FinishReason::StopSequence;
+            }
+            let tail = tail + &filter.finish();
+            if let Some(callback) = on_text {
+                callback(&tail)?;
+            }
+            result.text = Some(filter.text().to_owned());
+        }
+        Ok(result)
     }
 }

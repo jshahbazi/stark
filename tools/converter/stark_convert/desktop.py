@@ -17,8 +17,12 @@ import time
 import uuid
 from pathlib import Path
 
-from .chat import Worker, load_template
+from jinja2.exceptions import TemplateError
+
+from .api_request import parse_chat_request
+from .chat import ChatCancelled, ChatError, Worker, load_template
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
+from .local_api import APIError, LocalAPI
 from .registry import get_model
 from .sources import huggingface_repository
 
@@ -30,6 +34,12 @@ MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
 class DesktopError(Exception):
     """A fixed, content-free user-facing failure."""
+
+
+def cancellation_error(cancelled):
+    if getattr(cancelled, "reason", None) == "deadline":
+        return APIError(504, "Request deadline exceeded.", "request_timeout")
+    return APIError(499, "Request cancelled.", "request_cancelled")
 
 
 def terminate(process):
@@ -121,6 +131,15 @@ class Desktop:
         self.context_limit = 8192
         self.output_limit = 512
         self.models = []
+        self.api = None
+        self.api_closing = False
+        self.api_condition = threading.Condition(self.lock)
+        self.api_queue = []
+        self.api_queue_limit = 8
+        self.api_queue_timeout = 30
+        self.api_context = 16384
+        self.api_maximum = 4096
+        self.api_vocab = 0
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.data_dir.chmod(0o700)
         self.model_dir = self.data_dir / "models"
@@ -230,6 +249,7 @@ class Desktop:
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
+            self.api_condition.notify_all()
             self.install_epoch = None
             converter, job = self.converter, self.job
             for phase, previous in cancelled.items():
@@ -498,11 +518,16 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
+            worker.streaming = ready.get("streaming") == "text-delta-v1"
+            worker.stop_sequences = ready.get("stop_sequences") is True
             self.codec, self.template = codec, template
             self.context_limit = min(16384, ready["max_context_tokens"])
-            self.output_limit = min(4096, ready["max_new_tokens"])
+            self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(self.context, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
+            self.api_context = self.context_limit
+            self.api_maximum = min(self.output_limit, self.api_context - 1)
+            self.api_vocab = ready.get("vocab_size", 0)
             self.active_model = identifier
             self.active_mode = mode
             self.reset()
@@ -554,35 +579,8 @@ class Desktop:
         with self.lock:
             if self.active_mode != "chat":
                 raise DesktopError("Choose Chat mode and run a model before sending a message.")
-            worker, template, codec = self.worker, self.template, self.codec
             candidate = [*self.messages, {"role": "user", "content": text}]
-        if worker is None or template is None:
-            raise DesktopError("Run a model before sending a prompt.")
-        prompt = template.render(
-            messages=candidate,
-            tools=None,
-            add_generation_prompt=True,
-            enable_thinking=self.thinking,
-            bos_token=codec.get("bos_token") or "",
-            eos_token=codec.get("eos_token") or "",
-        )
-        tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
-        count = tokens.get("token_count")
-        if not isinstance(count, int):
-            raise ValueError
-        if count + self.maximum > self.context:
-            raise DesktopError("Conversation is full. Start a new conversation and try again.")
-        reply = worker.request(
-            {
-                "operation": "generate",
-                "rendered_prompt": prompt,
-                "context_tokens": self.context,
-                "max_new_tokens": self.maximum,
-                "sampling": {"mode": "greedy"},
-            }
-        )
-        if not isinstance(reply.get("text"), str) or "error" in reply:
-            raise ValueError
+        reply = self.infer(candidate, self.maximum, epoch=epoch, thinking=self.thinking)
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -606,6 +604,233 @@ class Desktop:
                 },
             )
             self.status("ready", "Ready", epoch)
+
+    def infer(
+        self,
+        messages,
+        maximum,
+        on_delta=None,
+        *,
+        context=None,
+        sampling=None,
+        seed=0,
+        stop=None,
+        cancelled=None,
+        epoch=None,
+        thinking=False,
+    ):
+        with self.lock:
+            if epoch is not None and epoch != self.epoch:
+                raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
+            worker, template, codec = self.worker, self.template, self.codec
+            context = context or self.context
+        if worker is None or template is None:
+            raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
+        if on_delta is not None and not worker.streaming:
+            raise APIError(
+                503, "This worker needs an update for streaming. Rebuild or reinstall Stark.", "streaming_unavailable"
+            )
+        if stop and not worker.stop_sequences:
+            raise APIError(503, "This worker needs an update for stop sequences.", "stop_sequences_unavailable")
+        try:
+            prompt = template.render(
+                messages=messages,
+                tools=None,
+                add_generation_prompt=True,
+                enable_thinking=thinking,
+                bos_token=codec.get("bos_token") or "",
+                eos_token=codec.get("eos_token") or "",
+            )
+        except (TemplateError, ChatError):
+            raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
+        tokens = worker.request(
+            {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
+        )
+        count = tokens.get("token_count")
+        if not isinstance(count, int):
+            raise ValueError
+        if count + maximum > context:
+            raise DesktopError("Conversation is full. Start a new conversation and try again.")
+        token_ids = tokens.get("token_ids")
+        if (
+            not isinstance(token_ids, list)
+            or len(token_ids) != count
+            or any(type(token) is not int for token in token_ids)
+        ):
+            raise ValueError
+        request = {
+            "operation": "generate",
+            "input_token_ids": token_ids,
+            "context_tokens": context,
+            "max_new_tokens": maximum,
+            "sampling": sampling or {"mode": "greedy"},
+            "seed": seed,
+        }
+        if stop:
+            request["stop"] = stop
+        if on_delta is not None:
+            request["stream"] = True
+            reply = worker.request(request, on_delta=on_delta, cancelled=cancelled)
+        else:
+            reply = worker.request(request, cancelled=cancelled)
+        if not isinstance(reply.get("text"), str) or "error" in reply:
+            raise ValueError
+        return reply
+
+    def start_api(self):
+        try:
+            self.api = LocalAPI(self.api_models, self.api_complete, status=self.api_status, cancellable=True)
+            details = self.api.start()
+            # Credentials travel only through the private app pipe; never persist them.
+            self.emit("connection", **details)
+        except OSError:
+            self.api = None
+            self.emit("connection", message="Cannot start the local API. Quit and reopen Stark to retry.")
+
+    def api_models(self):
+        with self.lock:
+            if self.active_model is None or self.active_mode != "chat":
+                return []
+            model = next(m for m in self.models if m["id"] == self.active_model)
+            return [
+                {
+                    "id": self.active_model,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "stark",
+                    "name": model["name"],
+                    "context_length": self.api_context,
+                    "max_output_tokens": self.api_maximum,
+                }
+            ]
+
+    def api_status(self):
+        with self.lock:
+            return {
+                "status": "ok",
+                "model_loaded": self.active_model is not None and self.active_mode == "chat",
+                "busy": self.job is not None,
+                "queued_requests": len(self.api_queue),
+                "queue_limit": self.api_queue_limit,
+                "queue_timeout_seconds": self.api_queue_timeout,
+                "models": self.api_models(),
+                "capabilities": {
+                    "chat_completions": True,
+                    "streaming": True,
+                    "sampling": ["temperature", "top_p", "top_k", "min_p", "seed"],
+                    "stop_sequences": bool(self.active_mode == "chat" and self.worker and self.worker.stop_sequences),
+                    "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
+                    "tool_calling": False,
+                    "structured_output": False,
+                    "images": False,
+                    "embeddings": False,
+                    "responses": False,
+                },
+            }
+
+    def api_complete(self, payload, on_delta=None, cancelled=None):
+        cancelled = cancelled or threading.Event()
+        with self.lock:
+            request = parse_chat_request(payload, self.api_maximum, self.api_vocab)
+            maximum = request["maximum"]
+            messages = request["messages"]
+            if self.api_closing:
+                raise APIError(503, "Stark is shutting down.", "server_stopped")
+            if self.active_model is None or self.worker is None or self.active_mode != "chat":
+                raise APIError(503, "Run a model in Stark first.", "model_not_loaded")
+            active = next(m for m in self.models if m["id"] == self.active_model)
+            if request["model"] not in (None, self.active_model, active["name"]):
+                raise APIError(
+                    404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
+                )
+            epoch, identifier = self.epoch, self.active_model
+            if len(self.api_queue) >= self.api_queue_limit:
+                raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
+            ticket = object()
+            self.api_queue.append(ticket)
+            deadline = time.monotonic() + self.api_queue_timeout
+            try:
+                while self.job is not None or self.api_queue[0] is not ticket:
+                    if cancelled.is_set():
+                        raise cancellation_error(cancelled)
+                    if self.api_closing or self.epoch != epoch:
+                        raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise APIError(429, "Request queue wait expired. Retry shortly.", "queue_timeout")
+                    self.api_condition.wait(min(0.1, remaining))
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled)
+                if self.api_closing or self.epoch != epoch or self.active_model != identifier:
+                    raise APIError(503, "Model changed or stopped while this request waited.", "model_changed")
+            finally:
+                self.api_queue.remove(ticket)
+                self.api_condition.notify_all()
+            self.job = threading.current_thread()
+            candidate = [dict(m) for m in messages]
+            system = (self.codec or {}).get("default_system_prompt")
+            if system and not any(m["role"] == "system" for m in candidate):
+                candidate.insert(0, {"role": "system", "content": system})
+            self.status("generating", "Generating for connected application…", epoch)
+        try:
+            reply = self.infer(
+                candidate,
+                maximum,
+                on_delta=on_delta,
+                context=self.api_context,
+                sampling=request["sampling"],
+                seed=request["seed"],
+                stop=request["stop"],
+                cancelled=cancelled,
+                epoch=epoch,
+            )
+            with self.lock:
+                if epoch != self.epoch:
+                    raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
+            prompt_tokens = metric(reply, "input_tokens") or 0
+            completion_tokens = metric(reply, "output_tokens") or 0
+            return {
+                "id": "chatcmpl-" + uuid.uuid4().hex,
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": identifier,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": reply["text"]},
+                        "finish_reason": "length" if reply.get("finish_reason") in ("length", "context") else "stop",
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
+        except ChatCancelled:
+            raise cancellation_error(cancelled) from None
+        except DesktopError:
+            raise APIError(
+                400,
+                "Conversation exceeds the context budget. Shorten messages or the reply limit.",
+                "context_length_exceeded",
+            ) from None
+        except APIError:
+            raise
+        except BaseException:
+            with self.lock:
+                if epoch == self.epoch:
+                    self.close_worker()
+            raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
+        finally:
+            with self.lock:
+                if self.job is threading.current_thread():
+                    self.job = None
+                    self.api_condition.notify_all()
+                if epoch == self.epoch:
+                    self.status(
+                        "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
+                    )
 
     def decide(self, epoch, text, question, answers):
         with self.lock:
@@ -670,6 +895,7 @@ class Desktop:
 def serve(desktop):
     desktop.library()
     desktop.status("idle", "Choose a model to run")
+    desktop.start_api()
     pending = b""
     discarding = False
     while True:
@@ -735,7 +961,11 @@ def main(argv=None):
         return 1
     finally:
         if desktop is not None:
+            with desktop.lock:
+                desktop.api_closing = True
             desktop.stop(quiet=True)
+            if desktop.api is not None:
+                desktop.api.close()
 
 
 if __name__ == "__main__":
