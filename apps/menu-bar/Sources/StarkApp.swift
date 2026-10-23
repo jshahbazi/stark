@@ -465,7 +465,7 @@ struct ChatView: View {
                 Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
             }
             ZStack(alignment: .topLeading) {
-                if engine.draft.isEmpty { Text("Message the model…").foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 12).allowsHitTesting(false) }
+                if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
                 TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
                     .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
             }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
