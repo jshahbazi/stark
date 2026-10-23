@@ -4,9 +4,9 @@ This change adds a separate Advanced Options panel for system prompt, context si
 
 ## Integration
 
-The feature branch starts from the updated `origin/codex/install-progress` branch and includes `origin/main` at `695f1eb2`. A fresh fetch and merge confirmed main was already an ancestor. Uncommitted installation-progress edits in the original checkout were preserved by using a separate worktree.
+The original implementation was validated on the updated `origin/codex/install-progress` branch, including `origin/main` at `695f1eb2`. A fresh fetch and merge confirmed main was already an ancestor. Uncommitted installation-progress edits in the original checkout were preserved by using a separate worktree. For pull request review, the advanced-options commits were subsequently isolated on `codex/gui-advanced-options-pr`, based directly on main at `695f1eb2`, excluding unrelated security and website commits.
 
-Packaging needed a compatibility repair: its standalone loader executed runtime provenance as a script after that module gained package-relative imports. Shared manifest construction now lives in dependency-free `_build_metadata.py`; runtime callers still supply the existing checked file hash function. The builder and installed package verify matching provenance. Prior validation receipts remain unchanged.
+Packaging on the original source branch needed a compatibility repair: its standalone loader executed runtime provenance as a script after that module gained package-relative imports. That repair moved shared manifest construction into dependency-free `_build_metadata.py`, preserving the runtime's checked hash function and matching installed provenance. This branch-specific repair is excluded from the isolated advanced-options PR because main's provenance loader already supports its standalone packaging path. The results below remain bound to the original tested source; the PR review records fresh validation separately.
 
 ## Checks
 
