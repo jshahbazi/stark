@@ -124,15 +124,16 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
 
 
 def test_api_assistant_reasoning_history_reaches_model_template(desktop, model):
-    from jinja2 import Template
-
-    running(desktop, model)
-    process = desktop.worker.process
-    history = list(desktop.messages)
-    desktop.template = Template(
+    config_path = model / "config.json"
+    config = json.loads(config_path.read_text())
+    config["token_codec_config"]["prompt_template"] = (
         "{% for m in messages %}{{ m.role }}:{{ m.content }}"
         "{% if m.reasoning_content is defined %}[{{ m.reasoning_content }}]{% endif %};{% endfor %}"
     )
+    config_path.write_text(json.dumps(config))
+    running(desktop, model)
+    process = desktop.worker.process
+    history = list(desktop.messages)
     request = desktop.worker.request
     prompts = []
 
