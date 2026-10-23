@@ -44,6 +44,20 @@ The script selects the latest stable release automatically. Installation puts th
 
 `doctor` should report `Installation checks passed. No model was loaded.` In the menu bar, choose **Install Model**, select a supported local folder or Hugging Face repository, then **Run** to open chat. **Stop** unloads the worker. Models download separately. [Menu bar guide](apps/menu-bar/README.md)
 
+### Use Stark in another app
+
+Stark can run a local model for another desktop app on your Mac. Look for **OpenAI-compatible** or **Custom OpenAI** in that app's provider settings.
+
+1. Open Stark, select a model and choose **Run**.
+2. Open **Connection Details…** from Stark's menu or chat window.
+3. In the other app, choose its OpenAI-compatible provider and paste the **Base URL**, **API key** and **Model ID** from that window. Save the settings and start a chat.
+
+Keep Stark open with the model running. After reopening Stark, copy the connection details again: the API key changes, and the address may change. If you switch models, update the Model ID in the other app.
+
+To try a request in Terminal, click **Copy curl Example** in Connection Details and paste the command into Terminal.
+
+The API supports text chat and streaming. Browser-based clients and remote devices cannot connect. Tool calls, embeddings, image input and OpenAI's Responses API are not supported. See the [local API guide](docs/LOCAL_API.md) for the full compatibility details.
+
 ### Chat in Terminal
 
 ```sh
