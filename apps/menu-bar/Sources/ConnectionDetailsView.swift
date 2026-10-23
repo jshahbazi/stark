@@ -5,9 +5,16 @@ struct ConnectionDetailsView: View {
     @ObservedObject var engine: EngineController
     @State private var revealKey = false
     @State private var copied = ""
+    @State private var inspectedModelID = ""
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
     private var modelID: String { engine.loadedMode == .chat ? engine.loadedID : "" }
+    private var displayedModelID: String {
+        if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
+        if engine.models.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
+        if engine.models.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
+        return engine.models.first?.id ?? ""
+    }
     private var curl: String {
         let request: [String: Any] = [
             "model": modelID,
@@ -29,7 +36,32 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
-            field("Model ID", value: modelID, placeholder: "Run a model in Chat mode first")
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Model ID").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Text(displayedModelID.isEmpty ? "Install a model first" : displayedModelID)
+                        .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    Spacer()
+                    Picker("Model", selection: Binding(
+                        get: { displayedModelID },
+                        set: { inspectedModelID = $0 }
+                    )) {
+                        if engine.models.isEmpty { Text("No models installed").tag("") }
+                        ForEach(engine.models) { Text($0.name).tag($0.id) }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    .frame(maxWidth: 200)
+                    .disabled(engine.models.isEmpty)
+                    .accessibilityLabel("Model to view ID")
+                    Button("Copy") { copy(displayedModelID, label: "Model ID") }
+                        .disabled(displayedModelID.isEmpty)
+                        .accessibilityLabel("Copy Model ID")
+                }
+                Text("Select a model to view its ID. Choose Chat mode and use Run in Stark to serve that model. The curl example uses the running model.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             VStack(alignment: .leading, spacing: 5) {
                 Text("API key").font(.caption).foregroundStyle(.secondary)
                 HStack {
