@@ -62,7 +62,9 @@ fn tag<T: 'static>() -> &'static sys::napi_type_tag {
 /// Never tag before `napi_wrap`: a failed wrap could otherwise label foreign storage.
 ///
 /// # Safety
-/// `env` and `value` must be live Node-API handles on the current thread.
+/// `env` and `value` must be live Node-API handles on the current thread. The
+/// value must already own native storage with the representation identified by
+/// `T`; this function publishes that storage identity to later typed readers.
 #[doc(hidden)]
 pub unsafe fn tag_native_type<T: 'static>(
   env: sys::napi_env,

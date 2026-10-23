@@ -31,8 +31,8 @@ def main() -> None:
     }[sys.platform]
     addon = target / "debug/stark_napi_identity_test.node"
     shutil.copy2(target / "debug" / library, addon)
-    for script, extra in [("probe.cjs", ["fixed"]), ("test.cjs", []), ("async.cjs", [])]:
-        subprocess.run([node, str(fixture / script), str(addon), *extra], check=True)
+    for script, extra in [("probe.cjs", ["fixed"]), ("test.cjs", []), ("async.cjs", []), ("external.cjs", [])]:
+        subprocess.run([node, "--expose-gc", str(fixture / script), str(addon), *extra], check=True)
 
 
 if __name__ == "__main__":

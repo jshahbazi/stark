@@ -71,6 +71,9 @@ impl<'env> JsExternal<'env> {
 
   #[inline]
   fn get_static_value<T: 'static>(&self) -> Result<&'static mut External<T>> {
+    unsafe {
+      crate::bindgen_runtime::validate_native_type::<External<T>>(self.0.env, self.0.value)?;
+    }
     let mut unknown_tagged_object = ptr::null_mut();
     check_status!(
       unsafe { sys::napi_get_value_external(self.0.env, self.0.value, &mut unknown_tagged_object) },
