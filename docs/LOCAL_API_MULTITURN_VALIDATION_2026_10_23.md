@@ -48,3 +48,19 @@ The native run used macOS 26.7.1 on arm64 hardware model `Mac17,7`, the runtime'
 | Qualified candidate message-shape snapshot | `8e026c1b610720d7fc0f71687c806cd2c207ab218afaca092711cf820c29d3dc` |
 
 Native test profiles, harnesses, and diagnostic records remain private. Published evidence is limited to aggregate results and artifact hashes. Prompts, responses, token vectors, credentials, probabilities, and exception dumps were not logged by the diagnostic harness.
+
+## Follow-up after desktop unlock
+
+The additional candidate GUI checks interrupted at the initial snapshot were completed after the desktop was unlocked, using the same candidate parser, model fixture, runtime, and diagnostic wrapper:
+
+| Cherry configuration | Observed result |
+| --- | --- |
+| Existing conversation, streaming enabled, third turn | Response completed with no HTTP/API error or active Stop control; three completed-response Regenerate controls were present. |
+| New conversation, Stream output disabled, first turn | Response completed with no HTTP/API error or active Stop control. |
+| Same new conversation, Stream output disabled, second turn | Response completed with no HTTP/API error or active Stop control; two completed-response Regenerate controls were present. |
+
+The Model settings were checked again after the new conversation: Stream output, Temperature override, and Max tokens override were all disabled. Mode qualification is based on the actual client settings observed in the GUI. The diagnostic wrapper did not record the top-level `stream` flag, so these results do not independently establish its on-wire value.
+
+The new immutable message-shape snapshot contains five accepted parser calls, with message counts of 3, 5, 1, 2, and 3 in order. The five-message history contains two prior assistant messages, each carrying an empty string `reasoning_content`; the final three-message history contains one such assistant message. One additional system/user request was accepted, without inspecting its purpose. The message-shape evidence qualifies request validation; completed responses were verified separately in the GUI.
+
+The initial one-request snapshot and its hash above are preserved. The follow-up snapshot has SHA-256 `b6633fe2c3c5cb48caf01d9d63e5b4b6366f51d835b47da14d596a8432303da9`. The private candidate bridge was stopped after capturing this evidence. Production source and the automated-check results are unchanged. Other models and nonempty reasoning returned by a real model remain unqualified.
