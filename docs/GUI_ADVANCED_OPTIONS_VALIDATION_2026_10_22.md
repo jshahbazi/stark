@@ -18,3 +18,11 @@ Packaging on the original source branch needed a compatibility repair: its stand
 Swift source SHA-256: `3cd3ae758df99bbe0d0753ef5fd4c3113b840e895369f4099067c919a295ba93`. Existing reused generation worker SHA-256: `f12fd9849d81610170c2b893e98360b25ab553310cd5276e266f6d5e583e320f`. The worker was reused from the installed app; this run does not establish a fresh engine build, answer quality or performance qualification.
 
 The updated app was installed at `~/Applications/Stark.app` and its local signature verified. Interactive visual inspection was not completed: native UI automation timed out when selecting the installed app. Swift compilation and the headless controller checks above cover code and protocol behavior.
+
+## Isolated PR validation
+
+Fresh validation on `codex/gui-advanced-options-pr`, based directly on main `695f1eb2`, passed 3,903 converter tests with 88 skips, all 15 menu bar packaging tests, Swift type checking, repository policy, Ruff lint and formatting, and diff checks. The smaller suite count reflects the excluded security branch. The PR contains only advanced-options implementation, tests and documentation.
+
+The app was rebuilt from the isolated branch without the original branch-specific provenance repair. Its embedded package provenance matched its source, and the Swift controller/native harness passed all 17 checks again with no stderr. Backend source SHA-256: `6d891e565f68933320ecd5c930959d92ecf9c12c306dced5ef3a147d8b633e05`. The unchanged Swift source and reused worker hashes are recorded above. The fresh aggregate report replaces only the ignored harness report; prior published validation receipts are preserved.
+
+Code review covered strict atomic settings validation, system prompt privacy, template rendering, context reservation, history reset and model-limit clamping, acknowledgement/error handling, and Configure/Stop/Run ordering. No actionable correctness findings remained. Ruff formatting corrections were applied before hosted review.
