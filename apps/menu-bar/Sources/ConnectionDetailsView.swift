@@ -24,6 +24,7 @@ struct ConnectionDetailsView: View {
             Text("Connect to Stark").font(.title2.weight(.semibold))
             Text("In your application's provider settings, choose OpenAI-compatible or Custom OpenAI, then paste these values.")
                 .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
             field("Model ID", value: engine.loadedID, placeholder: "Run a model first")
@@ -44,8 +45,10 @@ struct ConnectionDetailsView: View {
                 .font(.callout)
             Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key changes when Stark reopens.")
                 .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Text("Supports text Chat Completions and model discovery. Set temperature to 0 and the reply limit to 512 tokens or less. Streaming responses arrive after generation finishes. Tools, images and the Responses API are unavailable. Busy requests return an error for the client to retry.")
                 .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Copy curl Example") { copy(curl, label: "curl example (includes API key)") }
                     .disabled(!canConnect || engine.loadedID.isEmpty)
