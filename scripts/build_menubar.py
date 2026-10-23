@@ -5,17 +5,23 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import email.parser
 import hashlib
 import json
 import os
 import platform
 import plistlib
 import re
+import runpy
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -106,6 +112,11 @@ def source_identity() -> dict:
     tracked = run(["git", "ls-files", "-z"], "source_files").split("\0")
     paths = [ROOT / name for name in tracked if name and (ROOT / name).is_file()]
     paths += list((ROOT / "apps/menu-bar").rglob("*"))
+    paths += [
+        path
+        for path in (ROOT / "tools/converter/stark_convert").rglob("*")
+        if "__pycache__" not in path.parts and path.suffix != ".pyc"
+    ]
     paths += [
         ROOT / "scripts/build_menubar.py",
         ROOT / "tools/converter/stark_convert/desktop.py",
@@ -251,6 +262,195 @@ def install_desktop_dependencies(embedded: Path, temporary: Path) -> dict:
     }
 
 
+def converter_snapshot(project: Path, destination: Path) -> dict:
+    """Build from a fresh, source-bound package tree rather than stale build/ files."""
+    try:
+        configuration = tomllib.loads((project / "pyproject.toml").read_text())
+        build = configuration["build-system"]
+        if build != {
+            "requires": ["setuptools==83.0.0"],
+            "build-backend": "setuptools.build_meta",
+        }:
+            raise ValueError
+        source_package = project / "stark_convert"
+        if (source_package / "_build_inputs").exists():
+            raise ValueError
+        provenance_module = runpy.run_path(str(source_package / "provenance.py"))
+        source_inputs = (*provenance_module["SOURCE_INPUTS"], "uv.lock")
+        readme = configuration["project"]["readme"]
+        if not isinstance(readme, str):
+            raise TypeError
+        files = {}
+        for path in sorted(source_package.rglob("*")):
+            if "__pycache__" in path.parts or path.suffix == ".pyc":
+                continue
+            if path.is_symlink() or not (path.is_file() or path.is_dir()):
+                raise ValueError
+            if path.is_file():
+                relative = path.relative_to(project)
+                target = destination / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                files[relative.as_posix()] = sha256(target)
+        for name in (*source_inputs, readme):
+            relative = Path(name)
+            if relative.is_absolute() or ".." in relative.parts:
+                raise ValueError
+            path = project / relative
+            if path.is_symlink() or not path.is_file():
+                raise ValueError
+            target = destination / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            files[relative.as_posix()] = sha256(target)
+        tooling = provenance_module["toolchain_provenance"](destination)
+        return {
+            "project_name": configuration["project"]["name"],
+            "version": configuration["project"]["version"],
+            "source_inputs": list(source_inputs),
+            "source_files_sha256": files,
+            "toolchain_provenance": tooling,
+            "build_system": build,
+        }
+    except (OSError, KeyError, TypeError, ValueError):
+        raise BuildError("converter_snapshot_invalid") from None
+
+
+def validate_converter_wheel(wheel: Path, source: dict) -> dict:
+    """Reject stale modules, missing provenance capsules or stripped license metadata."""
+    metadata = f"stark_convert-{source['version']}.dist-info"
+    try:
+        with zipfile.ZipFile(wheel) as archive:
+            members = archive.namelist()
+            if len(members) != len(set(members)):
+                raise ValueError
+            for entry in archive.infolist():
+                relative = Path(entry.filename)
+                if (
+                    relative.is_absolute()
+                    or ".." in relative.parts
+                    or stat.S_ISLNK(entry.external_attr >> 16)
+                ):
+                    raise ValueError
+            expected_package = {
+                name: digest
+                for name, digest in source["source_files_sha256"].items()
+                if name.startswith("stark_convert/")
+            }
+            expected_capsule = {
+                "stark_convert/_build_inputs/" + name: source["source_files_sha256"][
+                    name
+                ]
+                for name in source["source_inputs"]
+            }
+            actual_package = {
+                name
+                for name in members
+                if name.startswith("stark_convert/") and not name.endswith("/")
+            }
+            if actual_package != {*expected_package, *expected_capsule}:
+                raise ValueError
+            for name, digest in {**expected_package, **expected_capsule}.items():
+                if hashlib.sha256(archive.read(name)).hexdigest() != digest:
+                    raise ValueError
+            license_path = metadata + "/licenses/LICENSE.lalamo"
+            wheel_metadata = email.parser.Parser().parsestr(
+                archive.read(metadata + "/METADATA").decode()
+            )
+            if (
+                metadata + "/METADATA" not in members
+                or metadata + "/WHEEL" not in members
+                or metadata + "/RECORD" not in members
+                or wheel_metadata["Name"] != source["project_name"]
+                or wheel_metadata["Version"] != source["version"]
+                or "LICENSE.lalamo" not in wheel_metadata.get_all("License-File", [])
+                or hashlib.sha256(archive.read(license_path)).hexdigest()
+                != source["source_files_sha256"]["LICENSE.lalamo"]
+            ):
+                raise ValueError
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile):
+        raise BuildError("converter_wheel_validation_failed") from None
+    return {
+        **source,
+        "wheel_filename": wheel.name,
+        "wheel_sha256": sha256(wheel),
+    }
+
+
+def install_converter(embedded: Path, temporary: Path) -> dict:
+    uv = shutil.which("uv")
+    if uv is None:
+        raise BuildError("uv_required_for_current_converter")
+    snapshot = temporary / "converter-source"
+    source = converter_snapshot(ROOT / "tools/converter", snapshot)
+    wheels = temporary / "converter-wheels"
+    run(
+        [
+            uv,
+            "--no-config",
+            "build",
+            str(snapshot),
+            "--wheel",
+            "--python",
+            str(embedded / PYTHON),
+            "--out-dir",
+            str(wheels),
+            "--no-build-logs",
+        ],
+        "current_converter_wheel",
+    )
+    artifacts = list(wheels.glob("*.whl"))
+    if len(artifacts) != 1 or not artifacts[0].name.startswith("stark_convert-"):
+        raise BuildError("converter_wheel_layout_invalid")
+    record = validate_converter_wheel(artifacts[0], source)
+    overlay = temporary / "converter-python-overlay"
+    run(
+        [
+            uv,
+            "--no-config",
+            "pip",
+            "install",
+            "--python",
+            str(embedded / PYTHON),
+            "--target",
+            str(overlay),
+            "--no-deps",
+            str(artifacts[0]),
+        ],
+        "current_converter_install",
+    )
+    for path in list(overlay.rglob("*")):
+        if path.is_file() and (
+            path.name in {"direct_url.json", "uv_cache.json"} or path.suffix == ".pyc"
+        ):
+            path.unlink()
+    for path in sorted(overlay.rglob("__pycache__"), reverse=True):
+        shutil.rmtree(path)
+    # Console scripts contain staging paths; the app invokes Python modules.
+    shutil.rmtree(overlay / "bin", ignore_errors=True)
+    metadata_name = f"stark_convert-{source['version']}.dist-info"
+    if {path.name for path in overlay.iterdir()} != {"stark_convert", metadata_name}:
+        raise BuildError("converter_install_layout_invalid")
+    for path in overlay.rglob("*"):
+        if path.is_symlink() or not (path.is_file() or path.is_dir()):
+            raise BuildError("converter_install_layout_invalid")
+    site_packages = embedded / CONVERTER.parent
+    for previous in [
+        embedded / CONVERTER,
+        *site_packages.glob("stark_convert-*.dist-info"),
+    ]:
+        if previous.is_dir():
+            shutil.rmtree(previous)
+    files = {}
+    for path in overlay.rglob("*"):
+        if path.is_file():
+            target = site_packages / path.relative_to(overlay)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            files[target.relative_to(embedded).as_posix()] = sha256(target)
+    return {**record, "files_sha256": files}
+
+
 def make_icon(source: Path, resources: Path, temporary: Path) -> None:
     iconset = temporary / "Stark.iconset"
     iconset.mkdir()
@@ -301,10 +501,66 @@ def make_icon(source: Path, resources: Path, temporary: Path) -> None:
     )
 
 
-def app_running(destination: Path) -> bool:
+def app_pids(destination: Path) -> list[int]:
     executable = str(destination / "Contents/MacOS/Stark")
-    listing = run(["/bin/ps", "-axo", "comm="], "running_apps")
-    return executable in (line.strip() for line in listing.splitlines())
+    listing = run(["/bin/ps", "-axo", "pid=,comm="], "running_apps")
+    processes = [line.strip().split(maxsplit=1) for line in listing.splitlines()]
+    return [int(pid) for pid, command in processes if command == executable]
+
+
+def app_running(destination: Path) -> bool:
+    return bool(app_pids(destination))
+
+
+def wait_for_app_exit(destination: Path, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while app_running(destination):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def stop_app(destination: Path) -> None:
+    """Quit only this bundle, escalating if its normal shutdown stalls."""
+    if not app_running(destination):
+        return
+    print(f"Quitting Stark at {destination} before replacement...", flush=True)
+    # NSRunningApplication avoids Apple Events permission prompts and never
+    # launches a stopped app. Pass the path as data, not executable script text.
+    script = (
+        "ObjC.import('AppKit'); function run(argv) { "
+        "var apps = $.NSWorkspace.sharedWorkspace.runningApplications; "
+        "for (var i = 0; i < apps.count; i++) { var app = apps.objectAtIndex(i); "
+        "if (app.bundleURL && ObjC.unwrap(app.bundleURL.path) === argv[0]) "
+        "app.terminate; } }"
+    )
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script, str(destination)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if wait_for_app_exit(destination, 5):
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        # Refresh exact executable matches before each escalation; never kill
+        # by process name, which could affect another installation.
+        for pid in app_pids(destination):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                raise BuildError("app_termination_failed") from None
+        if wait_for_app_exit(destination, 2):
+            return
+    raise BuildError("app_did_not_exit")
 
 
 def exchange_paths(first: Path, second: Path) -> None:
@@ -327,8 +583,6 @@ def install_app(app: Path, destination: Path) -> None:
             != APP_ID
         ):
             raise BuildError("install_destination_is_unrelated")
-        if app_running(destination):
-            raise BuildError("installed_app_is_running_quit_stark_first")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".stark-install-", dir=destination.parent
@@ -340,6 +594,7 @@ def install_app(app: Path, destination: Path) -> None:
             "staged_signature",
         )
         if destination.exists():
+            stop_app(destination)
             exchange_paths(stage, destination)
         else:
             stage.rename(destination)
@@ -385,8 +640,6 @@ def build(options: argparse.Namespace) -> Path:
         and read_plist(app / "Contents/Info.plist").get("CFBundleIdentifier") != APP_ID
     ):
         raise BuildError("output_app_is_unrelated")
-    if app.exists() and app_running(app):
-        raise BuildError("output_app_is_running_quit_stark_first")
     with tempfile.TemporaryDirectory(
         prefix=".stark-build-", dir=output
     ) as temporary_name:
@@ -400,11 +653,7 @@ def build(options: argparse.Namespace) -> Path:
         embedded = resources / "runtime"
         shutil.copytree(runtime, embedded, symlinks=False)
         shutil.copy2(worker, embedded / "libexec/stark-generate")
-        for module in ("desktop.py", "chat.py", "local_api.py", "api_request.py"):
-            shutil.copy2(
-                ROOT / "tools/converter/stark_convert" / module,
-                embedded / CONVERTER / module,
-            )
+        converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
         shutil.copy2(artwork, resources / "Stark.jpg")
         shutil.copy2(template, resources / "MenuBarTemplate.png")
@@ -432,11 +681,22 @@ def build(options: argparse.Namespace) -> Path:
             ],
             "swift_build",
         )
-        inspection = "import stark_convert.desktop, stark_convert.chat; import jinja2; import stark_convert.cli"
-        run(
-            [str(embedded / PYTHON), "-I", "-B", "-c", inspection],
-            "embedded_python_imports",
+        inspection = (
+            "import inspect,json; import stark_convert.desktop,stark_convert.chat,jinja2; "
+            "from stark_convert import cli,progress; "
+            "from stark_convert.provenance import toolchain_provenance; "
+            "assert 'progress' in inspect.signature(cli.convert).parameters; "
+            "assert callable(progress.FDProgressSink); "
+            "print(json.dumps(toolchain_provenance(),sort_keys=True))"
         )
+        installed_tooling = json.loads(
+            run(
+                [str(embedded / PYTHON), "-I", "-B", "-c", inspection],
+                "embedded_python_imports",
+            )
+        )
+        if installed_tooling != converter_package["toolchain_provenance"]:
+            raise BuildError("installed_converter_provenance_mismatch")
         response = run(
             [
                 str(embedded / PYTHON),
@@ -463,11 +723,13 @@ def build(options: argparse.Namespace) -> Path:
             },
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
-                **{
-                    str(CONVERTER / module): sha256(embedded / CONVERTER / module)
-                    for module in ("desktop.py", "chat.py", "local_api.py", "api_request.py")
-                },
+                **converter_package["files_sha256"],
                 **desktop_dependencies["files_sha256"],
+            },
+            "converter_package": {
+                key: value
+                for key, value in converter_package.items()
+                if key != "files_sha256"
             },
             "desktop_python_dependencies": {
                 "versions": desktop_dependencies["versions"],
@@ -484,6 +746,8 @@ def build(options: argparse.Namespace) -> Path:
                 "base_runtime_hashes": "passed",
                 "worker_invalid_arguments": "passed",
                 "python_imports": "passed",
+                "converter_progress_api": "passed",
+                "converter_toolchain_provenance": "passed",
                 "desktop_entrypoint": "passed",
                 "model_loaded": False,
             },
@@ -505,6 +769,7 @@ def build(options: argparse.Namespace) -> Path:
             "app_signature_verification",
         )
         if app.exists():
+            stop_app(app)
             exchange_paths(staged, app)
         else:
             staged.rename(app)

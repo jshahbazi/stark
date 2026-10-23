@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -183,6 +184,69 @@ class DesktopDependencyTests(unittest.TestCase):
             )
 
 
+class AppShutdownTests(unittest.TestCase):
+    def test_process_matching_uses_complete_executable_path(self):
+        destination = Path("/Applications with spaces/Stark.app")
+        listing = (
+            " 123 /Applications with spaces/Stark.app/Contents/MacOS/Stark\n"
+            " 456 /Other/Stark.app/Contents/MacOS/Stark\n"
+            " 789 /Applications with spaces/Stark.app/Contents/MacOS/Stark-helper\n"
+        )
+        with patch.object(builder, "run", return_value=listing):
+            self.assertEqual(builder.app_pids(destination), [123])
+
+    def test_normal_quit_does_not_send_signals(self):
+        destination = Path("/Applications/Stark.app")
+        with (
+            patch.object(builder, "app_running", return_value=True),
+            patch.object(builder.subprocess, "run") as request,
+            patch.object(builder, "wait_for_app_exit", return_value=True),
+            patch.object(builder.os, "kill") as kill,
+        ):
+            builder.stop_app(destination)
+        self.assertEqual(request.call_args.args[0][-1], str(destination))
+        self.assertEqual(request.call_args.kwargs["timeout"], 5)
+        kill.assert_not_called()
+
+    def test_stalled_quit_escalates_with_refreshed_pids(self):
+        with (
+            patch.object(builder, "app_running", return_value=True),
+            patch.object(
+                builder.subprocess, "run",
+                side_effect=subprocess.TimeoutExpired("quit", 5),
+            ),
+            patch.object(
+                builder, "wait_for_app_exit", side_effect=[False, False, True]
+            ),
+            patch.object(builder, "app_pids", side_effect=[[123, 456], [456]]),
+            patch.object(builder.os, "kill") as kill,
+        ):
+            builder.stop_app(Path("/Applications/Stark.app"))
+        self.assertEqual(
+            [call.args for call in kill.call_args_list],
+            [(123, signal.SIGTERM), (456, signal.SIGTERM), (456, signal.SIGKILL)],
+        )
+
+    def test_no_running_app_needs_no_quit(self):
+        with (
+            patch.object(builder, "app_running", return_value=False),
+            patch.object(builder.subprocess, "run") as request,
+        ):
+            builder.stop_app(Path("/Applications/Stark.app"))
+        request.assert_not_called()
+
+    def test_failed_shutdown_is_reported(self):
+        with (
+            patch.object(builder, "app_running", return_value=True),
+            patch.object(builder.subprocess, "run"),
+            patch.object(builder, "wait_for_app_exit", return_value=False),
+            patch.object(builder, "app_pids", return_value=[123]),
+            patch.object(builder.os, "kill"),
+            self.assertRaisesRegex(builder.BuildError, "app_did_not_exit"),
+        ):
+            builder.stop_app(Path("/Applications/Stark.app"))
+
+
 class InstallTests(unittest.TestCase):
     def test_fresh_install_publishes_complete_copy(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -214,20 +278,49 @@ class InstallTests(unittest.TestCase):
             ):
                 builder.install_app(app, link)
 
-    def test_running_app_is_left_intact(self):
+    def test_running_app_quits_after_verification_before_replacement(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app, destination = root / "built/Stark.app", root / "Applications/Stark.app"
             make_app(app)
             make_app(destination)
+            events = []
             with (
-                patch.object(builder, "app_running", return_value=True),
-                self.assertRaisesRegex(builder.BuildError, "installed_app_is_running"),
+                patch.object(
+                    builder, "run", side_effect=lambda *_: events.append("verified")
+                ),
+                patch.object(
+                    builder, "stop_app", side_effect=lambda *_: events.append("stopped")
+                ),
+                patch.object(
+                    builder, "exchange_paths", side_effect=lambda *_: events.append("replaced")
+                ),
             ):
                 builder.install_app(app, destination)
+            self.assertEqual(events, ["verified", "stopped", "replaced"])
+
+    def test_failed_shutdown_keeps_previous_app(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app, destination = root / "built/Stark.app", root / "Applications/Stark.app"
+            make_app(app)
+            make_app(destination)
+            (destination / "Contents/payload").write_text("previous app")
+            with (
+                patch.object(builder, "run", return_value=""),
+                patch.object(
+                    builder, "stop_app",
+                    side_effect=builder.BuildError("app_did_not_exit"),
+                ),
+                patch.object(builder, "exchange_paths") as exchange,
+                self.assertRaisesRegex(builder.BuildError, "app_did_not_exit"),
+            ):
+                builder.install_app(app, destination)
+            exchange.assert_not_called()
             self.assertEqual(
-                (destination / "Contents/payload").read_text(), "complete staged app"
+                (destination / "Contents/payload").read_text(), "previous app"
             )
+            self.assertEqual(list(destination.parent.glob(".stark-install-*")), [])
 
     def test_failed_staging_or_atomic_exchange_keeps_previous_app(self):
         with tempfile.TemporaryDirectory() as temporary:

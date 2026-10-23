@@ -13,7 +13,7 @@ PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-ge
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app installs to `~/Applications/Stark.app`. Quit Stark before replacing an existing installation. The builder stages the new app, verifies its local signature and atomically replaces a matching Stark bundle; unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary. Existing CLI installations are copied without changing them.
+The app installs to `~/Applications/Stark.app`. After staging and verifying the new app, the builder automatically quits the copy being replaced. If normal shutdown stalls, it terminates that copy, using a force kill if necessary, and waits for it to exit before atomically replacing the bundle. Active chats and model operations stop during replacement. This also applies to a running copy in the build output folder. `--open` launches the new app after installation. Unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary. Existing CLI installations are copied without changing them.
 
 The local app is ad-hoc signed. This workflow adds no Developer ID signing, notarization, hosted release workflow or Gatekeeper bypass. Use the normal macOS approval flow for a downloaded build after verifying its source.
 
