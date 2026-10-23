@@ -815,6 +815,29 @@ code {
   margin-top:30px
 }
 
+.start-heading>p.source-install-note {
+  font-size:13px;
+  line-height:1.8
+}
+
+.start-content {
+  min-width:0
+}
+
+.install-terminal {
+  margin-bottom:36px
+}
+
+.install-terminal pre {
+  min-height:0;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+
+.install-terminal .copy-status:not(:empty) {
+  padding:0 19px 16px
+}
+
 .start-steps {
   list-style:none;
   padding:0;
@@ -1352,4 +1375,49 @@ code {
     transition:none!important;
     animation:none!important
   }
+}
+
+/* Multi-engine comparison */
+.workload-control {
+  display:flex;
+  flex-direction:column;
+  gap:7px;
+  color:#a9b59f;
+  font:9px/1.4 var(--mono);
+  letter-spacing:.04em;
+  text-transform:uppercase
+}
+.workload-control select {
+  min-width:245px;
+  padding:10px 36px 10px 12px;
+  border:1px solid #4b5546;
+  border-radius:3px;
+  background:var(--night);
+  color:var(--paper);
+  font:12px/1.5 var(--mono);
+  text-transform:none;
+  letter-spacing:0
+}
+.engine-table { min-width:0 }
+.engine-table th:first-child { width:44% }
+.engine-table th:last-child {
+  width:56%;
+  text-align:left;
+  padding-right:0
+}
+.engine-table td { padding-right:0 }
+.engine-table small { font-size:9px; line-height:1.5 }
+.engine-table sup { color:#96a38b; margin-left:3px; font-size:9px }
+.engine-table .bar { height:6px; margin-top:10px }
+.chart-selection { color:#bec7b5; font:10px/1.6 var(--mono); margin-top:17px }
+.benchmark-links { display:flex; align-items:center; flex-wrap:wrap; gap:18px 30px; margin-top:22px }
+.benchmark-links .text-link:not(.gold-link) { color:#bec7b5 }
+@media (max-width:600px) {
+  .benchmark-controls { align-items:flex-start; flex-direction:column; gap:16px }
+  .workload-control,.workload-control select { width:100%; min-width:0 }
+  .engine-table th:first-child { width:48% }
+  .engine-table th:last-child { width:52% }
+  .engine-table th,.engine-table td { padding-top:19px; padding-bottom:19px }
+  .engine-table tbody th { font-size:13px }
+  .engine-table small { max-width:145px; font-size:9px }
 }
