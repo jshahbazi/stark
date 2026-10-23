@@ -50,6 +50,22 @@ Cache compatibility includes runner OS, architecture and image version; Rust/C/C
 
 Every Cargo build, Clippy invocation and test still runs after a restore. Caches are saved only after the owning job succeeds. GitHub limits cache access by branch: pull requests can restore default-branch caches, while caches saved for a PR merge ref cannot populate `main`. See [GitHub's cache access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache). Cache misses and evictions trigger normal cold builds. Increment the `stark-rust-v1` namespace in `scripts/ci/rust-cache-key.sh` to force a fresh cache after an infrastructure issue.
 
+### Hosted cache validation
+
+The [cold population run](https://github.com/jshahbazi/stark/actions/runs/39874355777) and immediately following [warm run](https://github.com/jshahbazi/stark/actions/runs/39879305262) both passed on source commit `0f73fa9b557a131938d037478329a6190e5dd871`. All five Rust jobs saved caches after their cold builds and restored their exact primary keys on the warm run. Every existing build, Clippy and test step executed, including 56 server tests and seven CXX tests. [Security also passed](https://github.com/jshahbazi/stark/actions/runs/39874358763) on this commit.
+
+| Cached job | Cold execution | Warm execution |
+| --- | --- | --- |
+| Repository checks | 1m57s | 2m13s |
+| Scorer, default | 10m16s | 10m35s |
+| Scorer, optimized | 7m12s | 6m27s |
+| Inherited dependency compatibility | 18m12s | 4m35s |
+| CXX panic safety and grammar compatibility | 16m24s | 2m42s |
+
+Execution includes job setup, cache transfers and cleanup, and excludes time waiting for a runner. Summed execution across these parallel jobs fell from 54m01s to 26m32s, a 51% reduction. Compatibility execution fell by 75% and CXX by 84%. Default scorer execution did not improve: dependencies were reused, while Cargo rebuilt workspace crates and their native Metal work after the fresh checkout. Caching does not eliminate that remaining build cost.
+
+Whole-workflow elapsed time, measured from workflow creation to its terminal update, was 47m48s cold and 38m16s warm. Runner queues dominated both runs: CXX waited 31m15s cold and 34m01s warm; warm compatibility and optimized scoring also waited over 30 minutes. These hosted measurements demonstrate cache reuse and reduced execution work; runner availability and image changes affect subsequent elapsed times.
+
 ## Download a development build
 
 Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
