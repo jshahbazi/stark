@@ -14,6 +14,88 @@ from stark_convert.local_api import APIError, LocalAPI
 
 
 class LocalAPITest(unittest.TestCase):
+    def test_restart_keeps_old_requests_cancelled(self):
+        monitor_entered = threading.Event()
+        release_monitor = threading.Event()
+        completion_entered = threading.Event()
+        completion_cancelled = threading.Event()
+
+        class DelayedMonitorAPI(LocalAPI):
+            def _handler_class(self, session_key, session_closed):
+                handler = super()._handler_class(session_key, session_closed)
+                original = handler._monitor_peer
+
+                def delayed_monitor(request, cancelled):
+                    monitor_entered.set()
+                    release_monitor.wait(5)
+                    original(request, cancelled)
+
+                handler._monitor_peer = delayed_monitor
+                return handler
+
+        def complete(payload, on_delta, cancelled):
+            completion_entered.set()
+            if cancelled.wait(5):
+                completion_cancelled.set()
+            raise APIError(499, "Cancelled", "cancelled")
+
+        api = DelayedMonitorAPI(lambda: [], complete, port=0, cancellable=True)
+        info = api.start()
+        port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
+        try:
+            connection.request("POST", "/v1/chat/completions", body=b"{}", headers={
+                "Authorization": "Bearer " + info["api_key"],
+                "Content-Type": "application/json",
+            })
+            self.assertTrue(monitor_entered.wait(2))
+            self.assertTrue(completion_entered.wait(2))
+            api.close()
+            api.start()
+            release_monitor.set()
+            self.assertTrue(completion_cancelled.wait(2))
+            self.assertEqual(connection.getresponse().status, 499)
+        finally:
+            release_monitor.set()
+            connection.close()
+            api.close()
+
+    def test_signed_content_length_is_rejected(self):
+        status, _, _ = self.request(
+            "POST", "/chat/completions", {}, key=self.info["api_key"], headers={"Content-Length": "+2"}
+        )
+        self.assertEqual(status, 400)
+        self.assertEqual(self.calls, [])
+
+    def test_truncated_body_is_rejected_before_completion(self):
+        called = []
+        api = LocalAPI(lambda: [], lambda payload: called.append(True) or {"choices": []}, port=0)
+        info = api.start()
+        sock = None
+        try:
+            port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+            body = b'{"messages":[{"role":"user","content":"synthetic fixture"}]}'
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            sock.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + info["api_key"].encode() + b"\r\n"
+                b"Content-Type: application/json\r\nContent-Length: " + str(len(body) + 10).encode()
+                + b"\r\n\r\n" + body
+            )
+            sock.shutdown(socket.SHUT_WR)
+            response = b""
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                response += data
+            self.assertIn(b"HTTP/1.1 400", response)
+            self.assertEqual(called, [])
+        finally:
+            if sock is not None:
+                sock.close()
+            api.close()
+
     def setUp(self):
         self.calls = []
         self.api = LocalAPI(lambda: [{"id": "stark", "object": "model"}], self.complete)

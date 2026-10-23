@@ -114,10 +114,11 @@ class LocalAPI:
 
     def start(self) -> dict[str, str]:
         with self._lock:
-            self._closing.clear()
             if self._server is not None:
                 raise RuntimeError("LocalAPI is already running")
-            handler = self._handler_class()
+            session_closed = threading.Event()
+            session_key = secrets.token_urlsafe(32)
+            handler = self._handler_class(session_key, session_closed)
             try:
                 server = _BoundedHTTPServer(("127.0.0.1", self._port), handler, self._max_connections)
             except OSError as exc:
@@ -125,14 +126,15 @@ class LocalAPI:
                     raise
                 server = _BoundedHTTPServer(("127.0.0.1", 0), handler, self._max_connections)
             self._server = server
-            self._api_key = secrets.token_urlsafe(32)
+            self._api_key = session_key
+            self._closing = session_closed
             self._thread = threading.Thread(target=server.serve_forever, name="stark-local-api", daemon=True)
             self._thread.start()
             return {"base_url": f"http://127.0.0.1:{server.server_port}/v1", "api_key": self._api_key}
 
     def close(self) -> None:
-        self._closing.set()
         with self._lock:
+            self._closing.set()
             server, thread = self._server, self._thread
             self._server = self._thread = None
             self._api_key = None
@@ -142,7 +144,7 @@ class LocalAPI:
         if thread is not None:
             thread.join(timeout=2)
 
-    def _handler_class(self):
+    def _handler_class(self, session_key, session_closed):
         api = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -214,6 +216,8 @@ class LocalAPI:
                 self._sse_write(error.payload())
 
             def _guard(self):
+                if session_closed.is_set():
+                    raise APIError(503, "Server is shutting down", "server_shutdown")
                 if len(self.headers.get_all("Host", [])) > 1 or len(self.headers.get_all("Authorization", [])) > 1:
                     raise APIError(400, "Duplicate request headers are not allowed", "invalid_request")
                 if "Origin" in self.headers:
@@ -222,7 +226,7 @@ class LocalAPI:
                 hostname = urlsplit("//" + host).hostname
                 if hostname not in {"127.0.0.1", "localhost", "::1"}:
                     raise APIError(403, "Host is not allowed", "host_not_allowed")
-                expected = api._api_key or ""
+                expected = session_key
                 actual = self.headers.get("Authorization", "")
                 if not expected or not hmac.compare_digest(
                     actual.encode("utf-8", "replace"), ("Bearer " + expected).encode("utf-8")
@@ -266,20 +270,23 @@ class LocalAPI:
                     content_lengths = self.headers.get_all("Content-Length", [])
                     if len(content_lengths) != 1:
                         raise APIError(400, "Content-Length is required", "length_required")
-                    try:
-                        length = int(content_lengths[0])
-                    except (TypeError, ValueError):
-                        raise APIError(400, "Invalid Content-Length", "invalid_request") from None
-                    if length < 0:
+                    raw_length = content_lengths[0].strip()
+                    if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
                         raise APIError(400, "Invalid Content-Length", "invalid_request")
+                    if len(raw_length.lstrip("0")) > 7:
+                        raise APIError(413, "Request body is too large", "body_too_large")
+                    length = int(raw_length.lstrip("0") or "0")
                     if length > 1024 * 1024:
                         raise APIError(413, "Request body is too large", "body_too_large")
                     content_type = self.headers.get("Content-Type")
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
                     try:
+                        body = self.rfile.read(length)
+                        if len(body) != length:
+                            raise APIError(400, "Incomplete request body", "invalid_request")
                         payload = json.loads(
-                            self.rfile.read(length),
+                            body,
                             object_pairs_hook=self._pairs,
                             parse_constant=self._constant,
                             parse_float=self._float,
@@ -401,7 +408,7 @@ class LocalAPI:
             def _monitor_peer(self, cancelled):
                 deadline = time.monotonic() + api._request_timeout
                 while not cancelled.wait(0.05):
-                    if api._closing.is_set():
+                    if session_closed.is_set():
                         cancelled.set()
                         return
                     if time.monotonic() >= deadline:
