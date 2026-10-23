@@ -172,7 +172,7 @@ def copy_runtime_for_application(
     return excluded
 
 
-def verify_worker(worker: Path) -> None:
+def verify_worker(worker: Path, kind: str = "generation") -> None:
     try:
         reply = subprocess.run(
             [str(worker)],
@@ -188,7 +188,16 @@ def verify_worker(worker: Path) -> None:
         }:
             raise ValueError
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise BuildError("generation_worker_self_check_failed") from None
+        raise BuildError(f"{kind}_worker_self_check_failed") from None
+
+
+def verify_worker_build_record(record_path: Path, worker: Path, error: str) -> None:
+    try:
+        record = json.loads(record_path.read_text())
+        if record.get("worker_sha256") != sha256(worker):
+            raise ValueError
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        raise BuildError(error) from None
 
 
 def desktop_requirements(lockfile: Path) -> tuple[str, dict[str, str]]:
@@ -604,13 +613,17 @@ def build(options: argparse.Namespace) -> Path:
         raise BuildError("build_requires_native_apple_silicon_macos")
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
+    score_worker = options.score_worker.expanduser().resolve()
     worker_record = None
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
         worker_record_path = worker_record_path.expanduser().resolve()
-        worker_record = json.loads(worker_record_path.read_text())
-        if worker_record.get("worker_sha256") != sha256(worker):
-            raise BuildError("worker_build_record_hash_mismatch")
+        verify_worker_build_record(worker_record_path, worker, "worker_build_record_hash_mismatch")
+    score_worker_record = None
+    score_worker_record_path = getattr(options, "score_worker_build_record", None)
+    if score_worker_record_path is not None:
+        score_worker_record_path = score_worker_record_path.expanduser().resolve()
+        verify_worker_build_record(score_worker_record_path, score_worker, "score_worker_build_record_hash_mismatch")
     runtime_manifest = verify_runtime(runtime)
     if (
         not worker.is_file()
@@ -621,6 +634,15 @@ def build(options: argparse.Namespace) -> Path:
     ):
         raise BuildError("arm64_generation_worker_missing")
     verify_worker(worker)
+    if (
+        not score_worker.is_file()
+        or "arm64"
+        not in run(
+            ["/usr/bin/lipo", "-archs", str(score_worker)], "score_worker_architecture"
+        ).split()
+    ):
+        raise BuildError("arm64_score_worker_missing")
+    verify_worker(score_worker, "score")
     source_directory = ROOT / "apps/menu-bar"
     sources = sorted((source_directory / "Sources").glob("*.swift"))
     if not sources or not (ROOT / "tools/converter/stark_convert/desktop.py").is_file():
@@ -656,12 +678,15 @@ def build(options: argparse.Namespace) -> Path:
             runtime, embedded, runtime_manifest
         )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
+        shutil.copy2(score_worker, embedded / "libexec/stark-score")
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
         shutil.copy2(artwork, resources / "Stark.jpg")
         shutil.copy2(template, resources / "MenuBarTemplate.png")
         if worker_record_path is not None:
             shutil.copy2(worker_record_path, resources / "worker-build.json")
+        if score_worker_record_path is not None:
+            shutil.copy2(score_worker_record_path, resources / "score-worker-build.json")
         make_icon(artwork, resources, temporary)
         info = read_plist(source_directory / "Info.plist")
         set_application_version(info, getattr(options, "version", None))
@@ -685,7 +710,7 @@ def build(options: argparse.Namespace) -> Path:
             "swift_build",
         )
         inspection = (
-            "import inspect,json; import stark_convert.desktop,stark_convert.chat,jinja2; "
+            "import inspect,json; import stark_convert.desktop,stark_convert.chat,stark_convert.decision,jinja2; "
             "from stark_convert import cli,progress; "
             "from stark_convert.provenance import toolchain_provenance; "
             "assert 'progress' in inspect.signature(cli.convert).parameters; "
@@ -711,7 +736,7 @@ def build(options: argparse.Namespace) -> Path:
             ],
             "desktop_entrypoint",
         )
-        if "--worker" not in response or "--data-dir" not in response:
+        if "--worker" not in response or "--score-worker" not in response or "--data-dir" not in response:
             raise BuildError("desktop_entrypoint_contract_failed")
         manifest = {
             "schema_version": 1,
@@ -729,6 +754,7 @@ def build(options: argparse.Namespace) -> Path:
             },
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
+                "libexec/stark-score": sha256(embedded / "libexec/stark-score"),
                 **converter_package["files_sha256"],
                 **desktop_dependencies["files_sha256"],
             },
@@ -751,6 +777,7 @@ def build(options: argparse.Namespace) -> Path:
             "validation": {
                 "base_runtime_hashes": "passed",
                 "worker_invalid_arguments": "passed",
+                "score_worker_invalid_arguments": "passed",
                 "python_imports": "passed",
                 "converter_progress_api": "passed",
                 "converter_toolchain_provenance": "passed",
@@ -762,6 +789,10 @@ def build(options: argparse.Namespace) -> Path:
         if worker_record_path is not None:
             manifest["worker_build_record_sha256"] = sha256(
                 resources / "worker-build.json"
+            )
+        if score_worker_record_path is not None:
+            manifest["score_worker_build_record_sha256"] = sha256(
+                resources / "score-worker-build.json"
             )
         (resources / "menu-bar-manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
@@ -814,9 +845,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Generation worker to embed",
     )
     parser.add_argument(
+        "--score-worker",
+        type=Path,
+        default=ROOT / "target/release/stark-score",
+        help="Probability scoring worker to embed",
+    )
+    parser.add_argument(
         "--worker-build-record",
         type=Path,
         help="Optional source-bound build record for a development worker",
+    )
+    parser.add_argument(
+        "--score-worker-build-record",
+        type=Path,
+        help="Optional source-bound build record for a development scoring worker",
     )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/menu-bar")
     parser.add_argument(

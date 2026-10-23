@@ -122,6 +122,34 @@ class RuntimeVerificationTests(unittest.TestCase):
         ):
             builder.verify_worker(Path("worker"))
 
+    def test_score_worker_probe_uses_distinct_failure_code(self):
+        invalid = subprocess.CompletedProcess([], 0, b'{"ready":true}\n')
+        with (
+            patch.object(builder.subprocess, "run", return_value=invalid),
+            self.assertRaisesRegex(
+                builder.BuildError, "score_worker_self_check_failed"
+            ),
+        ):
+            builder.verify_worker(Path("score-worker"), "score")
+
+    def test_missing_score_worker_is_rejected_before_packaging(self):
+        with self.assertRaisesRegex(builder.BuildError, "score_worker_self_check_failed"):
+            builder.verify_worker(Path("/definitely/missing/stark-score"), "score")
+
+    def test_score_build_record_must_match_score_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "stark-score"
+            record = root / "score-worker-build.json"
+            binary.write_bytes(b"score worker")
+            record.write_text(json.dumps({"worker_sha256": "0" * 64}))
+            with self.assertRaisesRegex(
+                builder.BuildError, "score_worker_build_record_hash_mismatch"
+            ):
+                builder.verify_worker_build_record(
+                    record, binary, "score_worker_build_record_hash_mismatch"
+                )
+
     def test_preserves_manifest_and_rejects_modified_base_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
             runtime = Path(temporary)

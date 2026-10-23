@@ -91,6 +91,196 @@ def running(desktop, model):
     return identifier
 
 
+@pytest.fixture
+def score_executable(tmp_path):
+    path = tmp_path / "fake score worker"
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        "assert sys.argv[1]=='--score-model-path'\n"
+        "print(json.dumps({'ready':True,'mode':'exact-token-scoring-cache-v1','vocab_size':1000}),flush=True)\n"
+        "prompt=''\n"
+        "for line in sys.stdin:\n"
+        "    request=json.loads(line)\n"
+        "    if request['operation']=='tokenize':\n"
+        "        text=request['text']\n"
+        "        if len(text)>1: prompt=text\n"
+        "        ids=[ord(text)] if len(text)==1 else [1,2,3]\n"
+        "        reply={'token_ids':ids,'token_count':len(ids)}\n"
+        "    elif request['operation']=='reset_cache': reply={'cache_reset':True}\n"
+        "    else:\n"
+        "        if 'wait fixture' in prompt: time.sleep(30)\n"
+        "        if 'failure fixture' in prompt:\n"
+        "            print('private exception fixture',file=sys.stderr,flush=True)\n"
+        "            raise SystemExit(2)\n"
+        "        candidates=request['candidate_token_ids']\n"
+        "        p=[0.1/(len(candidates)-1)]*(len(candidates)-1)+[0.9]\n"
+        "        if 'bad readout fixture' in prompt: p[0]=float('nan')\n"
+        "        reply={'candidate_token_ids':candidates,'candidate_probabilities':p,\n"
+        "               'input_tokens':len(request['input_token_ids']),\n"
+        "               'temperature':request['temperature'],'truncated':False}\n"
+        "        if 'context fixture' in prompt: reply={'error':'context_overflow'}\n"
+        "    print(json.dumps(reply),flush=True)\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def running_decision(desktop, model, score_executable):
+    identifier = installed(desktop, model)
+    desktop.score_executable = score_executable
+    desktop.dispatch({"command": "run", "model_id": identifier, "mode": "decision"})
+    finish(desktop)
+    assert desktop.active_model == identifier and desktop.active_mode == "decision"
+    return identifier
+
+
+def decision_command(**overrides):
+    return {
+        "command": "decide",
+        "text": "synthetic decision text",
+        "question": "synthetic decision question",
+        "answers": ["First", "Second", "Third"],
+        **overrides,
+    }
+
+
+def test_decision_private_pipe_roundtrip_uses_input_order_and_keeps_library_content_free(
+    desktop, model, score_executable
+):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(answers=["Third", "First", "Second"]))
+    finish(desktop)
+    result = next(event for event in events(desktop) if event["event"] == "decision")
+    assert result == {
+        "event": "decision",
+        "choice_index": 2,
+        "answers": ["Third", "First", "Second"],
+        "probabilities": [0.05, 0.05, 0.9],
+        "input_tokens": 3,
+    }
+    assert desktop.worker is worker
+    assert desktop.messages == []
+    assert "synthetic decision" not in desktop.registry.read_text()
+    assert set(json.loads(desktop.registry.read_text())[0]) == {"id", "name", "path", "source"}
+    assert not any(key in result for key in ("logits", "token_ids", "candidate_token_ids"))
+    ready = next(event for event in events(desktop) if event["event"] == "ready")
+    assert ready["mode"] == "decision"
+
+
+def test_manual_mode_switch_reaps_old_worker_and_reloads_selected_model(desktop, model, score_executable):
+    identifier = running_decision(desktop, model, score_executable)
+    score_process = desktop.worker.process
+    desktop.dispatch({"command": "run", "model_id": identifier, "mode": "chat"})
+    finish(desktop)
+    assert score_process.poll() is not None
+    assert desktop.active_mode == "chat"
+    chat_process = desktop.worker.process
+    desktop.dispatch({"command": "run", "model_id": identifier, "mode": "decision"})
+    finish(desktop)
+    assert chat_process.poll() is not None
+    assert desktop.active_mode == "decision"
+    assert desktop.worker.process.pid != score_process.pid
+
+
+@pytest.mark.parametrize("count", [2, 16])
+def test_decision_minimum_and_maximum_answer_sets_roundtrip(desktop, model, score_executable, count):
+    running_decision(desktop, model, score_executable)
+    labels = [f"Answer {index}" for index in range(count)]
+    desktop.dispatch(decision_command(answers=labels))
+    finish(desktop)
+    result = next(event for event in events(desktop) if event["event"] == "decision")
+    assert result["answers"] == labels
+    assert len(result["probabilities"]) == count
+    assert result["choice_index"] == count - 1
+
+
+def test_mode_commands_are_guarded_and_invalid_mode_preserves_loaded_worker(desktop, model, score_executable):
+    identifier = running_decision(desktop, model, score_executable)
+    process = desktop.worker.process
+    with pytest.raises(DesktopError, match="Choose Chat or Decision"):
+        desktop.dispatch({"command": "run", "model_id": identifier, "mode": "unknown"})
+    assert desktop.worker.process is process
+    with pytest.raises(DesktopError, match="Chat mode"):
+        desktop.dispatch(advanced_options())
+    desktop.dispatch({"command": "generate", "text": "synthetic text"})
+    finish(desktop)
+    assert desktop.worker.process is process
+    assert not any(event["event"] == "reply" for event in events(desktop))
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert not any(event["event"] == "decision" for event in events(desktop))
+
+
+@pytest.mark.parametrize("answers", [["single"], ["duplicate", " Duplicate "], ["first", ""], None])
+def test_bad_decision_answers_reject_before_starting_or_writing_to_worker(desktop, model, score_executable, answers):
+    running_decision(desktop, model, score_executable)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        with pytest.raises(DesktopError):
+            desktop.dispatch(decision_command(answers=answers))
+        request.assert_not_called()
+    assert desktop.job is None
+
+
+@pytest.mark.parametrize("text", ["failure fixture", "bad readout fixture"])
+def test_decision_native_or_protocol_failure_fences_worker_without_diagnostic_payloads(
+    desktop, model, score_executable, text
+):
+    running_decision(desktop, model, score_executable)
+    process = desktop.worker.process
+    desktop.dispatch(decision_command(text=text))
+    finish(desktop)
+    assert desktop.worker is None and process.poll() is not None
+    assert desktop.active_mode is None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert text not in desktop.output.getvalue()
+    assert "private exception fixture" not in desktop.output.getvalue()
+
+
+def test_native_model_context_rejection_preserves_worker_and_allows_retry(desktop, model, score_executable):
+    running_decision(desktop, model, score_executable)
+    worker = desktop.worker
+    desktop.dispatch(decision_command(text="context fixture"))
+    finish(desktop)
+    assert desktop.worker is worker
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    assert any("context limit" in event.get("message", "") for event in events(desktop))
+    desktop.dispatch(decision_command())
+    finish(desktop)
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
+def test_stop_cancels_complete_decision_and_fences_late_results(desktop, model, score_executable):
+    import threading
+
+    identifier = running_decision(desktop, model, score_executable)
+    process = desktop.worker.process
+    entered = threading.Event()
+    request = desktop.worker.request
+
+    def blocking_request(payload):
+        if payload["operation"] == "score":
+            entered.set()
+        return request(payload)
+
+    with patch.object(desktop.worker, "request", side_effect=blocking_request):
+        desktop.dispatch(decision_command(text="wait fixture"))
+        assert entered.wait(timeout=2)
+        desktop.dispatch(decision_command())
+        assert any("Wait for the current operation" in event.get("message", "") for event in events(desktop))
+        started = time.monotonic()
+        desktop.stop()
+        assert time.monotonic() - started < 5
+    assert process.poll() is not None
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    desktop.dispatch({"command": "run", "model_id": identifier, "mode": "decision"})
+    finish(desktop)
+    assert desktop.worker.process.pid != process.pid
+
+
 def advanced_options(**overrides):
     return {
         "command": "configure",

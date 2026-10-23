@@ -1,6 +1,6 @@
 # Stark menu bar app
 
-Stark's native macOS controller lives in the menu bar. Click the cat icon to install a model, choose a model and run it, or stop the loaded worker. Run opens a small chat window. Status and the last request's input/output token speeds appear in the dropdown and chat window.
+Stark's native macOS controller provides the supported manual Chat and Decision playground in the menu bar. Click the cat icon to install a model, choose a model and run it, or stop the loaded workers. Run opens the model workspace; Open Chat provides the conversation view and Decision provides the structured context/question/choices readout. Status and the last request's input/output token speeds appear in the dropdown and chat window.
 
 ## Build and install
 
@@ -10,14 +10,15 @@ The following commands are for rebuilding the app from source during development
 
 Use an Apple silicon Mac with macOS 26.4 or later. Building the Swift app requires Xcode's command line tools, uv and an existing [standalone Stark CLI installation](../../docs/INSTALLATION.md). The resulting app includes that private runtime and runs without a source checkout, system Python, Rust or uv.
 
-Build the current generation worker with the locked toolchain, then build and install the app:
+Build both native workers with the locked toolchain, then build and install the app:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --features optimized
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app installs to `~/Applications/Stark.app`. Quit Stark before replacing an existing installation. The builder stages the new app, verifies its local signature and atomically replaces a matching Stark bundle; unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary. Existing CLI installations are copied without changing them.
+The app installs to `~/Applications/Stark.app`. Quit Stark before replacing an existing installation. The builder stages the new app, verifies its local signature and atomically replaces a matching Stark bundle; unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary; `--score-worker` selects a different scoring binary and defaults to `target/release/stark-score`. Existing CLI installations are copied without changing them.
 
 The local app is ad-hoc signed. This workflow adds no Developer ID signing, notarization, hosted release workflow or Gatekeeper bypass. Use the normal macOS approval flow for a downloaded build after verifying its source.
 
@@ -27,7 +28,7 @@ The local app is ad-hoc signed. This workflow adds no Developer ID signing, nota
 
 The install dialog shows separate Download and Conversion progress bars. Download counts selected checkpoint bytes, including files already in the Hugging Face cache. Conversion counts bytes written to the output weights. Each bar shows a percentage and byte counts once its total is known; preparation uses an indeterminate bar. Validation and publication finish before a stage is marked complete. Local sources skip downloading, and already converted models skip conversion. Stop cancels the install; reopen **Installation Progress** from the menu to follow an active install. Command-I also opens the install dialog while Stark is active.
 
-Run loads one model into one persistent worker. Requests are serialized. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies and conversation history stay in memory and private process pipes. The app exposes no HTTP listener.
+Run loads one model into one persistent worker. Requests are serialized. The bundle also carries the standalone scoring worker for the manual Decision mode. Decision mode accepts a context, question and candidate choices, then displays the supplied-choice distribution at temperature 1; this is a comparative readout, not calibrated confidence. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies, token probabilities and decision history stay in memory and private process pipes. The app exposes no HTTP listener.
 
 Open Chat shows user and model messages in a scrollable conversation. Choose a model and select Run, then enter a message and select Send or press Command-Return. Return inserts a new line. New Chat clears the visible conversation and the worker's conversation context while keeping the model loaded. Switching models and selecting Run starts a fresh conversation; Stop also clears the session. Failed or cancelled messages return to the composer for retry. Chat history is never saved to disk. Replies appear when generation completes.
 
@@ -51,6 +52,8 @@ The app carries the base CLI runtime's licenses, notices and original source man
 `Contents/Resources/menu-bar-manifest.json` records the source revision, source hashes, whether the checkout was dirty, the base runtime manifest hash and all app overlays, including the added Python package files. Its `converter_package` record identifies the wheel, build backend, source hashes and installed converter provenance. `artifacts/menu-bar/Stark.app.manifest.json` additionally records the signed executable hash. The base CLI manifest continues to identify the original distribution; the overlay manifest identifies changed worker and Python modules. Local build checks do not extend previous model qualification to this app or binary.
 
 `--worker-build-record /path/to/record.json` embeds an optional development-worker build record after checking its `worker_sha256` against the selected worker. This preserves the distinction between a fresh locked Cargo build and a development worker that reuses previously compiled engine libraries.
+
+`--score-worker-build-record /path/to/record.json` does the same for the scoring worker and is recorded separately from generation provenance. The builder verifies both workers with their content-free invalid-argument protocol before packaging.
 
 Run the model-free packaging checks with:
 
