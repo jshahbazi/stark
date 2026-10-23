@@ -5,9 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <meta name="theme-color" content="#171b19">
-  <meta name="description" content="Run local language models on Apple silicon with Stark's menu bar app, terminal chat, model converter and generation and scoring workers. Open source, built in Rust and Metal, and derived from Uzu.">
+  <meta name="description" content="Run local language models on Apple silicon with Stark's menu bar app, terminal chat and OpenAI-compatible API for other Mac apps. Open-source Rust and Metal, with model conversion and scoring.">
   <meta property="og:title" content="Stark — run local AI on your Mac">
-  <meta property="og:description" content="Menu bar chat, terminal tools and a Rust/Metal engine for Apple silicon. Explore the developer interfaces and measured Qwen3.5-2B performance.">
+  <meta property="og:description" content="Chat in Stark or connect another Mac app through its local OpenAI-compatible API. Includes terminal tools, model conversion and measured Qwen3.5-2B performance.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://starkengine.app/">
   <meta property="og:image" content="https://starkengine.app/assets/stark-engine.jpg">
@@ -32,7 +32,7 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="status-dot" aria-hidden="true"></span> RUST + METAL <span class="eyebrow-divider">/</span> BUILT FOR APPLE SILICON</p>
         <h1 id="hero-title">Run local AI<br>on your <em>Mac.</em></h1>
-        <p class="hero-description">Chat from your menu bar or Terminal. Stark includes a native engine, model conversion, and generation and scoring tools for developers.</p>
+        <p class="hero-description">Chat from your menu bar or Terminal. Connect another Mac app through Stark's <a href="#connect">OpenAI-compatible API</a>, with text chat and streaming from the model running on your Mac.</p>
         <p class="hero-provenance">An experimental, open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p>
         <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#start">App + terminal tools <span aria-hidden="true">↗</span></a></div>
         <p class="hero-footnote">Latest release · Signed and notarized · Apple silicon · macOS 26.4 or newer.</p>
@@ -82,6 +82,19 @@ open "$HOME/Applications/Stark.app"</code></pre>
         <li><span>02</span><div><h3>Install your model.</h3><p>Click the cat in your menu bar, choose <strong>Install Model</strong> and select a compatible local folder or Hugging Face repository. For terminal use, run <code>stark convert</code>; the Convert tab below shows an example.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md">Converter guide <span aria-hidden="true">↗</span></a></div></li>
         <li><span>03</span><div><h3>Start chatting.</h3><p>Select your model and choose <strong>Run</strong> in the app. In Terminal, use <code>stark chat --model-path /path/to/converted-model</code>. Use <code>/reset</code> for a new conversation and <code>/exit</code> to quit.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#interactive-cli-chat">Terminal chat guide <span aria-hidden="true">↗</span></a></div></li>
       </ol>
+      <section class="api-connect" id="connect" aria-labelledby="connect-title">
+        <p class="eyebrow">LOCAL API / OTHER APPS</p>
+        <h3 id="connect-title">Use Stark in another app.</h3>
+        <p>Connect a desktop app on your Mac to the model running in Stark. The app needs an <strong>OpenAI-compatible</strong> or <strong>Custom OpenAI</strong> provider option.</p>
+        <ol class="start-steps">
+          <li><span aria-hidden="true">01</span><div><h4>Run your model.</h4><p>Open Stark, select your installed model and choose <strong>Run</strong>.</p></div></li>
+          <li><span aria-hidden="true">02</span><div><h4>Copy the details.</h4><p>Open <strong>Connection Details…</strong> from Stark's menu or chat window. Copy the <strong>Base URL</strong>, <strong>API key</strong> and <strong>Model ID</strong>.</p></div></li>
+          <li><span aria-hidden="true">03</span><div><h4>Connect your app.</h4><p>Choose its OpenAI-compatible provider, paste those three values and save the settings. You can now start a text chat.</p></div></li>
+        </ol>
+        <p>Keep Stark open with the model running. After reopening Stark, copy the connection details again: the API key changes, and the address may change. Update the Model ID if you switch models.</p>
+        <p class="api-compatibility">Text chat and streaming are supported. Tool calls, embeddings, images and the Responses API are not supported. Browser apps and other devices cannot connect. For a Terminal example, choose <strong>Copy curl Example</strong> in Connection Details.</p>
+        <p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">Full API guide <span aria-hidden="true">↗</span></a></p>
+      </section>
     </section>
 
     <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
@@ -103,8 +116,8 @@ open "$HOME/Applications/Stark.app"</code></pre>
     </section>
 
     <section class="engine-section wrap section-pad" id="engine" aria-labelledby="engine-title">
-      <div class="section-heading"><p class="eyebrow">03 / FOR DEVELOPERS</p><h2 id="engine-title">Integrate Stark.</h2><p>Start a local generation or scoring worker from your application. Exchange JSON-lines requests and replies over stdin/stdout. Your app controls chat templates, tools and the interface.</p></div>
-      <p class="engine-provenance">Derived from Uzu, Stark adds direct scoring APIs, Rust/Metal optimizations and a streaming model converter. The current integration uses worker processes; no Stark SDK packages are published. <a href="https://github.com/jshahbazi/stark/blob/main/README.md">Read the project overview</a>.</p>
+      <div class="section-heading"><p class="eyebrow">03 / FOR DEVELOPERS</p><h2 id="engine-title">Integrate Stark.</h2><p>Use the menu bar app's local <a href="#connect">OpenAI-compatible API</a> for text chat and streaming, or start generation and scoring workers from your application. Workers exchange JSON-lines requests and replies over private stdin/stdout pipes.</p></div>
+      <p class="engine-provenance">Derived from Uzu, Stark adds direct scoring APIs, Rust/Metal optimizations and a streaming model converter. Direct worker integrations control their own chat templates, tools and interface; no Stark SDK packages are published. <a href="https://github.com/jshahbazi/stark/blob/main/README.md">Read the project overview</a>.</p>
       <div class="engine-grid">
         <div class="capabilities">
           <article><span class="index">01</span><div><h3>Generate locally.</h3><p>Use the generation worker to tokenize, decode and generate text. Your application renders the model's chat template and sends token IDs through private pipes. <a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md">Generation protocol</a>.</p></div></article>
