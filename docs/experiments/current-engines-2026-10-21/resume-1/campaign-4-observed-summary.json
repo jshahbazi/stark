@@ -1,0 +1,655 @@
+{
+  "schema": 1,
+  "mode": "observed_busy_host",
+  "timing_accepted": false,
+  "allow_public_clean_table": false,
+  "estimator": "median output tokens/client seconds per load and workload; geometric mean across four loads, then six workloads",
+  "includes_host_flagged_loads": true,
+  "engines": {
+    "stark_optimized": {
+      "identity": {
+        "id": "stark_optimized",
+        "kind": "stark",
+        "version": "0.0.0-dev.97f15f38201cc0b465a81c45e26a4b5b135d903c.39707877019.1",
+        "source_commit": "97f15f38201cc0b465a81c45e26a4b5b135d903c",
+        "representation": "MLX affine4 g64 repacked unchanged",
+        "executable_sha256": "1cd922689dca98d41efc0727dab32fe472e6e7d199546130c1e555c8a151e517",
+        "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 276.31621897547257,
+          "per_block_median_tokens_per_second": {
+            "0": 341.6955680803863,
+            "1": 251.6130015287991,
+            "2": 259.6827558962204,
+            "3": 261.10186515618875
+          },
+          "min_load_median": 251.6130015287991,
+          "max_load_median": 341.6955680803863
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 267.13780837183396,
+          "per_block_median_tokens_per_second": {
+            "0": 344.2031070371539,
+            "1": 248.54566028840838,
+            "2": 232.44508060740392,
+            "3": 256.0944132783311
+          },
+          "min_load_median": 232.44508060740392,
+          "max_load_median": 344.2031070371539
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 252.56375840543475,
+          "per_block_median_tokens_per_second": {
+            "0": 319.5492358957139,
+            "1": 232.79268408189057,
+            "2": 232.35933552540678,
+            "3": 235.40565407810658
+          },
+          "min_load_median": 232.35933552540678,
+          "max_load_median": 319.5492358957139
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 232.6324170876747,
+          "per_block_median_tokens_per_second": {
+            "0": 304.79011598421954,
+            "1": 219.732697274382,
+            "2": 196.8790441514515,
+            "3": 222.11908418845485
+          },
+          "min_load_median": 196.8790441514515,
+          "max_load_median": 304.79011598421954
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 178.97504707070985,
+          "per_block_median_tokens_per_second": {
+            "0": 226.62386273173348,
+            "1": 162.75198345768854,
+            "2": 167.5679261579098,
+            "3": 166.0149193359175
+          },
+          "min_load_median": 162.75198345768854,
+          "max_load_median": 226.62386273173348
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 281.926929702027,
+          "per_block_median_tokens_per_second": {
+            "0": 343.2438091439422,
+            "1": 264.4509943038171,
+            "2": 260.91342375325104,
+            "3": 266.748450911418
+          },
+          "min_load_median": 260.91342375325104,
+          "max_load_median": 343.2438091439422
+        }
+      },
+      "overall_geomean_tokens_per_second": 245.48144704370287,
+      "sanity": {
+        "arithmetic": {
+          "passes": 0,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 0,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 606.553953297566,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 48,
+        "swapouts": 0
+      }
+    },
+    "mlx_lm": {
+      "identity": {
+        "id": "mlx_lm",
+        "kind": "mlx",
+        "version": "0.32.3.dev6+g72be8c955",
+        "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+        "representation": "MLX affine4 g64",
+        "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+        "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+        "lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 247.72745592087333,
+          "per_block_median_tokens_per_second": {
+            "0": 306.8578535600853,
+            "1": 255.3179818640961,
+            "2": 257.45220236418317,
+            "3": 186.71590471488577
+          },
+          "min_load_median": 186.71590471488577,
+          "max_load_median": 306.8578535600853
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 240.93737920754808,
+          "per_block_median_tokens_per_second": {
+            "0": 306.6173654291955,
+            "1": 236.52156237959127,
+            "2": 250.8175653178013,
+            "3": 185.26410951940764
+          },
+          "min_load_median": 185.26410951940764,
+          "max_load_median": 306.6173654291955
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 219.34304025128668,
+          "per_block_median_tokens_per_second": {
+            "0": 290.9480488446389,
+            "1": 207.4021644582034,
+            "2": 239.51255454013784,
+            "3": 160.15423192772505
+          },
+          "min_load_median": 160.15423192772505,
+          "max_load_median": 290.9480488446389
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 216.57173146384548,
+          "per_block_median_tokens_per_second": {
+            "0": 282.77546652860764,
+            "1": 203.29647360703532,
+            "2": 227.41257184355385,
+            "3": 168.27555515752647
+          },
+          "min_load_median": 168.27555515752647,
+          "max_load_median": 282.77546652860764
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 166.0990834297762,
+          "per_block_median_tokens_per_second": {
+            "0": 221.65754386870893,
+            "1": 155.403708809042,
+            "2": 173.94574691965337,
+            "3": 127.03144355746484
+          },
+          "min_load_median": 127.03144355746484,
+          "max_load_median": 221.65754386870893
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 233.09521303955685,
+          "per_block_median_tokens_per_second": {
+            "0": 314.33456154917076,
+            "1": 200.06041206973293,
+            "2": 267.66901980854567,
+            "3": 175.3807877181207
+          },
+          "min_load_median": 175.3807877181207,
+          "max_load_median": 314.33456154917076
+        }
+      },
+      "overall_geomean_tokens_per_second": 218.81852712598177,
+      "sanity": {
+        "arithmetic": {
+          "passes": 0,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 0,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 691.7603477666845,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 61,
+        "swapouts": 0
+      }
+    },
+    "llama_cpp": {
+      "identity": {
+        "id": "llama_cpp",
+        "kind": "llama",
+        "version": "b11747",
+        "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+        "representation": "GGUF Q4_K_M, unsloth/Qwen3.5-2B-GGUF@f6d5376be1edb4d416d56da11e5397a961aca8ae (different quantizer)",
+        "executable_sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+        "model_sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 163.62367418322808,
+          "per_block_median_tokens_per_second": {
+            "0": 204.96695266198813,
+            "1": 171.37150808379673,
+            "2": 141.55392382583702,
+            "3": 144.15847750756677
+          },
+          "min_load_median": 141.55392382583702,
+          "max_load_median": 204.96695266198813
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 159.76496598178034,
+          "per_block_median_tokens_per_second": {
+            "0": 197.78475910847484,
+            "1": 169.59871282777692,
+            "2": 138.39125760413324,
+            "3": 140.34669003728817
+          },
+          "min_load_median": 138.39125760413324,
+          "max_load_median": 197.78475910847484
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 151.30676303193542,
+          "per_block_median_tokens_per_second": {
+            "0": 184.81134675236083,
+            "1": 160.29780326993017,
+            "2": 130.04591483634158,
+            "3": 136.04432949837934
+          },
+          "min_load_median": 130.04591483634158,
+          "max_load_median": 184.81134675236083
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 146.02269734563347,
+          "per_block_median_tokens_per_second": {
+            "0": 175.9208658298056,
+            "1": 153.28417316885466,
+            "2": 129.43040556436588,
+            "3": 130.26582209503792
+          },
+          "min_load_median": 129.43040556436588,
+          "max_load_median": 175.9208658298056
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 113.02800568631247,
+          "per_block_median_tokens_per_second": {
+            "0": 132.12959488265759,
+            "1": 119.97138025928307,
+            "2": 98.95521713241597,
+            "3": 104.0465787307738
+          },
+          "min_load_median": 98.95521713241597,
+          "max_load_median": 132.12959488265759
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 160.0554339805759,
+          "per_block_median_tokens_per_second": {
+            "0": 184.64316986247343,
+            "1": 171.78173051454243,
+            "2": 140.86147749463157,
+            "3": 146.88560386132147
+          },
+          "min_load_median": 140.86147749463157,
+          "max_load_median": 184.64316986247343
+        }
+      },
+      "overall_geomean_tokens_per_second": 147.85765513164188,
+      "sanity": {
+        "arithmetic": {
+          "passes": 4,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 4,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 697.8418668159159,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 323,
+        "swapouts": 0
+      }
+    },
+    "tensorfold_default": {
+      "identity": {
+        "id": "tensorfold_default",
+        "kind": "tensorfold",
+        "version": "1.1.1",
+        "representation": "MLX affine4 g64",
+        "draft": true,
+        "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+        "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 132.77343702082464,
+          "per_block_median_tokens_per_second": {
+            "0": 158.30155627703857,
+            "1": 144.07351357738278,
+            "2": 115.56519036169716,
+            "3": 117.90939737228602
+          },
+          "min_load_median": 115.56519036169716,
+          "max_load_median": 158.30155627703857
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 131.77978666455064,
+          "per_block_median_tokens_per_second": {
+            "0": 150.00983707256674,
+            "1": 145.22661806073114,
+            "2": 115.43741283951998,
+            "3": 119.91752388487592
+          },
+          "min_load_median": 115.43741283951998,
+          "max_load_median": 150.00983707256674
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 192.54283886917725,
+          "per_block_median_tokens_per_second": {
+            "0": 216.94019001101566,
+            "1": 204.37498176834586,
+            "2": 181.18588629320897,
+            "3": 171.08714180730644
+          },
+          "min_load_median": 171.08714180730644,
+          "max_load_median": 216.94019001101566
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 114.09649431691601,
+          "per_block_median_tokens_per_second": {
+            "0": 127.13611544673249,
+            "1": 119.6358490024015,
+            "2": 111.02368719005,
+            "3": 100.35598605141938
+          },
+          "min_load_median": 100.35598605141938,
+          "max_load_median": 127.13611544673249
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 70.53956409061944,
+          "per_block_median_tokens_per_second": {
+            "0": 81.25575905564082,
+            "1": 74.31491481955575,
+            "2": 67.71437468376013,
+            "3": 60.550826841604014
+          },
+          "min_load_median": 60.550826841604014,
+          "max_load_median": 81.25575905564082
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 144.754783388587,
+          "per_block_median_tokens_per_second": {
+            "0": 165.98302677375105,
+            "1": 152.05535895740056,
+            "2": 138.2685856440552,
+            "3": 125.81799614948451
+          },
+          "min_load_median": 125.81799614948451,
+          "max_load_median": 165.98302677375105
+        }
+      },
+      "overall_geomean_tokens_per_second": 125.59457889128592,
+      "sanity": {
+        "arithmetic": {
+          "passes": 0,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 0,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 610.4928461130022,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 2,
+        "swapouts": 0
+      }
+    },
+    "tensorfold_plain": {
+      "identity": {
+        "id": "tensorfold_plain",
+        "kind": "tensorfold",
+        "version": "1.1.1",
+        "representation": "MLX affine4 g64",
+        "draft": false,
+        "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+        "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 142.53116827964016,
+          "per_block_median_tokens_per_second": {
+            "0": 163.3704514496959,
+            "1": 153.08209261279887,
+            "2": 120.21896288468903,
+            "3": 137.26774622404665
+          },
+          "min_load_median": 120.21896288468903,
+          "max_load_median": 163.3704514496959
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 140.91531116975267,
+          "per_block_median_tokens_per_second": {
+            "0": 162.4733950321814,
+            "1": 150.28240318486976,
+            "2": 120.83707998788508,
+            "3": 133.64174171827088
+          },
+          "min_load_median": 120.83707998788508,
+          "max_load_median": 162.4733950321814
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 121.82449912066,
+          "per_block_median_tokens_per_second": {
+            "0": 138.83771237661094,
+            "1": 130.84283871793397,
+            "2": 103.92531534240553,
+            "3": 116.67015634000212
+          },
+          "min_load_median": 103.92531534240553,
+          "max_load_median": 138.83771237661094
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 113.32710800866127,
+          "per_block_median_tokens_per_second": {
+            "0": 133.11059257293175,
+            "1": 123.19284090851171,
+            "2": 99.96908182897502,
+            "3": 100.61701617353589
+          },
+          "min_load_median": 99.96908182897502,
+          "max_load_median": 133.11059257293175
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 70.39190386269959,
+          "per_block_median_tokens_per_second": {
+            "0": 79.2718733772108,
+            "1": 73.91872032171824,
+            "2": 61.302003062049224,
+            "3": 68.3506453289574
+          },
+          "min_load_median": 61.302003062049224,
+          "max_load_median": 79.2718733772108
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 141.9954205686144,
+          "per_block_median_tokens_per_second": {
+            "0": 160.67973594033936,
+            "1": 149.62938961467134,
+            "2": 124.61930415051552,
+            "3": 135.68568075474084
+          },
+          "min_load_median": 124.61930415051552,
+          "max_load_median": 160.67973594033936
+        }
+      },
+      "overall_geomean_tokens_per_second": 118.51925691695729,
+      "sanity": {
+        "arithmetic": {
+          "passes": 0,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 0,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 554.3353544565189,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 580,
+        "swapouts": 0
+      }
+    },
+    "vllm_metal": {
+      "identity": {
+        "id": "vllm_metal",
+        "kind": "vllm",
+        "version": "0.32.0",
+        "representation": "MLX affine4 g64; stock MLX model layers plus vLLM Metal attention/scheduler",
+        "executable_sha256": "eb0dd353515c4d16c7ad8199515461575d1ccaf55035d35ba23c5fad472fc156",
+        "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+        "lock_sha256": "7e2318038023d5df589e83fbe1a349b5d50c0e32a4c6774b3efb1dc9d1e00cc2"
+      },
+      "load_statuses": {
+        "excluded_interference": 4
+      },
+      "workloads": {
+        "fibonacci-module": {
+          "geomean_tokens_per_second": 211.28186822363207,
+          "per_block_median_tokens_per_second": {
+            "0": 235.60659957384522,
+            "1": 218.02209546038515,
+            "2": 147.5500354624339,
+            "3": 262.9187958723495
+          },
+          "min_load_median": 147.5500354624339,
+          "max_load_median": 262.9187958723495
+        },
+        "gpu-explanation": {
+          "geomean_tokens_per_second": 210.85941767700234,
+          "per_block_median_tokens_per_second": {
+            "0": 253.6772258066512,
+            "1": 207.1357177167608,
+            "2": 146.46572065812043,
+            "3": 256.8618140105547
+          },
+          "min_load_median": 146.46572065812043,
+          "max_load_median": 256.8618140105547
+        },
+        "copy-edit": {
+          "geomean_tokens_per_second": 167.31427522587936,
+          "per_block_median_tokens_per_second": {
+            "0": 221.7578362617242,
+            "1": 202.42684195679357,
+            "2": 140.46928910550912,
+            "3": 124.28065290815499
+          },
+          "min_load_median": 124.28065290815499,
+          "max_load_median": 221.7578362617242
+        },
+        "context-medium": {
+          "geomean_tokens_per_second": 148.7829422088259,
+          "per_block_median_tokens_per_second": {
+            "0": 172.3728222946589,
+            "1": 195.67584388865865,
+            "2": 133.5105303156333,
+            "3": 108.8155701470582
+          },
+          "min_load_median": 108.8155701470582,
+          "max_load_median": 195.67584388865865
+        },
+        "context-long": {
+          "geomean_tokens_per_second": 135.9297446897513,
+          "per_block_median_tokens_per_second": {
+            "0": 165.27027104314837,
+            "1": 157.88541263389865,
+            "2": 122.45273791283905,
+            "3": 106.84464464831576
+          },
+          "min_load_median": 106.84464464831576,
+          "max_load_median": 165.27027104314837
+        },
+        "long-output": {
+          "geomean_tokens_per_second": 188.48210845420343,
+          "per_block_median_tokens_per_second": {
+            "0": 252.03849573014332,
+            "1": 215.00550884798974,
+            "2": 183.79618824337965,
+            "3": 126.71486311547129
+          },
+          "min_load_median": 126.71486311547129,
+          "max_load_median": 252.03849573014332
+        }
+      },
+      "overall_geomean_tokens_per_second": 174.68448499154846,
+      "sanity": {
+        "arithmetic": {
+          "passes": 0,
+          "samples": 4
+        },
+        "prime": {
+          "passes": 0,
+          "samples": 4
+        },
+        "sorting": {
+          "passes": 4,
+          "samples": 4
+        },
+        "python": {
+          "passes": 0,
+          "samples": 4
+        }
+      },
+      "measurement_max_external_cpu_percent": 556.6250685431646,
+      "measurement_max_thermal_state": 1,
+      "paging_delta_totals": {
+        "pageouts": 389,
+        "swapouts": 0
+      }
+    }
+  },
+  "receipt_sha256": "a198d7b1cb8664e2132ede11da3ad78176a682ca0a8120f1fb23cace1c156627",
+  "summary_program_sha256": "8e39bab9a1ae978d52c5bf4b2e43593f59dff85429b6e05df3ce090e36e6c99c"
+}

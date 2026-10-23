@@ -100,11 +100,24 @@ uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 
 ## Measured performance
 
-**7.36% higher end-to-end Qwen3.5-2B generation throughput than pinned MLX-LM** across four accepted paired runs on an Apple M5 Max with 40 GPU cores and 128 GiB of memory.
+**Latest generation comparison — 2026-10-22:** Qwen3.5-2B (4-bit), Apple M5 Max (40 GPU cores, 128 GiB), one request at a time.
 
-This preliminary result uses one model at concurrency one, the same affine W4/G64 checkpoint and input tokens, greedy sampling and fresh state. Rates include prefill, decode, IPC/readout and cleanup; loading and warmup are excluded. The figure is the geometric mean of paired workload/load ratios across six workloads, with 20 requests per engine/workload.
+| Engine / configuration | Build / version | End-to-end tokens/s |
+| --- | --- | ---: |
+| Stark | `97f15f38` | **245.5** |
+| MLX-LM | `72be8c955` / MLX 0.32.4 | 218.8 |
+| vLLM Metal | 0.32.0 | 174.7 |
+| llama.cpp | b11747 | 147.9 |
+| TensorFold (drafting on) | 1.1.1 | 125.6 |
+| TensorFold (drafting off) | 1.1.1 | 118.5 |
 
-Four of six planned pairs passed the frozen host guards; two were excluded for interference. Whole-campaign `timing_accepted` remains `false`. Answer-quality equivalence is unqualified; HTTP serving, concurrent requests, other models and other Macs remain outside this result. [Short write-up](docs/STARK_BENCHMARK_BRIEF_2026_10_21.md) · [full protocol, versions, workload table and exclusions](docs/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md)
+**Stark recorded 12.2% higher observed aggregate throughput than MLX-LM** and led all six workloads in this run. All engines were measured afresh: four independent loads per configuration and three repeats per workload, totaling 432 performance requests.
+
+Rates include input processing, generation, transport/readout and request cleanup; loading and warmup are excluded. The aggregate is the geometric mean of six workload rates, each based on four per-load medians. These are observed desktop results; performance varies with system load, model and hardware.
+
+llama.cpp uses a separate Q4_K_M quantizer; the other configurations use affine W4/G64. MetalRT remains unmeasured because stock support for this exact model is unverified.
+
+[Interactive comparison](https://starkengine.app/#benchmarks) · [Method, versions and quality checks](https://github.com/jshahbazi/stark/blob/b64daf27015d346761e369885ea320b55222b846/docs/QWEN35_ENGINE_COMPARISON_2026_10_22.md) · [Machine-readable results](https://raw.githubusercontent.com/jshahbazi/stark/b64daf27015d346761e369885ea320b55222b846/website/public/benchmark-results.json)
 
 Separate source-bound studies record **243 JevK5 cases / 486 cold-and-cache-hit scoring replies** matching frozen Uzu references ([validation](docs/VALIDATION.md)), and **0.532 s versus 1.853 s** conversion time with **92.0% lower sampled process-tree RSS** for LFM2-350M MLX 4-bit across five warm-file repeats ([conversion study](docs/MODEL_CONVERSION_MILESTONE_4_MLX.md)).
 

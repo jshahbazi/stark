@@ -1,0 +1,39 @@
+{
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "executable_sha256": "66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89",
+      "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d"
+    },
+    {
+      "id": "mlx_lm",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac"
+    },
+    {
+      "id": "llama_cpp",
+      "executable_sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+      "model_sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+    },
+    {
+      "id": "tensorfold_default",
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+    },
+    {
+      "id": "tensorfold_plain",
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+    },
+    {
+      "id": "vllm_metal",
+      "executable_sha256": "8413e6d99c128c209a81ec98b83203739a332f889e6fa668340d06afe701017c",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "5bc1702fca04bd4deb945a562d15918f28740f13856e3dcdd20961a934dff601"
+    }
+  ],
+  "config_sha256": "2255c304254002e208f22e977ace5a24cdc44b7685af45362c73b07b577ce8be",
+  "protocol_sha256": "5c485853c278a09e471f101830639b1a50c4dc447632798ca90f0506c6d5fbb7",
+  "tools_lock_sha256": "acf7c45b6f7feac003986526a309a911d35bf68266e4455fbe33457b354378f9"
+}
