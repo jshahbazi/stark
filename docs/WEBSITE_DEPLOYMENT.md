@@ -82,3 +82,25 @@ The multi-engine expansion above was withdrawn from the marketing page because i
 - Uploaded archive content hash: `sha256:493dc0c53b55624303ee9d101fd40c6db5050e797b4f1e3b26703dbfa211a9f7`.
 
 An immediate rollback to saved version 5 preceded the source correction, using deployment `appgdep_6ad9242d35208191857bda11fc5d727f`. Anonymous HTTP and browser checks confirmed the older table was absent and the newer Stark rates were restored. A [separate fresh campaign protocol](experiments/current-engines-2026-10-21/PROTOCOL.md) was frozen before any new admission or measurement, to obtain contemporaneous results rather than reusing the historical pilot.
+
+## Fresh multi-engine publication (2026-10-22 local time)
+
+The user requested the complete fresh comparison and directed host-activity flags to be ignored for the website presentation. The public page now uses campaign 4 from the [Qwen3.5-2B comparison](QWEN35_ENGINE_COMPARISON_2026_10_22.md): five engines, six configurations and six performance workloads. No values from older campaigns were mixed into the chart. The 12.2% Stark/MLX-LM headline is the rounded observed aggregate from this same run.
+
+The interface has an overall view, six workload selections, token-rate and MLX-relative modes, downloadable numeric results, and a compact methodology disclosure. It scopes results to Qwen3.5-2B on M5 Max at concurrency one, identifies llama.cpp's separate Q4_K_M quantizer, and links the full evidence. Internal host-guard jargon is absent from the page. The acquisition receipts and flags remain unchanged, and publication makes no clean-host or multi-model claim.
+
+The existing signed v0.1.2 installer presentation was preserved from Site source b31a91786756c85c431a1ec5dda18d448ff1d33c (version 9), which was newer than the benchmark branch's website copy.
+
+- Stark website source: fb6f101d on codex/current-engine-benchmark-resume.
+- Public report source: b64daf27015d346761e369885ea320b55222b846.
+- Site source: 3b11db0f1b8bdad3dbc44790bd5ff7b936a16f38.
+- Saved version 10: appgprj_6ad8f59df1f4819185403a1dff22a0fb~appgver_96242c7c95588191ba9f06f73855212b.
+- Deployment: appgdep_6adab7646cb081918dd6906ff467986b, succeeded at 2026-10-23T01:25:00.532450Z (2026-10-22 Pacific time).
+- Archive hash: sha256:480bc3078739e54776279383e16587646c92923c644e5bf5483200ff3b80830d.
+- Audience remains public.
+
+The static build and JavaScript syntax check passed. All 42 exported rates match the observed summary exactly. Browser checks verified 84 displayed cells across seven workload choices and two modes; the 390-pixel layout had no document overflow. Installed command tabs remain functional. Production browser verification confirmed all six rows, the new headline and retained install section on starkengine.app.
+
+During final domain checks, starkengine.io resolved but returned HTTP 404. Its old Sites custom-hostname record was still pending/active_redeploying. Refreshing that existing record returned active status with active TLS at 2026-10-23T01:28:27.346647Z; no DNS record was changed. This supersedes the earlier missing-delegation diagnosis for the current observation.
+
+Anonymous HTTP rechecks after hostname refresh returned 200 for starkengine.io and its benchmark-results.json. Both public domains serve the same 42 rates, byte-for-byte equal to the tracked data file. The live comparison screenshot is retained privately in the task runtime. The owned local preview server was stopped after verification.
