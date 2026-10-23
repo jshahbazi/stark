@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 from .chat import Worker, load_template
+from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .registry import get_model
 from .sources import huggingface_repository
 
@@ -92,8 +93,9 @@ def converter_progress(value):
 
 
 class Desktop:
-    def __init__(self, executable, data_dir, output=None, timeout=300):
+    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None):
         self.executable = executable
+        self.score_executable = score_executable or Path(executable).with_name("stark-score")
         self.data_dir = data_dir.expanduser().absolute()
         self.output = output or sys.stdout
         self.timeout = timeout
@@ -107,6 +109,8 @@ class Desktop:
         self.install_epoch = None
         self.install_progress = {}
         self.active_model = None
+        self.active_mode = None
+        self.vocab_size = None
         self.template = None
         self.codec = None
         self.messages = []
@@ -175,6 +179,8 @@ class Desktop:
         with self.lock:
             worker, self.worker = self.worker, None
             self.active_model = None
+            self.active_mode = None
+            self.vocab_size = None
             self.messages = []
             self.codec = None
             self.template = None
@@ -445,7 +451,7 @@ class Desktop:
             if managed is not None:
                 shutil.rmtree(managed, ignore_errors=True)
 
-    def run(self, epoch, identifier):
+    def run(self, epoch, identifier, mode="chat"):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
@@ -453,9 +459,32 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
-            worker = Worker(self.executable, Path(model["path"]), self.timeout)
+            worker = (
+                ScoreWorker(self.score_executable, Path(model["path"]), self.timeout)
+                if mode == "decision"
+                else Worker(self.executable, Path(model["path"]), self.timeout)
+            )
             self.worker = worker
         ready = worker.read()
+        if mode == "decision":
+            if (
+                ready.get("ready") is not True
+                or ready.get("mode") != "exact-token-scoring-cache-v1"
+                or type(ready.get("vocab_size")) is not int
+                or not 0 < ready["vocab_size"] <= 2**32 - 1
+            ):
+                self.close_worker()
+                raise DesktopError("Stark could not load this model for decisions. Check model support and memory.")
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                self.codec, self.template = codec, template
+                self.active_model, self.active_mode = identifier, mode
+                self.vocab_size = ready["vocab_size"]
+                self.messages = []
+                self.emit("ready", epoch, model_id=identifier, mode=mode)
+                self.status("ready", "Ready", epoch)
+            return
         if (
             ready.get("ready") is not True
             or ready.get("mode") != "text-generation-v1"
@@ -475,8 +504,9 @@ class Desktop:
             self.context = min(self.context, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             self.active_model = identifier
+            self.active_mode = mode
             self.reset()
-            self.emit("ready", epoch, model_id=identifier, **self.settings_summary())
+            self.emit("ready", epoch, model_id=identifier, mode=mode, **self.settings_summary())
             self.status("ready", "Ready", epoch)
 
     def settings_summary(self):
@@ -494,6 +524,8 @@ class Desktop:
                 raise DesktopError("Wait for the current operation or choose Stop.")
             if self.worker is None:
                 raise DesktopError("Run a model before changing advanced options.")
+            if self.active_mode != "chat":
+                raise DesktopError("Advanced chat options are available in Chat mode.")
             context, maximum = payload.get("context_tokens"), payload.get("max_new_tokens")
             system, thinking = payload.get("system_prompt"), payload.get("thinking")
             if (
@@ -520,6 +552,8 @@ class Desktop:
 
     def generate(self, epoch, text):
         with self.lock:
+            if self.active_mode != "chat":
+                raise DesktopError("Choose Chat mode and run a model before sending a message.")
             worker, template, codec = self.worker, self.template, self.codec
             candidate = [*self.messages, {"role": "user", "content": text}]
         if worker is None or template is None:
@@ -573,6 +607,21 @@ class Desktop:
             )
             self.status("ready", "Ready", epoch)
 
+    def decide(self, epoch, text, question, answers):
+        with self.lock:
+            if self.active_mode != "decision" or self.worker is None:
+                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
+            worker, codec, template, vocab_size = self.worker, self.codec, self.template, self.vocab_size
+        try:
+            reply = decide(worker, codec, template, text, question, answers, vocab_size)
+        except DecisionInputError as error:
+            raise DesktopError(str(error)) from None
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            self.emit("decision", epoch, **reply)
+            self.status("ready", "Ready", epoch)
+
     def monitor(self):
         with self.lock:
             if self.worker is None or self.job is not None or self.worker.process.poll() is None:
@@ -591,12 +640,21 @@ class Desktop:
             self.stop()
             return command != "quit"
         elif command == "run" and isinstance(payload.get("model_id"), str):
+            mode = payload.get("mode", "chat")
+            if mode not in ("chat", "decision"):
+                raise DesktopError("Choose Chat or Decision mode.")
             self.stop(quiet=True)
-            self.start(self.run, "loading", "Loading model…", payload["model_id"])
+            self.start(self.run, "loading", "Loading model…", payload["model_id"], mode)
         elif command == "install" and isinstance(payload.get("source"), str) and isinstance(payload.get("kind"), str):
             self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
         elif command == "generate" and isinstance(payload.get("text"), str) and payload["text"].strip():
             self.start(self.generate, "generating", "Generating…", payload["text"])
+        elif command == "decide":
+            try:
+                answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))
+            except DecisionInputError as error:
+                raise DesktopError(str(error)) from None
+            self.start(self.decide, "deciding", "Evaluating decision…", payload["text"], payload["question"], answers)
         elif command == "reset":
             with self.lock:
                 if self.job is not None:
@@ -648,6 +706,7 @@ def serve(desktop):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", type=Path, required=True)
+    parser.add_argument("--score-worker", type=Path)
     parser.add_argument("--data-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     desktop = None
@@ -658,7 +717,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        desktop = Desktop(args.worker, args.data_dir)
+        desktop = Desktop(args.worker, args.data_dir, score_executable=args.score_worker)
         serve(desktop)
         return 0
     except (KeyboardInterrupt, BrokenPipeError):

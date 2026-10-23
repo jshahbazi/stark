@@ -815,6 +815,8 @@ def build_application(
             str(bundle),
             "--worker",
             str(bundle / "libexec/stark-generate"),
+            "--score-worker",
+            str(bundle / "libexec/stark-score"),
             "--output",
             str(output),
             "--version",

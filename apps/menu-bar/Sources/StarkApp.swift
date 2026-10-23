@@ -13,6 +13,19 @@ struct ChatMessage: Identifiable {
     let isUser: Bool
 }
 
+enum PlaygroundMode: String, CaseIterable, Identifiable {
+    case chat, decision
+    var id: String { rawValue }
+    var title: String { self == .chat ? "Chat" : "Decision" }
+}
+
+struct DecisionResult {
+    let answers: [String]
+    let probabilities: [Double]
+    let choiceIndex: Int
+    var choice: String { answers[choiceIndex] }
+}
+
 struct ChatOptions {
     var useModelSystemPrompt = true
     var systemPrompt = ""
@@ -56,6 +69,12 @@ final class EngineController: ObservableObject {
     @Published var errorMessage: String?
     @Published var messages: [ChatMessage] = []
     @Published var draft = ""
+    @Published private(set) var mode = PlaygroundMode(rawValue: UserDefaults.standard.string(forKey: "playgroundMode") ?? "") ?? .chat
+    @Published private(set) var loadedMode: PlaygroundMode?
+    @Published var decisionText = ""
+    @Published var decisionQuestion = ""
+    @Published var decisionAnswers = "Yes, No"
+    @Published private(set) var decisionResult: DecisionResult?
     @Published var finishReason = ""
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
@@ -75,8 +94,10 @@ final class EngineController: ObservableObject {
     private var shuttingDown = false
     private var pendingMessageID: UUID?
     private var pendingOptions: ChatOptions?
+    private var pendingDecisionAnswers: [String]?
 
-    var busy: Bool { ["loading", "generating", "installing", "stopping", "configuring"].contains(state) }
+    var busy: Bool { ["loading", "generating", "deciding", "installing", "stopping", "configuring"].contains(state) }
+    var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
     var statusColor: Color {
         if state == "error" { return .red }
@@ -94,6 +115,7 @@ final class EngineController: ObservableObject {
         child.executableURL = python
         child.arguments = ["-I", "-B", "-m", "stark_convert.desktop", "--worker",
                            runtime.appendingPathComponent("libexec/stark-generate").path,
+                           "--score-worker", runtime.appendingPathComponent("libexec/stark-score").path,
                            "--data-dir", data.path]
         let incoming = Pipe()
         let outgoing = Pipe()
@@ -112,10 +134,12 @@ final class EngineController: ObservableObject {
                 self.state = "error"
                 self.message = "Stark stopped. Quit and reopen the app to restart."
                 self.loadedID = ""
+                self.loadedMode = nil
                 self.pendingOptions = nil
                 self.input = nil
                 self.discardPendingMessage()
                 self.clearConversation()
+                self.clearDecision()
             }
         }
         output = outgoing.fileHandleForReading
@@ -165,11 +189,16 @@ final class EngineController: ObservableObject {
             message = event["message"] as? String ?? ""
             if state == "idle" || state == "error" {
                 loadedID = ""
+                loadedMode = nil
                 discardPendingMessage()
                 clearConversation()
+                clearDecision()
             }
         case "ready":
+            guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
+                  event["model_id"] as? String == selectedID, state != "stopping" else { return }
             loadedID = event["model_id"] as? String ?? selectedID
+            loadedMode = readyMode
             applyLimits(event)
             state = "ready"
             message = "Ready"
@@ -190,7 +219,8 @@ final class EngineController: ObservableObject {
             }
             onInstalled?()
         case "reply":
-            guard pendingMessageID != nil, let text = event["text"] as? String else { return }
+            guard mode == .chat, loadedMode == .chat, pendingMessageID != nil,
+                  let text = event["text"] as? String else { return }
             messages.append(ChatMessage(text: text, isUser: false))
             pendingMessageID = nil
             finishReason = event["finish_reason"] as? String ?? ""
@@ -198,12 +228,29 @@ final class EngineController: ObservableObject {
             outputTokens = event["output_tokens"] as? Int ?? 0
             inputSpeed = rate(event["input_tokens_per_second"])
             outputSpeed = rate(event["output_tokens_per_second"])
+        case "decision":
+            guard mode == .decision, loadedMode == .decision, state == "deciding",
+                  let expected = pendingDecisionAnswers else { return }
+            guard let answers = event["answers"] as? [String], answers == expected,
+                  let probabilities = event["probabilities"] as? [Double], probabilities.count == answers.count,
+                  let index = event["choice_index"] as? Int, answers.indices.contains(index),
+                  probabilities.allSatisfy({ $0.isFinite && (0...1).contains($0) }),
+                  abs(probabilities.reduce(0, +) - 1) <= 0.0001,
+                  probabilities[index] == probabilities.max() else {
+                clearDecision()
+                errorMessage = "Stark returned an invalid decision. Run the model again."
+                stopAfterInvalidDecision()
+                return
+            }
+            decisionResult = DecisionResult(answers: answers, probabilities: probabilities, choiceIndex: index)
+            pendingDecisionAnswers = nil
         case "error":
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
             if state == "installing" { endInstallProgress("failed") }
             discardPendingMessage()
             pendingOptions = nil
-            if state == "configuring" {
+            clearDecision()
+            if state == "configuring" || state == "deciding" {
                 state = loadedID.isEmpty ? "idle" : "ready"
                 message = loadedID.isEmpty ? "Stopped" : "Ready"
             }
@@ -234,7 +281,7 @@ final class EngineController: ObservableObject {
 
     @discardableResult
     func configure(_ updated: ChatOptions) -> Bool {
-        guard state == "ready", loadedID == selectedID else { return false }
+        guard modelReady, mode == .chat else { return false }
         errorMessage = nil
         let payload: [String: Any] = [
             "command": "configure", "context_tokens": updated.contextTokens,
@@ -270,8 +317,21 @@ final class EngineController: ObservableObject {
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
         errorMessage = nil
         clearConversation()
+        clearDecision()
+        loadedMode = nil
         state = "loading"; message = "Loading model…"
-        send(["command": "run", "model_id": selectedID])
+        send(["command": "run", "model_id": selectedID, "mode": mode.rawValue])
+    }
+
+    func changeMode(_ updated: PlaygroundMode) {
+        guard !busy, updated != mode else { return }
+        let reload = !loadedID.isEmpty
+        mode = updated
+        UserDefaults.standard.set(updated.rawValue, forKey: "playgroundMode")
+        errorMessage = nil
+        clearConversation()
+        clearDecision()
+        if reload { run() }
     }
 
     func install(source: String, kind: String) {
@@ -284,7 +344,7 @@ final class EngineController: ObservableObject {
 
     func generate() {
         let text = draft
-        guard state == "ready", loadedID == selectedID,
+        guard modelReady, mode == .chat,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         errorMessage = nil
         state = "generating"; message = "Generating…"; finishReason = ""
@@ -294,6 +354,42 @@ final class EngineController: ObservableObject {
             pendingMessageID = entry.id
             draft = ""
         }
+    }
+
+    var parsedDecisionAnswers: [String] {
+        decisionAnswers.components(separatedBy: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+
+    var decisionValidation: String? {
+        let answers = parsedDecisionAnswers
+        if decisionText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter text to evaluate." }
+        if decisionQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Enter a question." }
+        if !(2...16).contains(answers.count) { return "Enter between 2 and 16 answers." }
+        if answers.contains(where: { $0.isEmpty }) { return "Each answer must have a label." }
+        if Set(answers.map { $0.lowercased() }).count != answers.count { return "Use distinct answers." }
+        return nil
+    }
+
+    func decide() {
+        guard modelReady, mode == .decision else { return }
+        if let validation = decisionValidation { errorMessage = validation; return }
+        let answers = parsedDecisionAnswers
+        errorMessage = nil
+        clearDecision()
+        state = "deciding"; message = "Deciding…"
+        if send(["command": "decide", "text": decisionText, "question": decisionQuestion, "answers": answers]) {
+            pendingDecisionAnswers = answers
+        }
+    }
+
+    func clearDecision() {
+        decisionResult = nil
+        pendingDecisionAnswers = nil
+    }
+
+    private func stopAfterInvalidDecision() {
+        state = "stopping"; message = "Stopping…"
+        send(["command": "stop"])
     }
 
     func reset() {
@@ -307,6 +403,7 @@ final class EngineController: ObservableObject {
         if state == "installing" { endInstallProgress("cancelled") }
         discardPendingMessage()
         clearConversation()
+        clearDecision()
         state = "stopping"; message = "Stopping…"
         send(["command": "stop"])
     }
@@ -407,9 +504,11 @@ struct MenuView: View {
                 if engine.models.isEmpty { Text("Install a model to begin").tag("") }
                 ForEach(engine.models) { Text($0.name).tag($0.id) }
             }.disabled(engine.busy)
-            SpeedView(engine: engine)
-            Text("Last request").font(.caption2).foregroundStyle(.secondary)
-                .padding(.top, -10)
+            if engine.mode == .chat {
+                SpeedView(engine: engine)
+                Text("Last request").font(.caption2).foregroundStyle(.secondary)
+                    .padding(.top, -10)
+            }
             HStack {
                 Button(engine.state == "installing" ? "Installation Progress…" : "Install Model…", action: install)
                     .disabled(engine.busy && engine.state != "installing")
@@ -422,7 +521,7 @@ struct MenuView: View {
             }
             Divider()
             HStack {
-                Button("Open Chat", action: console).buttonStyle(.link)
+                Button("Open Playground", action: console).buttonStyle(.link)
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }.buttonStyle(.link)
             }.font(.caption)
@@ -619,30 +718,26 @@ struct AdvancedOptionsView: View {
     }
 }
 
-struct ChatView: View {
+struct PlaygroundView: View {
     @ObservedObject var engine: EngineController
-    @FocusState private var composerFocused: Bool
-    @State private var advancedOptions = false
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Stark Chat").font(.title3.weight(.semibold))
-                    StatusLine(engine: engine)
-                }
+                Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Advanced Options…") { advancedOptions = true }
-                    .disabled(engine.state != "ready" || engine.loadedID != engine.selectedID)
-                    .help("Run a model to adjust its chat options.")
-                Button("New Chat") { engine.reset(); composerFocused = true }
-                    .disabled(engine.busy || engine.messages.isEmpty || engine.loadedID != engine.selectedID)
+                Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
+                    ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
+                }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
+                    .accessibilityLabel("Chat or Decision mode")
             }
+            StatusLine(engine: engine)
             HStack {
                 Picker("Model", selection: $engine.selectedID) {
                     if engine.models.isEmpty { Text("Install a model to begin").tag("") }
                     ForEach(engine.models) { Text($0.name).tag($0.id) }
                 }.disabled(engine.busy)
-                if engine.loadedID != engine.selectedID || engine.loadedID.isEmpty {
+                if engine.loadedID != engine.selectedID || engine.loadedID.isEmpty || engine.loadedMode != engine.mode {
                     Button("Run", action: engine.run).disabled(engine.selectedID.isEmpty || engine.busy)
                 }
                 if !engine.loadedID.isEmpty || engine.busy {
@@ -650,10 +745,88 @@ struct ChatView: View {
                 }
             }
             if !engine.loadedID.isEmpty && engine.loadedID != engine.selectedID {
-                Text("Run switches models and starts a new chat.").font(.caption).foregroundStyle(.secondary)
+                Text("Select Run to load the chosen model.").font(.caption).foregroundStyle(.secondary)
+            }
+            if let error = engine.errorMessage {
+                Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
+            }
+            if engine.mode == .chat { ChatContentView(engine: engine) }
+            else { DecisionView(engine: engine) }
+        }.padding(20).frame(minWidth: 500, minHeight: 600)
+            .onChange(of: engine.selectedID) { engine.clearDecision() }
+    }
+}
+
+struct DecisionView: View {
+    @ObservedObject var engine: EngineController
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Text to evaluate").font(.callout)
+                    TextEditor(text: $engine.decisionText).font(.body).frame(minHeight: 100, maxHeight: 150)
+                        .padding(5).overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary))
+                        .accessibilityLabel("Text to evaluate")
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Question").font(.callout)
+                    TextField("Which answer fits this text?", text: $engine.decisionQuestion)
+                        .textFieldStyle(.roundedBorder).accessibilityLabel("Decision question")
+                }
+                VStack(alignment: .leading, spacing: 7) {
+                    Text("Answers").font(.callout)
+                    TextField("Billing, Support, Sales", text: $engine.decisionAnswers)
+                        .textFieldStyle(.roundedBorder).accessibilityLabel("Decision answers")
+                    Text("Separate 2–16 answers with commas.").font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    Text("Inputs and results stay in memory").font(.caption).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Run decision", action: engine.decide)
+                        .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
+                        .disabled(!engine.modelReady || engine.decisionValidation != nil)
+                }
+                if let result = engine.decisionResult {
+                    Divider()
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Result").font(.caption).foregroundStyle(.secondary)
+                        Text(result.choice).font(.title3.weight(.medium)).textSelection(.enabled)
+                        ForEach(result.answers.indices, id: \.self) { index in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(result.answers[index]).fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 12)
+                                Text(result.probabilities[index], format: .percent.precision(.fractionLength(1)))
+                                    .monospacedDigit()
+                            }.font(.callout)
+                        }
+                        Text("Shares across these answers; calibration is unverified.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }.accessibilityElement(children: .contain)
+                }
+            }.padding(.vertical, 2)
+        }.disabled(engine.busy)
+            .onChange(of: engine.decisionText) { engine.clearDecision() }
+            .onChange(of: engine.decisionQuestion) { engine.clearDecision() }
+            .onChange(of: engine.decisionAnswers) { engine.clearDecision() }
+    }
+}
+
+struct ChatContentView: View {
+    @ObservedObject var engine: EngineController
+    @FocusState private var composerFocused: Bool
+    @State private var advancedOptions = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Button("Advanced Options…") { advancedOptions = true }
+                    .disabled(!engine.modelReady)
+                    .help("Run a model to adjust its chat options.")
+                Spacer()
+                Button("New Chat") { engine.reset(); composerFocused = true }
+                    .disabled(engine.busy || engine.messages.isEmpty || engine.loadedID != engine.selectedID)
             }
             SpeedView(engine: engine)
-            if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             ScrollViewReader { scroll in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 14) {
@@ -691,9 +864,9 @@ struct ChatView: View {
                 Spacer()
                 Button("Send") { engine.generate(); composerFocused = true }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-                    .disabled(engine.state != "ready" || engine.loadedID != engine.selectedID || engine.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!engine.modelReady || engine.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
-        }.padding(20).frame(minWidth: 500, minHeight: 600)
+        }
             .sheet(isPresented: $advancedOptions) { AdvancedOptionsView(engine: engine) }
             .onAppear { composerFocused = true }
             .onChange(of: engine.state) { if engine.state == "ready" { composerFocused = true } }
@@ -828,12 +1001,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showPrompt() {
         dismissMenu()
-        if promptWindow == nil { promptWindow = window(title: "Stark — Chat", view: ChatView(engine: engine), resizable: true) }
+        if promptWindow == nil { promptWindow = window(title: "Stark — Playground", view: PlaygroundView(engine: engine), resizable: true) }
         present(promptWindow)
     }
 
     private func run() {
-        if engine.loadedID != engine.selectedID || engine.state != "ready" { engine.run() }
+        if !engine.modelReady { engine.run() }
         showPrompt()
     }
 

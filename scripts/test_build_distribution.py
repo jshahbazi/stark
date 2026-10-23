@@ -33,6 +33,8 @@ class BundleConstructionTests(unittest.TestCase):
             (bundle / "libexec").mkdir(parents=True)
             worker = bundle / "libexec/stark-generate"
             worker.write_bytes(b"fresh release worker")
+            score_worker = bundle / "libexec/stark-score"
+            score_worker.write_bytes(b"fresh release score worker")
             calls = []
 
             def command_result(command, stage, *_args, **_kwargs):
@@ -40,6 +42,13 @@ class BundleConstructionTests(unittest.TestCase):
                 calls.append(command)
                 self.assertEqual(command[command.index("--runtime") + 1], str(bundle))
                 self.assertEqual(command[command.index("--worker") + 1], str(worker))
+                self.assertEqual(
+                    command[command.index("--score-worker") + 1], str(score_worker)
+                )
+                self.assertNotEqual(
+                    command[command.index("--score-worker") + 1],
+                    str(distribution.ROOT / "target/release/stark-score"),
+                )
                 self.assertEqual(command[command.index("--version") + 1], "0.1.2")
                 output = Path(command[command.index("--output") + 1])
                 self.assertFalse(output.is_relative_to(bundle))
