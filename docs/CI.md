@@ -1,10 +1,11 @@
 # Continuous integration and security checks
 
-Public checks run for pull requests to `main`, pushes to `main` and `codex/**`, and manual workflow dispatches. Security and CodeQL also run weekly on the default branch after these files are merged. All test inputs are synthetic. Workflows upload no model, scoring, or native validation artifacts.
+CI, Security and CodeQL run for pull requests to `main`, pushes to `main`, and manual workflow dispatches. Feature-branch pushes do not start a second copy of these workflows alongside the pull request. To validate a branch before opening a pull request, select the branch under **Actions → CI → Run workflow**; Security and CodeQL have the same manual control. Security and CodeQL also run weekly on the default branch. Build continues to produce development bundles for source changes pushed to `main` or `codex/**`. All test inputs are synthetic. Build artifacts contain the standalone distribution and aggregate installation checks; models, scoring payloads and private native validation artifacts stay outside public CI.
 
 | Workflow | Coverage |
 | --- | --- |
 | CI | Tracked-file and workflow policy, native crate formatting, locked dependency resolution, workflow syntax, model-free converter tests and Ruff lint, Linux/macOS process lifecycle tests, Apple silicon scorer builds/Clippy/tests with default and optimized features, inherited Python binding and HTTP/1.1 server compatibility, synthetic server tests, and model-free TypeScript lint/type/test/package checks. |
+| Build | Standalone Apple silicon development bundle, checksum, installer and aggregate installation verification; downloadable from the run for seven days. Runs on source/build changes pushed to `main` or `codex/**`, and manually on a selected branch. |
 | Security | RustSec advisories, transitive soundness advisories, licenses and sources across all Cargo features; OSV checks of all seven dependency lockfiles, including the independent streaming converter; and dependency review for new vulnerabilities in pull requests. |
 | CodeQL | Extended security queries for Rust, C/C++, Python, JavaScript/TypeScript, and GitHub Actions, using build mode `none`. Metal kernels and Swift bindings are not covered by these scans. |
 | Prebuilt release | Manual version-tag dispatch on a merged commit; standalone Mac build, model-free archive verification and draft release upload. See [release operations](RELEASING.md). |
@@ -18,7 +19,7 @@ Python checks use `uv` 0.12.24 and Python 3.12.13; the converter uses its locked
 
 OSV downloads public advisory databases and matches dependencies locally. The scan names the root Cargo lockfile, the inherited wasm example Cargo lockfile, the tools, converter, and Python binding uv lockfiles, the TypeScript pnpm lockfile, and the repository-checker script lockfile explicitly. It does not install project dependencies, execute call analysis, or send dependency metadata to OSV. A strict JSON checker requires every declared lockfile to appear in the scan. Optional VCS commit metadata must be a full 40-character hexadecimal SHA; unknown package identity fields remain rejected. Known vulnerabilities and soundness advisories fail the gate unless covered by an explicit, unexpired exception. Both dependency jobs validate the exception manifest against exact locked package identities and cargo-deny's ignore list before scanning. OSV reports accepted findings as visible warnings. The current [rustls exception](RUSTLS_TEST_EXCEPTION.md) covers non-production tests only. Exactly classified unmaintained-package notices remain visible warnings; their advisory IDs are not ignored. Cargo-deny also checks transitive soundness advisories with `unsound = "all"`.
 
-Compatibility jobs use the CPU feature for inherited bindings and server code. TypeScript tests stub the native callback interface and validate CommonJS, ESM, package exports, declarations, and source maps without loading an engine binary. Native integration tests require explicit `STARK_NATIVE_INTEGRATION=1` and stay outside public CI. The manual Rust binding-tool test command opts into those native tests. Python tool dependency updates have model-free local import/CLI validation; public CI checks their lockfile and advisories. Model export, inference, and numerical equivalence need separate private validation.
+Compatibility jobs use the CPU feature for inherited bindings and server code. The debug-profile CXX panic-safety and grammar tests run in a separate macOS job, in parallel with inherited dependency checks and release-profile server tests. This avoids putting both long builds on the same critical path. The completion gate requires both jobs to succeed, along with every other CI job; cancellation, failure and skipped checks do not pass it. TypeScript tests run on Ubuntu, stub the native callback interface and validate CommonJS, ESM, package exports, declarations, and source maps without loading an engine binary. Native integration tests require explicit `STARK_NATIVE_INTEGRATION=1` and stay outside public CI. The manual Rust binding-tool test command opts into those native tests. Python tool dependency updates have model-free local import/CLI validation; public CI checks their lockfile and advisories. Model export, inference, and numerical equivalence need separate private validation.
 
 The existing repository quality job also runs converter synthetic tests with Hugging Face offline mode, Ruff, and a lock consistency check. It downloads no model and installs no Lalamo environment. Converter source/model parity and native loading remain separately recorded private validation evidence.
 
@@ -27,6 +28,35 @@ Standalone installation checks cover the launcher, bundle manifests and archive 
 Formatting uses `nightly-2026-10-01` because the upstream import configuration requires nightly rustfmt. Scoring compilation still uses Rust 1.98.1. Legacy crate formatting is not a gate. Actionlint suppresses only the constant-false-condition diagnostic used by deliberately disabled inherited jobs; the repository checker independently requires those jobs to remain disabled.
 
 The inherited Tests, Release, Run Benchmark, and Run Stark Cargo Command workflows stay disabled. Their action references are pinned for repository policy compliance; this does not qualify or enable their infrastructure.
+
+Pull requests emit the required `CI completed` gate. Push and manual runs emit `Branch CI completed`, using the same aggregate checks. Distinct names prevent a cancelled duplicate branch run from blocking a passing pull request.
+
+## CI timing evidence
+
+The scheduling change was validated on 2026-10-22 UTC with identical native and TypeScript source, feature flags, test commands and toolchain pins. Only the workflows and this document changed between these commits.
+
+| CI run | Source commit | Elapsed time |
+| --- | --- | --- |
+| [Before: pull request](https://github.com/jshahbazi/stark/actions/runs/39704758381) | `a60e554ce65eadd2f8f679729ed6590d161a74fd` | 31m26s |
+| [After: manual branch validation](https://github.com/jshahbazi/stark/actions/runs/39708539187) | `09ede8daec2f8debf764a44c1be2f36254011b37` | 16m24s |
+
+Both CI runs passed. Elapsed time includes runner queues and the completion gate; the observed reduction was 48%. The CXX test step took 12m31s in both runs. In the second run its separate job queued for 2m35s and finished while the inherited compatibility job was still running. TypeScript passed on Ubuntu in 23s, compared with 33s on macOS. These are individual hosted-run measurements; runner availability and image changes affect subsequent timings.
+
+## Download a development build
+
+Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
+
+The artifact contains four files: `stark-VERSION-aarch64-apple-darwin.tar.gz`, its `.sha256` checksum, `install.sh` and `verification.json`. After extracting the artifact, install the exact archive locally:
+
+```sh
+sh install.sh --archive "$PWD/stark-VERSION-aarch64-apple-darwin.tar.gz"
+```
+
+Replace `VERSION` with the version in the filename. The bundle supports Apple silicon and macOS 26.4 or newer. It includes both workers, the converter and its Python runtime. The workflow checks installation, offline synthetic conversion, file hashes, relocation and uninstall before uploading these four files. Failed verification uploads no artifact. Artifacts expire after seven days; download any build you need to keep.
+
+Development builds are unsigned. Use the [published signed release](INSTALLATION.md) for normal installation. This read-only workflow uses no Apple credentials and creates no GitHub release. It reuses the release builder without repeating the scorer lint/test jobs already covered by CI.
+
+## Release workflows
 
 The separate manual prebuilt release job has `contents: write` for its draft upload. Checkout persists no credential, and only the final upload step receives `GH_TOKEN`; build and verification processes receive no publishing token. The workflow requires an existing matching version tag on a commit merged into `main`. Publication follows verification of the actual draft assets.
 
@@ -72,6 +102,6 @@ Keep secret scanning, push protection, Dependabot alerts, private vulnerability 
 
 The repository's live configuration was hardened on 2026-10-11: private reporting and Dependabot alerts were enabled, SHA pinning became mandatory, and the Actions allowlist was limited to checkout, dependency review, CodeQL, setup-uv, and setup-node. `main` requires a pull request and conversation resolution, blocks force pushes and deletion, and applies its protections to administrators. The sole maintainer can merge without a second reviewer. Required `CI completed` and `Security completed` checks are installed with strict branch freshness and are restricted to the GitHub Actions app (ID 15368). These workflow definitions must be included when integrating this branch; scheduled scanning and default-branch dependency alerts use `main` after integration.
 
-The signing addition permits the exact reviewed upload-artifact and download-artifact commits for transfer between the signing and publishing jobs. It preserves the other Actions restrictions and restricts the `macos-release` environment to protected branches.
+The signing addition permits the exact reviewed upload-artifact and download-artifact commits for transfer between the signing and publishing jobs. Build uses the same permitted upload-artifact commit. The other Actions restrictions remain in place, and the `macos-release` environment is restricted to protected branches.
 
 To update a tool or action, resolve its release to an immutable commit or verified archive hash, update the pin and any lockfile together, and record a new validation run. Never add an advisory exception solely to make CI pass; document any independently reviewed exception with its scope, rationale, and expiry.

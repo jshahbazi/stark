@@ -17,8 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
+from .progress import DownloadProgress, ProgressCallback, ProgressReporter, reporter
 from .registry import architecture_for_config, get_model, required_files
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, open_regular, read_json
 
@@ -26,6 +28,21 @@ _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
 _PARALLEL_HASH_MIN_BYTES = 8 * 1024 * 1024
 _HASH_WORKERS = 4
+
+
+def huggingface_repository(value: str) -> str:
+    """Normalize a model repository ID or HTTPS repository page URL."""
+    value = value.strip()
+    if any(character.isspace() for character in value):
+        raise ValueError("invalid_huggingface_repository")
+    if "://" in value:
+        url = urlsplit(value)
+        if url.scheme != "https" or url.netloc.lower() != "huggingface.co":
+            raise ValueError("invalid_huggingface_repository")
+        value = url.path.removeprefix("/").removesuffix("/")
+    if not re.fullmatch(r"(?:[A-Za-z0-9][A-Za-z0-9_.-]*/)?[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise ValueError("invalid_huggingface_repository")
+    return value
 
 
 def _relative(name: str) -> Path:
@@ -436,16 +453,23 @@ def resolve_source(
     hub: Any = None,
     metadata_profile: str | None = None,
     architecture: str | None = None,
+    progress: ProgressCallback | ProgressReporter | None = None,
 ) -> SourceSnapshot:
     """Resolve all repositories before any file downloads or conversion starts."""
+    progress = reporter(progress)
+    if repo is not None:
+        repo = huggingface_repository(repo)
     if source_manifest is not None:
-        return _replay(
+        snapshot = _replay(
             Path(source_manifest),
             repo=repo,
             revision=revision,
             metadata_profile=metadata_profile,
             architecture=architecture,
         )
+        if progress is not None:
+            progress.emit("download", "skipped", force=True)
+        return snapshot
     if revision is not None and not isinstance(revision, str):
         raise ConversionError("Invalid source revision")
     path = Path(value).expanduser()
@@ -453,9 +477,10 @@ def resolve_source(
     if not local and (path.exists() or str(value).startswith(("/", ".", "~"))):
         raise ValueError("invalid_source")
     if not local:
-        if repo is not None and repo != str(value):
+        repository = huggingface_repository(str(value))
+        if repo is not None and repo != repository:
             raise ValueError("conflicting_repository")
-        repo = str(value)
+        repo = repository
     entry = get_model(repo) if repo else None
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
@@ -477,6 +502,10 @@ def resolve_source(
         )
     )
     repositories = {repo, *(rule["repo"] for rule in rules)}
+    remote_repositories = repositories - ({repo} if local else set())
+    downloads = DownloadProgress(progress) if progress is not None and remote_repositories else None
+    if progress is not None and downloads is None:
+        progress.emit("download", "skipped", force=True)
     if local and revision is not None and not _REVISION.fullmatch(revision):
         raise ConversionError("Local source revision must be immutable")
     if offline and repositories != {repo}:
@@ -508,6 +537,8 @@ def resolve_source(
 
         def loader(filename: str) -> Path:
             _relative(filename)
+            if downloads is not None:
+                return downloads.download(hub, repo, filename, revisions[repo])
             return Path(
                 hub.hf_hub_download(repo_id=repo, filename=filename, revision=revisions[repo], local_files_only=False)
             )
@@ -518,6 +549,12 @@ def resolve_source(
             # Config-less checkpoint repositories must derive their physical
             # root from a selected primary weight, never an external sidecar.
             selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
+            if downloads is not None:
+                downloads.select(
+                    hub,
+                    [(rule["repo"], rule["filename"], revisions[rule["repo"]]) for rule in rules]
+                    + [(repo, name, revisions[repo]) for name in ((index_name,) if index_name else ()) + selected],
+                )
             root_filename = selected[0]
         config_path = loader(root_filename)
         # snapshot files preserve repository-relative placement in the hub cache.
@@ -535,6 +572,15 @@ def resolve_source(
     if index_name:
         descriptors.append({"role": "weight_index", "repo": repo, "filename": index_name})
     descriptors.extend({"role": "weights", "repo": repo, "filename": name} for name in selected)
+    if downloads is not None:
+        downloads.select(
+            hub,
+            [
+                (descriptor["repo"], descriptor["filename"], revisions[descriptor["repo"]])
+                for descriptor in descriptors
+                if not local or descriptor["repo"] != repo
+            ],
+        )
     records, known = [], set()
     for descriptor in descriptors:
         effective_repo, filename = descriptor["repo"], descriptor["filename"]
@@ -545,14 +591,17 @@ def resolve_source(
         if effective_repo == repo:
             resolved_path = authorize_source_path(root, loader(filename))
         else:
-            resolved_path = Path(
-                hub.hf_hub_download(
-                    repo_id=effective_repo,
-                    filename=filename,
-                    revision=revisions[effective_repo],
-                    local_files_only=False,
+            if downloads is not None:
+                resolved_path = downloads.download(hub, effective_repo, filename, revisions[effective_repo])
+            else:
+                resolved_path = Path(
+                    hub.hf_hub_download(
+                        repo_id=effective_repo,
+                        filename=filename,
+                        revision=revisions[effective_repo],
+                        local_files_only=False,
+                    )
                 )
-            )
             resolved_path = resolved_path.resolve(strict=True)
         records.append(
             {
@@ -582,4 +631,6 @@ def resolve_source(
     snapshot = SourceSnapshot(root, repo, revisions[repo], manifest)
     if profile is not None:
         snapshot.assert_unchanged(verify_content=False)
+    if downloads is not None:
+        downloads.complete()
     return snapshot

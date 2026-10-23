@@ -7,20 +7,23 @@ import argparse
 import json
 import math
 import os
-import re
 import select
 import shutil
 import signal
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from .chat import Worker, load_template
 from .registry import get_model
+from .sources import huggingface_repository
 
 MAX_COMMAND_BYTES = 1024 * 1024
+MAX_PROGRESS_BYTES = 4096
+PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
 
@@ -67,6 +70,27 @@ def metric(reply, key):
     return value if valid else None
 
 
+def converter_progress(value):
+    """Accept only the content-free converter pipe contract."""
+    if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
+        return None
+    if (
+        not isinstance(value["phase"], str)
+        or value["phase"] not in PROGRESS_PHASES
+        or not isinstance(value["state"], str)
+        or value["state"] not in {"waiting", "running", "complete", "skipped"}
+    ):
+        return None
+    completed, total = value["completed_bytes"], value["total_bytes"]
+    if type(completed) is not int or not 0 <= completed <= 2**63 - 1:
+        return None
+    if total is not None and (type(total) is not int or not completed <= total <= 2**63 - 1):
+        return None
+    if value["state"] == "complete" and total is not None and completed != total:
+        return None
+    return {key: value[key] for key in ("phase", "state", "completed_bytes", "total_bytes")}
+
+
 class Desktop:
     def __init__(self, executable, data_dir, output=None, timeout=300):
         self.executable = executable
@@ -80,6 +104,8 @@ class Desktop:
         self.job = None
         self.worker = None
         self.converter = None
+        self.install_epoch = None
+        self.install_progress = {}
         self.active_model = None
         self.template = None
         self.codec = None
@@ -152,10 +178,53 @@ class Desktop:
             terminate(worker.process)
             worker.close()
 
+    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
+        with self.lock:
+            if epoch != self.epoch or self.install_epoch != epoch:
+                return
+            value = {"state": state, "completed_bytes": completed_bytes, "total_bytes": total_bytes}
+            previous = self.install_progress.get(phase)
+            if previous and previous["state"] in {"complete", "skipped", "cancelled", "failed"}:
+                return
+            if previous and completed_bytes < previous["completed_bytes"]:
+                return
+            self.install_progress[phase] = value
+            self.emit("progress", epoch, phase=phase, **value)
+
+    def begin_install_progress(self, epoch, kind):
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            self.install_epoch = epoch
+            self.install_progress = {}
+            self.progress(epoch, "download", "running" if kind == "huggingface" else "skipped")
+            self.progress(epoch, "conversion", "waiting")
+
+    def finish_install_progress(self, epoch, skipped=False):
+        for phase in PROGRESS_PHASES:
+            previous = self.install_progress.get(phase, {})
+            self.progress(
+                epoch,
+                phase,
+                "skipped" if skipped else "complete",
+                previous.get("completed_bytes", 0),
+                previous.get("total_bytes"),
+            )
+
+    def fail_install_progress(self, epoch):
+        for phase in PROGRESS_PHASES:
+            previous = self.install_progress.get(phase, {})
+            self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
+
     def stop(self, quiet=False):
         with self.lock:
+            cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
+            self.install_epoch = None
             converter, job = self.converter, self.job
+            for phase, previous in cancelled.items():
+                if previous["state"] in {"waiting", "running"}:
+                    self.emit("progress", phase=phase, **{**previous, "state": "cancelled"})
         terminate(converter)
         self.close_worker()
         if job is not None and job is not threading.current_thread():
@@ -175,6 +244,9 @@ class Desktop:
                 self.emit("error", message="Wait for the current operation or choose Stop.")
                 return
             epoch = self.epoch
+            installing = state == "installing"
+            if installing:
+                self.begin_install_progress(epoch, args[0])
             self.status(state, message, epoch)
 
             def execute():
@@ -182,12 +254,16 @@ class Desktop:
                     function(epoch, *args)
                 except DesktopError as error:
                     if epoch == self.epoch:
+                        if installing:
+                            self.fail_install_progress(epoch)
                         self.emit("error", epoch, message=str(error))
                         self.status(
                             "ready" if self.worker else "error", "Ready" if self.worker else "Operation failed", epoch
                         )
                 except BaseException:
                     if epoch == self.epoch:
+                        if installing:
+                            self.fail_install_progress(epoch)
                         self.close_worker()
                         self.emit(
                             "error", epoch, message="Unable to complete the operation. Check the model and try again."
@@ -195,11 +271,86 @@ class Desktop:
                         self.status("error", "Operation failed", epoch)
                 finally:
                     with self.lock:
+                        if installing and self.install_epoch == epoch:
+                            self.install_epoch = None
                         if self.job is threading.current_thread():
                             self.job = None
 
             self.job = threading.Thread(target=execute, name="stark-desktop-operation", daemon=True)
             self.job.start()
+
+    def read_converter_progress(self, descriptor, process, epoch):
+        pending = b""
+        discarding = False
+        exited_at = None
+        while True:
+            if process.poll() is not None:
+                exited_at = exited_at or time.monotonic()
+                if time.monotonic() - exited_at >= 0.5:
+                    break
+            if not select.select([descriptor], [], [], 0.1)[0]:
+                if exited_at is not None:
+                    break
+                continue
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if discarding:
+                    discarding = False
+                    continue
+                if len(line) > MAX_PROGRESS_BYTES:
+                    continue
+                try:
+                    event = converter_progress(json.loads(line))
+                except (ValueError, UnicodeError):
+                    continue
+                if event is not None:
+                    # The app still validates/publishes the model and registry.
+                    if event["phase"] == "conversion" and event["state"] == "complete":
+                        event["state"] = "running"
+                    self.progress(epoch, **event)
+            if len(pending) > MAX_PROGRESS_BYTES:
+                pending = b""
+                discarding = True
+
+    def run_converter(self, command, environment, epoch):
+        read_descriptor, write_descriptor = os.pipe()
+        process = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                process = subprocess.Popen(
+                    [*command, "--progress-fd", str(write_descriptor)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                    pass_fds=(write_descriptor,),
+                )
+                self.converter = process
+            os.close(write_descriptor)
+            write_descriptor = None
+            self.read_converter_progress(read_descriptor, process, epoch)
+            return process.wait()
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor is not None:
+                os.close(write_descriptor)
+            if process is not None:
+                terminate(process)
+                # A child must not leave descendants holding its private pipe.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                with self.lock:
+                    if self.converter is process:
+                        self.converter = None
 
     def install(self, epoch, kind, source):
         if kind == "local":
@@ -216,8 +367,10 @@ class Desktop:
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
         elif kind == "huggingface":
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", source):
-                raise DesktopError("Enter a Hugging Face repository as owner/model.")
+            try:
+                source = huggingface_repository(source)
+            except ValueError:
+                raise DesktopError("Enter a model name or a https://huggingface.co/owner/model URL.") from None
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -228,6 +381,7 @@ class Desktop:
             if previous is not None:
                 if not model_valid(Path(previous["path"])):
                     raise DesktopError("The installed model folder is missing or incomplete.")
+                self.finish_install_progress(epoch, skipped=True)
                 self.emit("installed", epoch, model={k: previous[k] for k in ("id", "name", "path")})
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
                 return
@@ -253,22 +407,8 @@ class Desktop:
                 if kind == "local":
                     command.append("--offline")
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+                result = self.run_converter(command, environment, epoch)
                 with self.lock:
-                    if epoch != self.epoch:
-                        return
-                    process = subprocess.Popen(
-                        command,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        env=environment,
-                        start_new_session=True,
-                    )
-                    self.converter = process
-                result = process.wait()
-                with self.lock:
-                    if self.converter is process:
-                        self.converter = None
                     if epoch != self.epoch:
                         return
                 if result != 0 or not model_valid(output):
@@ -292,6 +432,7 @@ class Desktop:
                     self.models.remove(model)
                     raise
                 managed = None  # The registry now owns the managed folder.
+                self.finish_install_progress(epoch, skipped=converted)
                 self.library()
                 self.emit("installed", epoch, model={k: model[k] for k in ("id", "name", "path")})
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
