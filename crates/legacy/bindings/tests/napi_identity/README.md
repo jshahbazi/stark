@@ -24,6 +24,15 @@ foreign native classes must raise JavaScript errors before field access.
 Synchronous and asynchronous factory rejection must also detach newly installed
 storage, so caller-retained objects remain reusable under their original tag.
 
+`external.cjs` covers modern and deprecated external creation and extraction,
+shared/mutable arguments, strong references, generic transport, zero/positive/
+negative memory hints, and single finalization after garbage collection. Null,
+one-byte and forged-header foreign allocations and wrong Rust types must fail
+before typed payload access. The runner exposes Node's garbage collector for
+this synthetic lifetime check. A focused pre-fix null-external probe aborted
+its disposable Node subprocess while its ordinary external control passed;
+this is evidence about the shared runtime API, not deployed Stark exposure.
+
 For pre-patch comparison, build the same fixture with Cargo configuration
 overriding its three `patch.crates-io` paths to pristine sources for exactly
 `napi` 3.10.3, `napi-derive-backend` 5.1.1 and `napi-sys` 3.2.2 in a separate
