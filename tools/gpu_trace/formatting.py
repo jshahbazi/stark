@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import shutil
 
 from rich import box
@@ -31,7 +32,13 @@ def _fmt_percent(value: float) -> str:
 
 
 def _bar(value: float, width: int = 20) -> str:
-    filled = int(value / 100 * width)
+    if type(width) is not int or not 0 <= width <= 1000:
+        raise ValueError("Invalid bar width")
+    if value >= 100:
+        value = 100.0
+    elif value <= 0 or not math.isfinite(value):
+        value = 0.0
+    filled = int(min(100.0, max(0.0, value)) / 100 * width)
     return "█" * filled + "░" * (width - filled)
 
 

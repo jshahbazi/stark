@@ -15,6 +15,7 @@ pub fn execute_switch(
     default: &Option<Pipeline>,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let key_description: String =
         key_pipeline.iter().map(|operation| operation.to_string()).collect::<Vec<_>>().join(", ");
@@ -26,28 +27,29 @@ pub fn execute_switch(
     )
     .entered();
 
-    let match_value = execute_pipeline(key_pipeline, input.clone(), schema)?;
+    let match_value = execute_pipeline(key_pipeline, input.clone(), schema, context)?;
 
     for case in cases {
         if case.when.evaluate(&match_value) {
             tracing::trace!(matched = %case.when);
-            return execute_pipeline(&case.then, input, schema);
+            return execute_pipeline(&case.then, input, schema, context);
         }
     }
 
     tracing::trace!("matched default");
     match default {
-        Some(pipeline) => execute_pipeline(pipeline, input, schema),
+        Some(pipeline) => execute_pipeline(pipeline, input, schema, context),
         None => Ok(Value::Null),
     }
 }
 
-#[tracing::instrument(skip(arguments, input, schema), fields(target = %target))]
+#[tracing::instrument(skip(arguments, input, schema, context), fields(target = %target))]
 pub fn execute_call(
     target: &CallTarget,
     arguments: &IndexMap<String, Value>,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let resolved_name = match target {
         CallTarget::Static {
@@ -87,7 +89,7 @@ pub fn execute_call(
     let pipeline = schema.pipelines.get(&resolved_name).ok_or_else(|| TransformError::UndefinedPipeline {
         name: resolved_name.clone(),
     })?;
-    execute_pipeline(pipeline, effective_input, schema)
+    execute_pipeline(pipeline, effective_input, schema, context)
 }
 
 #[tracing::instrument(skip_all, fields(field = field, with = with))]
@@ -97,6 +99,7 @@ pub fn execute_on(
     do_pipeline: &Pipeline,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let working_value = match with {
         Some(key) => input.as_object().and_then(|map| map.get(key).cloned()).unwrap_or(Value::Null),
@@ -107,7 +110,7 @@ pub fn execute_on(
         input.as_object().and_then(|map| map.get(field)).map(|value| value == &Value::Bool(true)).unwrap_or(false);
 
     if is_active {
-        execute_pipeline(do_pipeline, working_value, schema)
+        execute_pipeline(do_pipeline, working_value, schema, context)
     } else {
         Ok(working_value)
     }

@@ -1,9 +1,8 @@
 use std::any::Any;
 
 use crate::{
-    array::size_for_shape,
     backends::common::{
-        Backend, Buffer, CommandBuffer, Context, DeviceCapabilities, Kernels, SparseBuffer,
+        Backend, Buffer, CommandBuffer, Context, DeviceCapabilities, InvalidInput, Kernels, SparseBuffer,
         gpu_types::{Copy, ring::RingParams},
         kernel::KVCacheUpdateKernel,
     },
@@ -12,6 +11,32 @@ use crate::{
 };
 
 pub const ATTENTION_SUFFIX_CAPACITY: u32 = 1024; // TODO: remove hardcoded suffix capacity
+
+fn checked_cache_capacity(
+    prefix: u32,
+    width: u32,
+    element_bytes: usize,
+) -> Result<(u32, usize), InvalidInput> {
+    let rows = prefix.checked_add(ATTENTION_SUFFIX_CAPACITY).ok_or(InvalidInput("attention capacity overflow"))?;
+    let bytes = (rows as usize)
+        .checked_mul(width as usize)
+        .and_then(|size| size.checked_mul(element_bytes))
+        .filter(|&size| size > 0 && size <= isize::MAX as usize)
+        .ok_or(InvalidInput("attention byte capacity overflow"))?;
+    Ok((rows, bytes))
+}
+
+fn checked_preparation_rows(
+    prefix: u32,
+    suffix: u32,
+    capacity: u32,
+) -> Result<u32, InvalidInput> {
+    let rows = prefix.checked_add(suffix).ok_or(InvalidInput("attention preparation overflow"))?;
+    if suffix > ATTENTION_SUFFIX_CAPACITY || rows > capacity {
+        return Err(InvalidInput("attention preparation exceeds cache capacity"));
+    }
+    Ok(rows)
+}
 
 #[derive(Clone, Copy)]
 pub struct KVCacheView {
@@ -138,7 +163,7 @@ impl KVCacheState {
                 let mut copies = Vec::with_capacity(accepted_indices.len().min(*capacity as usize));
                 for (index, accepted_index) in accepted_indices.iter().copied().enumerate() {
                     let source = suffix_base + accepted_index;
-                    let destination = (*offset + *length) % *capacity;
+                    let destination = ((u64::from(*offset) + u64::from(*length)) % u64::from(*capacity)) as u32;
                     // A copy is dead when a later accept in the same batch overwrites its
                     // destination; emitting it would alias in a single kernel dispatch.
                     if index as u32 + *capacity >= count && source != destination {
@@ -164,6 +189,7 @@ pub struct AttentionState<B: Backend> {
     pub element_dim: u32,
     pub data_type: DataType,
     cache: KVCacheState,
+    capacity_elements: u32,
     pub is_sparse: bool,
     pub keys: Box<dyn Buffer<Backend = B>>,
     pub values: Box<dyn Buffer<Backend = B>>,
@@ -180,26 +206,31 @@ impl<B: Backend> AttentionState<B> {
         max_context_length: Option<u32>,
         context: &B::Context,
     ) -> Result<Self, B::Error> {
-        if let Some(max_context_length) = max_context_length {
-            assert!(
-                attention.max_rope_length.is_none_or(|max_rope_length| max_context_length <= max_rope_length),
-                "context exceeds RoPE length"
-            );
+        if max_context_length
+            .is_some_and(|length| length == 0 || attention.max_rope_length.is_some_and(|maximum| length > maximum))
+        {
+            return Err(InvalidInput("context exceeds model capacity").into());
         }
 
         let data_type = attention.data_type;
 
-        let max_prefix_elements = attention.ring_capacity.unwrap_or_else(|| {
-            max_context_length
+        let max_prefix_elements = match attention.ring_capacity {
+            Some(window) => max_context_length.map_or(window, |limit| window.min(limit)),
+            None => max_context_length
                 .or(attention.max_rope_length)
-                .expect("Cannot create full attention state with unlimited length for with no RoPE")
-        });
+                .ok_or(InvalidInput("full attention requires a finite context capacity"))?,
+        };
 
-        let cache = attention.ring_capacity.map_or_else(KVCacheState::full, KVCacheState::ring);
+        let cache =
+            attention.ring_capacity.map_or_else(KVCacheState::full, |_| KVCacheState::ring(max_prefix_elements));
 
-        let max_elements = max_prefix_elements + ATTENTION_SUFFIX_CAPACITY;
-        let element_dim = attention.num_kv_heads.unwrap() * attention.head_dim;
-        let kv_buffer_bytes = size_for_shape(&[max_elements, element_dim], data_type);
+        let element_dim = attention
+            .num_kv_heads
+            .and_then(|heads| heads.checked_mul(attention.head_dim))
+            .filter(|&width| width > 0)
+            .ok_or(InvalidInput("invalid attention cache width"))?;
+        let (max_elements, kv_buffer_bytes) =
+            checked_cache_capacity(max_prefix_elements, element_dim, data_type.size_in_bytes())?;
 
         let is_sparse = context.device_capabilities().contains(DeviceCapabilities::SPARSE_BUFFERS);
 
@@ -218,6 +249,7 @@ impl<B: Backend> AttentionState<B> {
             element_dim,
             data_type,
             cache,
+            capacity_elements: max_elements,
             is_sparse,
             keys,
             values,
@@ -232,11 +264,17 @@ impl<B: Backend> MixerState<B> for AttentionState<B> {
         context_length: u32,
         suffix_length: u32,
     ) -> Result<(), B::Error> {
-        assert!(suffix_length <= ATTENTION_SUFFIX_CAPACITY, "suffix exceeds capacity");
+        let elements_required = checked_preparation_rows(
+            self.cache.required_prefix_len(context_length),
+            suffix_length,
+            self.capacity_elements,
+        )?;
 
         if self.is_sparse {
-            let elements_required = self.cache.required_prefix_len(context_length) + suffix_length;
-            let bytes_required = size_for_shape(&[elements_required, self.element_dim], self.data_type);
+            let bytes_required = (elements_required as usize)
+                .checked_mul(self.element_dim as usize)
+                .and_then(|size| size.checked_mul(self.data_type.size_in_bytes()))
+                .ok_or(InvalidInput("attention mapping size overflow"))?;
 
             let keys = (self.keys.as_mut() as &mut dyn Any).downcast_mut::<B::SparseBuffer>().unwrap();
             let values = (self.values.as_mut() as &mut dyn Any).downcast_mut::<B::SparseBuffer>().unwrap();

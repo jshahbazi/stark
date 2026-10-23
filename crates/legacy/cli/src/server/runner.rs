@@ -10,13 +10,13 @@ use rocket::{
     response::Body,
     routes,
 };
-use tokio::{
-    io::{AsyncRead, ReadBuf},
-    sync::Mutex,
-};
 use stark::{
     engine::{Engine, EngineConfig},
     types::session::chat::ChatConfig,
+};
+use tokio::{
+    io::{AsyncRead, ReadBuf},
+    sync::{Mutex, Semaphore},
 };
 
 use crate::{
@@ -31,8 +31,7 @@ use crate::{
 pub struct ResponseBodyLogger<'r> {
     body: Body<'r>,
     prefix: String,
-    bytes: Vec<u8>,
-    is_json: bool,
+    bytes: u64,
     logged: bool,
     span: tracing::Span,
 }
@@ -41,14 +40,13 @@ impl<'r> ResponseBodyLogger<'r> {
     pub fn new(
         body: Body<'r>,
         prefix: String,
-        is_json: bool,
+        _is_json: bool,
         span: tracing::Span,
     ) -> Self {
         Self {
             body,
             prefix,
-            bytes: Vec::new(),
-            is_json,
+            bytes: 0,
             logged: false,
             span,
         }
@@ -63,14 +61,7 @@ impl<'r> ResponseBodyLogger<'r> {
         }
         self.logged = true;
 
-        let body = if self.is_json {
-            serde_json::from_slice::<serde_json::Value>(&self.bytes)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|_| format!("{:?}", String::from_utf8_lossy(&self.bytes)))
-        } else {
-            format!("{:?}", String::from_utf8_lossy(&self.bytes))
-        };
-        self.span.in_scope(|| tracing::debug!("{} body={}{}\n", self.prefix, body, suffix));
+        self.span.in_scope(|| tracing::debug!("{} bytes={}{}", self.prefix, self.bytes, suffix));
     }
 }
 
@@ -91,7 +82,7 @@ impl AsyncRead for ResponseBodyLogger<'_> {
                 if filled_after == filled_before {
                     this.log("");
                 } else {
-                    this.bytes.extend_from_slice(&buffer.filled()[filled_before..filled_after]);
+                    this.bytes = this.bytes.saturating_add((filled_after - filled_before) as u64);
                 }
                 Poll::Ready(Ok(()))
             },
@@ -126,7 +117,7 @@ impl Fairing for RequestLoggingFairing {
         request: &mut Request<'_>,
         _data: &mut Data<'_>,
     ) {
-        let _ = request.local_cache(|| RequestInfo::new(request.method(), request.uri().to_string()));
+        let _ = request.local_cache(|| RequestInfo::new(request.method(), request.uri().path().as_str().to_string()));
     }
 
     async fn on_response<'r>(
@@ -138,9 +129,10 @@ impl Fairing for RequestLoggingFairing {
             return;
         }
 
-        let request_info = request.local_cache(|| RequestInfo::new(request.method(), request.uri().to_string()));
+        let request_info =
+            request.local_cache(|| RequestInfo::new(request.method(), request.uri().path().as_str().to_string()));
         let _entered = request_info.span.enter();
-        let prefix = format!("<-- {} {}", response.status(), request.uri());
+        let prefix = format!("<-- {} {}", response.status(), request_info.uri);
         if response.body().is_none() {
             tracing::debug!("{prefix} body=<empty>\n");
         } else {
@@ -157,7 +149,15 @@ pub async fn run_server(
     port: u16,
     prefix_cache: bool,
     verbose_file_logs: bool,
+    allow_unauthenticated_local: bool,
 ) -> Result<()> {
+    let address: IpAddr = host.parse().with_context(|| format!("Invalid host: {host}"))?;
+    let access = super::access::ServerAccess::new(
+        address,
+        std::env::var("STARK_SERVER_API_KEY").ok(),
+        allow_unauthenticated_local,
+    )
+    .map_err(anyhow::Error::msg)?;
     let file_logger = if verbose_file_logs {
         let cache_dir = std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
@@ -195,9 +195,9 @@ pub async fn run_server(
         session: Arc::new(Mutex::new(session)),
         thinking_support,
         prefix_cache,
+        admission: Arc::new(Semaphore::new(1)),
     };
 
-    let address: IpAddr = host.parse().with_context(|| format!("Invalid host: {host}"))?;
     let config = Config {
         port,
         address,
@@ -231,6 +231,7 @@ pub async fn run_server(
 
     let rocket = rocket::custom(config)
         .manage(state)
+        .manage(access)
         .attach(RequestLoggingFairing)
         .mount("/", routes![handle_chat_completions, handle_models])
         .mount("/v1", routes![handle_chat_completions, handle_models]);
@@ -240,4 +241,23 @@ pub async fn run_server(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod body_logger_tests {
+    use tokio::io::AsyncReadExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn response_logging_retains_only_a_count_and_preserves_transport_bytes() {
+        let payload = b"synthetic private reply\n".repeat(65_536);
+        let mut response = Response::build().streamed_body(std::io::Cursor::new(payload.clone())).finalize();
+        let body = response.body_mut().take();
+        let mut logger = ResponseBodyLogger::new(body, "response".into(), false, tracing::Span::none());
+        let mut transported = Vec::new();
+        logger.read_to_end(&mut transported).await.unwrap();
+        assert_eq!(transported, payload);
+        assert_eq!(logger.bytes, payload.len() as u64);
+    }
 }

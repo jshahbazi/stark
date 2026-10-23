@@ -325,7 +325,7 @@ def converter_snapshot(project: Path, destination: Path) -> dict:
         source_package = project / "stark_convert"
         if (source_package / "_build_inputs").exists():
             raise ValueError
-        provenance_module = runpy.run_path(str(source_package / "provenance.py"))
+        provenance_module = runpy.run_path(str(source_package / "_build_metadata.py"))
         source_inputs = (*provenance_module["SOURCE_INPUTS"], "uv.lock")
         readme = configuration["project"]["readme"]
         if not isinstance(readme, str):
@@ -353,7 +353,10 @@ def converter_snapshot(project: Path, destination: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(path, target)
             files[relative.as_posix()] = sha256(target)
-        tooling = provenance_module["toolchain_provenance"](destination)
+        try:
+            tooling = provenance_module["toolchain_provenance"](destination)
+        except provenance_module["ConversionError"]:
+            raise ValueError from None
         return {
             "project_name": configuration["project"]["name"],
             "version": configuration["project"]["version"],

@@ -27,6 +27,8 @@ pub trait Kernels: Sized {
     type RadixTopKSmall: radix_top_k_small::RadixTopKSmall<Backend = Self::Backend>;
 }
 
+// Metal-only builds do not select this uninhabited CPU fallback type.
+#[cfg_attr(not(backend = "cpu"), allow(dead_code))]
 pub struct Unsupported<B: Backend> {
     never: Infallible,
     _marker: PhantomData<fn() -> B>,

@@ -14,6 +14,7 @@ fn assert_row_width(element_count: u32) {
     );
 }
 
+#[cfg(backend = "metal")]
 pub const ACTIVATION_SCALE_GROUP_SIZE: u32 = 128;
 
 #[derive(Clone, Copy)]

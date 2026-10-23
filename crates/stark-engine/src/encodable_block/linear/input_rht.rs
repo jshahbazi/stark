@@ -26,9 +26,9 @@ impl<B: Backend> InputRht<B> {
             rht_signs,
             activation_quantization,
         } = preparation;
-        let rht = ActivationTransform::input_rht(context, data_type, in_place)?;
+        let rht = ActivationTransform::<B>::input_rht(context, data_type, in_place)?;
         let quantizer = activation_quantization
-            .map(|quantization| ActivationTransform::quantize(context, data_type, quantization))
+            .map(|quantization| ActivationTransform::<B>::quantize(context, data_type, quantization))
             .transpose()?;
 
         Ok(Self {

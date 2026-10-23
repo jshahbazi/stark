@@ -24,12 +24,22 @@ pub struct Backend {
     client: Arc<Client<OpenAIConfig>>,
 }
 
+/// Override every SDK credential default before using a provider-selected URL.
+/// Local compatible providers intentionally have no cloud credentials.
+pub fn explicit_client_config(
+    endpoint: &str,
+    api_key: Option<&str>,
+) -> OpenAIConfig {
+    OpenAIConfig::new()
+        .with_api_base(endpoint)
+        .with_api_key(api_key.unwrap_or_default())
+        .with_org_id("")
+        .with_project_id("")
+}
+
 impl Backend {
     pub fn new(config: Config) -> Result<Self, Error> {
-        let mut openai_config = OpenAIConfig::new().with_api_base(&config.api_endpoint);
-        if let Some(api_key) = config.api_key.as_ref() {
-            openai_config = openai_config.with_api_key(api_key);
-        }
+        let mut openai_config = explicit_client_config(&config.api_endpoint, config.api_key.as_deref());
         if let Some(headers) = config.headers.as_ref() {
             for (key, value) in headers {
                 let name =
@@ -75,5 +85,23 @@ impl chat_message::Backend for Backend {
         Box::pin(
             async move { Ok(Box::new(Instance::new(client, reference, api_type)) as Box<dyn chat_message::Instance>) },
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_openai::config::Config as _;
+
+    use super::explicit_client_config;
+
+    #[test]
+    fn provider_credentials_are_explicit() {
+        let local = explicit_client_config("http://127.0.0.1:11434/v1", None);
+        let headers = local.headers();
+        assert_eq!(headers[reqwest::header::AUTHORIZATION], "Bearer ");
+        assert!(!headers.contains_key("OpenAI-Organization"));
+        assert!(!headers.contains_key("OpenAI-Project"));
+        let cloud = explicit_client_config("https://example.invalid/v1", Some("synthetic-key"));
+        assert_eq!(cloud.headers()[reqwest::header::AUTHORIZATION], "Bearer synthetic-key");
     }
 }

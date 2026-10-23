@@ -105,6 +105,17 @@ pub struct ReductionParserConfig {
 
 impl ReductionParserConfig {
     pub fn validate(&self) -> Result<(), ReductionParserError> {
+        let mut pending = vec![(self.groups.as_slice(), 1usize)];
+        let mut nodes = 0usize;
+        while let Some((groups, depth)) = pending.pop() {
+            nodes = nodes.saturating_add(groups.len());
+            if depth > super::stack::MAX_DEPTH || nodes > super::stack::MAX_TOKENS {
+                return Err(ReductionParserError::ResourceLimit);
+            }
+            pending.extend(
+                groups.iter().filter(|group| !group.groups().is_empty()).map(|group| (group.groups(), depth + 1)),
+            );
+        }
         validate_sibling_groups(&self.groups)
     }
 

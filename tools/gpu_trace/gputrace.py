@@ -10,10 +10,68 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import struct
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+
+_RESOURCE_NAME = re.compile(r"MTL(Buffer|Texture)-\d+-\d+")
+_MAX_METADATA_BYTES = 64 * 1024 * 1024
+_MAX_TOTAL_METADATA_BYTES = 128 * 1024 * 1024
+_MAX_STRINGS = 262_144
+_MAX_METADATA_FILES = 1024
+
+
+@contextmanager
+def _capture_file(gputrace: Path, filename: str):
+    """Read only a regular basename from the opened capture directory."""
+    if not filename or Path(filename).name != filename or filename in {".", ".."} or "\\" in filename:
+        raise ValueError("Invalid capture filename")
+    directory = os.open(gputrace, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        descriptor = os.open(filename, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+    finally:
+        os.close(directory)
+    with os.fdopen(descriptor, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise ValueError("Capture resources must be regular files")
+        yield handle
+
+
+def _resource_names(gputrace: Path) -> set[str]:
+    result = set()
+    for name in os.listdir(gputrace):
+        if _RESOURCE_NAME.fullmatch(name):
+            try:
+                with _capture_file(gputrace, name):
+                    result.add(name)
+            except (OSError, ValueError):
+                continue
+    return result
+
+
+def _resource_path(gputrace: Path, filename: str) -> None:
+    if not _RESOURCE_NAME.fullmatch(filename):
+        raise ValueError("Invalid capture resource filename")
+
+
+def _metadata_files(gputrace: Path):
+    total = 0
+    names = [name for name in os.listdir(gputrace) if name.startswith("device-resources")]
+    if len(names) > _MAX_METADATA_FILES:
+        raise ValueError("Capture metadata file budget exceeded")
+    for name in names:
+        with _capture_file(gputrace, name) as handle:
+            size = os.fstat(handle.fileno()).st_size
+            total += size
+            if size > _MAX_METADATA_BYTES or total > _MAX_TOTAL_METADATA_BYTES:
+                raise ValueError("Capture metadata byte budget exceeded")
+            data = handle.read(size + 1)
+            if len(data) != size:
+                raise ValueError("Capture metadata changed while reading")
+            yield data
 
 
 @dataclass(frozen=True)
@@ -54,14 +112,20 @@ class BufferElement:
 
 
 def parse_metadata(gputrace: Path) -> CaptureMetadata:
-    meta_path = gputrace / "metadata"
-    if not meta_path.exists():
+    try:
+        with _capture_file(gputrace, "metadata") as handle:
+            if os.fstat(handle.fileno()).st_size > _MAX_METADATA_BYTES:
+                raise ValueError("Capture metadata byte budget exceeded")
+            metadata_bytes = handle.read(_MAX_METADATA_BYTES + 1)
+            if len(metadata_bytes) > _MAX_METADATA_BYTES:
+                raise ValueError("Capture metadata byte budget exceeded")
+    except FileNotFoundError:
         return CaptureMetadata(uuid="", captured_frames=0, graphics_api="")
 
     result = subprocess.run(
-        ["plutil", "-convert", "json", "-o", "-", str(meta_path)],
+        ["plutil", "-convert", "json", "-o", "-", "-"],
+        input=metadata_bytes,
         capture_output=True,
-        text=True,
     )
     if result.returncode != 0:
         return CaptureMetadata(uuid="", captured_frames=0, graphics_api="")
@@ -82,25 +146,14 @@ def parse_metadata(gputrace: Path) -> CaptureMetadata:
 
 def _extract_strings(data: bytes, min_length: int = 3) -> list[tuple[int, str]]:
     """Extract printable ASCII strings with their byte offsets."""
+    if len(data) > _MAX_METADATA_BYTES:
+        raise ValueError("Capture metadata byte budget exceeded")
     strings: list[tuple[int, str]] = []
-    current: list[str] = []
-    start: int | None = None
-
-    for i, b in enumerate(data):
-        if 32 <= b <= 126:
-            if start is None:
-                start = i
-            current.append(chr(b))
-        else:
-            if len(current) >= min_length:
-                assert start is not None
-                strings.append((start, "".join(current)))
-            current = []
-            start = None
-
-    if len(current) >= min_length and start is not None:
-        strings.append((start, "".join(current)))
-
+    for match in re.finditer(rb"[ -~]+", data):
+        if len(match[0]) >= min_length:
+            if len(strings) >= _MAX_STRINGS:
+                raise ValueError("Capture metadata string budget exceeded")
+            strings.append((match.start(), match[0].decode("ascii")))
     return strings
 
 
@@ -114,17 +167,15 @@ def extract_buffer_labels(gputrace: Path) -> dict[str, str]:
     resource filenames to their nearest following label string.
     """
     label_map: dict[str, str] = {}
+    inventory = _resource_names(gputrace)
 
-    for fname in os.listdir(gputrace):
-        if not fname.startswith("device-resources"):
-            continue
-        data = (gputrace / fname).read_bytes()
+    for data in _metadata_files(gputrace):
         strings = _extract_strings(data)
 
         resource_refs = [
             (off, s)
             for off, s in strings
-            if re.match(r"MTL(Buffer|Texture)-\d+-\d+", s)
+            if _RESOURCE_NAME.fullmatch(s) and s in inventory
         ]
 
         label_strings = [
@@ -136,16 +187,12 @@ def extract_buffer_labels(gputrace: Path) -> dict[str, str]:
             and not s.startswith("/")
         ]
 
+        label_index = 0
         for roff, rname in resource_refs:
-            best_label: str | None = None
-            best_dist = float("inf")
-            for loff, lval in label_strings:
-                dist = loff - roff
-                if 0 < dist < best_dist:
-                    best_dist = dist
-                    best_label = lval
-            if best_label:
-                label_map[rname] = best_label
+            while label_index < len(label_strings) and label_strings[label_index][0] <= roff:
+                label_index += 1
+            if label_index < len(label_strings):
+                label_map[rname] = label_strings[label_index][1]
 
     return label_map
 
@@ -163,10 +210,8 @@ def extract_shader_info(
     functions: list[str] = []
     libraries: list[str] = []
 
-    for fname in os.listdir(gputrace):
-        if not fname.startswith("device-resources"):
-            continue
-        data = (gputrace / fname).read_bytes()
+    seen_functions = set()
+    for data in _metadata_files(gputrace):
         strings = _extract_strings(data)
 
         for _, s in strings:
@@ -187,7 +232,8 @@ def extract_shader_info(
                 and len(s) > 3
                 and s not in ("function", "functions", "buffer", "buffers")
             ):
-                if s not in functions:
+                if s not in seen_functions:
+                    seen_functions.add(s)
                     functions.append(s)
 
     return functions, libraries
@@ -244,14 +290,13 @@ def read_buffer(
         "uint32"                 - single uint32 per element
         "half4"                  - 4 half-precision floats
     """
-    filepath = gputrace / filename
-    if not filepath.exists():
-        return []
+    _resource_path(gputrace, filename)
 
     fmt, fields = parse_layout(layout)
     stride = struct.calcsize(fmt)
 
-    data = filepath.read_bytes()
+    with _capture_file(gputrace, filename) as handle:
+        data = handle.read()
     total_elements = len(data) // stride
 
     results: list[BufferElement] = []
@@ -276,12 +321,11 @@ def read_buffer(
 
 def buffer_element_count(gputrace: Path, filename: str, layout: str) -> int:
     """Return total element count for a buffer given a layout."""
-    filepath = gputrace / filename
-    if not filepath.exists():
-        return 0
+    _resource_path(gputrace, filename)
     fmt, _ = parse_layout(layout)
     stride = struct.calcsize(fmt)
-    return filepath.stat().st_size // stride
+    with _capture_file(gputrace, filename) as handle:
+        return os.fstat(handle.fileno()).st_size // stride
 
 
 # ── resource listing ──────────────────────────────────────────────────────
@@ -294,11 +338,10 @@ def list_resources(gputrace: Path) -> CaptureInfo:
     functions, libraries = extract_shader_info(gputrace)
 
     resources: list[CaptureResource] = []
-    for fname in sorted(os.listdir(gputrace)):
-        m = re.match(r"MTL(Buffer|Texture)-\d+-\d+", fname)
-        if not m:
-            continue
-        size = (gputrace / fname).stat().st_size
+    for fname in sorted(_resource_names(gputrace)):
+        m = _RESOURCE_NAME.fullmatch(fname)
+        with _capture_file(gputrace, fname) as handle:
+            size = os.fstat(handle.fileno()).st_size
         kind = "buffer" if m.group(1) == "Buffer" else "texture"
         label = labels.get(fname, "")
         resources.append(
@@ -335,11 +378,9 @@ class BufferStats:
 
 def buffer_summary(gputrace: Path, filename: str, label: str) -> BufferStats | None:
     """Compute summary statistics for a buffer interpreted as float32."""
-    filepath = gputrace / filename
-    if not filepath.exists():
-        return None
-
-    data = filepath.read_bytes()
+    _resource_path(gputrace, filename)
+    with _capture_file(gputrace, filename) as handle:
+        data = handle.read()
     n_floats = len(data) // 4
     if n_floats == 0:
         return None
@@ -368,7 +409,8 @@ def resolve_buffer_filename(
     Tries exact filename match first, then exact label match,
     then partial label match (case-insensitive).
     """
-    if (gputrace / buffer_query).exists():
+    inventory = _resource_names(gputrace)
+    if buffer_query in inventory:
         return buffer_query
 
     if labels is None:
@@ -376,12 +418,12 @@ def resolve_buffer_filename(
 
     # Exact label match (case-insensitive)
     for fname, label in labels.items():
-        if label.lower() == buffer_query.lower():
+        if fname in inventory and label.lower() == buffer_query.lower():
             return fname
 
     # Partial match
     for fname, label in labels.items():
-        if buffer_query.lower() in label.lower():
+        if fname in inventory and buffer_query.lower() in label.lower():
             return fname
 
     return None

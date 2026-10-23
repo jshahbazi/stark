@@ -251,6 +251,38 @@ class DesktopDependencyTests(unittest.TestCase):
 
 
 class ConverterPackageTests(unittest.TestCase):
+    def test_snapshot_uses_only_the_standard_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code = (
+                "import json, runpy, sys; from pathlib import Path; "
+                "builder = runpy.run_path(sys.argv[1]); "
+                "source = builder['converter_snapshot'](Path(sys.argv[2]), Path(sys.argv[3])); "
+                "assert not any(name.split('.')[0] in "
+                "{'numpy', 'tokenizers', 'huggingface_hub', 'stark_convert'} for name in sys.modules); "
+                "print(json.dumps(source['toolchain_provenance']))"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    code,
+                    str(builder.ROOT / "scripts/build_menubar.py"),
+                    str(builder.ROOT / "tools/converter"),
+                    str(Path(temporary) / "source"),
+                ],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode, 0, "dependency_free_converter_snapshot_failed"
+            )
+            self.assertEqual(
+                json.loads(result.stdout)["converter_lock_sha256"],
+                builder.sha256(builder.ROOT / "tools/converter/uv.lock"),
+            )
+
     def test_python_target_lock_accepts_only_empty_regular_uv_lock(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

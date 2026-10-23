@@ -21,6 +21,7 @@ pub mod weaver;
 
 pub use activation_transform::*;
 pub use activation_type::*;
+#[cfg(backend = "metal")]
 pub use attention::*;
 pub use embedding::*;
 pub use gated_act_mul::*;

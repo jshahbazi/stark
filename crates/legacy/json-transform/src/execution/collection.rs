@@ -9,13 +9,14 @@ pub fn execute_each(
     apply: &Pipeline,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let Value::Array(items) = input else {
         return Ok(Value::Null);
     };
     let _span = tracing::info_span!("execute_each", items = items.len()).entered();
     let results: Result<Vec<Value>, TransformError> =
-        items.into_iter().map(|element| execute_pipeline(apply, element, schema)).collect();
+        items.into_iter().map(|element| execute_pipeline(apply, element, schema, context)).collect();
     Ok(Value::Array(results?))
 }
 
@@ -23,6 +24,7 @@ pub fn execute_flat_map(
     apply: &Pipeline,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let Value::Array(items) = input else {
         return Ok(input);
@@ -30,7 +32,7 @@ pub fn execute_flat_map(
     let _span = tracing::info_span!("execute_flat_map", items = items.len()).entered();
     let mut results: Vec<Value> = Vec::new();
     for element in items {
-        let result = execute_pipeline(apply, element, schema)?;
+        let result = execute_pipeline(apply, element, schema, context)?;
         match result {
             Value::Array(inner_items) => results.extend(inner_items),
             other => results.push(other),
@@ -77,6 +79,7 @@ pub fn execute_reduce(
     then_pipeline: &Pipeline,
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let Value::Array(items) = input else {
         return Ok(Value::Null);
@@ -87,7 +90,7 @@ pub fn execute_reduce(
     let mut group_key: Option<Value> = None;
 
     for item in items {
-        let item_key = execute_pipeline(key_pipeline, item.clone(), schema)?;
+        let item_key = execute_pipeline(key_pipeline, item.clone(), schema, context)?;
 
         let should_group = match r#if {
             Some(condition) => condition.evaluate(&item_key),
@@ -95,7 +98,7 @@ pub fn execute_reduce(
         };
 
         if !should_group {
-            flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema)?;
+            flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema, context)?;
             result.push(item);
             continue;
         }
@@ -103,14 +106,14 @@ pub fn execute_reduce(
         let same_group = group_key.as_ref().map(|existing| existing == &item_key).unwrap_or(false);
 
         if !group.is_empty() && !same_group {
-            flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema)?;
+            flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema, context)?;
         }
 
         group_key = Some(item_key);
         group.push(item);
     }
 
-    flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema)?;
+    flush_group(&mut group, &mut group_key, &mut result, then_pipeline, schema, context)?;
 
     Ok(Value::Array(result))
 }
@@ -121,12 +124,13 @@ fn flush_group(
     result: &mut Vec<Value>,
     then_pipeline: &Pipeline,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<(), TransformError> {
     if group.is_empty() {
         return Ok(());
     }
     let group_array = Value::Array(std::mem::take(group));
-    let merged = execute_pipeline(then_pipeline, group_array, schema)?;
+    let merged = execute_pipeline(then_pipeline, group_array, schema, context)?;
     result.push(merged);
     *group_key = None;
     Ok(())

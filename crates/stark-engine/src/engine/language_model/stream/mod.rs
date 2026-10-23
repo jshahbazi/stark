@@ -38,6 +38,12 @@ pub enum LanguageModelStreamError<B: Backend> {
     NoSeedToken,
     #[error("Context overflow")]
     ContextOverflow,
+    #[error("Token ID is outside the model vocabulary")]
+    InvalidToken,
+    #[error("Invalid sampling options")]
+    InvalidSampling,
+    #[error("State belongs to a different model")]
+    ForeignState,
 }
 
 impl<B: Backend> LanguageModel<B> {

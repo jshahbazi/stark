@@ -1,3 +1,4 @@
+mod access;
 mod log;
 mod request_info;
 

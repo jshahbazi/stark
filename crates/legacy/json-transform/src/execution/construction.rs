@@ -22,16 +22,17 @@ pub fn execute_resolve(
     Ok(Value::Object(object))
 }
 
-#[tracing::instrument(skip(fields, input, schema), fields(field_count = fields.len()))]
+#[tracing::instrument(skip(fields, input, schema, context), fields(field_count = fields.len()))]
 pub fn execute_object(
     fields: &IndexMap<String, Pipeline>,
     required: &[String],
     input: Value,
     schema: &TransformSchema,
+    context: &mut super::ExecutionContext,
 ) -> Result<Value, TransformError> {
     let mut map = serde_json::Map::new();
     for (field_name, pipeline) in fields {
-        let value = execute_pipeline(pipeline, input.clone(), schema)?;
+        let value = execute_pipeline(pipeline, input.clone(), schema, context)?;
         let is_empty = match &value {
             Value::Null => true,
             Value::String(text) => text.is_empty(),

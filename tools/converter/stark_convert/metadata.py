@@ -25,7 +25,7 @@ from tokenizers import AddedToken, Tokenizer
 
 from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.registry import CONFIG_ADAPTERS, get_model, models
-from stark_convert.streaming import ConversionError, read_json
+from stark_convert.streaming import ConversionError, authorize_source_path, read_json, read_regular_bytes
 
 __all__ = ["SUPPORTED_METADATA_REPOS", "UnsupportedMetadata", "write_metadata"]
 
@@ -201,12 +201,12 @@ def _file_path(
             raise ConversionError("Cannot resolve metadata source file.") from None
     if spec["repo"] != model_entry["repo"]:
         raise ConversionError("External metadata source requires a resolved snapshot.")
-    return source / spec["filename"]
+    return authorize_source_path(source, source / spec["filename"])
 
 
 def _read_text(path: Path, label: str) -> str:
     try:
-        return path.read_text(encoding="utf-8")
+        return read_regular_bytes(path).decode("utf-8")
     except (OSError, UnicodeError):
         raise ConversionError(f"Cannot read {label} metadata.") from None
 
@@ -439,7 +439,9 @@ def write_metadata(
         raise ConversionError("Generic metadata requires nonempty stop-token identifiers.")
 
     try:
-        tokenizer = Tokenizer.from_file(str(_file_path(source, model_entry, "tokenizer", resolve_file)))
+        tokenizer = Tokenizer.from_str(
+            _read_text(_file_path(source, model_entry, "tokenizer", resolve_file), "tokenizer")
+        )
         _add_tokens(tokenizer, tokenizer_config)
         if bos_token is None:
             bos_token = _token_ids_to_text(tokenizer, hf_config.get("bos_token_id"))

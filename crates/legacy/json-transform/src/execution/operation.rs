@@ -338,6 +338,17 @@ impl Operation {
         input: Value,
         schema: &TransformSchema,
     ) -> Result<Value, TransformError> {
+        schema.validate()?;
+        self.execute_with_context(input, schema, &mut super::ExecutionContext::default())
+    }
+
+    pub(crate) fn execute_with_context(
+        &self,
+        input: Value,
+        schema: &TransformSchema,
+        context: &mut super::ExecutionContext,
+    ) -> Result<Value, TransformError> {
+        context.spend()?;
         match self {
             // Access
             Self::Get {
@@ -349,7 +360,7 @@ impl Operation {
             Self::Object {
                 fields,
                 required,
-            } => construction::execute_object(fields, required, input, schema),
+            } => construction::execute_object(fields, required, input, schema, context),
             Self::Literal {
                 value,
             } => construction::execute_literal(value),
@@ -366,10 +377,10 @@ impl Operation {
             // Collection
             Self::Each {
                 apply,
-            } => collection::execute_each(apply, input, schema),
+            } => collection::execute_each(apply, input, schema, context),
             Self::FlatMap {
                 apply,
-            } => collection::execute_flat_map(apply, input, schema),
+            } => collection::execute_flat_map(apply, input, schema, context),
             Self::Filter {
                 condition,
             } => collection::execute_filter(condition, input),
@@ -380,7 +391,7 @@ impl Operation {
                 key,
                 r#if,
                 then,
-            } => collection::execute_reduce(key, r#if, then, input, schema),
+            } => collection::execute_reduce(key, r#if, then, input, schema, context),
 
             // String
             Self::Format {
@@ -412,16 +423,16 @@ impl Operation {
                 key,
                 cases,
                 default,
-            } => control_flow::execute_switch(key, cases, default, input, schema),
+            } => control_flow::execute_switch(key, cases, default, input, schema, context),
             Self::Call {
                 target,
                 arguments,
-            } => control_flow::execute_call(target, arguments, input, schema),
+            } => control_flow::execute_call(target, arguments, input, schema, context),
             Self::On {
                 field,
                 with,
                 r#do,
-            } => control_flow::execute_on(field, with.as_deref(), r#do, input, schema),
+            } => control_flow::execute_on(field, with.as_deref(), r#do, input, schema, context),
         }
     }
 }

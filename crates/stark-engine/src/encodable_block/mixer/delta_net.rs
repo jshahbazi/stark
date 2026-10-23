@@ -176,6 +176,8 @@ impl<B: Backend> DeltaNet<B> {
         parameter_tree: &ParameterTree<B>,
         context: &B::Context,
     ) -> Result<(Self, Option<B::GlobalBuffer>), DeltaNetNewError<B>> {
+        crate::config::validation::validate_heads(config.num_heads, config.num_groups, config.head_dim)
+            .map_err(|_| DeltaNetNewError::UnsupportedConfiguration("invalid head/group geometry".into()))?;
         if config.kernel_size < 2 {
             return Err(DeltaNetNewError::UnsupportedConfiguration(format!(
                 "kernel_size must be >= 2, got {}",
@@ -195,10 +197,15 @@ impl<B: Backend> DeltaNet<B> {
             )));
         }
 
-        let key_dim = config.num_groups * config.head_dim;
-        let value_dim = config.num_heads * config.value_head_dim;
-        let conv_dim = key_dim * 2 + value_dim;
-        let total_proj_dim = conv_dim + value_dim + config.num_heads + config.num_heads;
+        let geometry_error = || DeltaNetNewError::UnsupportedConfiguration("projection dimension overflow".into());
+        let key_dim = config.num_groups.checked_mul(config.head_dim).ok_or_else(geometry_error)?;
+        let value_dim = config.num_heads.checked_mul(config.value_head_dim).ok_or_else(geometry_error)?;
+        let conv_dim = key_dim.checked_mul(2).and_then(|dim| dim.checked_add(value_dim)).ok_or_else(geometry_error)?;
+        let total_proj_dim = conv_dim
+            .checked_add(value_dim)
+            .and_then(|dim| dim.checked_add(config.num_heads))
+            .and_then(|dim| dim.checked_add(config.num_heads))
+            .ok_or_else(geometry_error)?;
 
         let (in_projection, in_projection_input_hadamard_factors) =
             <dyn Linear<B>>::new_with_input_rht_mixed_precision(

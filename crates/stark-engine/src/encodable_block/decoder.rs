@@ -19,6 +19,8 @@ use crate::{
 
 #[derive(Debug, Error)]
 pub enum DecoderError<B: Backend> {
+    #[error(transparent)]
+    InvalidInput(#[from] crate::backends::common::InvalidInput),
     #[error("Backend error: {0}")]
     Backend(#[source] B::Error),
     #[error("Embedding error: {0}")]
@@ -55,6 +57,10 @@ impl<B: Backend> Decoder<B> {
         parameter_tree: &ParameterTree<B>,
         data_type: DataType,
     ) -> Result<Self, DecoderError<B>> {
+        crate::config::validation::validate_ple_layout(
+            config.ple_model_config.as_ref(),
+            &config.transformer_config.layer_configs,
+        )?;
         let (embedding, readout_input_hadamard_factors) = Embedding::new(
             context,
             config.vocab_size,

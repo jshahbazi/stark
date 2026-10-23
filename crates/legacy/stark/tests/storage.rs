@@ -8,9 +8,6 @@ use download_manager::{DestinationLock, LockOwner};
 use kiban::rt::RuntimeHandle;
 use mock_registry::{Behavior, MockRegistry, artifact_path};
 use rstest::rstest;
-use tokio::time::timeout;
-use tokio_stream::{StreamExt, wrappers::BroadcastStream};
-use uuid::Uuid;
 use stark::{
     engine::Downloader,
     registry::mirai::HUGGING_FACE_URL,
@@ -20,6 +17,9 @@ use stark::{
         model::{Model, ModelAccessibility, ModelIdentifier, ModelSource},
     },
 };
+use tokio::time::timeout;
+use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, header_exists, method, path},
@@ -31,6 +31,97 @@ const HELLO: &[u8] = b"hello\n";
 const HELLO_SHA256: &str = "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03";
 const HELLO_GIT_BLOB_SHA1: &str = "ce013625030ba8dba906f756967f9e9ca394464a";
 const REVISION: &str = "f5dec40ceb1d8c4b15f049bf5e185dd7be2cc150";
+
+fn synthetic_registry_model(
+    file_name: String,
+    version: &str,
+) -> Model {
+    Model::external(
+        "synthetic/model".into(),
+        "test".into(),
+        "Test".into(),
+        "uzu".into(),
+        "Uzu".into(),
+        "1".into(),
+        vec![],
+        ModelAccessibility::OnDevice {
+            source: ModelSource::Registry {
+                toolchain_version: version.into(),
+                repository: None,
+                source_repository: None,
+                files: vec![File {
+                    url: "http://127.0.0.1:9/model".into(),
+                    name: file_name,
+                    size: 1,
+                    hashes: vec![Hash {
+                        method: HashMethod::Sha256,
+                        value: HELLO_SHA256.into(),
+                    }],
+                }],
+            },
+        },
+        None,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_refresh_rejects_escaping_paths_without_deleting_the_victim() -> Result<(), Box<dyn std::error::Error>>
+{
+    let test_storage =
+        TestStorage::new(RuntimeHandle::current(), vec![], DownloadManagerType::Universal, HUGGING_FACE_URL, None)
+            .await?;
+    let victim_directory = tempfile::tempdir()?;
+    let victim = victim_directory.path().join("victim");
+    std::fs::write(&victim, b"synthetic-victim")?;
+    for (name, version) in [
+        (victim.to_string_lossy().to_string(), "1"),
+        ("../../../../victim".into(), "1"),
+        ("model.safetensors".into(), "../../outside"),
+        ("model.safetensors".into(), "/outside"),
+        ("weights.lock".into(), "1"),
+        ("weights.PART".into(), "1"),
+    ] {
+        let model = synthetic_registry_model(name, version);
+        assert!(test_storage.storage.refresh(&[model], true).await.is_err());
+        assert_eq!(std::fs::read(&victim)?, b"synthetic-victim");
+    }
+    let valid = synthetic_registry_model("nested/model.safetensors".into(), "1");
+    test_storage.storage.refresh(std::slice::from_ref(&valid), false).await?;
+    assert!(test_storage.storage.cache_model_path(&valid).is_some());
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn registry_refresh_rejects_symlinked_destinations_and_sidecars() -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::symlink;
+    let test_storage =
+        TestStorage::new(RuntimeHandle::current(), vec![], DownloadManagerType::Universal, HUGGING_FACE_URL, None)
+            .await?;
+    let outside = tempfile::tempdir()?;
+    let victim = outside.path().join("victim");
+    std::fs::write(&victim, b"synthetic-victim")?;
+    let model = synthetic_registry_model("model.safetensors".into(), "1");
+    let cache = test_storage.storage.cache_model_path(&model).unwrap();
+    std::fs::create_dir_all(&cache)?;
+    for name in [
+        "model.safetensors",
+        "model.safetensors.part",
+        "model.safetensors.lock",
+        "model.safetensors.checksum",
+        "model.safetensors.resume_data",
+    ] {
+        symlink(&victim, cache.join(name))?;
+        assert!(test_storage.storage.refresh(std::slice::from_ref(&model), true).await.is_err());
+        assert_eq!(std::fs::read(&victim)?, b"synthetic-victim");
+        std::fs::remove_file(cache.join(name))?;
+    }
+    symlink(outside.path(), cache.join("nested"))?;
+    let nested = synthetic_registry_model("nested/victim".into(), "1");
+    assert!(test_storage.storage.refresh(&[nested], false).await.is_err());
+    assert_eq!(std::fs::read(&victim)?, b"synthetic-victim");
+    Ok(())
+}
 
 #[rstest]
 #[case::universal(DownloadManagerType::Universal)]

@@ -20,6 +20,7 @@ from ..streaming import (
     load_checkpoint,
     read_json,
     tensor_sha256,
+    validate_planning_layers,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
 
@@ -44,6 +45,7 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     model_dim = _positive_int(config, "hidden_size")
     hidden_dim = _positive_int(config, "intermediate_size")
     layers = _positive_int(config, "num_hidden_layers")
+    validate_planning_layers(layers)
     heads = _positive_int(config, "num_attention_heads")
     groups = _positive_int(config, "num_key_value_heads", heads)
     if heads % groups:
@@ -100,6 +102,8 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
     if family == "granite" and config.get("layer_types") is not None:
         unsupported.append("Explicit layer types are outside qualified dense coverage")
     embedding_scale, residual_scale, attention_scale, logit_divisor = None, None, None, None
+    tensors = load_checkpoint(source)
+    validate_planning_layers(layers, tensors)
     uses_rope = [True] * layers
     if family == "granite":
         if not _GRANITE_KEYS <= set(config):
@@ -143,7 +147,6 @@ def _build_plan(source: Path, *, family: str, dtype: str) -> ConversionPlan:
         if use_sliding or window is not None:
             unsupported.append("SmolLM3 sliding attention is outside qualified dense coverage")
     quantization = parse_mlx_quantization(config) if family == "smollm3" else None
-    tensors = load_checkpoint(source)
     if family != "smollm3":
         for key in ("quantization", "quantization_config"):
             if config.get(key) is not None:

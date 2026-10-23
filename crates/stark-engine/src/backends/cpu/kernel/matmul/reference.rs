@@ -20,6 +20,7 @@ pub(super) enum WeightData {
     },
     Quantized {
         weights: SendPtr<u8>,
+        weights_size: usize,
         scales: SendPtr<u8>,
         zero_points: Option<(SendPtr<u8>, QuantParamsStrides)>,
         biases: Option<SendPtr<u8>>,
@@ -57,18 +58,44 @@ impl WeightData {
                     transpose: b_transpose,
                 })
             },
-            MatmulB::Quantized(quantized) => Ok(WeightData::Quantized {
-                weights: buffer_ptr(quantized.codes),
-                scales: buffer_ptr(quantized.scales),
-                zero_points: quantized.zero_points().map(|values| (buffer_ptr(values), quantized.zero_point_strides())),
-                biases: quantized.biases().map(buffer_ptr),
-                scale_strides: quantized.params.scale_strides(),
-                bits: quantized.bits() as usize,
-                group_size: quantized.group_size as usize,
-                signed_codes: quantized.signed_codes,
-            }),
+            MatmulB::Quantized(quantized) => {
+                let weights_size = quantized.codes.size();
+                let required_bytes = n
+                    .checked_mul(k)
+                    .and_then(|count| count.checked_mul(quantized.bits() as usize))
+                    .map(|bits| bits.div_ceil(8));
+                if required_bytes.is_none_or(|size| size > weights_size) {
+                    return Err(MatmulError::UnsupportedLayout {
+                        path: "CpuMatmul codes buffer",
+                    });
+                }
+                Ok(WeightData::Quantized {
+                    weights: buffer_ptr(quantized.codes),
+                    weights_size,
+                    scales: buffer_ptr(quantized.scales),
+                    zero_points: quantized
+                        .zero_points()
+                        .map(|values| (buffer_ptr(values), quantized.zero_point_strides())),
+                    biases: quantized.biases().map(buffer_ptr),
+                    scale_strides: quantized.params.scale_strides(),
+                    bits: quantized.bits() as usize,
+                    group_size: quantized.group_size as usize,
+                    signed_codes: quantized.signed_codes,
+                })
+            },
         }
     }
+}
+
+#[inline]
+pub(super) fn packed_code(
+    codes: &[u8],
+    bits: usize,
+    index: usize,
+) -> u8 {
+    let codes_per_byte = 8 / bits;
+    let byte = codes[index / codes_per_byte];
+    (byte >> ((index % codes_per_byte) * bits)) & ((1u16 << bits) - 1) as u8
 }
 
 #[inline]
@@ -101,5 +128,106 @@ pub(super) unsafe fn write_f32(
             DataType::BF16 => *(base as *mut bf16).add(index) = bf16::from_f32(value),
             _ => unreachable!(),
         }
+    }
+}
+
+#[cfg(test)]
+mod packed_tail_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::packed_code;
+
+    #[stark_test]
+    fn packed_codes_only_require_their_exact_byte_tail() {
+        assert_eq!(packed_code(&[0xd3], 8, 0), 0xd3);
+        assert_eq!(packed_code(&[0xd3], 4, 0), 3);
+        assert_eq!(packed_code(&[0xd3], 4, 1), 13);
+        let codes = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba];
+        for index in 0..12 {
+            assert_eq!(packed_code(&codes, 4, index), index as u8);
+        }
+        let aligned = [0x12, 0x34, 0x56, 0x78];
+        for (index, expected) in aligned.into_iter().enumerate() {
+            assert_eq!(packed_code(&aligned, 8, index), expected);
+        }
+    }
+
+    #[stark_test]
+    fn cpu_matmul_dispatches_exact_packed_tails() {
+        use crate::{
+            backends::{
+                common::{
+                    Backend, BufferMut, BufferRef, CommandBufferEncoding, CommandBufferExecutable,
+                    CommandBufferPending, Context,
+                    gpu_types::QuantizationMode,
+                    kernel::matmul::{
+                        MatmulA, MatmulArguments, MatmulB, MatmulDOps, MatmulKernel, QuantParams, QuantParamsLayout,
+                        QuantizedB, QuantizedCorrection,
+                    },
+                },
+                cpu::{Cpu, kernel::matmul::MatmulCpuKernel},
+            },
+            data_type::DataType,
+        };
+
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        for (mode, k, n, codes, expected) in [
+            (QuantizationMode::U8, 1, 1, vec![129u8], vec![1.0f32]),
+            (QuantizationMode::U4, 2, 1, vec![0x21], vec![-13.0]),
+            (QuantizationMode::U4, 6, 2, vec![0x10, 0x32, 0x54, 0x76, 0x98, 0xba], vec![-33.0, 3.0]),
+            (QuantizationMode::U8, 4, 1, vec![129, 130, 131, 132], vec![10.0]),
+        ] {
+            let mut input = context.create_buffer(k * 4).unwrap();
+            input.copyin(&vec![1.0f32; k]);
+            let mut weights = context.create_buffer(codes.len()).unwrap();
+            weights.copyin(&codes);
+            let mut scales = context.create_buffer(n * 4).unwrap();
+            scales.copyin(&vec![1.0f32; n]);
+            let mut output = context.create_buffer(n * 4).unwrap();
+            let mut commands = context.create_command_buffer(None, None).unwrap();
+            let mut kernel = MatmulCpuKernel::new(&context, DataType::F32, DataType::F32, DataType::F32).unwrap();
+            kernel
+                .encode(
+                    MatmulArguments {
+                        a: MatmulA::FullPrecision {
+                            values: &input,
+                            offset: 0,
+                        },
+                        b: MatmulB::Quantized(QuantizedB {
+                            codes: &weights,
+                            scales: &scales,
+                            correction: QuantizedCorrection::Symmetric,
+                            params: QuantParams::new(QuantParamsLayout::OutputGroup, n as u32, 1),
+                            mode,
+                            group_size: k as u32,
+                            signed_codes: false,
+                        }),
+                        b_leading_dimension: None,
+                        b_transpose: true,
+                        d: &mut output,
+                        d_transform: MatmulDOps::none(),
+                        gather_indices: None::<&<Cpu as Backend>::GlobalBuffer>,
+                        m: 1,
+                        n: n as u32,
+                        k: k as u32,
+                    },
+                    &mut commands,
+                )
+                .unwrap();
+            commands.end_encoding().submit().wait_until_completed().unwrap();
+            assert_eq!(output.copyout::<f32>(), expected);
+        }
+        let codes = context.create_buffer(1).unwrap();
+        let scales = context.create_buffer(4).unwrap();
+        let undersized = MatmulB::Quantized(QuantizedB {
+            codes: &codes,
+            scales: &scales,
+            correction: QuantizedCorrection::Symmetric,
+            params: QuantParams::new(QuantParamsLayout::OutputGroup, 1, 1),
+            mode: QuantizationMode::U8,
+            group_size: 2,
+            signed_codes: false,
+        });
+        assert!(super::WeightData::from_b(undersized, None, true, 2, 1).is_err());
     }
 }

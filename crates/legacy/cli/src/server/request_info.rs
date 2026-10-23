@@ -1,11 +1,8 @@
-use std::{
-    convert::Infallible,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use rocket::{
     Request,
-    http::Method,
+    http::{Method, Status},
     request::{FromRequest, Outcome},
 };
 use uuid::Uuid;
@@ -40,9 +37,17 @@ impl RequestInfo {
 
 #[rocket::async_trait]
 impl<'a> FromRequest<'a> for &'a RequestInfo {
-    type Error = Infallible;
+    type Error = ();
 
     async fn from_request(request: &'a Request<'_>) -> Outcome<Self, Self::Error> {
-        Outcome::Success(request.local_cache(|| RequestInfo::new(request.method(), request.uri().to_string())))
+        let Some(access) = request.rocket().state::<super::access::ServerAccess>() else {
+            return Outcome::Error((Status::ServiceUnavailable, ()));
+        };
+        if let Err(status) = access.authorize(request) {
+            return Outcome::Error((status, ()));
+        }
+        Outcome::Success(
+            request.local_cache(|| RequestInfo::new(request.method(), request.uri().path().as_str().to_string())),
+        )
     }
 }

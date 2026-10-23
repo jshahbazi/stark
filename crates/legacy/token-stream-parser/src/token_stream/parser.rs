@@ -11,6 +11,7 @@ pub struct TokenStreamParser {
     framing: FramingParser,
     reduction: ReductionParser,
     extraction: ExtractionParser,
+    tokens: usize,
 }
 
 impl Parser for TokenStreamParser {
@@ -21,6 +22,8 @@ impl Parser for TokenStreamParser {
     type Error = TokenStreamParserError;
 
     fn new(config: Self::Config) -> Result<Self, Self::Error> {
+        config.reduction.validate()?;
+        config.transformation.validate()?;
         let sections_compose_groups = config.reduction.collect_sections_compose_groups();
         let framing = match FramingParser::new(config.framing_config()) {
             Ok(parser) => parser,
@@ -38,10 +41,11 @@ impl Parser for TokenStreamParser {
             framing,
             reduction,
             extraction,
+            tokens: 0,
         })
     }
 
-    #[tracing::instrument(skip_all, fields(token = %input))]
+    #[tracing::instrument(skip_all)]
     fn push(
         &mut self,
         input: &Token,
@@ -57,6 +61,7 @@ impl Parser for TokenStreamParser {
         self.framing.reset();
         self.reduction.reset();
         self.extraction.reset();
+        self.tokens = 0;
     }
 }
 
@@ -66,6 +71,11 @@ impl TokenStreamParser {
         input: &Token,
         extract: bool,
     ) -> Result<(), TokenStreamParserError> {
+        // Check before framing clones or retains input and before reduction mutates.
+        if self.tokens >= 262_144 {
+            return Err(crate::reduction::ReductionParserError::ResourceLimit.into());
+        }
+        self.tokens += 1;
         let event = match self.framing.push(input) {
             Ok(event) => event,
             Err(infallible) => match infallible {},

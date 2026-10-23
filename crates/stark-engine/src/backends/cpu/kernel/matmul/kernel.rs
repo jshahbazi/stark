@@ -1,4 +1,4 @@
-use super::reference::{WeightData, read_f32, write_f32};
+use super::reference::{WeightData, packed_code, read_f32, write_f32};
 use crate::{
     backends::{
         common::{
@@ -200,6 +200,7 @@ impl MatmulKernel for MatmulCpuKernel {
                                 },
                                 WeightData::Quantized {
                                     weights,
+                                    weights_size,
                                     scales,
                                     zero_points,
                                     biases,
@@ -208,15 +209,9 @@ impl MatmulKernel for MatmulCpuKernel {
                                     group_size,
                                     signed_codes,
                                 } => {
-                                    let pack_factor = 32 / *bits;
                                     let weight_linear_index = b_col * k_u + inner;
-                                    let word_index = weight_linear_index / pack_factor;
-                                    let code_index_in_word = weight_linear_index % pack_factor;
-                                    let bit_offset = code_index_in_word * *bits;
-                                    let weights_words = weights.as_ptr() as *const u32;
-                                    let word = weights_words.add(word_index).read_unaligned();
-                                    let code_mask = (1u32 << bits) - 1;
-                                    let mut weight_code = ((word >> bit_offset) & code_mask) as u8;
+                                    let codes = std::slice::from_raw_parts(weights.as_ptr(), *weights_size);
+                                    let mut weight_code = packed_code(codes, *bits, weight_linear_index);
                                     if *signed_codes {
                                         weight_code ^= 1u8 << (bits - 1);
                                     }

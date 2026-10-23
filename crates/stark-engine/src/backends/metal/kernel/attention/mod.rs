@@ -64,6 +64,7 @@ impl AttentionKernel for AttentionMetalKernel {
         context: &MetalContext,
         config: AttentionKernelConfig,
     ) -> Result<Self, MetalError> {
+        crate::config::validation::validate_heads(config.num_q_heads, config.num_groups, config.head_dim)?;
         let grouped = gemm_grouped::AttentionGemmGrouped::is_supported(&config, context)
             .then(|| gemm_grouped::AttentionGemmGrouped::new(&config));
         let gemm = gemm::AttentionGemm::is_supported(&config).then(|| gemm::AttentionGemm::new(&config));

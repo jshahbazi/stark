@@ -1,4 +1,4 @@
-use std::{collections::HashMap, pin::Pin, str::FromStr, sync::Arc};
+use std::{collections::HashMap, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 use rocket::{
     Request, State,
@@ -13,18 +13,21 @@ use rocket::{
     serde::json::Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, mpsc};
-use tokio_stream::wrappers::UnboundedReceiverStream;
-use tracing::Instrument;
 use stark::{
     session::chat::{ChatSession, ChatSessionStream, ChatSessionStreamChunk, UNPARSED_ARGUMENTS_KEY},
     types::{
-        basic::{Grammar, ReasoningEffort, SamplingMethod},
+        basic::{CancelToken, Grammar, ReasoningEffort, SamplingMethod},
         session::chat::{
             ChatContentBlock, ChatMessage, ChatReplyConfig, ChatReplyFinishReason, ChatReplyStats, ChatRole,
         },
     },
 };
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    sync::{Mutex, mpsc},
+};
+use tokio_stream::wrappers::ReceiverStream;
+use tracing::Instrument;
 
 use crate::{
     common::thinking::ThinkingSupport,
@@ -39,6 +42,77 @@ use crate::{
         request_log::RequestLog,
     },
 };
+
+const MAX_REQUEST_BODY_BYTES: u64 = 64 * 1024 * 1024;
+const REQUEST_BODY_TIMEOUT: Duration = Duration::from_secs(30);
+const RESPONSE_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum RequestBodyError {
+    Timeout,
+    TooLarge,
+    InvalidBody,
+}
+
+async fn read_request_body(
+    source: impl AsyncRead + Unpin,
+    limit: u64,
+    deadline: Duration,
+) -> Result<String, RequestBodyError> {
+    let read = async {
+        let mut body = String::new();
+        source.take(limit + 1).read_to_string(&mut body).await.map_err(|_| RequestBodyError::InvalidBody)?;
+        if body.len() as u64 > limit {
+            return Err(RequestBodyError::TooLarge);
+        }
+        Ok(body)
+    };
+    tokio::time::timeout(deadline, read).await.map_err(|_| RequestBodyError::Timeout)?
+}
+
+/// Bounds only waits for an HTTP consumer, leaving model execution uncapped.
+struct ResponseSender<T> {
+    sender: mpsc::Sender<T>,
+    deadline: Duration,
+    cancel_token: Option<CancelToken>,
+}
+
+impl<T> ResponseSender<T> {
+    fn new(
+        sender: mpsc::Sender<T>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            sender,
+            deadline,
+            cancel_token: None,
+        }
+    }
+
+    fn set_cancel_token(
+        &mut self,
+        token: CancelToken,
+    ) {
+        self.cancel_token = Some(token);
+    }
+
+    async fn send(
+        &self,
+        value: T,
+    ) -> Result<(), ()> {
+        if matches!(tokio::time::timeout(self.deadline, self.sender.send(value)).await, Ok(Ok(()))) {
+            return Ok(());
+        }
+        if let Some(token) = &self.cancel_token {
+            token.cancel();
+        }
+        Err(())
+    }
+
+    async fn closed(&self) {
+        self.sender.closed().await;
+    }
+}
 
 fn deserialize_message_content<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
@@ -479,13 +553,98 @@ fn with_response_format_grammar(
 }
 
 fn json_schema_grammar(json_schema: &JsonSchemaFormat) -> Result<Grammar, ResponseFormatError> {
-    jsonschema::meta::validate(&json_schema.schema)
-        .map_err(|error| ResponseFormatError::InvalidJsonSchema(error.to_string()))?;
+    if !cfg!(feature = "capability-grammar") {
+        return Err(ResponseFormatError::GrammarUnsupported);
+    }
+    validate_local_json_schema(&json_schema.schema)?;
     let schema = serde_json::to_string(&json_schema.schema)
         .map_err(|error| ResponseFormatError::InvalidResponseFormat(error.to_string()))?;
     Ok(Grammar::JsonSchema {
         schema,
     })
+}
+
+struct NoExternalSchemas;
+
+impl jsonschema::Retrieve for NoExternalSchemas {
+    fn retrieve(
+        &self,
+        _uri: &jsonschema::Uri<String>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        Err("external schema resources are disabled".into())
+    }
+}
+
+fn validate_local_json_schema(schema: &serde_json::Value) -> Result<(), ResponseFormatError> {
+    use jsonschema::Draft;
+
+    let invalid = || ResponseFormatError::InvalidJsonSchema("unsupported or invalid schema".to_string());
+    // Select a bundled meta-schema before the dependency can resolve a custom URI.
+    let draft_for = |schema: &serde_json::Value| -> Result<Draft, ResponseFormatError> {
+        let uri = match schema.get("$schema") {
+            None => return Ok(Draft::Draft202012),
+            Some(value) => value.as_str().ok_or_else(invalid)?,
+        };
+        let uri = uri.strip_suffix('#').unwrap_or(uri);
+        match uri {
+            "http://json-schema.org/draft-04/schema" | "https://json-schema.org/draft-04/schema" => Ok(Draft::Draft4),
+            "http://json-schema.org/draft-06/schema" | "https://json-schema.org/draft-06/schema" => Ok(Draft::Draft6),
+            "http://json-schema.org/draft-07/schema" | "https://json-schema.org/draft-07/schema" => Ok(Draft::Draft7),
+            "http://json-schema.org/draft/2019-09/schema" | "https://json-schema.org/draft/2019-09/schema" => {
+                Ok(Draft::Draft201909)
+            },
+            "http://json-schema.org/draft/2020-12/schema" | "https://json-schema.org/draft/2020-12/schema" => {
+                Ok(Draft::Draft202012)
+            },
+            _ => Err(invalid()),
+        }
+    };
+    let draft = draft_for(schema)?;
+    let mut pending = vec![schema];
+    while let Some(schema) = pending.pop() {
+        draft_for(schema)?;
+        let Some(object) = schema.as_object() else {
+            continue;
+        };
+        // Visit schema positions, preserving ordinary properties/annotations
+        // whose names or literal values happen to contain these keywords.
+        for keyword in ["$defs", "definitions", "properties", "patternProperties", "dependentSchemas", "dependencies"] {
+            if let Some(children) = object.get(keyword).and_then(serde_json::Value::as_object) {
+                pending.extend(children.values().filter(|value| value.is_object() || value.is_boolean()));
+            }
+        }
+        for keyword in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+            if let Some(children) = object.get(keyword).and_then(serde_json::Value::as_array) {
+                pending.extend(children);
+            }
+        }
+        for keyword in [
+            "not",
+            "if",
+            "then",
+            "else",
+            "contains",
+            "propertyNames",
+            "additionalProperties",
+            "unevaluatedProperties",
+            "additionalItems",
+            "unevaluatedItems",
+            "contentSchema",
+            "items",
+        ] {
+            if let Some(child) = object.get(keyword) {
+                if let Some(children) = child.as_array() {
+                    pending.extend(children);
+                } else {
+                    pending.push(child);
+                }
+            }
+        }
+    }
+    // The explicit draft and deny-all retriever cover both direct and transitive
+    // references. Compiler details can include fetched data and stay private.
+    jsonschema::options().with_draft(draft).with_retriever(NoExternalSchemas).build(schema).map_err(|_| invalid())?;
+    Ok(())
 }
 
 /// Wrong-typed values already fail JSON extraction; out-of-range numbers would
@@ -511,7 +670,8 @@ fn validate_sampling(request: &ChatCompletionRequest) -> Result<(), (&'static st
 }
 
 fn build_reply_config(request: &ChatCompletionRequest) -> Result<ChatReplyConfig, ResponseFormatError> {
-    let token_limit = request.max_completion_tokens.or(request.max_tokens);
+    // The server owns an upper bound even when the client omits a limit.
+    let token_limit = Some(request.max_completion_tokens.or(request.max_tokens).unwrap_or(4096).min(4096));
     let mut config = ChatReplyConfig::default().with_token_limit(token_limit);
 
     if request.temperature.is_some_and(|temperature| temperature <= 0.0) {
@@ -608,11 +768,11 @@ fn oai_error_body(
     }
 }
 
-fn send_error_body(
-    sender: &mpsc::UnboundedSender<Vec<u8>>,
+async fn send_error_body(
+    sender: &ResponseSender<Vec<u8>>,
     body: &OaiErrorResponse,
 ) {
-    let _ = sender.send(serde_json::to_vec(body).unwrap_or_default());
+    let _ = sender.send(serde_json::to_vec(body).unwrap_or_default()).await;
 }
 
 fn chunk_json(
@@ -723,11 +883,11 @@ async fn prepare_input(
     Ok(messages)
 }
 
-fn send_response(
-    sender: &mpsc::UnboundedSender<Vec<u8>>,
+async fn send_response(
+    sender: &ResponseSender<Vec<u8>>,
     response: &ChatCompletionResponse,
 ) {
-    let _ = sender.send(serde_json::to_vec(response).unwrap_or_default());
+    let _ = sender.send(serde_json::to_vec(response).unwrap_or_default()).await;
 }
 
 /// Cancels the turn and waits for it to wind down before the caller releases
@@ -747,7 +907,7 @@ async fn run_blocking(
     created: i64,
     prefix_cache: bool,
     parameter_types: ToolParameterTypes,
-    sender: mpsc::UnboundedSender<Vec<u8>>,
+    mut sender: ResponseSender<Vec<u8>>,
     log: RequestLog,
 ) {
     // A blocking response writes nothing until generation finishes, and Rocket
@@ -768,7 +928,10 @@ async fn run_blocking(
                 return;
             },
             _ = keepalive.tick() => {
-                let _ = sender.send(b"\n".to_vec());
+                if sender.send(b"\n".to_vec()).await.is_err() {
+                    log.fail("client unavailable");
+                    return;
+                }
             },
         }
     };
@@ -776,7 +939,8 @@ async fn run_blocking(
         Ok(input) => input,
         Err(error) => {
             log.fail(&error.to_string());
-            send_error_body(&sender, &oai_error_body(Status::InternalServerError, "backend_error", &error.to_string()));
+            send_error_body(&sender, &oai_error_body(Status::InternalServerError, "backend_error", &error.to_string()))
+                .await;
             return;
         },
     };
@@ -786,6 +950,7 @@ async fn run_blocking(
     // notices a disconnect mid-generation. Cancelling stops the backend at the
     // next token boundary and lets the session run its cancelled-turn cleanup.
     let stream = session.reply_with_stream(input, config).await;
+    sender.set_cancel_token(stream.cancel_token());
     let mut final_replies = Vec::new();
     loop {
         let chunk = tokio::select! {
@@ -796,7 +961,11 @@ async fn run_blocking(
                 return;
             },
             _ = keepalive.tick() => {
-                let _ = sender.send(b"\n".to_vec());
+                if sender.send(b"\n".to_vec()).await.is_err() {
+                    cancel_and_drain(&stream).await;
+                    log.fail("client unavailable");
+                    return;
+                }
                 continue;
             },
         };
@@ -813,7 +982,9 @@ async fn run_blocking(
                 error,
             } => {
                 log.fail(&error.to_string());
-                send_error_body(&sender, &oai_error_body(Status::BadRequest, "backend_error", &error.to_string()));
+                send_error_body(&sender, &oai_error_body(Status::BadRequest, "backend_error", &error.to_string()))
+                    .await;
+                cancel_and_drain(&stream).await;
                 return;
             },
         }
@@ -821,7 +992,8 @@ async fn run_blocking(
 
     let Some(reply) = final_replies.last() else {
         log.fail("no response generated");
-        send_error_body(&sender, &oai_error_body(Status::InternalServerError, "no_response", "No response generated"));
+        send_error_body(&sender, &oai_error_body(Status::InternalServerError, "no_response", "No response generated"))
+            .await;
         return;
     };
     let tool_calls = reply_tool_calls(&reply.message, &parameter_types);
@@ -865,7 +1037,7 @@ async fn run_blocking(
         }],
         usage: usage_from_stats(&reply.stats, prefix_cache),
     };
-    send_response(&sender, &response);
+    send_response(&sender, &response).await;
 }
 
 async fn run_stream(
@@ -877,7 +1049,7 @@ async fn run_stream(
     created: i64,
     prefix_cache: bool,
     parameter_types: ToolParameterTypes,
-    sender: mpsc::UnboundedSender<Event>,
+    mut sender: ResponseSender<Event>,
     log: RequestLog,
 ) {
     // Same as the blocking path: don't start generating for a client that
@@ -897,25 +1069,33 @@ async fn run_stream(
             // The SSE response is already committed as 200, so the error travels
             // as an OpenAI-style error event, the way OpenAI reports mid-stream.
             let body = oai_error_body(Status::InternalServerError, "backend_error", &error.to_string());
-            let _ = sender.send(Event::data(serde_json::to_string(&body).unwrap_or_default()));
-            let _ = sender.send(Event::data("[DONE]"));
+            let _ = sender.send(Event::data(serde_json::to_string(&body).unwrap_or_default())).await;
+            let _ = sender.send(Event::data("[DONE]")).await;
             return;
         },
     };
 
-    let _ = sender.send(Event::data(chunk_json(
-        &id,
-        &model,
-        created,
-        StreamDelta {
-            role: Some("assistant".to_string()),
-            ..StreamDelta::default()
-        },
-        None,
-        None,
-    )));
+    if sender
+        .send(Event::data(chunk_json(
+            &id,
+            &model,
+            created,
+            StreamDelta {
+                role: Some("assistant".to_string()),
+                ..StreamDelta::default()
+            },
+            None,
+            None,
+        )))
+        .await
+        .is_err()
+    {
+        log.fail("client unavailable");
+        return;
+    }
 
     let stream = session.reply_with_stream(input, config).await;
+    sender.set_cancel_token(stream.cancel_token());
     let mut emitted = 0usize;
     let mut emitted_reasoning = 0usize;
     let mut emitted_tool_calls = 0usize;
@@ -957,17 +1137,19 @@ async fn run_stream(
                 if reasoning.len() > reasoning_start {
                     let delta = reasoning[reasoning_start..].to_string();
                     emitted_reasoning = reasoning.len();
-                    let sent = sender.send(Event::data(chunk_json(
-                        &id,
-                        &model,
-                        created,
-                        StreamDelta {
-                            reasoning_content: Some(delta),
-                            ..StreamDelta::default()
-                        },
-                        None,
-                        None,
-                    )));
+                    let sent = sender
+                        .send(Event::data(chunk_json(
+                            &id,
+                            &model,
+                            created,
+                            StreamDelta {
+                                reasoning_content: Some(delta),
+                                ..StreamDelta::default()
+                            },
+                            None,
+                            None,
+                        )))
+                        .await;
                     if sent.is_err() {
                         cancel_and_drain(&stream).await;
                         log.fail("client disconnected");
@@ -979,17 +1161,19 @@ async fn run_stream(
                 if !withhold_stream_text(has_tools, &text) && text.len() > start {
                     let delta = text[start..].to_string();
                     emitted = text.len();
-                    let sent = sender.send(Event::data(chunk_json(
-                        &id,
-                        &model,
-                        created,
-                        StreamDelta {
-                            content: Some(delta),
-                            ..StreamDelta::default()
-                        },
-                        None,
-                        None,
-                    )));
+                    let sent = sender
+                        .send(Event::data(chunk_json(
+                            &id,
+                            &model,
+                            created,
+                            StreamDelta {
+                                content: Some(delta),
+                                ..StreamDelta::default()
+                            },
+                            None,
+                            None,
+                        )))
+                        .await;
                     if sent.is_err() {
                         cancel_and_drain(&stream).await;
                         log.fail("client disconnected");
@@ -1015,17 +1199,19 @@ async fn run_stream(
                         &parameter_types,
                     );
                     for delta in deltas {
-                        let sent = sender.send(Event::data(chunk_json(
-                            &id,
-                            &model,
-                            created,
-                            StreamDelta {
-                                tool_calls: Some(vec![delta]),
-                                ..StreamDelta::default()
-                            },
-                            None,
-                            None,
-                        )));
+                        let sent = sender
+                            .send(Event::data(chunk_json(
+                                &id,
+                                &model,
+                                created,
+                                StreamDelta {
+                                    tool_calls: Some(vec![delta]),
+                                    ..StreamDelta::default()
+                                },
+                                None,
+                                None,
+                            )))
+                            .await;
                         if sent.is_err() {
                             cancel_and_drain(&stream).await;
                             log.fail("client disconnected");
@@ -1046,17 +1232,19 @@ async fn run_stream(
                         Some(mut streamer) => streamer.finish(index, &call),
                         None => oai_tool_call(Some(index), &call),
                     };
-                    let sent = sender.send(Event::data(chunk_json(
-                        &id,
-                        &model,
-                        created,
-                        StreamDelta {
-                            tool_calls: Some(vec![delta]),
-                            ..StreamDelta::default()
-                        },
-                        None,
-                        None,
-                    )));
+                    let sent = sender
+                        .send(Event::data(chunk_json(
+                            &id,
+                            &model,
+                            created,
+                            StreamDelta {
+                                tool_calls: Some(vec![delta]),
+                                ..StreamDelta::default()
+                            },
+                            None,
+                            None,
+                        )))
+                        .await;
                     if sent.is_err() {
                         cancel_and_drain(&stream).await;
                         log.fail("client disconnected");
@@ -1082,7 +1270,8 @@ async fn run_stream(
                 log.fail(&error.to_string());
                 // Committed 200 stream: report as an OpenAI-style error event.
                 let body = oai_error_body(Status::BadRequest, "backend_error", &error.to_string());
-                let _ = sender.send(Event::data(serde_json::to_string(&body).unwrap_or_default()));
+                let _ = sender.send(Event::data(serde_json::to_string(&body).unwrap_or_default())).await;
+                cancel_and_drain(&stream).await;
                 break;
             },
         }
@@ -1094,17 +1283,19 @@ async fn run_stream(
         let start =
             (emitted..=final_text.len()).find(|&index| final_text.is_char_boundary(index)).unwrap_or(final_text.len());
         if final_text.len() > start {
-            let sent = sender.send(Event::data(chunk_json(
-                &id,
-                &model,
-                created,
-                StreamDelta {
-                    content: Some(final_text[start..].to_string()),
-                    ..StreamDelta::default()
-                },
-                None,
-                None,
-            )));
+            let sent = sender
+                .send(Event::data(chunk_json(
+                    &id,
+                    &model,
+                    created,
+                    StreamDelta {
+                        content: Some(final_text[start..].to_string()),
+                        ..StreamDelta::default()
+                    },
+                    None,
+                    None,
+                )))
+                .await;
             if sent.is_err() {
                 cancel_and_drain(&stream).await;
                 log.fail("client disconnected");
@@ -1128,16 +1319,18 @@ async fn run_stream(
         let usage = final_stats
             .as_ref()
             .map_or_else(ChatCompletionUsage::default, |stats| usage_from_stats(stats, prefix_cache));
-        let _ = sender.send(Event::data(chunk_json(
-            &id,
-            &model,
-            created,
-            StreamDelta::default(),
-            Some(finish_reason),
-            Some(usage),
-        )));
+        let _ = sender
+            .send(Event::data(chunk_json(
+                &id,
+                &model,
+                created,
+                StreamDelta::default(),
+                Some(finish_reason),
+                Some(usage),
+            )))
+            .await;
     }
-    let _ = sender.send(Event::data("[DONE]"));
+    let _ = sender.send(Event::data("[DONE]")).await;
 }
 
 #[allow(private_interfaces)]
@@ -1147,28 +1340,44 @@ pub async fn handle_chat_completions(
     body: Data<'_>,
     state: &State<ServerState>,
     request_info: &RequestInfo,
-    content_type: &ContentType,
+    _content_type: &ContentType,
 ) -> ChatCompletionResult {
-    let body = match body.open(ByteUnit::Mebibyte(64)).into_string().await {
-        Ok(body) if body.is_complete() => body.into_inner(),
-        Ok(_) => {
+    let permit = match Arc::clone(&state.admission).try_acquire_owned() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return ChatCompletionResult::Error(status::Custom(
+                Status::TooManyRequests,
+                Json(oai_error_body(Status::TooManyRequests, "server_busy", "server is busy")),
+            ));
+        },
+    };
+    let body = match read_request_body(
+        body.open(ByteUnit::Byte(MAX_REQUEST_BODY_BYTES + 1)),
+        MAX_REQUEST_BODY_BYTES,
+        REQUEST_BODY_TIMEOUT,
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(RequestBodyError::Timeout) => {
+            return ChatCompletionResult::Error(status::Custom(
+                Status::RequestTimeout,
+                Json(oai_error_body(Status::RequestTimeout, "request_timeout", "request body read timed out")),
+            ));
+        },
+        Err(RequestBodyError::TooLarge) => {
             return invalid_request_response("body", "request_too_large", "request body exceeds 64 MiB".to_string());
         },
-        Err(error) => {
-            return invalid_request_response("body", "invalid_body", format!("failed to read request body: {error}"));
+        Err(RequestBodyError::InvalidBody) => {
+            return invalid_request_response("body", "invalid_body", "failed to read request body".to_string());
         },
     };
-    let log_body = if content_type.is_json() {
-        serde_json::from_str::<serde_json::Value>(&body).map(|value| value.to_string()).unwrap_or_else(|_| body.clone())
-    } else {
-        body.clone()
-    };
-    tracing::debug!("--> {} {} body={}", request_info.method, request_info.uri, log_body);
+    tracing::debug!("--> {} {} bytes={}", request_info.method, request_info.uri, body.len());
 
     let request = match serde_json::from_str::<ChatCompletionRequest>(&body) {
         Ok(request) => request,
         Err(error) => {
-            tracing::info!("rejected: {error}");
+            tracing::info!("rejected: invalid_request");
             return invalid_request_response(
                 "body",
                 "invalid_request",
@@ -1216,32 +1425,33 @@ pub async fn handle_chat_completions(
     let id = request_info.id.as_str().to_owned();
     if is_stream {
         let session = Arc::clone(&state.session);
-        let (sender, receiver) = mpsc::unbounded_channel::<Event>();
+        let (sender, receiver) = mpsc::channel::<Event>(8);
+        let sender = ResponseSender::new(sender, RESPONSE_BACKPRESSURE_TIMEOUT);
+        let prefix_cache = state.prefix_cache;
         tokio::spawn(
-            run_stream(session, messages, config, id, model, created, state.prefix_cache, parameter_types, sender, log)
-                .in_current_span(),
+            async move {
+                let _permit = permit;
+                run_stream(session, messages, config, id, model, created, prefix_cache, parameter_types, sender, log)
+                    .await;
+            }
+            .in_current_span(),
         );
-        let body: Pin<Box<dyn Stream<Item = Event> + Send>> = Box::pin(UnboundedReceiverStream::new(receiver));
+        let body: Pin<Box<dyn Stream<Item = Event> + Send>> = Box::pin(ReceiverStream::new(receiver));
         ChatCompletionResult::Stream(EventStream::from(body))
     } else {
         let session = Arc::clone(&state.session);
-        let (sender, receiver) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (sender, receiver) = mpsc::channel::<Vec<u8>>(8);
+        let sender = ResponseSender::new(sender, RESPONSE_BACKPRESSURE_TIMEOUT);
+        let prefix_cache = state.prefix_cache;
         tokio::spawn(
-            run_blocking(
-                session,
-                messages,
-                config,
-                id,
-                model,
-                created,
-                state.prefix_cache,
-                parameter_types,
-                sender,
-                log,
-            )
+            async move {
+                let _permit = permit;
+                run_blocking(session, messages, config, id, model, created, prefix_cache, parameter_types, sender, log)
+                    .await;
+            }
             .in_current_span(),
         );
-        let body: Pin<Box<dyn Stream<Item = Vec<u8>> + Send>> = Box::pin(UnboundedReceiverStream::new(receiver));
+        let body: Pin<Box<dyn Stream<Item = Vec<u8>> + Send>> = Box::pin(ReceiverStream::new(receiver));
         // Hand the body to Rocket immediately so it can write keepalives and
         // drop the receiver when the client disconnects. Any backend error
         // occurs after the 200 response is committed and is sent in the body.

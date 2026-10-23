@@ -25,6 +25,9 @@ pub fn repetition_penalty<T: ArrayElement + Float + NumCast>(
         token_id: usize,
         repetition_penalty: f32,
     ) {
+        if token_id >= vocab_size {
+            return;
+        }
         let offset = sample_index * vocab_size + token_id;
         let logit = unsafe { (*original_logits.add(offset)).to_f32().unwrap() };
         let penalized = if logit > 0.0 {
@@ -57,5 +60,29 @@ pub fn repetition_penalty<T: ArrayElement + Float + NumCast>(
             };
             apply(original_logits, logits_copy, vocab_size, sample_index as usize, token_id, repetition_penalty);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::repetition_penalty;
+
+    #[stark_test]
+    fn repetition_penalty_ignores_out_of_vocabulary_indices() {
+        let logits = [2.0f32, 4.0];
+        let ring = [0u32, 0];
+        for token in [2, 3, u32::MAX] {
+            let mut copy = logits;
+            repetition_penalty(logits.as_ptr(), copy.as_mut_ptr(), ring.as_ptr(), [token].as_ptr(), 2.0, 1, 2, 0, 1);
+            assert_eq!(copy, logits);
+        }
+        let mut copy = logits;
+        repetition_penalty(logits.as_ptr(), copy.as_mut_ptr(), ring.as_ptr(), [1].as_ptr(), 2.0, 1, 2, 0, 1);
+        assert_eq!(copy, [2.0, 2.0]);
+        let retained = [0u32, 1, u32::MAX];
+        repetition_penalty(logits.as_ptr(), copy.as_mut_ptr(), retained.as_ptr(), [0].as_ptr(), 2.0, 2, 2, 0, 1);
+        assert_eq!(copy, [1.0, 2.0]);
     }
 }

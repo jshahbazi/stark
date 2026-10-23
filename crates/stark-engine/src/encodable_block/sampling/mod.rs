@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use crate::{
     backends::common::{
-        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, Context, Kernels,
+        Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, Context, InvalidInput, Kernels,
         kernel::{RepetitionPenaltyKernel, UnifiedSamplingKernel},
     },
     data_type::DataType,
@@ -30,6 +30,10 @@ pub struct Sampling<B: Backend> {
 }
 
 impl<B: Backend> Sampling<B> {
+    pub(crate) fn vocab_size(&self) -> u32 {
+        self.vocab_size
+    }
+
     pub fn new(
         data_type: DataType,
         vocab_size: u32,
@@ -56,6 +60,44 @@ pub enum SamplingMethod {
 }
 
 impl SamplingMethod {
+    pub fn validate(
+        &self,
+        vocab_size: u32,
+    ) -> Result<(), InvalidInput> {
+        if vocab_size == 0 {
+            return Err(InvalidInput("sampling vocabulary must be nonzero"));
+        }
+        if let Self::Stochastic {
+            temperature,
+            top_k,
+            top_p,
+            min_p,
+            repetition_penalty,
+            suffix_repetition_length,
+        } = self
+        {
+            if temperature.is_some_and(|value| !value.is_finite() || value <= 0.0 || !value.recip().is_finite()) {
+                return Err(InvalidInput("invalid sampling temperature"));
+            }
+            if top_k.is_some_and(|value| value == 0 || value > vocab_size) {
+                return Err(InvalidInput("invalid sampling top_k"));
+            }
+            if top_p.is_some_and(|value| !value.is_finite() || value <= 0.0 || value > 1.0) {
+                return Err(InvalidInput("invalid sampling top_p"));
+            }
+            if min_p.is_some_and(|value| !value.is_finite() || !(0.0..=1.0).contains(&value)) {
+                return Err(InvalidInput("invalid sampling min_p"));
+            }
+            if repetition_penalty.is_some_and(|value| !value.is_finite() || value <= 0.0)
+                || (repetition_penalty.is_some() && suffix_repetition_length.is_none())
+                || suffix_repetition_length.is_some_and(|value| value == 0 || value.checked_add(2).is_none())
+            {
+                return Err(InvalidInput("invalid repetition sampling options"));
+            }
+        }
+        Ok(())
+    }
+
     pub fn suffix_repetition_length(&self) -> Option<u32> {
         match self {
             SamplingMethod::Greedy => None,
@@ -92,6 +134,10 @@ impl<B: Backend> Sampling<B> {
         sampling_range: Range<u32>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::GlobalBuffer, B::Error> {
+        sampling_method.validate(self.vocab_size)?;
+        if sampling_range.start > sampling_range.end || sampling_range.end > batch_dim.size() {
+            return Err(InvalidInput("invalid sampling range").into());
+        }
         command_buffer.push_debug_group("sampling");
 
         let sampling_length = sampling_range.end - sampling_range.start;
