@@ -1,0 +1,28 @@
+# GUI advanced options validation — 2026-10-22
+
+This change adds a separate Advanced Options panel for system prompt, context size, output token limit and thinking mode. Apply and New Chat resets history with the current worker; Cancel discards edits. Settings remain in memory for the app session.
+
+## Integration
+
+The original implementation was validated on the updated `origin/codex/install-progress` branch, including `origin/main` at `695f1eb2`. A fresh fetch and merge confirmed main was already an ancestor. Uncommitted installation-progress edits in the original checkout were preserved by using a separate worktree. For pull request review, the advanced-options commits were subsequently isolated on `codex/gui-advanced-options-pr`, based directly on main at `695f1eb2`, excluding unrelated security and website commits.
+
+Packaging on the original source branch needed a compatibility repair: its standalone loader executed runtime provenance as a script after that module gained package-relative imports. That repair moved shared manifest construction into dependency-free `_build_metadata.py`, preserving the runtime's checked hash function and matching installed provenance. This branch-specific repair is excluded from the isolated advanced-options PR because main's provenance loader already supports its standalone packaging path. The results below remain bound to the original tested source; the PR review records fresh validation separately.
+
+## Checks
+
+- Converter suite: 3,950 passed, 88 skipped. Targeted desktop suite: 66 passed, including option rendering, strict type/range checks, atomic rejection, model-limit clamping, history reset, worker reuse and settings privacy.
+- Menu bar packaging tests: 15 passed. Provenance tests: 20 passed. Swift type checking, repository policy, Ruff and diff checks passed.
+- Full local app build passed, including embedded package provenance equality and signature verification.
+- A headless harness compiled the current Swift source, replaced only the application bootstrap and library location, and drove the actual EngineController against the bundled backend and local Qwen3-0.6B model. All 17 checks passed: readiness and worker limits, option acknowledgement, four-option application, native reply and output budget, invalid-setting recovery without losing history/options, New Chat retaining options, settings application clearing history, and Configure/Stop/Run ordering. No stderr or transcript content was retained. Aggregate evidence stays under ignored `artifacts/advanced-options-validation/`.
+
+Swift source SHA-256: `3cd3ae758df99bbe0d0753ef5fd4c3113b840e895369f4099067c919a295ba93`. Existing reused generation worker SHA-256: `f12fd9849d81610170c2b893e98360b25ab553310cd5276e266f6d5e583e320f`. The worker was reused from the installed app; this run does not establish a fresh engine build, answer quality or performance qualification.
+
+The updated app was installed at `~/Applications/Stark.app` and its local signature verified. Interactive visual inspection was not completed: native UI automation timed out when selecting the installed app. Swift compilation and the headless controller checks above cover code and protocol behavior.
+
+## Isolated PR validation
+
+Fresh validation on `codex/gui-advanced-options-pr`, based directly on main `695f1eb2`, passed 3,903 converter tests with 88 skips, all 15 menu bar packaging tests, Swift type checking, repository policy, Ruff lint and formatting, and diff checks. The smaller suite count reflects the excluded security branch. The PR contains only advanced-options implementation, tests and documentation.
+
+The app was rebuilt from the isolated branch without the original branch-specific provenance repair. Its embedded package provenance matched its source, and the Swift controller/native harness passed all 17 checks again with no stderr. Backend source SHA-256: `6d891e565f68933320ecd5c930959d92ecf9c12c306dced5ef3a147d8b633e05`. The unchanged Swift source and reused worker hashes are recorded above. The fresh aggregate report replaces only the ignored harness report; prior published validation receipts are preserved.
+
+Code review covered strict atomic settings validation, system prompt privacy, template rendering, context reservation, history reset and model-limit clamping, acknowledgement/error handling, and Configure/Stop/Run ordering. No actionable correctness findings remained. Ruff formatting corrections were applied before hosted review.

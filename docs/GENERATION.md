@@ -39,6 +39,8 @@ For this checkpoint, the app must render the exact Hugging Face/upstream MiniCPM
 
 ## Interactive CLI chat
 
+The menu bar app exposes the same system prompt, context size, output limit and thinking options through **Advanced Options…** after loading a model. Applying options starts a new chat without reloading the model. See the [menu bar guide](../apps/menu-bar/README.md#models-and-requests).
+
 With an updated source installation (`./install.sh --from-source`), start a terminal conversation:
 
 ```sh

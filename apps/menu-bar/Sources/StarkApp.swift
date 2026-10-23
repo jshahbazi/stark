@@ -13,6 +13,14 @@ struct ChatMessage: Identifiable {
     let isUser: Bool
 }
 
+struct ChatOptions {
+    var useModelSystemPrompt = true
+    var systemPrompt = ""
+    var contextTokens = 8192
+    var maxNewTokens = 512
+    var thinking = false
+}
+
 struct InstallProgress {
     var state = "waiting"
     var completedBytes: Int64 = 0
@@ -55,6 +63,9 @@ final class EngineController: ObservableObject {
     @Published var outputTokens = 0
     @Published var downloadProgress = InstallProgress()
     @Published var conversionProgress = InstallProgress()
+    @Published var options = ChatOptions()
+    @Published var contextLimit = 8192
+    @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
     private var process: Process?
     private var input: FileHandle?
@@ -63,8 +74,9 @@ final class EngineController: ObservableObject {
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
     private var pendingMessageID: UUID?
+    private var pendingOptions: ChatOptions?
 
-    var busy: Bool { ["loading", "generating", "installing", "stopping"].contains(state) }
+    var busy: Bool { ["loading", "generating", "installing", "stopping", "configuring"].contains(state) }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
     var statusColor: Color {
         if state == "error" { return .red }
@@ -100,6 +112,7 @@ final class EngineController: ObservableObject {
                 self.state = "error"
                 self.message = "Stark stopped. Quit and reopen the app to restart."
                 self.loadedID = ""
+                self.pendingOptions = nil
                 self.input = nil
                 self.discardPendingMessage()
                 self.clearConversation()
@@ -157,8 +170,19 @@ final class EngineController: ObservableObject {
             }
         case "ready":
             loadedID = event["model_id"] as? String ?? selectedID
+            applyLimits(event)
             state = "ready"
             message = "Ready"
+        case "configured":
+            guard let configured = pendingOptions else { return }
+            options = configured
+            pendingOptions = nil
+            applyLimits(event)
+            if state == "configuring" {
+                clearConversation()
+                state = "ready"
+                message = "Ready"
+            }
         case "installed":
             if let model = event["model"] as? [String: Any], let id = model["id"] as? String {
                 selectedID = id
@@ -178,6 +202,11 @@ final class EngineController: ObservableObject {
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
             if state == "installing" { endInstallProgress("failed") }
             discardPendingMessage()
+            pendingOptions = nil
+            if state == "configuring" {
+                state = loadedID.isEmpty ? "idle" : "ready"
+                message = loadedID.isEmpty ? "Stopped" : "Ready"
+            }
         case "progress":
             guard let phase = event["phase"] as? String, ["download", "conversion"].contains(phase),
                   let progressState = event["state"] as? String,
@@ -194,6 +223,29 @@ final class EngineController: ObservableObject {
     private func rate(_ value: Any?) -> Double? {
         guard let number = value as? Double, number.isFinite, number >= 0 else { return nil }
         return number
+    }
+
+    private func applyLimits(_ event: [String: Any]) {
+        contextLimit = event["max_context_tokens"] as? Int ?? contextLimit
+        outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
+        options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
+        options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
+    }
+
+    @discardableResult
+    func configure(_ updated: ChatOptions) -> Bool {
+        guard state == "ready", loadedID == selectedID else { return false }
+        errorMessage = nil
+        let payload: [String: Any] = [
+            "command": "configure", "context_tokens": updated.contextTokens,
+            "max_new_tokens": updated.maxNewTokens, "thinking": updated.thinking,
+            "system_prompt": updated.useModelSystemPrompt ? NSNull() : updated.systemPrompt as Any
+        ]
+        guard send(payload) else { return false }
+        pendingOptions = updated
+        state = "configuring"
+        message = "Applying advanced options…"
+        return true
     }
 
     @discardableResult
@@ -483,9 +535,94 @@ struct ChatBubble: View {
     }
 }
 
+struct AdvancedOptionsView: View {
+    @ObservedObject var engine: EngineController
+    @Environment(\.dismiss) private var dismiss
+    @State private var useModelSystemPrompt: Bool
+    @State private var systemPrompt: String
+    @State private var context: String
+    @State private var output: String
+    @State private var thinking: Bool
+
+    init(engine: EngineController) {
+        self.engine = engine
+        _useModelSystemPrompt = State(initialValue: engine.options.useModelSystemPrompt)
+        _systemPrompt = State(initialValue: engine.options.systemPrompt)
+        _context = State(initialValue: String(engine.options.contextTokens))
+        _output = State(initialValue: String(engine.options.maxNewTokens))
+        _thinking = State(initialValue: engine.options.thinking)
+    }
+
+    private var validation: String? {
+        guard let count = Int(context), (2...engine.contextLimit).contains(count) else {
+            return "Context size must be between 2 and \(engine.contextLimit) tokens."
+        }
+        guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
+            return "Output limit must be between 1 and \(engine.outputLimit) tokens."
+        }
+        return maximum < count ? nil : "Output limit must be smaller than context size."
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Advanced Options").font(.title2.weight(.semibold))
+            Text("Applying changes starts a new chat with the model still loaded.")
+                .font(.callout).foregroundStyle(.secondary)
+            Toggle("Use model's default system prompt", isOn: $useModelSystemPrompt)
+            if !useModelSystemPrompt {
+                Text("System prompt").font(.headline)
+                TextEditor(text: $systemPrompt).font(.body).frame(height: 100)
+                    .padding(5).overlay(RoundedRectangle(cornerRadius: 6).stroke(.quaternary))
+                    .accessibilityLabel("System prompt")
+                Text("Leave empty to omit the system message.").font(.caption).foregroundStyle(.secondary)
+            }
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                GridRow {
+                    Text("Context size (tokens)")
+                    TextField("Context size", text: $context).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Context size in tokens")
+                }
+                GridRow {
+                    Text("Output limit (tokens)")
+                    TextField("Output limit", text: $output).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("Output limit in tokens")
+                }
+            }
+            Text("Context includes the conversation and room for the full reply budget.")
+                .font(.caption).foregroundStyle(.secondary)
+            Toggle("Thinking mode", isOn: $thinking)
+            Text("Enables reasoning when the model's chat template supports it.")
+                .font(.caption).foregroundStyle(.secondary)
+            if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
+            if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
+            Text("Settings stay in memory for this app session. Switching models may reduce token limits.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Restore Defaults") {
+                    useModelSystemPrompt = true; systemPrompt = ""; thinking = false
+                    let count = min(8192, engine.contextLimit)
+                    context = String(count)
+                    output = String(min(512, engine.outputLimit, count - 1))
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Apply and New Chat") {
+                    guard let count = Int(context), let maximum = Int(output) else { return }
+                    var options = ChatOptions()
+                    options.useModelSystemPrompt = useModelSystemPrompt
+                    options.systemPrompt = systemPrompt
+                    options.contextTokens = count; options.maxNewTokens = maximum; options.thinking = thinking
+                    if engine.configure(options) { dismiss() }
+                }.buttonStyle(.borderedProminent).disabled(validation != nil || engine.busy || engine.state != "ready")
+            }
+        }.padding(24).frame(width: 510)
+    }
+}
+
 struct ChatView: View {
     @ObservedObject var engine: EngineController
     @FocusState private var composerFocused: Bool
+    @State private var advancedOptions = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -494,6 +631,9 @@ struct ChatView: View {
                     StatusLine(engine: engine)
                 }
                 Spacer()
+                Button("Advanced Options…") { advancedOptions = true }
+                    .disabled(engine.state != "ready" || engine.loadedID != engine.selectedID)
+                    .help("Run a model to adjust its chat options.")
                 Button("New Chat") { engine.reset(); composerFocused = true }
                     .disabled(engine.busy || engine.messages.isEmpty || engine.loadedID != engine.selectedID)
             }
@@ -554,6 +694,7 @@ struct ChatView: View {
                     .disabled(engine.state != "ready" || engine.loadedID != engine.selectedID || engine.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }.padding(20).frame(minWidth: 500, minHeight: 600)
+            .sheet(isPresented: $advancedOptions) { AdvancedOptionsView(engine: engine) }
             .onAppear { composerFocused = true }
             .onChange(of: engine.state) { if engine.state == "ready" { composerFocused = true } }
     }
