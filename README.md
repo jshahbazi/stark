@@ -26,19 +26,21 @@ Stark is an experimental, open-source Rust/Metal engine for running language mod
 
 ## Quickstart
 
-Use an **Apple silicon Mac with macOS 26.4 or newer**, in a native arm64 terminal. The [v0.1.2 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.2) includes terminal chat, the menu bar app, workers, converter and private Python runtimes. No source checkout or developer tools are required. Native components are Developer ID signed and notarized by Apple; the app includes its notarization ticket.
+Use an **Apple silicon Mac with macOS 26.4 or newer**, in a native arm64 terminal. The [latest signed release](https://github.com/jshahbazi/stark/releases/latest) includes terminal chat, the menu bar app, workers, converter and private Python runtimes. No source checkout or developer tools are required. Native components are Developer ID signed and notarized by Apple; the app includes its notarization ticket.
 
 ### Install and open the app
 
+For drag-and-drop installation, download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest), open it, and drag `Stark.app` into Applications. The script below installs both the app and terminal tools.
+
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.2
+curl -fL https://github.com/jshahbazi/stark/releases/latest/download/install.sh -o stark-install.sh
+sh stark-install.sh
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 open "$HOME/Applications/Stark.app"
 ```
 
-Installation puts the CLI in `~/.local` and the app in `~/Applications`, without sudo. It verifies the archive checksum and stages both components before activation. Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile` to keep the command available in new terminals. See [installation, updates and uninstall](docs/INSTALLATION.md).
+The script selects the latest stable release automatically. Installation puts the CLI in `~/.local` and the app in `~/Applications`, without sudo. It verifies the archive checksum and stages both components before activation. Add `export PATH="$HOME/.local/bin:$PATH"` to `~/.zprofile` to keep the command available in new terminals. See [installation, updates and uninstall](docs/INSTALLATION.md).
 
 `doctor` should report `Installation checks passed. No model was loaded.` In the menu bar, choose **Install Model**, select a supported local folder or Hugging Face repository, then **Run** to open chat. **Stop** unloads the worker. Models download separately. [Menu bar guide](apps/menu-bar/README.md)
 

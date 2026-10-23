@@ -199,6 +199,112 @@ class InstallerTests(unittest.TestCase):
             self.run_install("--version", "0.1.0", expected=1).stderr,
         )
 
+    def mock_downloads(
+        self, archive, latest="https://github.com/jshahbazi/stark/releases/tag/v0.3.0"
+    ):
+        self.environment.update(
+            TEST_ARCHIVE=str(archive),
+            TEST_LATEST_URL=latest,
+            TEST_CURL_LOG=str(self.root / "curl.log"),
+        )
+        self.command(
+            "curl",
+            "output=; previous=; url=\n"
+            "for argument do\n"
+            '  case "$previous" in -o|--output) output=$argument;; esac\n'
+            '  case "$argument" in https://*) url=$argument;; esac\n'
+            "  previous=$argument\n"
+            "done\n"
+            'printf "%s\\n" "$url" >> "$TEST_CURL_LOG"\n'
+            'case "$url" in\n'
+            '  https://github.com/jshahbazi/stark/releases/latest) printf "%s" "$TEST_LATEST_URL";;\n'
+            '  *.tar.gz) cp "$TEST_ARCHIVE" "$output";;\n'
+            '  *.tar.gz.sha256) cp "$TEST_ARCHIVE.sha256" "$output";;\n'
+            "  *) exit 22;;\n"
+            "esac",
+        )
+
+    @unittest.skipUnless(
+        platform.system() == "Darwin", "uses BSD mv -h for installation"
+    )
+    def test_default_resolves_latest_once_and_pins_archive_and_checksum(self):
+        self.mock_downloads(self.bundle("0.3.0"))
+        self.run_install()
+        self.assertEqual(
+            (self.root / "curl.log").read_text().splitlines(),
+            [
+                "https://github.com/jshahbazi/stark/releases/latest",
+                "https://github.com/jshahbazi/stark/releases/download/v0.3.0/stark-0.3.0-aarch64-apple-darwin.tar.gz",
+                "https://github.com/jshahbazi/stark/releases/download/v0.3.0/stark-0.3.0-aarch64-apple-darwin.tar.gz.sha256",
+            ],
+        )
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(), Path("releases/0.3.0")
+        )
+
+    @unittest.skipUnless(
+        platform.system() == "Darwin", "uses BSD mv -h for installation"
+    )
+    def test_explicit_version_does_not_resolve_latest(self):
+        self.mock_downloads(self.bundle("0.2.0"))
+        self.run_install("--version", "0.2.0")
+        self.assertNotIn("/releases/latest", (self.root / "curl.log").read_text())
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(), Path("releases/0.2.0")
+        )
+
+    def test_latest_lookup_failure_does_not_create_installation(self):
+        self.command("curl", "exit 22")
+        result = self.run_install(expected=1)
+        self.assertIn("latest stable release unavailable", result.stderr)
+        self.assertFalse(self.prefix.exists())
+
+    def test_latest_redirect_requires_exact_repository_and_stable_version(self):
+        archive = self.bundle("0.3.0")
+        for redirect in (
+            "https://example.com/jshahbazi/stark/releases/tag/v0.3.0",
+            "https://github.com/other/stark/releases/tag/v0.3.0",
+            "http://github.com/jshahbazi/stark/releases/tag/v0.3.0",
+            "https://github.com/jshahbazi/stark/releases/tag/v0.3.0-preview.1",
+            "https://github.com/jshahbazi/stark/releases/tag/v0.3.0/../../other",
+            "https://github.com/jshahbazi/stark/releases/tag/v0.3.0?download=1",
+            "https://github.com/jshahbazi/stark/releases/tag/v0.3.0\n0.4.0",
+            "https://github.com/jshahbazi/stark/releases/tag/v00.3.0",
+        ):
+            with self.subTest(redirect=redirect):
+                self.mock_downloads(archive, latest=redirect)
+                self.assertIn("invalid latest", self.run_install(expected=1).stderr)
+                self.assertFalse(self.prefix.exists())
+
+    def test_source_build_requires_explicit_flag(self):
+        source = self.root / "checkout"
+        (source / "scripts").mkdir(parents=True)
+        copied_installer = source / "install.sh"
+        copied_installer.write_text(INSTALLER.read_text())
+        (source / "scripts/build_distribution.py").touch()
+        (source / "scripts/install-from-source.sh").write_text(
+            '#!/bin/sh\nprintf "source-build\\n"\n'
+        )
+        self.command("curl", "exit 22")
+        implicit = subprocess.run(
+            ["/bin/sh", copied_installer],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(implicit.returncode, 1)
+        self.assertIn("latest stable release unavailable", implicit.stderr)
+        explicit = subprocess.run(
+            ["/bin/sh", copied_installer, "--from-source"],
+            env=self.environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(explicit.returncode, 0)
+        self.assertEqual(explicit.stdout, "source-build\n")
+
     def test_rejects_traversal_and_links_even_with_valid_checksum(self):
         for extra in [("stark/../../escape",), ("stark/alias", "/tmp"), ("outside",)]:
             archive = self.bundle(extra=extra)

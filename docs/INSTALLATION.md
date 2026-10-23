@@ -2,11 +2,11 @@
 
 Stark runs on an Apple silicon Mac with macOS 26.4 or newer. The native engine currently compiles Metal 4 kernels for that minimum OS. Use a native arm64 terminal; Intel Macs and Rosetta terminals are rejected.
 
-Install the [v0.1.2 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.2), including terminal chat and the menu bar app, without a source checkout or developer tools:
+Install the [latest signed release](https://github.com/jshahbazi/stark/releases/latest), including terminal chat and the menu bar app, without a source checkout or developer tools:
 
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.2
+curl -fL https://github.com/jshahbazi/stark/releases/latest/download/install.sh -o stark-install.sh
+sh stark-install.sh
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 open "$HOME/Applications/Stark.app"
@@ -17,6 +17,8 @@ The installer downloads and verifies the versioned archive, installs the CLI to 
 The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
 
 ## Menu bar application
+
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest), open it, and drag `Stark.app` to Applications. Eject the disk image, then open the installed app. The installer script above also installs the terminal tools.
 
 The installed app provides model installation, Run/Stop controls, a small chat window, status and last-request input/output token speeds. Open `~/Applications/Stark.app`, click the cat icon, choose **Install Model**, select a supported folder or Hugging Face repository, then choose **Run** to open chat. **Stop** unloads the worker. Models download separately and remain outside the application bundle. See the [menu bar guide](../apps/menu-bar/README.md).
 
@@ -36,7 +38,7 @@ The source build requires Xcode with its Metal Toolchain, [rustup](https://rustu
 From the Stark checkout:
 
 ```sh
-./install.sh
+./install.sh --from-source
 ```
 
 This installs Rust 1.98.1 through your existing rustup, builds the workers with locked dependencies, downloads Python 3.13.13 and the locked converter dependencies, and creates a standalone installation in `~/.local`. It does not require an administrator password. The build can take several minutes. Each source build gets a version containing its source identity and UTC build time. The resulting installation runs independently of the source checkout, Rust, uv, Xcode and your system Python.
@@ -86,7 +88,7 @@ curl --proto '=https' --tlsv1.2 --fail --location \
 sh install.sh --version VERSION
 ```
 
-The version is explicit. A missing release or checksum stops the installation with an error; the installer never substitutes another build.
+By default, running the installer selects the latest stable GitHub release, validates its version, then downloads that exact archive and checksum. It resolves the version once so a newly published release cannot change the selected archive halfway through installation. A missing release or checksum stops installation. Use `--version VERSION` when you want to pin a specific release; source builds require `--from-source`.
 
 ## Use Stark
 
@@ -129,7 +131,7 @@ Quit the menu bar app, then install a newer archive with the same command, prefi
 Choose a prefix consistently for installation and updates:
 
 ```sh
-./install.sh --prefix "$HOME/tools"
+./install.sh --from-source --prefix "$HOME/tools"
 sh install.sh --archive /path/to/stark-VERSION-aarch64-apple-darwin.tar.gz \
   --prefix "$HOME/tools" --app-dir "$HOME/Applications"
 ```

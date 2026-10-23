@@ -73,15 +73,15 @@
       <div class="start-heading">
         <p class="eyebrow">02 / GET STARTED</p>
         <h2 id="start-title">Install it on<br>your Mac.</h2>
-        <p>Use an Apple silicon Mac with macOS 26.4 or newer and a native arm64 terminal. The signed v0.1.2 release includes the menu bar app, terminal chat, model converter and private runtimes. No developer tools are required.</p>
-        <a class="button primary" href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/INSTALLATION.md">Installation guide <span aria-hidden="true">↗</span></a>
-        <p class="source-install-note">The app installs to <code>~/Applications/Stark.app</code> and the CLI to <code>~/.local</code>. Models download separately. <a href="https://github.com/jshahbazi/stark/blob/v0.1.2/apps/menu-bar/README.md">Menu bar guide</a> · <a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/GENERATION.md#interactive-cli-chat">Terminal chat guide</a></p>
+        <p>Use an Apple silicon Mac with macOS 26.4 or newer and a native arm64 terminal. The latest signed release includes the menu bar app, terminal chat, model converter and private runtimes. No developer tools are required.</p>
+        <a class="button primary" href="https://github.com/jshahbazi/stark/blob/main/docs/INSTALLATION.md">Installation guide <span aria-hidden="true">↗</span></a>
+        <p class="source-install-note">The app installs to <code>~/Applications/Stark.app</code> and the CLI to <code>~/.local</code>. Models download separately. <a href="https://github.com/jshahbazi/stark/blob/main/apps/menu-bar/README.md">Menu bar guide</a> · <a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#interactive-cli-chat">Terminal chat guide</a></p>
       </div>
       <div class="start-content">
         <div class="terminal install-terminal">
-          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>INSTALL STARK / V0.1.2</span></div>
-          <pre tabindex="0" role="region" aria-label="Installation commands"><code id="install-code">curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.2
+          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>INSTALL STARK / LATEST RELEASE</span></div>
+          <pre tabindex="0" role="region" aria-label="Installation commands"><code id="install-code">curl -fL https://github.com/jshahbazi/stark/releases/latest/download/install.sh -o stark-install.sh
+sh stark-install.sh
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
 open "$HOME/Applications/Stark.app"</code></pre>
@@ -89,9 +89,9 @@ open "$HOME/Applications/Stark.app"</code></pre>
           <p class="copy-status" id="install-copy-status" aria-live="polite"></p>
         </div>
         <ol class="start-steps">
-          <li><span>01</span><div><h3>Install and check.</h3><p>Run the commands above in Terminal to install both interfaces and open Stark. <code>stark doctor</code> should report <code>Installation checks passed. No model was loaded.</code> Add the PATH line to <code>~/.zprofile</code> for future terminals.</p><a href="https://github.com/jshahbazi/stark/releases/tag/v0.1.2">Release and downloads <span aria-hidden="true">↗</span></a></div></li>
-          <li><span>02</span><div><h3>Choose a model.</h3><p>Click the cat in your menu bar, choose <strong>Install Model</strong> and select a supported local folder or Hugging Face repository. In Terminal, use <code>stark convert</code>; the Convert tab below has an example.</p><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/MODEL_CONVERSION_PLAN.md">Supported models <span aria-hidden="true">↗</span></a></div></li>
-          <li><span>03</span><div><h3>Start chatting.</h3><p>Select your model and choose <strong>Run</strong> in the app to open chat. In Terminal, use <code>stark chat --model-path /path/to/converted-model</code>. Use <code>/reset</code> for a new conversation and <code>/exit</code> to quit.</p><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/GENERATION.md">Generation guide <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>01</span><div><h3>Install and check.</h3><p>Run the commands above in Terminal to install both interfaces and open Stark. <code>stark doctor</code> should report <code>Installation checks passed. No model was loaded.</code> Add the PATH line to <code>~/.zprofile</code> for future terminals.</p><a href="https://github.com/jshahbazi/stark/releases/latest">Release and downloads <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>02</span><div><h3>Choose a model.</h3><p>Click the cat in your menu bar, choose <strong>Install Model</strong> and select a supported local folder or Hugging Face repository. In Terminal, use <code>stark convert</code>; the Convert tab below has an example.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/MODEL_CONVERSION_PLAN.md">Supported models <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>03</span><div><h3>Start chatting.</h3><p>Select your model and choose <strong>Run</strong> in the app to open chat. In Terminal, use <code>stark chat --model-path /path/to/converted-model</code>. Use <code>/reset</code> for a new conversation and <code>/exit</code> to quit.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md">Generation guide <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div></li>
         </ol>
       </div>
     </section>

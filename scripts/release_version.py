@@ -30,9 +30,35 @@ def next_version(baseline: str, tags: list[str], bump: str) -> str:
     return f"{major}.{minor}.{patch + 1}"
 
 
+def existing_release_source(version: str) -> str:
+    if VERSION.fullmatch(version) is None:
+        raise ValueError("invalid existing version")
+    revision = subprocess.run(
+        ["git", "rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        raise ValueError("invalid release revision")
+    subprocess.run(
+        ["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+    )
+    return revision
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bump", required=True, choices=("major", "minor", "patch"))
+    parser.add_argument(
+        "--existing-version",
+        default="",
+        help="Add a DMG to this existing stable release",
+    )
     options = parser.parse_args()
     try:
         baseline = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"][
@@ -45,9 +71,14 @@ def main() -> int:
             capture_output=True,
             text=True,
         ).stdout.splitlines()
-        version = next_version(baseline, tags, options.bump)
+        version = options.existing_version or next_version(baseline, tags, options.bump)
+        revision = (
+            existing_release_source(version) if options.existing_version else None
+        )
         with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
             output.write(f"version={version}\n")
+            if revision is not None:
+                output.write(f"source_revision={revision}\n")
     except (OSError, ValueError, KeyError, TypeError, subprocess.CalledProcessError):
         parser.exit(1, "Unable to select release version.\n")
     print(f"Selected distribution version: {version}")
