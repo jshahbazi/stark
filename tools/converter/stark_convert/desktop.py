@@ -482,8 +482,10 @@ class Desktop:
     def settings_summary(self):
         # The system prompt stays in memory; acknowledgements contain only limits.
         return {
-            "context_tokens": self.context, "max_new_tokens": self.maximum,
-            "max_context_tokens": self.context_limit, "max_output_tokens": self.output_limit,
+            "context_tokens": self.context,
+            "max_new_tokens": self.maximum,
+            "max_context_tokens": self.context_limit,
+            "max_output_tokens": self.output_limit,
         }
 
     def configure(self, payload):
@@ -496,8 +498,10 @@ class Desktop:
             system, thinking = payload.get("system_prompt"), payload.get("thinking")
             if (
                 set(payload) != {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
-                or type(context) is not int or not 2 <= context <= self.context_limit
-                or type(maximum) is not int or not 1 <= maximum <= min(self.output_limit, context - 1)
+                or type(context) is not int
+                or not 2 <= context <= self.context_limit
+                or type(maximum) is not int
+                or not 1 <= maximum <= min(self.output_limit, context - 1)
                 or (system is not None and not isinstance(system, str))
                 or type(thinking) is not bool
             ):

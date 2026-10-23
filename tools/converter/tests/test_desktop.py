@@ -93,8 +93,12 @@ def running(desktop, model):
 
 def advanced_options(**overrides):
     return {
-        "command": "configure", "system_prompt": "custom system fixture",
-        "context_tokens": 2048, "max_new_tokens": 128, "thinking": True, **overrides,
+        "command": "configure",
+        "system_prompt": "custom system fixture",
+        "context_tokens": 2048,
+        "max_new_tokens": 128,
+        "thinking": True,
+        **overrides,
     }
 
 
@@ -140,13 +144,27 @@ def test_advanced_options_model_default_empty_override_and_restart(desktop, mode
     assert (replacement.context, replacement.maximum, replacement.thinking) == (8192, 512, False)
 
 
-@pytest.mark.parametrize("overrides", [
-    {"context_tokens": True}, {"context_tokens": 1}, {"context_tokens": 8193},
-    {"context_tokens": 100.5}, {"context_tokens": "2048"}, {"context_tokens": None},
-    {"max_new_tokens": 0}, {"max_new_tokens": -1}, {"max_new_tokens": 4097},
-    {"max_new_tokens": 2048}, {"max_new_tokens": False}, {"max_new_tokens": float("nan")},
-    {"thinking": "true"}, {"thinking": 1}, {"system_prompt": []}, {"unknown": "private fixture"},
-])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"context_tokens": True},
+        {"context_tokens": 1},
+        {"context_tokens": 8193},
+        {"context_tokens": 100.5},
+        {"context_tokens": "2048"},
+        {"context_tokens": None},
+        {"max_new_tokens": 0},
+        {"max_new_tokens": -1},
+        {"max_new_tokens": 4097},
+        {"max_new_tokens": 2048},
+        {"max_new_tokens": False},
+        {"max_new_tokens": float("nan")},
+        {"thinking": "true"},
+        {"thinking": 1},
+        {"system_prompt": []},
+        {"unknown": "private fixture"},
+    ],
+)
 def test_advanced_options_invalid_changes_are_atomic(desktop, model, overrides):
     running(desktop, model)
     before = list(desktop.messages)
@@ -172,9 +190,15 @@ def test_advanced_options_reject_missing_fields_no_model_and_busy(desktop, model
 def test_model_change_clamps_options_to_advertised_limits(desktop, model):
     identifier = running(desktop, model)
     desktop.dispatch(advanced_options())
-    with patch("stark_convert.desktop.Worker.read", return_value={
-        "ready": True, "mode": "text-generation-v1", "max_context_tokens": 512, "max_new_tokens": 64,
-    }):
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": 512,
+            "max_new_tokens": 64,
+        },
+    ):
         desktop.dispatch({"command": "run", "model_id": identifier})
         finish(desktop)
     assert (desktop.context, desktop.maximum) == (512, 64)
