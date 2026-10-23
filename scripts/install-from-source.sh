@@ -4,11 +4,18 @@ set -eu
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)
 fail() { printf 'stark source install: %s\n' "$*" >&2; exit 1; }
 prefix=${HOME:?HOME must be set}/.local
-if [ "$#" -gt 0 ]; then
-    [ "$#" -eq 2 ] && [ "$1" = --prefix ] || fail 'usage: ./install.sh --from-source [--prefix /absolute/path]'
-    prefix=$2
-fi
+app_dir=$HOME/Applications
+while [ "$#" -gt 0 ]; do
+    [ "$#" -ge 2 ] || fail 'source installation requires --prefix DIR or --app-dir DIR'
+    case "$1" in
+        --prefix) prefix=$2 ;;
+        --app-dir) app_dir=$2 ;;
+        *) fail 'source installation accepts only --prefix DIR and --app-dir DIR' ;;
+    esac
+    shift 2
+done
 case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path' ;; esac
+case "$app_dir" in /*) ;; *) fail '--app-dir must be an absolute path' ;; esac
 [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ] || fail 'use an Apple silicon Mac in a native arm64 terminal'
 sw_vers -productVersion | awk -F. '$1 > 26 || ($1 == 26 && $2 >= 4) { ok=1 } END { exit !ok }' \
     || fail 'macOS 26.4 or newer is required'
@@ -39,4 +46,4 @@ output=$root/artifacts/distributions
 printf 'Building Stark %s. This can take several minutes.\n' "$version"
 uv run --no-project --python 3.13.13 python "$root/scripts/build_distribution.py" \
     --version "$version" --output-dir "$output" --allow-dirty
-exec /bin/sh "$root/install.sh" --archive "$output/stark-$version-aarch64-apple-darwin.tar.gz" --prefix "$prefix"
+exec /bin/sh "$root/install.sh" --archive "$output/stark-$version-aarch64-apple-darwin.tar.gz" --prefix "$prefix" --app-dir "$app_dir"

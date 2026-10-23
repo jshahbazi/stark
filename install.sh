@@ -13,7 +13,7 @@ valid_hash() {
 }
 usage() {
     printf '%s\n' \
-        'Usage: ./install.sh [--from-source | --archive FILE | --version VERSION] [--prefix DIR]' \
+        'Usage: ./install.sh [--from-source | --archive FILE | --version VERSION] [--prefix DIR] [--app-dir DIR]' \
         '       ./install.sh --uninstall [--prefix DIR]' \
         '' \
         'Default prefix: ~/.local. Requires Apple silicon and macOS 26.4 or newer.' \
@@ -23,10 +23,12 @@ usage() {
         '--from-source     Build and install from this source checkout.' \
         '--sha256 HASH     Verify against this SHA-256 instead of an adjacent checksum file.' \
         '--prefix DIR      Install into DIR/bin and DIR/lib/stark, without sudo.' \
-        '--uninstall       Remove this prefix\047s Stark installation; keep all models.'
+        '--app-dir DIR     Install Stark.app into DIR (default: ~/Applications).' \
+        '--uninstall       Remove this prefix\047s managed CLI and app; keep all models and app data.'
 }
 
 prefix=${HOME:?HOME must be set}/.local
+app_dir=$HOME/Applications
 archive=
 version=
 expected_hash=
@@ -34,12 +36,13 @@ mode=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --help|-h) usage; exit 0 ;;
-        --archive|--version|--prefix|--sha256)
+        --archive|--version|--prefix|--sha256|--app-dir)
             [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
             case "$1" in
                 --archive) [ -z "$mode" ] || fail 'choose one install mode'; mode=archive; archive=$2 ;;
                 --version) [ -z "$mode" ] || fail 'choose one install mode'; mode=download; version=$2 ;;
                 --prefix) prefix=$2 ;;
+                --app-dir) app_dir=$2 ;;
                 --sha256) expected_hash=$2 ;;
             esac
             shift 2 ;;
@@ -50,6 +53,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path' ;; esac
+case "$app_dir" in /*) ;; *) fail '--app-dir must be an absolute path' ;; esac
 
 source_root=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || source_root=
 if [ -z "$mode" ] && [ -f "$source_root/scripts/build_distribution.py" ]; then
@@ -58,7 +62,7 @@ fi
 if [ "$mode" = from-source ]; then
     [ -z "$expected_hash" ] || fail '--sha256 applies only to binary bundles'
     [ -f "$source_root/scripts/install-from-source.sh" ] || fail '--from-source requires a source checkout'
-    exec /bin/sh "$source_root/scripts/install-from-source.sh" --prefix "$prefix"
+    exec /bin/sh "$source_root/scripts/install-from-source.sh" --prefix "$prefix" --app-dir "$app_dir"
 fi
 [ -n "$mode" ] || { usage >&2; fail 'select --archive or --version; no binary release is assumed'; }
 [ "$mode" != uninstall ] || [ -z "$expected_hash" ] || fail '--sha256 cannot be used with --uninstall'
@@ -87,6 +91,15 @@ if [ "$mode" = uninstall ]; then
         || fail "no managed Stark installation at $base"
     check_links
     mkdir "$base/.install-lock" 2>/dev/null || fail 'another installation is in progress'
+    trap 'rmdir "$base/.install-lock" 2>/dev/null || :' EXIT
+    trap 'exit 1' HUP INT TERM
+    if [ -e "$base/managed-app.json" ] || [ -L "$base/managed-app.json" ]; then
+        python=$base/current/libexec/python/bin/python3.13
+        helper=$base/current/share/stark/install_app.py
+        [ -x "$python" ] && [ -f "$helper" ] || fail 'combined installation is incomplete; reinstall before uninstalling'
+        "$python" -I -B "$helper" uninstall --prefix "$prefix" \
+            || fail 'app removal failed; CLI and models were kept'
+    fi
     for name in $names; do
         [ ! -L "$prefix/bin/$name" ] || rm "$prefix/bin/$name"
     done
@@ -157,6 +170,12 @@ if [ -z "$expected_hash" ]; then
         || fail 'checksum file must contain exactly one checksum'
     valid_hash "$expected_hash" || fail 'invalid SHA-256 checksum file'
 fi
+if [ "$mode" = archive ]; then
+    # Hash, inspect and execute only the private snapshot of caller-owned bytes.
+    # Replacing the external pathname after this copy cannot change the bundle.
+    cp -- "$archive" "$stage/archive.tar.gz" || fail 'cannot stage local archive'
+    archive=$stage/archive.tar.gz
+fi
 actual_hash=$(shasum -a 256 -- "$archive" | awk '{print $1}')
 [ "$actual_hash" = "$expected_hash" ] || fail 'SHA-256 mismatch; installation stopped'
 
@@ -183,6 +202,13 @@ for file in bin/stark libexec/stark-score libexec/stark-generate libexec/python/
 done
 # Doctor exercises the relocated Python environment and the workers without a model.
 "$bundle/bin/stark" doctor || fail 'bundle self-check failed; previous installation was kept'
+has_app=false
+if [ -e "$bundle/app/Stark.app" ]; then
+    [ -f "$bundle/share/stark/install_app.py" ] || fail 'combined bundle is missing its app installer'
+    has_app=true
+elif [ -e "$base/managed-app.json" ] || [ -L "$base/managed-app.json" ]; then
+    fail 'CLI-only bundle cannot replace a combined installation; uninstall first'
+fi
 release=$base/releases/$bundle_version
 [ ! -L "$release" ] || fail 'version directory must not be a symlink'
 if [ -e "$release" ]; then
@@ -192,17 +218,26 @@ else
     printf '%s\n' "$actual_hash" > "$bundle/.archive-sha256"
     mv "$bundle" "$release"
 fi
-ln -s "releases/$bundle_version" "$stage/current"
-# BSD mv -h replaces a symlink to a directory instead of moving into its target.
-/bin/mv -fh "$stage/current" "$base/current"
-for name in $names; do
-    if [ ! -L "$prefix/bin/$name" ]; then
-        ln -s "$(target_for "$name")" "$prefix/bin/$name"
-    fi
-done
+if [ "$has_app" = true ]; then
+    "$release/libexec/python/bin/python3.13" -I -B "$release/share/stark/install_app.py" \
+        install --bundle "$release" --prefix "$prefix" --app-dir "$app_dir" \
+        || fail 'combined activation failed; previous installation was kept'
+else
+    ln -s "releases/$bundle_version" "$stage/current"
+    # BSD mv -h replaces a symlink to a directory instead of moving into its target.
+    /bin/mv -fh "$stage/current" "$base/current"
+    for name in $names; do
+        if [ ! -L "$prefix/bin/$name" ]; then
+            ln -s "$(target_for "$name")" "$prefix/bin/$name"
+        fi
+    done
+fi
 printf 'Installed Stark %s in %s\n' "$bundle_version" "$prefix"
 case ":${PATH:-}:" in
     *":$prefix/bin:"*) ;;
     *) printf 'Add %s/bin to PATH in your shell profile.\n' "$prefix" ;;
 esac
 printf 'Run: %s/bin/stark doctor\n' "$prefix"
+if [ "$has_app" = true ]; then
+    printf 'App: %s/Stark.app (open it from Finder).\n' "$app_dir"
+fi

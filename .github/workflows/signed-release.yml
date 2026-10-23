@@ -24,12 +24,10 @@ jobs:
     name: Sign and notarize the verified prebuilt bundle
     if: github.repository == 'jshahbazi/stark' && github.ref == 'refs/heads/main'
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
     environment: macos-release
     env:
       STARK_RELEASE_VERSION: ${{ inputs.version }}
-      STARK_ENGINE_SOURCE: 8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e
-      STARK_INPUT_SHA256: 20f43b0f62fbe58dd026241031856a5f901067a88ed0f9cf27f2c3ea67d9e05b
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
@@ -50,26 +48,29 @@ jobs:
             ''|*[!0-9A-Za-z.-]*) exit 1 ;;
           esac
           printf '%s\n' "$STARK_RELEASE_VERSION" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'
-          test "$STARK_RELEASE_VERSION" != 0.1.0
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse "refs/tags/v$STARK_RELEASE_VERSION^{commit}")" = "$GITHUB_SHA"
-          git merge-base --is-ancestor "$STARK_ENGINE_SOURCE" HEAD
-      - name: Download the immutable reviewed input
+      - name: Check Metal tools and install pinned Rust
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+          rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - name: Build the combined CLI and menu bar distribution
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/stark-input"
-          curl --proto '=https' --tlsv1.2 -fLSs --retry 3 \
-            https://github.com/jshahbazi/stark/releases/download/v0.1.0/stark-0.1.0-aarch64-apple-darwin.tar.gz \
-            -o "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz"
-          printf '%s  %s\n' "$STARK_INPUT_SHA256" "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
-            > "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz.sha256"
-          shasum -a 256 --check "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz.sha256"
+          uv run --no-project --python 3.13.13 python scripts/build_distribution.py \
+            --version "$STARK_RELEASE_VERSION-unsigned" --output-dir "$RUNNER_TEMP/stark-input"
       - name: Test the release tools before importing credentials
         run: |
           uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py
           uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
-            --archive "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
-            --version 0.1.0 --expected-source "$STARK_ENGINE_SOURCE" \
+            --archive "$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-unsigned-aarch64-apple-darwin.tar.gz" \
+            --version "$STARK_RELEASE_VERSION-unsigned" --expected-source "$GITHUB_SHA" --require-application \
             --output "$RUNNER_TEMP/stark-input/input-verification.json"
       - name: Import temporary Apple credentials
         env:
@@ -84,9 +85,11 @@ jobs:
         env:
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: |
+          archive="$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-unsigned-aarch64-apple-darwin.tar.gz"
+          input_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
           uv run --no-project --python 3.13.13 python scripts/sign_distribution.py \
-            --archive "$RUNNER_TEMP/stark-input/stark-0.1.0-aarch64-apple-darwin.tar.gz" \
-            --input-sha256 "$STARK_INPUT_SHA256" --expected-source "$STARK_ENGINE_SOURCE" \
+            --archive "$archive" \
+            --input-sha256 "$input_sha256" --expected-source "$GITHUB_SHA" \
             --version "$STARK_RELEASE_VERSION" --sign-identity "$MACOS_SIGNING_IDENTITY" \
             --keychain "$RUNNER_TEMP/stark-signing/signing.keychain-db" --notary-profile stark-notary \
             --output-dir artifacts/signed-release
@@ -97,7 +100,7 @@ jobs:
         run: |
           uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
             --archive "artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz" \
-            --version "$STARK_RELEASE_VERSION" --expected-source "$STARK_ENGINE_SOURCE" \
+            --version "$STARK_RELEASE_VERSION" --expected-source "$GITHUB_SHA" --require-application \
             --expected-distribution-source "$GITHUB_SHA" \
             --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 --require-notarized \
             --output artifacts/signed-release/verification.json
@@ -144,18 +147,21 @@ jobs:
           printf '%s\n' \
             "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
             '' \
-            'The native workers, Python runtime, and native converter dependencies are Developer ID signed with hardened runtime and secure timestamps. Apple accepted the signed contents for notarization; executable tickets were checked online.' \
+            'Includes terminal chat, the native menu bar app, generation/scoring workers and the converter with private Python runtimes. Native code is Developer ID signed with hardened runtime and secure timestamps. Apple accepted the distribution for notarization; the app ticket is stapled and validated.' \
             '' \
             '```sh' \
             "curl -fL https://github.com/$GH_REPO/releases/download/$tag/install.sh -o stark-install.sh" \
             "sh stark-install.sh --version $STARK_RELEASE_VERSION" \
+            'export PATH="$HOME/.local/bin:$PATH"' \
+            'stark doctor' \
+            'open "$HOME/Applications/Stark.app"' \
             '```' \
             '' \
             'No Rust, Xcode, uv, or system Python setup is required. Models are separate.' \
             '' \
-            'The signed distribution repackages the verified v0.1.0 engine without rebuilding it. Engine and signing-recipe revisions, archive hashes, Apple acceptance, and model-free installation checks are recorded in the attached JSON receipts.' \
+            'Built from the tagged source revision with locked dependencies. Source and signing-recipe revisions, archive hashes, Apple acceptance, and model-free installation checks are recorded in the attached JSON receipts.' \
             '' \
-            'Apple cannot staple tickets to standalone command-line binaries or ZIP files. Gatekeeper retrieves these tickets online. The installer does not remove quarantine attributes or change Gatekeeper settings.' \
+            'The app includes its notarization ticket. Standalone command-line executables use online tickets. The installer does not remove quarantine attributes or change Gatekeeper settings.' \
             > "$RUNNER_TEMP/signed-release-notes.md"
           gh release create "$tag" \
             "$stem.tar.gz" "$stem.tar.gz.sha256" "$stem.zip" "$stem.zip.sha256" \

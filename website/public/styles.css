@@ -815,6 +815,29 @@ code {
   margin-top:30px
 }
 
+.start-heading>p.source-install-note {
+  font-size:13px;
+  line-height:1.8
+}
+
+.start-content {
+  min-width:0
+}
+
+.install-terminal {
+  margin-bottom:36px
+}
+
+.install-terminal pre {
+  min-height:0;
+  white-space:pre-wrap;
+  overflow-wrap:anywhere
+}
+
+.install-terminal .copy-status:not(:empty) {
+  padding:0 19px 16px
+}
+
 .start-steps {
   list-style:none;
   padding:0;
