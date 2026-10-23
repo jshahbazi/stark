@@ -42,6 +42,30 @@ The scheduling change was validated on 2026-10-22 UTC with identical native and 
 
 Both CI runs passed. Elapsed time includes runner queues and the completion gate; the observed reduction was 48%. The CXX test step took 12m31s in both runs. In the second run its separate job queued for 2m35s and finished while the inherited compatibility job was still running. TypeScript passed on Ubuntu in 23s, compared with 33s on macOS. These are individual hosted-run measurements; runner availability and image changes affect subsequent timings.
 
+## Rust build caches
+
+Rust CI jobs use the shared `.github/actions/rust-cache` action with GitHub's `actions/cache` v6.1.0 pinned to `55cc8345863c7cc4c66a329aec7e433d2d1c52a9`. Each job/configuration has its own cache of Cargo registry sources, Git dependencies and `target` outputs. The inherited compatibility job also populates the independent wasm target directory. Incremental compilation is disabled to avoid storing per-checkout incremental state. Models, private validation artifacts and Cargo credentials are outside the cache paths.
+
+Cache compatibility includes runner OS, architecture and image version; Rust/C/C++ compiler identity; Xcode, SDK and applicable Metal compiler identity; compiler flags; Cargo manifests, lockfiles, profiles and configuration; build scripts, native sources and code generators; and the cache/workflow implementation. Metal's randomized cryptex `InstalledDir` is excluded from its version output; its compiler build and target versions remain covered. Native or dependency changes invalidate the fallback boundary. An ordinary Rust source change gets a new exact key and can restore a compatible prior build; Cargo fingerprints rebuild changed crates. Changes under `docs/` or to the root README reuse the exact key.
+
+Every Cargo build, Clippy invocation and test still runs after a restore. Caches are saved only after the owning job succeeds. GitHub limits cache access by branch: pull requests can restore default-branch caches, while caches saved for a PR merge ref cannot populate `main`. See [GitHub's cache access rules](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#restrictions-for-accessing-a-cache). Cache misses and evictions trigger normal cold builds. Increment the `stark-rust-v1` namespace in `scripts/ci/rust-cache-key.sh` to force a fresh cache after an infrastructure issue.
+
+### Hosted cache validation
+
+The [cold population run](https://github.com/jshahbazi/stark/actions/runs/39874355777) and immediately following [warm run](https://github.com/jshahbazi/stark/actions/runs/39879305262) both passed on source commit `0f73fa9b557a131938d037478329a6190e5dd871`. All five Rust jobs saved caches after their cold builds and restored their exact primary keys on the warm run. Every existing build, Clippy and test step executed, including 56 server tests and seven CXX tests. [Security also passed](https://github.com/jshahbazi/stark/actions/runs/39874358763) on this commit.
+
+| Cached job | Cold execution | Warm execution |
+| --- | --- | --- |
+| Repository checks | 1m57s | 2m13s |
+| Scorer, default | 10m16s | 10m35s |
+| Scorer, optimized | 7m12s | 6m27s |
+| Inherited dependency compatibility | 18m12s | 4m35s |
+| CXX panic safety and grammar compatibility | 16m24s | 2m42s |
+
+Execution includes job setup, cache transfers and cleanup, and excludes time waiting for a runner. Summed execution across these parallel jobs fell from 54m01s to 26m32s, a 51% reduction. Compatibility execution fell by 75% and CXX by 84%. Default scorer execution did not improve: dependencies were reused, while Cargo rebuilt workspace crates and their native Metal work after the fresh checkout. Caching does not eliminate that remaining build cost.
+
+Whole-workflow elapsed time, measured from workflow creation to its terminal update, was 47m48s cold and 38m16s warm. Runner queues dominated both runs: CXX waited 31m15s cold and 34m01s warm; warm compatibility and optimized scoring also waited over 30 minutes. These hosted measurements demonstrate cache reuse and reduced execution work; runner availability and image changes affect subsequent elapsed times.
+
 ## Download a development build
 
 Open **Actions → Build**, select a successful run, then download its artifact. Each build has a unique `0.0.0-dev.COMMIT.RUN.ATTEMPT` version, with the full source commit and file hashes recorded in the bundle manifest. Documentation-only pushes do not start a build. The manual **Run workflow** control can build a selected branch once this workflow is on `main`.
@@ -103,5 +127,7 @@ Keep secret scanning, push protection, Dependabot alerts, private vulnerability 
 The repository's live configuration was hardened on 2026-10-11: private reporting and Dependabot alerts were enabled, SHA pinning became mandatory, and the Actions allowlist was limited to checkout, dependency review, CodeQL, setup-uv, and setup-node. `main` requires a pull request and conversation resolution, blocks force pushes and deletion, and applies its protections to administrators. The sole maintainer can merge without a second reviewer. Required `CI completed` and `Security completed` checks are installed with strict branch freshness and are restricted to the GitHub Actions app (ID 15368). These workflow definitions must be included when integrating this branch; scheduled scanning and default-branch dependency alerts use `main` after integration.
 
 The signing addition permits the exact reviewed upload-artifact and download-artifact commits for transfer between the signing and publishing jobs. Build uses the same permitted upload-artifact commit. The other Actions restrictions remain in place, and the `macos-release` environment is restricted to protected branches.
+
+Rust CI caching additionally permits only the exact `actions/cache` commit above. Repository-token permissions, required merge checks and the signing environment are unchanged.
 
 To update a tool or action, resolve its release to an immutable commit or verified archive hash, update the pin and any lockfile together, and record a new validation run. Never add an advisory exception solely to make CI pass; document any independently reviewed exception with its scope, rationale, and expiry.
