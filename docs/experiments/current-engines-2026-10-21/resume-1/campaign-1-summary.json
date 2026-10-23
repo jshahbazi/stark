@@ -1,0 +1,931 @@
+{
+  "schema": 1,
+  "summary_program_sha256": "2e045d3b0cd68df71b47ff87f0dec62d20383a82cd7a6e880edc3136c2e59f06",
+  "receipt_sha256": "5de957468c4a7fb83c760aae321f3ad148b28cc2aba0000e86412f6569a7483f",
+  "engine_ids": [
+    "stark_optimized",
+    "mlx_lm",
+    "tensorfold_default",
+    "tensorfold_plain",
+    "llama_cpp",
+    "vllm_metal"
+  ],
+  "timing_accepted": false,
+  "all_blocks_complete": false,
+  "fixture_coverage_ok": true,
+  "sanity_coverage_ok": true,
+  "allow_public_table": false,
+  "diagnostic_only_reason": "timing_or_completeness_gate_failed",
+  "planned_blocks": 4,
+  "realized_order": [
+    [
+      "stark_optimized",
+      "mlx_lm"
+    ]
+  ],
+  "block_statuses": {
+    "stark_optimized": [
+      "complete"
+    ],
+    "mlx_lm": [
+      "excluded_interference"
+    ],
+    "tensorfold_default": [],
+    "tensorfold_plain": [],
+    "llama_cpp": [],
+    "vllm_metal": []
+  },
+  "rates": {},
+  "diagnostic_rates": {
+    "stark_optimized": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          356.75344641120824
+        ],
+        "min_per_load_median_tokens_per_second": 356.75344641120824,
+        "max_per_load_median_tokens_per_second": 356.75344641120824
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          359.3335062462521
+        ],
+        "min_per_load_median_tokens_per_second": 359.3335062462521,
+        "max_per_load_median_tokens_per_second": 359.3335062462521
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          330.29807466091376
+        ],
+        "min_per_load_median_tokens_per_second": 330.29807466091376,
+        "max_per_load_median_tokens_per_second": 330.29807466091376
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          315.34103329867924
+        ],
+        "min_per_load_median_tokens_per_second": 315.34103329867924,
+        "max_per_load_median_tokens_per_second": 315.34103329867924
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          241.8577511282806
+        ],
+        "min_per_load_median_tokens_per_second": 241.8577511282806,
+        "max_per_load_median_tokens_per_second": 241.8577511282806
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [
+          364.9033638544611
+        ],
+        "min_per_load_median_tokens_per_second": 364.9033638544611,
+        "max_per_load_median_tokens_per_second": 364.9033638544611
+      }
+    },
+    "mlx_lm": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      }
+    },
+    "tensorfold_default": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      }
+    },
+    "tensorfold_plain": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      }
+    },
+    "llama_cpp": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      }
+    },
+    "vllm_metal": {
+      "fibonacci-module": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "gpu-explanation": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "copy-edit": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-medium": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "context-long": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      },
+      "long-output": {
+        "geomean_tokens_per_second": null,
+        "per_load_median_tokens_per_second": [],
+        "min_per_load_median_tokens_per_second": null,
+        "max_per_load_median_tokens_per_second": null
+      }
+    }
+  },
+  "paired_comparisons": {},
+  "diagnostic_paired_comparisons": {
+    "fibonacci-module": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    },
+    "gpu-explanation": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    },
+    "copy-edit": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    },
+    "context-medium": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    },
+    "context-long": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    },
+    "long-output": {
+      "mlx_lm": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_default": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "tensorfold_plain": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "llama_cpp": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      },
+      "vllm_metal": {
+        "per_block_engine_over_stark": [],
+        "geomean_engine_over_stark": null
+      }
+    }
+  },
+  "overall_engine_over_stark_geomean": {},
+  "hash_stability": {
+    "stark_optimized": {
+      "fibonacci-module": {
+        "samples": 3,
+        "token_hashes": [
+          "d905dc2359c77c1fe39a0dffc68594d3a823ae8470e94063638ecc33eafe7b7d"
+        ],
+        "text_hashes": [
+          "3cf4098ecdbfe45c0ee639880539a3d9851f868128f858e4621949873aad2320"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      },
+      "gpu-explanation": {
+        "samples": 3,
+        "token_hashes": [
+          "cbc2cf3d78090ad99303b12f013dbc8f249c0ad683a7bcd055bbbcfe4f855ae0"
+        ],
+        "text_hashes": [
+          "48b0b361c4fb5e5fa67bbef44165e9d3a9104dc080041d741ee79f7c9f684b56"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      },
+      "copy-edit": {
+        "samples": 3,
+        "token_hashes": [
+          "e54f75d7fe99d83b5557dd6601cd2348321135d48c84a0a7f3b4c57966cdbca5"
+        ],
+        "text_hashes": [
+          "8270b94d7f6ace2bca82cd6a773da45f5bcdf4329a5da84137786c3d35099b44"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      },
+      "context-medium": {
+        "samples": 3,
+        "token_hashes": [
+          "9315fe9818f0c088737bc7f578247ce2ada9a10bdb2b64258f30275344642cda"
+        ],
+        "text_hashes": [
+          "6b34524b8c38249661d1a9c51e69401768c9163c77df1f352b65c198ed7175bd"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      },
+      "context-long": {
+        "samples": 3,
+        "token_hashes": [
+          "094f2b58e1155b5a52dba57c4a26afd003539429754b50ed1b6a15705c8a6948"
+        ],
+        "text_hashes": [
+          "643dbc4c4170c0efbed091cb891b14d28360505c78399eace0b05c17e2db4af0"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      },
+      "long-output": {
+        "samples": 3,
+        "token_hashes": [
+          "b38266f59a8b891d4d27bcd97ad5dccef535f1feec0140d04507f340bd706efc"
+        ],
+        "text_hashes": [
+          "180afa064f4f05e5ea861f8db98ddf2e8b4079c1ded6fc331366afbb1c71b785"
+        ],
+        "token_hash_stable": true,
+        "text_hash_stable": true,
+        "token_hash_comparable": true
+      }
+    },
+    "mlx_lm": {
+      "fibonacci-module": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "gpu-explanation": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "copy-edit": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-medium": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-long": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "long-output": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      }
+    },
+    "tensorfold_default": {
+      "fibonacci-module": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "gpu-explanation": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "copy-edit": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "context-medium": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "context-long": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "long-output": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      }
+    },
+    "tensorfold_plain": {
+      "fibonacci-module": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "gpu-explanation": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "copy-edit": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "context-medium": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "context-long": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      },
+      "long-output": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": false
+      }
+    },
+    "llama_cpp": {
+      "fibonacci-module": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "gpu-explanation": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "copy-edit": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-medium": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-long": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "long-output": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      }
+    },
+    "vllm_metal": {
+      "fibonacci-module": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "gpu-explanation": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "copy-edit": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-medium": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "context-long": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      },
+      "long-output": {
+        "samples": 0,
+        "token_hashes": [],
+        "text_hashes": [],
+        "token_hash_stable": false,
+        "text_hash_stable": false,
+        "token_hash_comparable": true
+      }
+    }
+  },
+  "cross_engine_hash_agreement_performance_fixture_count": {
+    "token_hash_agreement_counts": {
+      "mlx_lm": 0,
+      "tensorfold_default": null,
+      "tensorfold_plain": null,
+      "llama_cpp": 0,
+      "vllm_metal": 0
+    },
+    "text_hash_agreement_counts": {
+      "mlx_lm": 0,
+      "tensorfold_default": 0,
+      "tensorfold_plain": 0,
+      "llama_cpp": 0,
+      "vllm_metal": 0
+    }
+  },
+  "sanity": {
+    "stark_optimized": {
+      "samples": 4,
+      "strict_exact_match_passes": 1,
+      "strict_exact_match_total": 4,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 1
+        },
+        "prime": {
+          "passes": 0,
+          "total": 1
+        },
+        "sorting": {
+          "passes": 1,
+          "total": 1
+        },
+        "python": {
+          "passes": 0,
+          "total": 1
+        }
+      },
+      "token_hashes": [
+        "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba",
+        "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e",
+        "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e",
+        "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+      ],
+      "text_hashes": [
+        "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36",
+        "5a8fc49b3d54c511d013a7c61c4b5e26b98c4b2367e6722d81956fbc1cec01c0",
+        "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3",
+        "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+      ]
+    },
+    "mlx_lm": {
+      "samples": 4,
+      "strict_exact_match_passes": 1,
+      "strict_exact_match_total": 4,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 1
+        },
+        "prime": {
+          "passes": 0,
+          "total": 1
+        },
+        "sorting": {
+          "passes": 1,
+          "total": 1
+        },
+        "python": {
+          "passes": 0,
+          "total": 1
+        }
+      },
+      "token_hashes": [
+        "0ff474bb783d6d3c564d06c538a5f4a71fc76aa82bf9d3eadaa227eca413f9ba",
+        "262516b9935802601c15a6edb4fa484e7df084cb5c6c0d8cc4a62215796f189e",
+        "2ab0ce7632a611e907a40710ff46da13c5ba832f5a402c6f51e15f53d6e8fa0e",
+        "64b8d09d687fb356f4e8854efb30b8ad3de051b5847939b280497d0101cdf4ad"
+      ],
+      "text_hashes": [
+        "227445a988500528d7826c6921d2e3b4a79ccf3a94cc3bcf7b667e3ae4990b36",
+        "559aead08264d5795d3909718cdd05abd49572e84fe55590eef31a88a08fdffd",
+        "a36b1f2c3f84522dd1005145646617d7054c0851e97c72a039c0bdfac9fa07f3",
+        "b17ef6d19c7a5b1ee83b907c595526dcb1eb06db8227d650d5dda0a9f4ce8cd9"
+      ]
+    },
+    "tensorfold_default": {
+      "samples": 0,
+      "strict_exact_match_passes": 0,
+      "strict_exact_match_total": 0,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 0
+        },
+        "prime": {
+          "passes": 0,
+          "total": 0
+        },
+        "sorting": {
+          "passes": 0,
+          "total": 0
+        },
+        "python": {
+          "passes": 0,
+          "total": 0
+        }
+      },
+      "token_hashes": [],
+      "text_hashes": []
+    },
+    "tensorfold_plain": {
+      "samples": 0,
+      "strict_exact_match_passes": 0,
+      "strict_exact_match_total": 0,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 0
+        },
+        "prime": {
+          "passes": 0,
+          "total": 0
+        },
+        "sorting": {
+          "passes": 0,
+          "total": 0
+        },
+        "python": {
+          "passes": 0,
+          "total": 0
+        }
+      },
+      "token_hashes": [],
+      "text_hashes": []
+    },
+    "llama_cpp": {
+      "samples": 0,
+      "strict_exact_match_passes": 0,
+      "strict_exact_match_total": 0,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 0
+        },
+        "prime": {
+          "passes": 0,
+          "total": 0
+        },
+        "sorting": {
+          "passes": 0,
+          "total": 0
+        },
+        "python": {
+          "passes": 0,
+          "total": 0
+        }
+      },
+      "token_hashes": [],
+      "text_hashes": []
+    },
+    "vllm_metal": {
+      "samples": 0,
+      "strict_exact_match_passes": 0,
+      "strict_exact_match_total": 0,
+      "per_fixture": {
+        "arithmetic": {
+          "passes": 0,
+          "total": 0
+        },
+        "prime": {
+          "passes": 0,
+          "total": 0
+        },
+        "sorting": {
+          "passes": 0,
+          "total": 0
+        },
+        "python": {
+          "passes": 0,
+          "total": 0
+        }
+      },
+      "token_hashes": [],
+      "text_hashes": []
+    }
+  }
+}

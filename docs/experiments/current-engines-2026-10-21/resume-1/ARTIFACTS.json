@@ -1,0 +1,98 @@
+{
+  "campaign": "current-engines-2026-10-21-resume-1",
+  "status": "protocol-ready-before-timing",
+  "source": {
+    "stark_main_commit": "97f15f38201cc0b465a81c45e26a4b5b135d903c",
+    "github_actions_build": "39707877019",
+    "github_actions_artifact": "12396251357",
+    "archive_sha256": "d17cb1b4ab77230abc344f1e4d415294147dc752e26bd16edc17505995a32559",
+    "local_rebuild": "blocked: unavailable rustls-webpki 0.103.16",
+    "executable_binding": "verified exact-main bundle",
+    "executable_sha256": "1cd922689dca98d41efc0727dab32fe472e6e7d199546130c1e555c8a151e517",
+    "manifest_sha256": "a4dbff8393f487d72224111fc6bf6da63ece8751375f197f19d783bf1f9bd30b",
+    "bundle_file_count_verified": 3143
+  },
+  "pins": {
+    "mlx_lm_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+    "tensorfold": "1.1.1",
+    "llama_cpp": "b11747",
+    "vllm_metal": "0.32.0"
+  },
+  "lock_sha256": {
+    "vllm": "7e2318038023d5df589e83fbe1a349b5d50c0e32a4c6774b3efb1dc9d1e00cc2",
+    "tools": "f89cb16e0be95e81c690d5587a3d550b98c6440132e45ea0af1ed63560b79e1d"
+  },
+  "models": {
+    "borrowed_models_read_only": true,
+    "model_hashes": "retained from original source-bound admission receipt"
+  },
+  "prior_attempt": {
+    "disposition": "separate interrupted failed diagnostic",
+    "timing_accepted": false,
+    "cells_reusable": false
+  },
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "kind": "stark",
+      "version": "0.0.0-dev.97f15f38201cc0b465a81c45e26a4b5b135d903c.39707877019.1",
+      "source_commit": "97f15f38201cc0b465a81c45e26a4b5b135d903c",
+      "representation": "MLX affine4 g64 repacked unchanged",
+      "executable_sha256": "1cd922689dca98d41efc0727dab32fe472e6e7d199546130c1e555c8a151e517",
+      "model_sha256": "a9e01fbf845a1d2af4727f4394b244815abd26b25d186bc49730249fb16c840d"
+    },
+    {
+      "id": "mlx_lm",
+      "kind": "mlx",
+      "version": "0.32.3.dev6+g72be8c955",
+      "source_commit": "72be8c955d9a0d3099bd01865af288e0e947c3fa",
+      "representation": "MLX affine4 g64",
+      "executable_sha256": "3237648c5222017bba78737370570e4c9d5a01e552cdf2fa11f107c8d00fc06e",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "8a773ac9441e6b95bc3daa57e3331038261605ae1c9d1a00644a0a6ac2e6a0ac"
+    },
+    {
+      "id": "llama_cpp",
+      "kind": "llama",
+      "version": "b11747",
+      "source_commit": "f711c8f3038020d71f69b8ced09162b014fd7335",
+      "representation": "GGUF Q4_K_M, unsloth/Qwen3.5-2B-GGUF@f6d5376be1edb4d416d56da11e5397a961aca8ae (different quantizer)",
+      "executable_sha256": "981b460a278e9a0c880cef32d6fab42785a119084456b16845304cf38c32cf69",
+      "model_sha256": "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223"
+    },
+    {
+      "id": "tensorfold_default",
+      "kind": "tensorfold",
+      "version": "1.1.1",
+      "representation": "MLX affine4 g64",
+      "draft": true,
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+    },
+    {
+      "id": "tensorfold_plain",
+      "kind": "tensorfold",
+      "version": "1.1.1",
+      "representation": "MLX affine4 g64",
+      "draft": false,
+      "executable_sha256": "557777af124d2f3d7edd607f962d8cd157abb3a5befa10b07843f6da8a8fa512",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5"
+    },
+    {
+      "id": "vllm_metal",
+      "kind": "vllm",
+      "version": "0.32.0",
+      "representation": "MLX affine4 g64; stock MLX model layers plus vLLM Metal attention/scheduler",
+      "executable_sha256": "eb0dd353515c4d16c7ad8199515461575d1ccaf55035d35ba23c5fad472fc156",
+      "model_sha256": "713fe7e5d3c3965f7106b0d0ee17615f7869c23c8d327996df8c1196fbcf07d5",
+      "lock_sha256": "7e2318038023d5df589e83fbe1a349b5d50c0e32a4c6774b3efb1dc9d1e00cc2"
+    }
+  ],
+  "config_sha256": "9408dc2ef3cd7bcc2c7c565e818924e902c286cfdf8b1eb843e42c8e3e087bdb",
+  "protocol_sha256": "46732acfa51e2e9a037e40cafa06fb989abe0f92f9add3c2d4aeac6726cd86f1",
+  "harness_sha256": {
+    "benchmark_stock_engines.py": "65d64e6e7fd789e7623f88ebaedfc0e9e51b8c89cd9b93a9e66f7d8e3fd463ef",
+    "benchmark_clean_qwen.py": "2ceee5a72be8884fdc56e10fe18ecbb5bf05a19497a3b37699ef144ac3d58622",
+    "stock_compare_mlx.py": "6d84a9acd1e8ba98a1dd76278f8eb17552a0923f294132acee288fcb6a34b228"
+  }
+}
