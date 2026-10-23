@@ -17,3 +17,7 @@ Campaign 2 did not change code or guards. The final retry is governed by `RETRY_
 ## User pause
 
 The user explicitly paused testing on 2026-10-22 during final campaign 3. The owned driver (PID 61917) received SIGTERM and exited through its cleanup handler. The receipt is `status: interrupted`, `timing_accepted: false`; 14 load outcomes were retained (11 passed, 3 excluded). No automatic retry or continued testing is scheduled. The partial campaign is diagnostic evidence only and must not replace public benchmark claims. Runtime environments and borrowed models are retained for an explicitly requested future resume.
+
+## User-directed completed observed run
+
+Following the user's just run it and try again instructions, campaign 4 completed all 24 loads and 528 measurements without quiet-window waiting. All 432 performance samples met fixed work; all 24 loads retained host-interference exclusions. The timing_accepted flag is false for this mode. [RESULTS.md](RESULTS.md) reports observed values, quality sanity outcomes and limitations. The public site remains unchanged. All task-owned workers and sleep assertions are stopped; no automatic retry is scheduled.
