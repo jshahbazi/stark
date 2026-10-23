@@ -99,7 +99,7 @@ After the verified image is available locally, backfill the stable aliases manua
 cp artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg artifacts/release-VERSION/Stark.dmg
 shasum -a 256 artifacts/release-VERSION/Stark.dmg | awk '{print $1 "  Stark.dmg"}' > artifacts/release-VERSION/Stark.dmg.sha256
 cmp artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg artifacts/release-VERSION/Stark.dmg
-shasum -a 256 --check artifacts/release-VERSION/Stark.dmg.sha256
+(cd artifacts/release-VERSION && shasum -a 256 --check Stark.dmg.sha256)
 gh release upload vVERSION \
   artifacts/release-VERSION/Stark.dmg artifacts/release-VERSION/Stark.dmg.sha256
 ```
