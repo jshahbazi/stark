@@ -126,6 +126,8 @@ These launch the existing [scoring](SCORING.md) and [generation](GENERATION.md) 
 
 ## Update, choose a location, or uninstall
 
+Apps built with the integrated updater offer **Check for Updates…** in the menu bar dropdown. Choose the offered upgrade to download and verify the latest stable signed app, then **Install and Relaunch**. This updates the complete app and preserves models; the terminal CLI keeps its existing version. Older apps need one normal installation to acquire the updater. See [app updates](../apps/menu-bar/README.md#app-updates) for verification, ownership and recovery behavior.
+
 Quit the menu bar app, then install a newer archive with the same command, prefix and app directory. The installer verifies its checksum, extracts into a temporary directory, runs `doctor` and validates the app before activation. Combined installation failures roll back the app, command links and active CLI version. Version directories are immutable: installing different contents under an existing version is refused. Reinstalling the same archive is allowed. A running app or unrelated application at the destination stops installation.
 
 Choose a prefix consistently for installation and updates:

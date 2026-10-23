@@ -18,9 +18,27 @@ PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-sc
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app installs to `~/Applications/Stark.app`. Quit Stark before replacing an existing installation. The builder stages the new app, verifies its local signature and atomically replaces a matching Stark bundle; unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary; `--score-worker` selects a different scoring binary and defaults to `target/release/stark-score`. Existing CLI installations are copied without changing them.
+The app installs to `~/Applications/Stark.app`. After staging and verifying the new app, the installer automatically quits the copy being replaced. If normal shutdown stalls, it terminates that exact executable, using a force kill if necessary, and waits for exit before replacement. Failed shutdown preserves the previous installation. Active chats and model operations stop during replacement. This applies to the combined CLI/app installer and the menu bar builder, including a running build-output copy. The builder atomically replaces a matching Stark bundle; unrelated applications are refused. `--install-dir /absolute/folder` changes the parent folder. Omit `--install` to leave the app in ignored `artifacts/menu-bar/Stark.app`. `--runtime` selects a different standalone CLI bundle; `--worker` selects a different generation binary; `--score-worker` selects a different scoring binary and defaults to `target/release/stark-score`. Existing CLI installations are copied without changing them.
 
 The local app is ad-hoc signed. This workflow adds no Developer ID signing, notarization, hosted release workflow or Gatekeeper bypass. Use the normal macOS approval flow for a downloaded build after verifying its source.
+
+## App updates
+
+Choose **Check for Updates…** in the dropdown to check the latest stable GitHub release. If a newer app is available, choose **Upgrade to VERSION…** to download and prepare it, then **Install and Relaunch**. The current app stays open during download and verification. Installation quits Stark, stops active requests, clears the in-memory conversation and launches the replacement. Models and preferences remain in place.
+
+The updater uses the release's versioned Apple silicon DMG and GitHub asset SHA-256. It checks the disk image and complete app signatures against Stark's production Developer ID team (`S5BT2PRN5B`), runs Gatekeeper assessment, checks the bundle ID, version, architecture and minimum macOS version, then stages a complete replacement before quitting. It uses the existing signed/notarized DMG packaging; no separate update feed, release asset or hosted workflow is required. Releases without a matching DMG or asset digest cannot be installed through the updater. No update is downloaded or installed automatically.
+
+The destination must be a writable `Stark.app`. Move an app out of its mounted disk image before updating. A private helper runs from the verified candidate's bundled Python, locks the destination, waits for the old app to exit, atomically exchanges the bundles and relaunches. Detected activation, ownership-record or launch failures restore the old app and records; an unsuccessful rollback preserves the private backup. Fixed failure messages appear in the dropdown, including after relaunch. Prompts, model output and exception dumps are never logged.
+
+App updates leave the separately installed terminal CLI at its existing version. CLI-managed installations keep both ownership records synchronized, including custom prefixes created by the current installer. Legacy default-prefix records are also supported. An older custom-prefix installation needs one upgrade with its CLI installer to record its state path before app-only updates are available; the updater refuses it before quitting. CLI prefix relocation likewise requires the installer to refresh that path. DMG drag-and-drop and local app builds have no CLI ownership record.
+
+The updater first ships in the app built from this source. Older installed releases need one normal app installation before this dropdown action becomes available. Local development builds remain ad-hoc signed; update candidates must be production-signed releases. Developer tools and a source checkout are not needed for an installed app to update itself.
+
+Run the model-free updater checks on an Apple silicon Mac:
+
+```sh
+uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update scripts.test_install_app
+```
 
 ## Models and requests
 
