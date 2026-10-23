@@ -12,6 +12,11 @@ on:
           - major
           - minor
           - patch
+      existing_version:
+        description: Add a signed DMG to an existing stable release instead of creating a version (optional)
+        required: false
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -50,16 +55,18 @@ jobs:
         id: release
         env:
           VERSION_BUMP: ${{ inputs.bump }}
+          EXISTING_VERSION: ${{ inputs.existing_version }}
         run: |
           set -euo pipefail
           test "$(uname -m)" = arm64
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          python scripts/release_version.py --bump "$VERSION_BUMP"
+          python scripts/release_version.py --bump "$VERSION_BUMP" --existing-version "$EXISTING_VERSION"
       - name: Set distribution version for subsequent steps
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
         run: echo "STARK_RELEASE_VERSION=$RELEASE_VERSION" >> "$GITHUB_ENV"
       - name: Check Metal tools and install pinned Rust
+        if: inputs.existing_version == ''
         run: |
           set -euo pipefail
           xcodebuild -version
@@ -69,14 +76,31 @@ jobs:
           xcrun -sdk macosx metal --version
           rustup toolchain install 1.98.1 --profile minimal --no-self-update
       - name: Build the combined CLI and menu bar distribution
+        if: inputs.existing_version == ''
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/stark-input"
           uv run --no-project --python 3.13.13 python scripts/build_distribution.py \
             --version "$STARK_RELEASE_VERSION-unsigned" --output-dir "$RUNNER_TEMP/stark-input"
+      - name: Download the immutable existing release
+        if: inputs.existing_version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/stark-input"
+          gh release download "v$STARK_RELEASE_VERSION" --dir "$RUNNER_TEMP/stark-input" \
+            --pattern "stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz" \
+            --pattern "stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz.sha256"
+          cd "$RUNNER_TEMP/stark-input"
+          shasum -a 256 --check "stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz.sha256"
       - name: Test the release tools before importing credentials
         run: |
-          uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py scripts/test_release_version.py
+          uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_build_dmg.py scripts/test_apple_credentials.py scripts/test_release_version.py
+      - name: Verify the new unsigned archive
+        if: inputs.existing_version == ''
+        run: |
           uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
             --archive "$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-unsigned-aarch64-apple-darwin.tar.gz" \
             --version "$STARK_RELEASE_VERSION-unsigned" --expected-source "$GITHUB_SHA" --require-application \
@@ -93,19 +117,57 @@ jobs:
       - name: Sign every native component and require Apple acceptance
         env:
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          EXISTING_VERSION: ${{ inputs.existing_version }}
+          EXISTING_SOURCE: ${{ steps.release.outputs.source_revision }}
         run: |
-          archive="$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-unsigned-aarch64-apple-darwin.tar.gz"
+          set -euo pipefail
+          if [ -z "$EXISTING_VERSION" ]; then
+            archive="$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-unsigned-aarch64-apple-darwin.tar.gz"
+            input_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
+            uv run --no-project --python 3.13.13 python scripts/sign_distribution.py \
+              --archive "$archive" \
+              --input-sha256 "$input_sha256" --expected-source "$GITHUB_SHA" \
+              --version "$STARK_RELEASE_VERSION" --sign-identity "$MACOS_SIGNING_IDENTITY" \
+              --keychain "$RUNNER_TEMP/stark-signing/signing.keychain-db" --notary-profile stark-notary \
+              --output-dir artifacts/signed-release
+            archive="artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz"
+            source_revision="$GITHUB_SHA"
+          else
+            archive="$RUNNER_TEMP/stark-input/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz"
+            source_revision="$EXISTING_SOURCE"
+          fi
           input_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
-          uv run --no-project --python 3.13.13 python scripts/sign_distribution.py \
-            --archive "$archive" \
-            --input-sha256 "$input_sha256" --expected-source "$GITHUB_SHA" \
+          uv run --no-project --python 3.13.13 python scripts/build_dmg.py \
+            --archive "$archive" --input-sha256 "$input_sha256" --expected-source "$source_revision" \
             --version "$STARK_RELEASE_VERSION" --sign-identity "$MACOS_SIGNING_IDENTITY" \
             --keychain "$RUNNER_TEMP/stark-signing/signing.keychain-db" --notary-profile stark-notary \
             --output-dir artifacts/signed-release
       - name: Remove temporary Apple credentials
         if: always()
         run: python .github/scripts/apple_credentials.py cleanup
+      - name: Verify the disk image after credential cleanup
+        env:
+          EXISTING_SOURCE: ${{ steps.release.outputs.source_revision }}
+        run: |
+          set -euo pipefail
+          source_revision="${EXISTING_SOURCE:-$GITHUB_SHA}"
+          stem="artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
+          uv run --no-project --python 3.13.13 python scripts/build_dmg.py \
+            --verify-dmg "$stem.dmg" --receipt "$stem.dmg.notarization.json" \
+            --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 \
+            --expected-source "$source_revision" --version "$STARK_RELEASE_VERSION" \
+            --output "$stem.dmg.verification.json"
+      - name: Prepare the stable DMG download aliases
+        if: inputs.existing_version == ''
+        run: |
+          set -euo pipefail
+          stem="artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
+          cp -- "$stem.dmg" artifacts/signed-release/Stark.dmg
+          digest=$(shasum -a 256 "$stem.dmg" | awk '{print $1}')
+          printf '%s  %s\n' "$digest" Stark.dmg > artifacts/signed-release/Stark.dmg.sha256
+          test "$(shasum -a 256 artifacts/signed-release/Stark.dmg | awk '{print $1}')" = "$digest"
       - name: Verify the signed installation after credential cleanup
+        if: inputs.existing_version == ''
         run: |
           uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
             --archive "artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin.tar.gz" \
@@ -144,24 +206,33 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           STARK_RELEASE_VERSION: ${{ needs.sign.outputs.version }}
+          EXISTING_VERSION: ${{ inputs.existing_version }}
         run: |
           set -euo pipefail
           tag="v$STARK_RELEASE_VERSION"
+          if [ -n "$EXISTING_VERSION" ]; then
+            echo 'The existing-release DMG is available in the signed workflow artifact. Verify it on a receiving Mac before adding it to the release.'
+            exit 0
+          fi
           if gh release view "$tag" --repo "$GH_REPO" >/dev/null 2>&1; then
             echo 'A release already exists for this version; assets are never replaced.' >&2
             exit 1
           fi
           cd artifacts/signed-release
           stem="stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
-          shasum -a 256 --check "$stem.tar.gz.sha256" "$stem.zip.sha256"
+          shasum -a 256 --check "$stem.tar.gz.sha256" "$stem.zip.sha256" "$stem.dmg.sha256"
+          shasum -a 256 --check Stark.dmg.sha256
+          cmp -- "$stem.dmg" Stark.dmg
+          test "$(awk '{print $1}' "$stem.dmg.sha256")" = "$(awk '{print $1}' Stark.dmg.sha256)"
           printf '%s\n' \
             "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
             '' \
             'Includes terminal chat, the native menu bar app, generation/scoring workers and the converter with private Python runtimes. Native code is Developer ID signed with hardened runtime and secure timestamps. Apple accepted the distribution for notarization; the app ticket is stapled and validated.' \
+            'Download the signed, notarized DMG for drag-and-drop application installation, or use the script below for the application and CLI tools.' \
             '' \
             '```sh' \
-            "curl -fL https://github.com/$GH_REPO/releases/download/$tag/install.sh -o stark-install.sh" \
-            "sh stark-install.sh --version $STARK_RELEASE_VERSION" \
+            "curl -fL https://github.com/$GH_REPO/releases/latest/download/install.sh -o stark-install.sh" \
+            'sh stark-install.sh' \
             'export PATH="$HOME/.local/bin:$PATH"' \
             'stark doctor' \
             'open "$HOME/Applications/Stark.app"' \
@@ -179,6 +250,8 @@ jobs:
             -f "ref=refs/tags/$tag" -f "sha=$GITHUB_SHA" --silent
           gh release create "$tag" \
             "$stem.tar.gz" "$stem.tar.gz.sha256" "$stem.zip" "$stem.zip.sha256" \
+            "$stem.dmg" "$stem.dmg.sha256" "$stem.dmg.notarization.json" "$stem.dmg.verification.json" \
+            Stark.dmg Stark.dmg.sha256 \
             "$stem.notarization.json" verification.json install.sh \
             --repo "$GH_REPO" --verify-tag --draft --title "Stark $STARK_RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/signed-release-notes.md"

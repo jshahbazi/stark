@@ -31,7 +31,17 @@ Before importing credentials, the action verifies the combined archive, applicat
 
 After signing, the finalizer refreshes the file manifest, submits the application package for notarization, staples and validates the app ticket, then creates the final TAR and ZIP hashes. It requires notarization status `Accepted`, a valid stapled app ticket and online ticket checks for standalone executables. Signing or notarization failure publishes no release outputs. A source-bound aggregate receipt records the source and signing-recipe revisions and hashes, signer certificate and Team ID, native image count, Apple submission identifier and exact archive hashes. It contains no credentials or runtime payloads.
 
-The signed draft has seven assets: the signed TAR archive and checksum, notarized ZIP and checksum, aggregate notarization receipt, installation verification JSON and `install.sh`. Download them and verify the actual archive on a receiving Mac:
+The signed draft includes the signed TAR archive and checksum, notarized ZIP and checksum, signed/notarized versioned DMG and checksum, stable `Stark.dmg` and `Stark.dmg.sha256` aliases, aggregate notarization receipts, installation and DMG verification JSON, and `install.sh`. The stable aliases are byte-for-byte copies of that release's verified versioned DMG; the stable checksum names `Stark.dmg`, and the publishing job checks both the checksum and exact byte equality before creating the draft. Existing versioned assets remain in the release. The DMG contains the unchanged, signed and stapled `Stark.app` plus an `Applications` shortcut. Users drag the application to Applications; the script installs both the application and CLI tools.
+
+The website can therefore use the stable download URL without a site update:
+
+```text
+https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg
+```
+
+The signing job creates the DMG from the final signed TAR, signs the container with Developer ID, submits the DMG to Apple, staples its own ticket, and checks Gatekeeper acceptance. It mounts the image read-only to verify that the application file inventory, source revision, signature, and app ticket are preserved, then detaches it. A separate verification pass runs after credentials are removed. No application is opened or installed during DMG verification. This follows [Apple's distribution packaging guidance](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
+
+Download the assets and verify the actual archive on a receiving Mac:
 
 ```sh
 gh release download v0.1.2 --dir artifacts/release-0.1.2
@@ -50,6 +60,53 @@ gh release edit v0.1.2 --draft=false --latest
 ```
 
 Test the public installer download, `stark doctor`, `stark --version` and `open "$HOME/Applications/Stark.app"` route from outside a checkout after publication. Preserve the earlier validation packets; record this run separately.
+
+Verify the actual DMG separately before publishing the draft:
+
+```sh
+uv run --no-project --python 3.13.13 python scripts/build_dmg.py \
+  --verify-dmg artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg \
+  --receipt artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg.notarization.json \
+  --expected-source TAGGED_SOURCE_COMMIT --version VERSION \
+  --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 \
+  --output artifacts/release-VERSION/receiving-mac-dmg-verification.json
+```
+
+The release installer resolves GitHub's latest stable release by default and pins that validated version for both the archive and checksum downloads. The public install command requires no version argument:
+
+```sh
+curl -fL https://github.com/jshahbazi/stark/releases/latest/download/install.sh -o stark-install.sh
+sh stark-install.sh
+```
+
+`--version VERSION` remains available for a pinned installation. Source builds require `--from-source` explicitly.
+
+## Add a DMG to an existing signed release
+
+Use the same protected signing workflow with an existing stable version:
+
+```sh
+gh workflow run signed-release.yml --ref main -f bump=patch -f existing_version=0.3.0
+```
+
+In this mode, `bump` is ignored. The workflow resolves the immutable release tag, requires its source to be an ancestor of the protected workflow source, downloads the existing TAR and checksum, and packages its signed application. It creates no tag or release and changes no existing archive bytes. After signing, notarization and credential-free verification, the new DMG assets are available in the workflow artifact `stark-signed-WORKFLOW_SOURCE_COMMIT`.
+
+Download that artifact, run the receiving-Mac DMG verification above using the existing tag's source revision, then add the versioned DMG, checksum, notarization receipt, and DMG verification receipts with `gh release upload vVERSION FILE...`. Do not use `--clobber` for versioned archives or disk images. Existing release artifacts and source tags remain immutable.
+
+After the verified image is available locally, backfill the stable aliases manually in the same release. This mode intentionally creates no release and does not upload aliases automatically:
+
+```sh
+cp artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg artifacts/release-VERSION/Stark.dmg
+shasum -a 256 artifacts/release-VERSION/Stark.dmg | awk '{print $1 "  Stark.dmg"}' > artifacts/release-VERSION/Stark.dmg.sha256
+cmp artifacts/release-VERSION/stark-VERSION-aarch64-apple-darwin.dmg artifacts/release-VERSION/Stark.dmg
+(cd artifacts/release-VERSION && shasum -a 256 --check Stark.dmg.sha256)
+gh release upload vVERSION \
+  artifacts/release-VERSION/Stark.dmg artifacts/release-VERSION/Stark.dmg.sha256
+```
+
+Confirm the versioned DMG's original SHA-256 matches the stable alias before uploading. Never use `--clobber`; if `Stark.dmg` already exists, stop and investigate the release state.
+
+The small `install.sh` release entrypoint may be refreshed to provide the latest stable installer behavior. Record its new source revision and SHA-256 in a separate verification receipt; preserve earlier receipts. Refreshing this entrypoint does not replace a versioned application archive or disk image.
 
 Apple staples the ticket to `Stark.app`; standalone command-line binaries and ZIP files use online tickets. The distributed TAR and ZIP contain the same final signed and stapled application bytes. See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow). The installer never removes quarantine or changes Gatekeeper policy.
 
