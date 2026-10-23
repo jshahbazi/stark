@@ -591,17 +591,28 @@ class InstallTests(unittest.TestCase):
             ):
                 builder.install_app(app, link)
 
-    def test_running_app_is_left_intact(self):
+    def test_running_app_quits_after_signature_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             app, destination = root / "built/Stark.app", root / "Applications/Stark.app"
             make_app(app)
             make_app(destination)
+            events = []
             with (
-                patch.object(builder, "app_running", return_value=True),
-                self.assertRaisesRegex(builder.BuildError, "installed_app_is_running"),
+                patch.object(
+                    builder, "run", side_effect=lambda *_: events.append("verified")
+                ),
+                patch.object(
+                    builder, "stop_app", side_effect=lambda *_: events.append("stopped")
+                ),
+                patch.object(
+                    builder,
+                    "exchange_paths",
+                    side_effect=lambda *_: events.append("exchanged"),
+                ),
             ):
                 builder.install_app(app, destination)
+            self.assertEqual(events, ["verified", "stopped", "exchanged"])
             self.assertEqual(
                 (destination / "Contents/payload").read_text(), "complete staged app"
             )

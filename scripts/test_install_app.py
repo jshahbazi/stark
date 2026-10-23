@@ -8,8 +8,10 @@ import os
 import plistlib
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -40,6 +42,92 @@ def app_fixture(app: Path, text: str = "one") -> Path:
 
 
 class AppValidationTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "darwin", "native AppKit fixture required")
+    def test_real_app_quits_normally_before_force_termination(self):
+        with tempfile.TemporaryDirectory(prefix="stark native quit ") as temporary:
+            root = Path(temporary).resolve()
+            app = app_fixture(root / "Fixture.app")
+            info_path = app / "Contents/Info.plist"
+            info = plistlib.loads(info_path.read_bytes())
+            info.update(
+                CFBundleIdentifier="com.starkengine.quit-fixture",
+                CFBundlePackageType="APPL",
+                LSUIElement=True,
+            )
+            info_path.write_bytes(plistlib.dumps(info))
+            source = root / "fixture.m"
+            source.write_text(
+                "#import <AppKit/AppKit.h>\n"
+                "int main() { @autoreleasepool { [NSApplication sharedApplication]; "
+                "[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory]; "
+                "[NSApp run]; } return 0; }\n"
+            )
+            executable = app / "Contents/MacOS/Stark"
+            compiled = subprocess.run(
+                [
+                    "xcrun",
+                    "clang",
+                    "-framework",
+                    "AppKit",
+                    str(source),
+                    "-o",
+                    str(executable),
+                ],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(
+                compiled.returncode, 0, "native quit fixture compilation failed"
+            )
+            child = subprocess.Popen(
+                [str(executable)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            try:
+                time.sleep(1)
+                self.assertTrue(installer.running(app))
+                installer.stop_app(app)
+                self.assertEqual(
+                    child.wait(timeout=5),
+                    0,
+                    "app did not exit through normal AppKit termination",
+                )
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+    def test_stop_matches_exact_paths_including_spaces(self):
+        app = Path("/Applications with spaces/Stark.app")
+        listing = b" 12 /Applications with spaces/Stark.app/Contents/MacOS/Stark\n 13 /Other/Stark.app/Contents/MacOS/Stark\n"
+        with patch.object(installer, "command", return_value=listing):
+            self.assertEqual(installer.app_pids(app), [12])
+
+    def test_normal_quit_does_not_force_termination(self):
+        with (
+            patch.object(installer, "running", return_value=True),
+            patch.object(installer.subprocess, "run") as request,
+            patch.object(installer, "wait_for_exit", return_value=True),
+            patch.object(installer.os, "kill") as kill,
+        ):
+            installer.stop_app(Path("/Applications/Stark.app"))
+        request.assert_called_once()
+        kill.assert_not_called()
+
+    def test_stalled_quit_escalates_with_fresh_exact_pids(self):
+        with (
+            patch.object(installer, "running", return_value=True),
+            patch.object(installer.subprocess, "run"),
+            patch.object(installer, "wait_for_exit", side_effect=[False, False, True]),
+            patch.object(installer, "app_pids", side_effect=[[12, 13], [13]]),
+            patch.object(installer.os, "kill") as kill,
+        ):
+            installer.stop_app(Path("/Applications/Stark.app"))
+        self.assertEqual(
+            [call.args for call in kill.call_args_list],
+            [(12, signal.SIGTERM), (13, signal.SIGTERM), (13, signal.SIGKILL)],
+        )
+
     def test_rejects_symlink_payload_entries_and_wrong_identity(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -139,6 +227,29 @@ class AppTransactionTests(unittest.TestCase):
         self.assertFalse(self.owner.exists())
         self.assertFalse((moved / "lib/stark" / installer.STATE_NAME).exists())
         self.assertEqual(data.read_text(), "private model marker")
+
+    def test_install_quits_only_after_staging_and_preserves_app_on_quit_failure(self):
+        self.install("0.1.2")
+        previous = installer.validate(self.target)
+        bundle = self.bundle("0.1.3")
+
+        def stop(target):
+            staged = list(self.apps.glob(".stark-install-*/Stark.app"))
+            self.assertEqual(len(staged), 1)
+            self.assertEqual(
+                installer.validate(staged[0]),
+                installer.validate(bundle / "app/Stark.app"),
+            )
+            self.assertEqual(target, self.target)
+            raise installer.AppError("Stark did not exit")
+
+        with (
+            patch.object(installer, "stop_app", side_effect=stop),
+            self.assertRaisesRegex(installer.AppError, "did not exit"),
+        ):
+            installer.install(bundle, self.prefix, self.apps)
+        self.assertEqual(installer.validate(self.target), previous)
+        self.assertEqual((self.base / "current").readlink(), Path("releases/0.1.2"))
 
     def test_state_write_failure_restores_app_current_links_and_both_records(self):
         self.install("0.1.2")

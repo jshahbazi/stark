@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -76,6 +77,63 @@ def running(app: Path) -> bool:
     return executable in (
         line.strip() for line in output.decode(errors="replace").splitlines()
     )
+
+
+def app_pids(app: Path) -> list[int]:
+    output = command(
+        ["/bin/ps", "-axo", "pid=,comm="], "cannot inspect running applications"
+    )
+    executable = str(app / "Contents/MacOS/Stark")
+    processes = [
+        line.strip().split(maxsplit=1)
+        for line in output.decode(errors="replace").splitlines()
+    ]
+    return [int(pid) for pid, name in processes if name == executable]
+
+
+def wait_for_exit(app: Path, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while running(app):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+    return True
+
+
+def stop_app(app: Path) -> None:
+    """Quit this exact app bundle, then escalate if shutdown stalls."""
+    if not running(app):
+        return
+    script = (
+        "ObjC.import('AppKit'); function run(argv) { "
+        "var apps = $.NSWorkspace.sharedWorkspace.runningApplications; "
+        "for (var i = 0; i < apps.count; i++) { var app = apps.objectAtIndex(i); "
+        "if (app.bundleURL && ObjC.unwrap(app.bundleURL.path) === argv[0]) app.terminate; } }"
+    )
+    try:
+        subprocess.run(
+            ["/usr/bin/osascript", "-l", "JavaScript", "-e", script, str(app)],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    if wait_for_exit(app, 5):
+        return
+    for number in (signal.SIGTERM, signal.SIGKILL):
+        for pid in app_pids(app):
+            try:
+                os.kill(pid, number)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                raise AppError("cannot terminate Stark for installation") from None
+        if wait_for_exit(app, 2):
+            return
+    raise AppError("Stark did not exit; previous installation was kept")
 
 
 def validate(app: Path) -> str:
@@ -150,9 +208,28 @@ def read_record(path: Path) -> dict | None:
         raise AppError("managed app record is invalid") from error
     require(
         isinstance(record, dict)
-        and set(record)
-        == {"schema_version", "installation_id", "path", "app_id", "sha256"}
-        and record["schema_version"] == 1
+        and (
+            (
+                record.get("schema_version") == 1
+                and set(record)
+                == {"schema_version", "installation_id", "path", "app_id", "sha256"}
+            )
+            or (
+                record.get("schema_version") == 2
+                and set(record)
+                == {
+                    "schema_version",
+                    "installation_id",
+                    "path",
+                    "app_id",
+                    "sha256",
+                    "state_path",
+                }
+                and isinstance(record["state_path"], str)
+                and Path(record["state_path"]).is_absolute()
+                and Path(record["state_path"]).name == STATE_NAME
+            )
+        )
         and record["app_id"] == APP_ID
         and isinstance(record["installation_id"], str)
         and re.fullmatch(r"[0-9a-f]{32}", record["installation_id"]) is not None
@@ -201,7 +278,9 @@ def paths(prefix: Path, app_dir: Path) -> tuple[Path, Path, Path]:
     return prefix, app_dir, target
 
 
-def owned_target(state: dict | None, owner: dict | None, target: Path) -> None:
+def owned_target(
+    state: dict | None, owner: dict | None, target: Path, *, allow_running: bool = False
+) -> None:
     if state is not None:
         require(
             state["path"] == str(target),
@@ -214,7 +293,10 @@ def owned_target(state: dict | None, owner: dict | None, target: Path) -> None:
         current = validate(target)
         if state is not None:
             require(current == state["sha256"], "installed app changed; preserving it")
-        require(not running(target), "installed app is running; quit Stark first")
+        require(
+            allow_running or not running(target),
+            "installed app is running; quit Stark first",
+        )
 
 
 def switch_current(base: Path, destination: str | None) -> None:
@@ -253,7 +335,7 @@ def install(bundle: Path, prefix: Path, app_dir: Path) -> None:
     preserve_backup = False
     try:
         owner = read_record(owner_path)
-        owned_target(state, owner, target)
+        owned_target(state, owner, target, allow_running=True)
         previous_digest = validate(target) if target.exists() else None
         previous_current = None
         current = base / "current"
@@ -285,13 +367,21 @@ def install(bundle: Path, prefix: Path, app_dir: Path) -> None:
         activated = False
         created_links: list[Path] = []
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "state_path": str(state_path),
             "installation_id": state["installation_id"] if state else uuid.uuid4().hex,
             "path": str(target),
             "app_id": APP_ID,
             "sha256": desired_digest,
         }
         try:
+            owned_target(state, read_record(owner_path), target, allow_running=True)
+            require(
+                (validate(target) if target.exists() else None) == previous_digest,
+                "installed app changed during staging",
+            )
+            if target.exists():
+                stop_app(target)
             owned_target(state, read_record(owner_path), target)
             require(
                 (validate(target) if target.exists() else None) == previous_digest,
