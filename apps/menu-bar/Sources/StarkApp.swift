@@ -700,10 +700,19 @@ struct ChatView: View {
     }
 }
 
+private final class MenuPanel: NSPanel {
+    var onEscape: (() -> Void)?
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func cancelOperation(_ sender: Any?) { onEscape?() }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let engine = EngineController()
     private var status: NSStatusItem!
-    private let popover = NSPopover()
+    private let menuPanel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    private var localMenuMonitor: Any?
+    private var globalMenuMonitor: Any?
     private var installWindow: NSWindow?
     private var promptWindow: NSWindow?
 
@@ -740,10 +749,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.button?.toolTip = "Stark"
         status.button?.setAccessibilityLabel("Stark menu bar")
         status.button?.target = self; status.button?.action = #selector(toggle)
-        popover.behavior = .transient
-        popover.contentViewController = NSHostingController(rootView: MenuView(
+        status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        menuPanel.level = .popUpMenu
+        menuPanel.isOpaque = false
+        menuPanel.backgroundColor = .clear
+        menuPanel.hasShadow = true
+        menuPanel.isReleasedWhenClosed = false
+        menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
+        menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
+        menuPanel.contentViewController = NSHostingController(rootView: MenuView(
             engine: engine, install: { [weak self] in self?.showInstall() },
-            run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() }))
+            run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() })
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
+            .clipShape(RoundedRectangle(cornerRadius: 13)))
         engine.onInstalled = { [weak self] in self?.installWindow?.orderOut(nil); self?.showPrompt() }
         engine.start()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -758,19 +776,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func toggle() {
-        guard let button = status.button else { return }
-        if popover.isShown { popover.performClose(nil) }
-        else { popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY) }
+        if menuPanel.isVisible { dismissMenu(); return }
+        guard let button = status.button, let statusWindow = button.window,
+              let screen = statusWindow.screen else { return }
+        let buttonFrame = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        let safe = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        let size = menuPanel.contentView?.fittingSize ?? NSSize(width: 350, height: 350)
+        let width = min(size.width, safe.width)
+        let height = min(size.height, safe.height)
+        // Match MeeCP's visible status-item highlight edge (two points outside its window).
+        let x = min(max(statusWindow.frame.minX - 2, safe.minX), safe.maxX - width)
+        let top = min(max(buttonFrame.minY - 5, safe.minY + height), safe.maxY)
+        menuPanel.setFrame(NSRect(x: x, y: top - height, width: width, height: height), display: true)
+        menuPanel.makeKeyAndOrderFront(nil)
+        updateMenuHighlight()
+        localMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .keyDown]) { [weak self] event in
+            guard let self else { return event }
+            if event.type == .keyDown {
+                if event.keyCode == 53 { self.dismissMenu(); return nil }
+            } else if event.window !== self.menuPanel && event.window !== self.status.button?.window {
+                self.dismissMenu()
+            }
+            return event
+        }
+        globalMenuMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.dismissMenu()
+        }
+    }
+
+    private func updateMenuHighlight() {
+        status.button?.highlight(menuPanel.isVisible)
+        // AppKit clears the button's tracking highlight after dispatching its action.
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.status.button?.highlight(self.menuPanel.isVisible)
+        }
+    }
+
+    private func dismissMenu() {
+        menuPanel.orderOut(nil)
+        if let monitor = localMenuMonitor { NSEvent.removeMonitor(monitor); localMenuMonitor = nil }
+        if let monitor = globalMenuMonitor { NSEvent.removeMonitor(monitor); globalMenuMonitor = nil }
+        updateMenuHighlight()
     }
 
     @objc private func showInstall() {
-        popover.performClose(nil)
+        dismissMenu()
         if installWindow == nil { installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine), resizable: false) }
         present(installWindow)
     }
 
     private func showPrompt() {
-        popover.performClose(nil)
+        dismissMenu()
         if promptWindow == nil { promptWindow = window(title: "Stark — Chat", view: ChatView(engine: engine), resizable: true) }
         present(promptWindow)
     }
