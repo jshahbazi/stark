@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import os
-import stat
 import struct
 import time
 from dataclasses import dataclass
@@ -20,15 +19,13 @@ from typing import BinaryIO
 
 import numpy as np
 
+from ._build_metadata import ConversionError as ConversionError
+from ._build_metadata import _signature, open_regular
 from .progress import ProgressCallback, ProgressReporter, reporter
 
 
 class UnsupportedConversion(Exception):
     """A representation is outside independently implemented coverage."""
-
-
-class ConversionError(Exception):
-    """An invalid checkpoint or failed conversion must not be published."""
 
 
 DTYPE_BYTES = {
@@ -79,24 +76,6 @@ def authorize_source_path(root: Path, path: Path) -> Path:
     with open_regular(resolved):
         pass
     return resolved
-
-
-def open_regular(path: Path) -> BinaryIO:
-    """Open a canonical regular file without blocking on FIFOs or following races."""
-    resolved = Path(os.path.abspath(path))
-    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for component in resolved.parts[1:-1]:
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        descriptor = os.open(resolved.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
-    finally:
-        os.close(directory)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise ConversionError("Source must be a regular file")
-    return os.fdopen(descriptor, "rb", buffering=0)
 
 
 def read_regular_bytes(path: Path) -> bytes:
@@ -161,10 +140,6 @@ def read_json(path: Path) -> dict:
     if not isinstance(result, dict):
         raise ConversionError("Checkpoint JSON must be an object")
     return result
-
-
-def _signature(stat: os.stat_result) -> tuple[int, int, int, int]:
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 @dataclass(frozen=True)

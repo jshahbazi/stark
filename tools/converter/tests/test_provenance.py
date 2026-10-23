@@ -1,6 +1,7 @@
 """Comprehensive inventories invalidate evidence for relevant tooling changes."""
 
 import os
+import runpy
 import shutil
 import subprocess
 import sys
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from stark_convert import provenance
 from stark_convert.provenance import SOURCE_INPUTS, toolchain_provenance
 
 
@@ -31,6 +33,14 @@ def project(tmp_path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("synthetic provenance fixture\n")
     return root
+
+
+def test_standalone_build_metadata_matches_runtime_provenance(project, monkeypatch):
+    standalone = runpy.run_path(str(Path(provenance.__file__).with_name("_build_metadata.py")))
+    expected = standalone["toolchain_provenance"](project)
+    assert toolchain_provenance(project) == expected
+    monkeypatch.setattr(provenance, "PROJECT", project)
+    assert toolchain_provenance() == expected
 
 
 @pytest.mark.parametrize(
