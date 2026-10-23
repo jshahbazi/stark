@@ -244,6 +244,16 @@ def quiet_window(monitor, seconds=10, timeout=120):
     raise RuntimeError("quiet_window_timeout")
 
 
+def accept_timing(report):
+    return (
+        report["protocol"].get("require_quiet_windows", True)
+        and report["power_log_screen"]["checked"]
+        and report["power_log_screen"]["sleep_events"] == 0
+        and abs(report["sleep_clock_discrepancy_seconds"]) < 2
+        and all(b["status"] == "complete" for b in report["blocks"])
+    )
+
+
 def run(config, output):
     from transformers import AutoTokenizer
 
@@ -264,7 +274,10 @@ def run(config, output):
         "worker_sha256": sha(Path(__file__).with_name("stock_compare_mlx.py")),
         "model": "mlx-community/Qwen3.5-2B-MLX-4bit",
         "model_revision": "93760be4f1f69842a46bc13dbdc0f19e291392a3",
-        "protocol": {k: config[k] for k in ("context", "blocks", "repeats")},
+        "protocol": {
+            **{k: config[k] for k in ("context", "blocks", "repeats")},
+            "require_quiet_windows": config.get("require_quiet_windows", True),
+        },
         "engines": [public_spec(s) for s in specs],
         "fixtures": [
             {
@@ -304,7 +317,11 @@ def run(config, output):
                 monitor = Monitor()
                 try:
                     with monitor:
-                        row["preload_quiet_seconds"] = quiet_window(monitor)
+                        row["preload_quiet_seconds"] = (
+                            quiet_window(monitor)
+                            if report["protocol"]["require_quiet_windows"]
+                            else None
+                        )
                         monitor.set_phase("load")
                         with contextlib.ExitStack() as stack:
                             engine = Engine(
@@ -318,7 +335,11 @@ def run(config, output):
                                 if checked is not None and checked != fixture["ids"]:
                                     raise RuntimeError("tokenizer_mismatch")
                                 engine.generate(fixture, config["context"])
-                            row["postwarm_quiet_seconds"] = quiet_window(monitor)
+                            row["postwarm_quiet_seconds"] = (
+                                quiet_window(monitor)
+                                if report["protocol"]["require_quiet_windows"]
+                                else None
+                            )
                             before_paging = paging()
                             monitor.set_phase("measurement")
                             row["measurement_start_seconds"] = (
@@ -404,12 +425,7 @@ def run(config, output):
         report["wall_elapsed_seconds"] - report["monotonic_elapsed_seconds"]
     )
     report["power_log_screen"] = sleep_events(start_wall, time.time())
-    report["timing_accepted"] = (
-        report["power_log_screen"]["checked"]
-        and report["power_log_screen"]["sleep_events"] == 0
-        and abs(report["sleep_clock_discrepancy_seconds"]) < 2
-        and all(b["status"] == "complete" for b in report["blocks"])
-    )
+    report["timing_accepted"] = accept_timing(report)
     report["status"] = "complete_with_failures" if report["failures"] else "complete"
     save(output, report)
 

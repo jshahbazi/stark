@@ -3,7 +3,7 @@
 import unittest
 from unittest.mock import patch
 
-from benchmark_clean_qwen import Monitor, cpu_deltas, quiet_window
+from benchmark_clean_qwen import Monitor, accept_timing, cpu_deltas, quiet_window
 
 
 def process(parent, cpu, name="external", start="one"):
@@ -11,6 +11,20 @@ def process(parent, cpu, name="external", start="one"):
 
 
 class CpuAttributionTests(unittest.TestCase):
+    def test_observe_only_run_cannot_be_certified_as_quiet(self):
+        report = {
+            "protocol": {},
+            "power_log_screen": {"checked": True, "sleep_events": 0},
+            "sleep_clock_discrepancy_seconds": 0,
+            "blocks": [{"status": "complete"}],
+        }
+        self.assertTrue(accept_timing(report))
+        report["protocol"]["require_quiet_windows"] = False
+        self.assertFalse(accept_timing(report))
+        report["protocol"]["require_quiet_windows"] = True
+        report["blocks"][0]["status"] = "excluded_interference"
+        self.assertFalse(accept_timing(report))
+
     def test_descendants_are_owned_but_xpc_compilers_are_external(self):
         old = {1: process(0, 1), 2: process(1, 1), 3: process(2, 1), 4: process(0, 1)}
         new = {

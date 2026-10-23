@@ -1,0 +1,132 @@
+{
+  "model": "Qwen3.5-2B",
+  "measured_date": "2026-10-22",
+  "hardware": "Apple M5 Max, 40 GPU cores, 128 GiB",
+  "context": 8192,
+  "concurrency": 1,
+  "method": "geometric mean of four per-load median request rates; overall gives six workloads equal weight",
+  "scope": "observed local desktop measurements",
+  "source_receipt_sha256": "a198d7b1cb8664e2132ede11da3ad78176a682ca0a8120f1fb23cace1c156627",
+  "workloads": [
+    {
+      "id": "overall",
+      "label": "Overall \u00b7 six workloads"
+    },
+    {
+      "id": "fibonacci-module",
+      "label": "Fibonacci module"
+    },
+    {
+      "id": "gpu-explanation",
+      "label": "GPU explanation"
+    },
+    {
+      "id": "copy-edit",
+      "label": "Copy editing"
+    },
+    {
+      "id": "context-medium",
+      "label": "Medium context"
+    },
+    {
+      "id": "context-long",
+      "label": "Long context"
+    },
+    {
+      "id": "long-output",
+      "label": "Long output"
+    }
+  ],
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "name": "Stark",
+      "version": "97f15f38",
+      "representation": "affine W4/G64",
+      "rates": [
+        245.48144704370287,
+        276.31621897547257,
+        267.13780837183396,
+        252.56375840543475,
+        232.6324170876747,
+        178.97504707070985,
+        281.926929702027
+      ]
+    },
+    {
+      "id": "mlx_lm",
+      "name": "MLX-LM",
+      "version": "0.32.3.dev6 / MLX 0.32.4",
+      "representation": "affine W4/G64",
+      "rates": [
+        218.81852712598177,
+        247.72745592087333,
+        240.93737920754808,
+        219.34304025128668,
+        216.57173146384548,
+        166.0990834297762,
+        233.09521303955685
+      ]
+    },
+    {
+      "id": "vllm_metal",
+      "name": "vLLM Metal",
+      "version": "0.32.0",
+      "representation": "affine W4/G64",
+      "rates": [
+        174.68448499154846,
+        211.28186822363207,
+        210.85941767700234,
+        167.31427522587936,
+        148.7829422088259,
+        135.9297446897513,
+        188.48210845420343
+      ]
+    },
+    {
+      "id": "llama_cpp",
+      "name": "llama.cpp",
+      "version": "b11747 / Q4_K_M",
+      "representation": "Q4_K_M",
+      "rates": [
+        147.85765513164188,
+        163.62367418322808,
+        159.76496598178034,
+        151.30676303193542,
+        146.02269734563347,
+        113.02800568631247,
+        160.0554339805759
+      ]
+    },
+    {
+      "id": "tensorfold_default",
+      "name": "TensorFold",
+      "version": "1.1.1 / drafting on",
+      "representation": "affine W4/G64",
+      "rates": [
+        125.59457889128592,
+        132.77343702082464,
+        131.77978666455064,
+        192.54283886917725,
+        114.09649431691601,
+        70.53956409061944,
+        144.754783388587
+      ]
+    },
+    {
+      "id": "tensorfold_plain",
+      "name": "TensorFold",
+      "version": "1.1.1 / drafting off",
+      "representation": "affine W4/G64",
+      "rates": [
+        118.51925691695729,
+        142.53116827964016,
+        140.91531116975267,
+        121.82449912066,
+        113.32710800866127,
+        70.39190386269959,
+        141.9954205686144
+      ]
+    }
+  ]
+}
