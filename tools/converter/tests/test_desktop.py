@@ -91,6 +91,140 @@ def running(desktop, model):
     return identifier
 
 
+def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
+    from stark_convert.local_api import APIError
+
+    with pytest.raises(APIError) as unavailable:
+        desktop.api_complete({"model": "missing", "messages": [{"role": "user", "content": "hello"}]})
+    assert unavailable.value.status == 503
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    history = list(desktop.messages)
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "synthetic API request"}]}
+    response = desktop.api_complete(payload)
+    assert response["model"] == identifier
+    assert response["choices"][0]["message"]["content"] == "synthetic answer"
+    assert response["usage"] == {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
+    assert desktop.messages == history
+    assert desktop.worker.process is process
+    assert desktop.api_models()[0]["id"] == identifier
+    assert desktop.job is None
+    assert all(e["event"] != "reply" for e in events(desktop))
+    desktop.dispatch({"command": "generate", "text": "synthetic desktop request"})
+    finish(desktop)
+    assert len(desktop.messages) == 3
+    assert desktop.worker.process is process
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"temperature": 0.5},
+        {"temperature": False},
+        {"n": 2},
+        {"tools": []},
+        {"max_tokens": True},
+        {"max_tokens": 513},
+        {"max_tokens": 1, "max_completion_tokens": 1},
+        {"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]},
+        {"model": "unknown"},
+    ],
+)
+def test_api_rejects_unsupported_requests_without_affecting_worker(desktop, model, extra):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    with pytest.raises(APIError) as error:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}], **extra})
+    assert error.value.status in (400, 404)
+    assert desktop.worker.process is process
+    assert desktop.job is None
+
+
+def test_api_busy_and_stop_fence_inflight_request(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    errors = []
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "wait fixture"}]}
+
+    def request():
+        try:
+            desktop.api_complete(payload)
+        except APIError as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=request)
+    thread.start()
+    deadline = time.monotonic() + 2
+    while desktop.job is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(APIError) as busy:
+        desktop.api_complete(payload)
+    assert busy.value.status == 409
+    desktop.dispatch({"command": "generate", "text": "competing request"})
+    assert any("Wait for the current operation" in e.get("message", "") for e in events(desktop))
+    desktop.stop()
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    assert len(errors) == 1 and errors[0].status == 503
+    assert desktop.worker is None
+    assert desktop.api_models() == []
+
+
+def test_api_live_http_uses_desktop_model(desktop, model):
+    import urllib.request
+
+    identifier = running(desktop, model)
+    desktop.start_api()
+    details = next(e for e in events(desktop) if e["event"] == "connection")
+    try:
+        request = urllib.request.Request(
+            details["base_url"] + "/chat/completions",
+            data=json.dumps(
+                {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True}
+            ).encode(),
+            headers={"Authorization": "Bearer " + details["api_key"], "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read()
+        assert b"synthetic answer" in body
+        assert b"data: [DONE]" in body
+        assert details["api_key"] not in desktop.registry.read_text()
+    finally:
+        desktop.api.close()
+
+
+def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "failure fixture"}]})
+    assert failed.value.status == 503
+    assert desktop.job is None
+    assert desktop.worker is None
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert desktop.active_model == identifier
+
+
+def test_api_context_rejection_keeps_loaded_worker(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    desktop.context = 21
+    with pytest.raises(APIError) as oversized:
+        desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}]})
+    assert oversized.value.code == "context_length_exceeded"
+    assert desktop.job is None
+    assert desktop.worker.process is process
+
+
 def test_local_registration_is_private_atomic_persistent_and_deduplicated(desktop, model):
     identifier = installed(desktop, model)
     assert model.is_dir()

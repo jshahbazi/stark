@@ -21,11 +21,30 @@ The local app is ad-hoc signed. This workflow adds no Developer ID signing, nota
 
 **Install Model** offers a local folder or a Hugging Face repository ID. A converted Stark folder is registered in place. A supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted with Stark's existing converter. Conversion receipts remain with managed models. Model support is governed by the [converter's supported formats](../../tools/converter/README.md); choosing a repository does not guarantee compatibility.
 
-Run loads one model into one persistent worker. Requests are serialized. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies and conversation history stay in memory and private process pipes. The app exposes no HTTP listener.
+Run loads one model into one persistent worker. Requests are serialized. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies and conversation history stay in memory. Connected applications send text through the authenticated loopback API described below; native inference uses private process pipes.
 
 Open Chat shows user and model messages in a scrollable conversation. Choose a model and select Run, then enter a message and select Send or press Command-Return. Return inserts a new line. New Chat clears the visible conversation and the worker's conversation context while keeping the model loaded. Switching models and selecting Run starts a fresh conversation; Stop also clears the session. Failed or cancelled messages return to the composer for retry. Chat history is never saved to disk. Replies appear when generation completes.
 
 Input throughput uses first-token wall time as a prefill proxy, including native setup and scheduling. Output throughput measures sampling after the first token, including a terminal stop token when sampled. These are last-request measurements; short replies may not produce an output rate. See the [generation timing contract](../../docs/GENERATION.md). Stop or a worker failure clears the running session; starting again loads a fresh worker.
+
+## Connect another application
+
+Select **Connection Details…** in the menu or chat window. Choose an OpenAI-compatible provider in your application and copy the **Base URL**, **API key** and **Model ID** from this window. Select a model and **Run** first; the model ID refers to the model currently loaded, including when a different model is selected in the menu. **Copy curl Example** copies a complete authenticated request for that model. The copied command includes the API key.
+
+The server starts with Stark and binds only to `127.0.0.1`, preferring port `8000`. If that port is occupied it chooses an available port; always use the URL shown in Connection Details. The base URL includes `/v1`. Keep Stark open while connected. The address is for native applications on the same Mac; browser-origin requests, remote devices and containers are unsupported. Each app launch creates a new random bearer key held only in memory and sent to the UI through its private process pipe. Reopening Stark requires updating the key and possibly the URL in your client. No request access logs or exception dumps are written.
+
+Supported endpoints:
+
+| Endpoint | Behavior |
+| --- | --- |
+| `GET /v1/models` | OpenAI-style model list containing the running model, or an empty list when stopped |
+| `POST /v1/chat/completions` | Text messages with `system`, `user` and `assistant` roles; requires the running model ID |
+
+Send `Authorization: Bearer <API key>` on both endpoints. Chat requests accept `model`, `messages`, `stream`, `max_tokens` or `max_completion_tokens`, `temperature: 0` and `n: 1`. Omit temperature to use greedy sampling. The reply budget defaults to 512 tokens, bounded by the loaded model; explicit budgets must fit that bound. Context is bounded by the model and capped at 8192 tokens, including the reserved reply budget. If a request has no system message, the model's default system prompt is prepended when available. The maximum HTTP body is 1 MiB. Unsupported fields, tools, images, structured output, nonzero temperature and the Responses API are rejected.
+
+Both JSON completions and `stream: true` SSE responses are supported. Generation completes before SSE content is sent; there are no live token updates. Each API request supplies its full conversation and leaves the app's chat history unchanged. One worker handles both app chat and API calls; concurrent requests receive `409 engine_busy` and should retry after the current operation finishes. Stop cancels generation; subsequent requests receive `503 model_not_loaded` until Run loads a model. Quit closes the listener and terminates the worker.
+
+This is a bounded Chat Completions interface. Applications requiring unsupported fields or a different API need further integration work. Model-free HTTP and worker-fixture tests validate the interface and lifecycle; they do not establish new model-quality or performance qualification.
 
 ## Artwork and provenance
 
