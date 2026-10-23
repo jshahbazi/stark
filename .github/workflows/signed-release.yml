@@ -157,6 +157,15 @@ jobs:
             --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 \
             --expected-source "$source_revision" --version "$STARK_RELEASE_VERSION" \
             --output "$stem.dmg.verification.json"
+      - name: Prepare the stable DMG download aliases
+        if: inputs.existing_version == ''
+        run: |
+          set -euo pipefail
+          stem="artifacts/signed-release/stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
+          cp -- "$stem.dmg" artifacts/signed-release/Stark.dmg
+          digest=$(shasum -a 256 "$stem.dmg" | awk '{print $1}')
+          printf '%s  %s\n' "$digest" Stark.dmg > artifacts/signed-release/Stark.dmg.sha256
+          test "$(shasum -a 256 artifacts/signed-release/Stark.dmg | awk '{print $1}')" = "$digest"
       - name: Verify the signed installation after credential cleanup
         if: inputs.existing_version == ''
         run: |
@@ -212,6 +221,9 @@ jobs:
           cd artifacts/signed-release
           stem="stark-$STARK_RELEASE_VERSION-aarch64-apple-darwin"
           shasum -a 256 --check "$stem.tar.gz.sha256" "$stem.zip.sha256" "$stem.dmg.sha256"
+          shasum -a 256 --check Stark.dmg.sha256
+          cmp -- "$stem.dmg" Stark.dmg
+          test "$(awk '{print $1}' "$stem.dmg.sha256")" = "$(awk '{print $1}' Stark.dmg.sha256)"
           printf '%s\n' \
             "Stark $STARK_RELEASE_VERSION for Apple silicon, macOS 26.4 or newer." \
             '' \
@@ -239,6 +251,7 @@ jobs:
           gh release create "$tag" \
             "$stem.tar.gz" "$stem.tar.gz.sha256" "$stem.zip" "$stem.zip.sha256" \
             "$stem.dmg" "$stem.dmg.sha256" "$stem.dmg.notarization.json" "$stem.dmg.verification.json" \
+            Stark.dmg Stark.dmg.sha256 \
             "$stem.notarization.json" verification.json install.sh \
             --repo "$GH_REPO" --verify-tag --draft --title "Stark $STARK_RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/signed-release-notes.md"

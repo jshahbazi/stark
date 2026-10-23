@@ -16,7 +16,7 @@ Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the so
 ## Content and interactions
 
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
-- The install section provides copyable latest-stable release commands for the menu bar app and terminal CLI, the Apple silicon/macOS 26.4 minimum, PATH setup, a model-free `doctor` check and the app launch command. Model installation and chat steps cover both interfaces.
+- The hero and install section link directly to the latest signed, notarized DMG through the stable Stark.dmg release asset. The install section provides copyable latest-stable release commands for the menu bar app and terminal CLI, the Apple silicon/macOS 26.4 minimum, PATH setup, a model-free `doctor` check and the app launch command. Model installation and chat steps cover both interfaces.
 - Chat, generation, scoring and conversion tabs provide installed CLI command references. They do not execute a model in the browser. Tabs support arrow keys, Home and End; both command panels support copying with a selection fallback.
 - The benchmark defaults to tokens/second and offers an overall view plus six workload selections across six configurations from five engines. Relative mode normalizes MLX-LM to 1.000× from the unrounded recorded rates; rounded display values are not used to reconstruct the speedups.
 - A semantic results table remains usable without JavaScript. Bar lengths compare engines within each workload. Narrow screens scroll the table within its own region.
