@@ -4,6 +4,10 @@ Stark's native macOS controller lives in the menu bar. Click the cat icon to ins
 
 ## Build and install
 
+For normal installation, use the [signed release installer](../../docs/INSTALLATION.md). It installs `~/Applications/Stark.app` together with the terminal CLI. No developer tools are required. Open the app, choose **Install Model**, select a supported model, then choose **Run** to chat.
+
+The following commands are for rebuilding the app from source during development.
+
 Use an Apple silicon Mac with macOS 26.4 or later. Building the Swift app requires Xcode's command line tools, uv and an existing [standalone Stark CLI installation](../../docs/INSTALLATION.md). The resulting app includes that private runtime and runs without a source checkout, system Python, Rust or uv.
 
 Build the current generation worker with the locked toolchain, then build and install the app:
@@ -19,13 +23,17 @@ The local app is ad-hoc signed. This workflow adds no Developer ID signing, nota
 
 ## Models and requests
 
-**Install Model** offers a local folder or a Hugging Face repository ID. A converted Stark folder is registered in place. A supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted with Stark's existing converter. Conversion receipts remain with managed models. Model support is governed by the [converter's supported formats](../../tools/converter/README.md); choosing a repository does not guarantee compatibility.
+**Install Model** offers a local folder or a Hugging Face repository name or URL, such as `Qwen/Qwen3-0.6B` or `https://huggingface.co/Qwen/Qwen3-0.6B`. Both forms select the same model. A converted Stark folder is registered in place. A supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted with Stark's existing converter. Conversion receipts remain with managed models. Model support is governed by the [converter's supported formats](../../tools/converter/README.md); choosing a repository does not guarantee compatibility.
 
 The install dialog shows separate Download and Conversion progress bars. Download counts selected checkpoint bytes, including files already in the Hugging Face cache. Conversion counts bytes written to the output weights. Each bar shows a percentage and byte counts once its total is known; preparation uses an indeterminate bar. Validation and publication finish before a stage is marked complete. Local sources skip downloading, and already converted models skip conversion. Stop cancels the install; reopen **Installation Progress** from the menu to follow an active install. Command-I also opens the install dialog while Stark is active.
 
 Run loads one model into one persistent worker. Requests are serialized. Stop terminates and reaps the worker, including an active request. The app stores its model registry and managed models beneath `~/Library/Application Support/Stark`; local folders registered in place remain at their original locations. Prompts, replies and conversation history stay in memory and private process pipes. The app exposes no HTTP listener.
 
 Open Chat shows user and model messages in a scrollable conversation. Choose a model and select Run, then enter a message and select Send or press Command-Return. Return inserts a new line. New Chat clears the visible conversation and the worker's conversation context while keeping the model loaded. Switching models and selecting Run starts a fresh conversation; Stop also clears the session. Failed or cancelled messages return to the composer for retry. Chat history is never saved to disk. Replies appear when generation completes.
+
+After loading a model, select **Advanced Options…** in the chat window to adjust the system prompt, context size, output token limit and thinking mode. The controls stay hidden until this button opens the panel. Use the model's default system prompt, enter a custom prompt, or disable the default and leave the text empty to omit the system message. Thinking mode takes effect when the model's chat template supports it.
+
+**Apply and New Chat** clears the conversation while keeping the model loaded. **Cancel** discards panel edits; **Restore Defaults** fills in the original defaults for review before applying. Context and output limits are validated against the loaded worker, and the context budget must leave room for the entire output limit. Defaults are up to 8192 context tokens, up to 512 output tokens and thinking off. Settings stay in memory for the app session and carry across New Chat, Stop/Run and model changes; a model with smaller limits reduces the token settings. Restarting the app restores defaults. System prompts and settings are not written to the model registry or preferences.
 
 Input throughput uses first-token wall time as a prefill proxy, including native setup and scheduling. Output throughput measures sampling after the first token, including a terminal stop token when sampled. These are last-request measurements; short replies may not produce an output rate. See the [generation timing contract](../../docs/GENERATION.md). Stop or a worker failure clears the running session; starting again loads a fresh worker.
 

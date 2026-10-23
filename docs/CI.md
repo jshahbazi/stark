@@ -9,7 +9,7 @@ CI, Security and CodeQL run for pull requests to `main`, pushes to `main`, and m
 | Security | RustSec advisories, transitive soundness advisories, licenses and sources across all Cargo features; OSV checks of all seven dependency lockfiles, including the independent streaming converter; and dependency review for new vulnerabilities in pull requests. |
 | CodeQL | Extended security queries for Rust, C/C++, Python, JavaScript/TypeScript, and GitHub Actions, using build mode `none`. Metal kernels and Swift bindings are not covered by these scans. |
 | Prebuilt release | Manual version-tag dispatch on a merged commit; standalone Mac build, model-free archive verification and draft release upload. See [release operations](RELEASING.md). |
-| Signed release | Manual dispatch from protected `main`; verifies a pinned prebuilt input, signs all runtime native images, requires Apple notarization and online executable tickets, verifies the installation, and creates a draft in a separate publishing job. |
+| Signed release | Manual dispatch from protected `main`; builds a fresh combined CLI and `Stark.app` distribution from the matching tag, verifies it before credentials, signs nested native code inside out, staples and validates the app notarization ticket, verifies the receiving installation, and creates a draft in a separate publishing job. |
 
 CodeQL runs on Ubuntu. Semantic coverage of platform-gated Rust Metal wrappers can be incomplete; a successful scan does not validate the macOS native path. See [GitHub's build-mode documentation](https://docs.github.com/en/code-security/reference/code-scanning/codeql/build-options-for-compiled-languages).
 
@@ -23,7 +23,7 @@ Compatibility jobs use the CPU feature for inherited bindings and server code. T
 
 The existing repository quality job also runs converter synthetic tests with Hugging Face offline mode, Ruff, and a lock consistency check. It downloads no model and installs no Lalamo environment. Converter source/model parity and native loading remain separately recorded private validation evidence.
 
-Standalone installation checks cover the launcher, bundle manifests and archive creation, checksum failures, unsupported platforms, command collisions and unsafe archive entries. Signing-tool tests reject altered input archives, invalid identities, missing native images, failed notarization and replacement of existing outputs. Credential-helper tests cover private-file permissions, partial setup, Keychain restoration and suppressed diagnostics. The macOS lifecycle job also exercises installation, relocation, upgrades and uninstall under a temporary prefix with spaces. These tests use synthetic workers and no model.
+Standalone installation checks cover the launcher, bundle manifests and archive creation, checksum failures, unsupported platforms, command collisions and unsafe archive entries. Signing-tool tests reject altered input archives, invalid identities, missing native images, failed notarization and replacement of existing outputs. Application-builder and application-installer tests cover nested bundle inventories, app identity, archive installation and safe replacement. Credential-helper tests cover private-file permissions, partial setup, Keychain restoration and suppressed diagnostics. The macOS lifecycle job also exercises installation, relocation, upgrades and uninstall under a temporary prefix with spaces. These tests use synthetic workers and no model.
 
 Formatting uses `nightly-2026-10-01` because the upstream import configuration requires nightly rustfmt. Scoring compilation still uses Rust 1.98.1. Legacy crate formatting is not a gate. Actionlint suppresses only the constant-false-condition diagnostic used by deliberately disabled inherited jobs; the repository checker independently requires those jobs to remain disabled.
 
@@ -84,7 +84,7 @@ Development builds are unsigned. Use the [published signed release](INSTALLATION
 
 The separate manual prebuilt release job has `contents: write` for its draft upload. Checkout persists no credential, and only the final upload step receives `GH_TOKEN`; build and verification processes receive no publishing token. The workflow requires an existing matching version tag on a commit merged into `main`. Publication follows verification of the actual draft assets.
 
-The signed-release workflow uses the protected `macos-release` environment on `main`. Only its credential-import step receives the six exact Apple secrets; the signing step receives the public signing identity. The helper creates a temporary Keychain, removes credential files, and restores the previous Keychain search list during unconditional cleanup. Its signing job has read-only repository access. A separate job receives `contents: write` and `GH_TOKEN` to upload the verified assets to a draft. Repository policy permits secret references only in this narrowly checked workflow and rejects additional secret references, other events, other branches, missing cleanup and credential reuse through YAML aliases. Existing inherited workflows remain disabled.
+The signed-release workflow uses the protected `macos-release` environment on `main`. It builds a fresh combined CLI and app from the exact version tag, verifies the app before credentials, and signs nested code inside out. Only its credential-import step receives the six exact Apple secrets; the signing step receives the public signing identity. The helper creates a temporary Keychain, removes credential files, and restores the previous Keychain search list during unconditional cleanup. Its signing job has read-only repository access. A separate job receives `contents: write` and `GH_TOKEN` to upload the verified assets to a draft. Repository policy permits secret references only in this narrowly checked workflow and rejects additional secret references, other events, other branches, missing cleanup and credential reuse through YAML aliases. Existing inherited workflows remain disabled.
 
 ## Local checks
 
@@ -95,7 +95,7 @@ sh -n install.sh
 sh -n scripts/install-from-source.sh
 sh -n scripts/stark
 uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_stark_cli.py scripts/test_build_distribution.py
-uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py
+uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_apple_credentials.py scripts/test_build_menubar.py scripts/test_install_app.py
 uv run --project tools/converter --locked ruff check scripts/build_distribution.py scripts/test_build_distribution.py scripts/test_install.py scripts/test_stark_cli.py
 ```
 

@@ -144,6 +144,46 @@ def test_online_pins_every_repository_before_any_download(tmp_path):
         snapshot.assert_unchanged(verify_content=False)
 
 
+@pytest.mark.parametrize(
+    "value",
+    [PRIMARY, f"https://huggingface.co/{PRIMARY}", f" https://huggingface.co/{PRIMARY}/?download=true#model-card "],
+)
+def test_repository_names_and_urls_resolve_to_the_same_pinned_source(tmp_path, value):
+    hub = Hub({PRIMARY: files(tmp_path / "source")})
+    snapshot = resolve_source(value, repo=PRIMARY, hub=hub)
+    assert snapshot.repo == PRIMARY
+    assert snapshot.revision == PIN
+    assert all(event[1] == PRIMARY for event in hub.events)
+    assert snapshot.receipt() == resolve_source(PRIMARY, repo=f"https://huggingface.co/{PRIMARY}", hub=hub).receipt()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "owner/model/extra",
+        "https://example.com/Qwen/Qwen3-0.6B",
+        "https://huggingface.co.example.com/Qwen/Qwen3-0.6B",
+        "https://huggingface.co@evil.example/Qwen/Qwen3-0.6B",
+        "https://user:password@huggingface.co/Qwen/Qwen3-0.6B",
+        "http://huggingface.co/Qwen/Qwen3-0.6B",
+        "https://huggingface.co/datasets/owner/model",
+        "https://huggingface.co/spaces/owner/model",
+        "https://huggingface.co/Qwen/Qwen3-0.6B/tree/main",
+        "https://huggingface.co/Qwen/Qwen3-0.6B/blob/main/config.json",
+        "https://huggingface.co/Qwen%2FQwen3-0.6B",
+        "https://huggingface.co/Qwen/\nQwen3-0.6B",
+    ],
+)
+def test_invalid_repository_urls_are_rejected_before_hub_access(value):
+    with pytest.raises(ValueError, match="^invalid_huggingface_repository$"):
+        resolve_source(value, hub=object())
+
+
+def test_repository_url_cannot_override_an_explicit_repository():
+    with pytest.raises(ValueError, match="^conflicting_repository$"):
+        resolve_source(f"https://huggingface.co/{PRIMARY}", repo="example/other-model", hub=object())
+
+
 def test_offline_external_sources_require_complete_manifest(tmp_path):
     root = files(tmp_path / "source")
     with pytest.raises(ConversionError):
