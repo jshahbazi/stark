@@ -48,26 +48,40 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     }
   });
 }
-for (const button of document.querySelectorAll('[data-view]')) {
+const engineRows = [...document.querySelectorAll('[data-engine-rates]')];
+const workloadSelect = document.querySelector('#benchmark-workload');
+const viewButtons = [...document.querySelectorAll('[data-view]')];
+const rates = new Map(engineRows.map(row => [row, JSON.parse(row.dataset.engineRates)]));
+let relativeView = false;
+function renderBenchmark() {
+  const index = Number(workloadSelect.value);
+  const baselineRow = engineRows.find(row => row.dataset.engineId === 'mlx_lm');
+  const baseline = rates.get(baselineRow)[index];
+  const maximum = Math.max(...engineRows.map(row => rates.get(row)[index]));
+  for (const row of engineRows) {
+    const rate = rates.get(row)[index];
+    row.querySelector('.engine-value').textContent = relativeView
+      ? (rate / baseline).toFixed(3) + '×' : rate.toFixed(1);
+    row.querySelector('.bar').style.setProperty('--bar', (rate / maximum * 100) + '%');
+  }
+  for (const button of viewButtons) {
+    const selected = (button.dataset.view === 'relative') === relativeView;
+    button.classList.toggle('active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  document.querySelector('#rate-heading span').textContent =
+    relativeView ? 'MLX-LM = 1.000×' : 'tokens / second';
+  const label = workloadSelect.selectedOptions[0].textContent;
+  document.querySelector('#chart-selection').textContent =
+    index === 0 ? 'Overall · geometric mean of six workloads' : label + ' · four independent model loads';
+  document.querySelector('#benchmark-caption').textContent =
+    label + ': Qwen3.5-2B generation speed on Apple M5 Max.';
+}
+workloadSelect.addEventListener('change', renderBenchmark);
+for (const button of viewButtons) {
   button.addEventListener('click', () => {
-    const relative = button.dataset.view === 'relative';
-    for (const item of document.querySelectorAll('[data-view]')) {
-      const selected = item === button;
-      item.classList.toggle('active', selected);
-      item.setAttribute('aria-pressed', String(selected));
-    }
-    for (const row of document.querySelectorAll('[data-stark]')) {
-      const stark = Number(row.dataset.stark);
-      const mlx = Number(row.dataset.mlx);
-      // Relative values use the recorded paired gain, rather than rounded rates.
-      row.querySelector('.stark-value').textContent = relative
-        ? (1 + Number(row.dataset.gain) / 100).toFixed(3) + '×' : stark.toFixed(1);
-      row.querySelector('.mlx-value').textContent = relative ? '1.000×' : mlx.toFixed(1);
-      row.querySelector('.mlx-bar').style.setProperty('--bar',
-        (relative ? 100 / (1 + Number(row.dataset.gain) / 100) : mlx / stark * 100) + '%');
-    }
-    for (const id of ['stark-heading', 'mlx-heading']) {
-      document.querySelector('#' + id + ' span').textContent = relative ? 'MLX-LM = 1.000×' : 'tokens / second';
-    }
+    relativeView = button.dataset.view === 'relative';
+    renderBenchmark();
   });
 }
+renderBenchmark();
