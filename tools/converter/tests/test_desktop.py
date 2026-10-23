@@ -91,6 +91,133 @@ def running(desktop, model):
     return identifier
 
 
+def advanced_options(**overrides):
+    return {
+        "command": "configure",
+        "system_prompt": "custom system fixture",
+        "context_tokens": 2048,
+        "max_new_tokens": 128,
+        "thinking": True,
+        **overrides,
+    }
+
+
+def test_advanced_options_render_reset_and_generate_without_reloading(desktop, model):
+    running(desktop, model)
+    process = desktop.worker.process
+    desktop.dispatch({"command": "generate", "text": "previous turn fixture"})
+    finish(desktop)
+    desktop.dispatch(advanced_options())
+    assert desktop.messages == [{"role": "system", "content": "custom system fixture"}]
+    assert desktop.worker.process is process
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    desktop.template = ImmutableSandboxedEnvironment().from_string(
+        "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}thinking={{ enable_thinking }}"
+    )
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "new turn fixture"})
+        finish(desktop)
+        payload = request.call_args_list[-1].args[0]
+    assert payload["context_tokens"] == 2048
+    assert payload["max_new_tokens"] == 128
+    assert payload["rendered_prompt"] == "system:custom system fixture;user:new turn fixture;thinking=True"
+    desktop.dispatch({"command": "reset"})
+    assert desktop.messages == [{"role": "system", "content": "custom system fixture"}]
+    assert "custom system fixture" not in desktop.registry.read_text()
+    assert "custom system fixture" not in desktop.output.getvalue()
+
+
+def test_advanced_options_model_default_empty_override_and_restart(desktop, model):
+    identifier = running(desktop, model)
+    desktop.dispatch(advanced_options(system_prompt=""))
+    assert desktop.messages == []
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert desktop.messages == []
+    assert (desktop.context, desktop.maximum, desktop.thinking) == (2048, 128, True)
+    desktop.dispatch(advanced_options(system_prompt=None, thinking=False))
+    assert desktop.messages == [{"role": "system", "content": "synthetic system"}]
+    assert desktop.thinking is False
+    replacement = Desktop(desktop.executable, desktop.data_dir, io.StringIO())
+    assert replacement.system_prompt is None
+    assert (replacement.context, replacement.maximum, replacement.thinking) == (8192, 512, False)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"context_tokens": True},
+        {"context_tokens": 1},
+        {"context_tokens": 8193},
+        {"context_tokens": 100.5},
+        {"context_tokens": "2048"},
+        {"context_tokens": None},
+        {"max_new_tokens": 0},
+        {"max_new_tokens": -1},
+        {"max_new_tokens": 4097},
+        {"max_new_tokens": 2048},
+        {"max_new_tokens": False},
+        {"max_new_tokens": float("nan")},
+        {"thinking": "true"},
+        {"thinking": 1},
+        {"system_prompt": []},
+        {"unknown": "private fixture"},
+    ],
+)
+def test_advanced_options_invalid_changes_are_atomic(desktop, model, overrides):
+    running(desktop, model)
+    before = list(desktop.messages)
+    with pytest.raises(DesktopError, match="Invalid advanced options"):
+        desktop.dispatch(advanced_options(**overrides))
+    assert desktop.messages == before
+    assert (desktop.context, desktop.maximum, desktop.thinking, desktop.system_prompt) == (8192, 512, False, None)
+    assert not any(e["event"] == "configured" for e in events(desktop))
+
+
+def test_advanced_options_reject_missing_fields_no_model_and_busy(desktop, model):
+    with pytest.raises(DesktopError, match="Run a model"):
+        desktop.dispatch(advanced_options())
+    running(desktop, model)
+    with pytest.raises(DesktopError, match="Invalid advanced options"):
+        desktop.dispatch({"command": "configure"})
+    desktop.dispatch({"command": "generate", "text": "wait fixture"})
+    with pytest.raises(DesktopError, match="Wait for the current operation"):
+        desktop.dispatch(advanced_options())
+    desktop.dispatch({"command": "stop"})
+
+
+def test_model_change_clamps_options_to_advertised_limits(desktop, model):
+    identifier = running(desktop, model)
+    desktop.dispatch(advanced_options())
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": 512,
+            "max_new_tokens": 64,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    assert (desktop.context, desktop.maximum) == (512, 64)
+    ready = [e for e in events(desktop) if e["event"] == "ready"][-1]
+    assert ready["context_tokens"] == 512 and ready["max_new_tokens"] == 64
+    assert ready["max_context_tokens"] == 512 and ready["max_output_tokens"] == 64
+
+
+def test_advanced_context_budget_rejection_leaves_history_unchanged(desktop, model):
+    running(desktop, model)
+    desktop.dispatch(advanced_options(context_tokens=21, max_new_tokens=2))
+    before = list(desktop.messages)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "budget fixture"})
+        finish(desktop)
+        assert [c.args[0]["operation"] for c in request.call_args_list] == ["tokenize"]
+    assert desktop.messages == before
+
+
 def test_local_registration_is_private_atomic_persistent_and_deduplicated(desktop, model):
     identifier = installed(desktop, model)
     assert model.is_dir()
