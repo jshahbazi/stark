@@ -14,12 +14,14 @@ uv sync --project tools/converter --locked
 
 ## Convert from Hugging Face
 
-Pass the model's Hugging Face repository name:
+Pass the model's Hugging Face repository name or full repository page URL:
 
 ```sh
 uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
   --output models/qwen3
 ```
+
+You can replace `Qwen/Qwen3-0.6B` with `https://huggingface.co/Qwen/Qwen3-0.6B`. A trailing slash, query string or page fragment is accepted. Use the repository's main page URL; select a specific revision with `--revision`.
 
 This downloads the model and writes the converted files to `models/qwen3`. Replace the repository name and output path for another [supported model](#catalog-coverage-and-qualification). Gated models require access through your existing Hugging Face credentials.
 

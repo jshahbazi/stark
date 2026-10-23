@@ -42,10 +42,21 @@ helpers cannot reinterpret class allocations either. Generic wrapper checks
 retain the existing inner `TypeId` test and support removing and rewrapping
 the same generic envelope.
 
+Typed external values also carry a tag identifying their `External<T>` storage.
+Shared and mutable arguments, `ExternalRef`, `JsExternal` extraction and the
+deprecated `Env` external APIs validate that identity before reading a native
+pointer. A null, undersized or foreign allocation cannot establish its Rust
+type by presenting bytes that resemble a `TypeId`. Generic `JsExternal`
+transport remains available for foreign externals. Deprecated external creation
+uses the same storage layout as the modern API, preserving signed memory hints
+and allowing both getter APIs to read the result. Creation failures reclaim
+unattached allocations; after successful creation, Node owns finalization, and
+the finalizer reverses only memory adjustments that succeeded.
+
 `napi-sys` adds the standard `napi_type_tag` ABI and both Node-API 8 tag functions
 to the existing generated symbol loader. Missing dynamic symbols return errors
 through its existing failure stubs. Builds without the `napi8` feature fail
-closed at native class operations. The Stark workspace already requests
+closed at native class and typed external operations. The Stark workspace already requests
 `napi10`; no supported host-version requirement is raised here. Typed native
 class conversion requires `'static` storage, as the runtime's class creation
 paths already do. No new external dependencies are added.
@@ -55,7 +66,8 @@ The source changes relative to the original packages are:
 - `napi`: `src/bindgen_runtime/native_type.rs` (new),
   `src/bindgen_runtime/mod.rs`, `callback_info.rs`, `class_accessor.rs`,
   `js_values/class.rs`, `js_values/value_ref.rs`, `js_values/object.rs`,
-  `js_values/task.rs`, and `src/env.rs`.
+  `js_values/task.rs`, `js_values/external.rs`, `src/js_values/external.rs`,
+  and `src/env.rs`.
 - `napi-derive-backend`: `src/codegen/struct.rs`.
 - `napi-sys`: `src/types.rs` and `src/functions.rs`.
 

@@ -11,7 +11,6 @@ import hashlib
 import json
 import math
 import os
-import stat
 import struct
 import time
 from dataclasses import dataclass
@@ -20,13 +19,13 @@ from typing import BinaryIO
 
 import numpy as np
 
+from ._build_metadata import ConversionError as ConversionError
+from ._build_metadata import _signature, open_regular
+from .progress import ProgressCallback, ProgressReporter, reporter
+
 
 class UnsupportedConversion(Exception):
     """A representation is outside independently implemented coverage."""
-
-
-class ConversionError(Exception):
-    """An invalid checkpoint or failed conversion must not be published."""
 
 
 DTYPE_BYTES = {
@@ -77,24 +76,6 @@ def authorize_source_path(root: Path, path: Path) -> Path:
     with open_regular(resolved):
         pass
     return resolved
-
-
-def open_regular(path: Path) -> BinaryIO:
-    """Open a canonical regular file without blocking on FIFOs or following races."""
-    resolved = Path(os.path.abspath(path))
-    directory = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for component in resolved.parts[1:-1]:
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        descriptor = os.open(resolved.name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
-    finally:
-        os.close(directory)
-    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise ConversionError("Source must be a regular file")
-    return os.fdopen(descriptor, "rb", buffering=0)
 
 
 def read_regular_bytes(path: Path) -> bytes:
@@ -159,10 +140,6 @@ def read_json(path: Path) -> dict:
     if not isinstance(result, dict):
         raise ConversionError("Checkpoint JSON must be an object")
     return result
-
-
-def _signature(stat: os.stat_result) -> tuple[int, int, int, int]:
-    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
 
 
 @dataclass(frozen=True)
@@ -634,10 +611,13 @@ class _HashingWriter:
     to hashing the completed file. This wrapper never retains payload buffers.
     """
 
-    def __init__(self, stream: BinaryIO):
+    def __init__(self, stream: BinaryIO, progress: ProgressReporter | None = None, total_bytes: int | None = None):
         self.stream = stream
         self.digest = hashlib.sha256()
         self.sequential = True
+        self.progress = progress
+        self.total_bytes = total_bytes
+        self.written_bytes = 0
 
     def write(self, data) -> int:
         written = self.stream.write(data)
@@ -645,6 +625,9 @@ class _HashingWriter:
             raise ConversionError("Incomplete output write")
         if self.sequential:
             self.digest.update(data)
+        self.written_bytes += written
+        if self.progress is not None:
+            self.progress.emit("conversion", "running", self.written_bytes, self.total_bytes)
         return written
 
     def tell(self) -> int:
@@ -661,7 +644,13 @@ class _HashingWriter:
         return self.stream.fileno()
 
 
-def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_CHUNK_BYTES) -> dict:
+def write_plan(
+    plan: ConversionPlan,
+    path: Path,
+    *,
+    chunk_bytes: int = DEFAULT_CHUNK_BYTES,
+    progress: ProgressCallback | ProgressReporter | None = None,
+) -> dict:
     """Write a header-first safetensors file into a caller-owned staging area."""
     if type(chunk_bytes) is not int or chunk_bytes < 16:
         raise ConversionError("Chunk size must be an integer of at least 16 bytes")
@@ -704,6 +693,10 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
         offset += op.nbytes
     encoded = json.dumps(header).encode("utf-8")
     encoded += b" " * (-len(encoded) % 8)
+    progress = reporter(progress)
+    total_bytes = 8 + len(encoded) + offset
+    if progress is not None:
+        progress.emit("conversion", "running", 0, total_bytes, force=True)
     start = time.perf_counter()
     peak = 0
     # Refuse accidental in-place conversion, even when the caller bypasses CLI.
@@ -711,7 +704,7 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
         raise ConversionError("Output overlaps checkpoint input")
     try:
         with path.open("xb") as stream:
-            output = _HashingWriter(stream)
+            output = _HashingWriter(stream, progress, total_bytes)
             output.write(struct.pack("<Q", len(encoded)))
             output.write(encoded)
             for op in operations:
@@ -759,6 +752,8 @@ def write_plan(plan: ConversionPlan, path: Path, *, chunk_bytes: int = DEFAULT_C
     else:
         with path.open("rb") as stream:
             output_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+    if progress is not None:
+        progress.emit("conversion", "running", total_bytes, total_bytes, force=True)
     return {
         "tensors": len(operations),
         "source_tensors": plan.source_tensors,

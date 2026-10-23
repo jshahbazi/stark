@@ -9,10 +9,13 @@ use stark_engine::{
     },
 };
 
-use crate::generation::{
-    GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
+use crate::{
+    cancel::CancelSignal,
+    generation::{
+        GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
+    },
+    text_stop::StopFilter,
 };
-use crate::{cancel::CancelSignal, text_stop::StopFilter};
 
 pub(crate) struct NativeBackend {
     model: LanguageModel<Metal>,

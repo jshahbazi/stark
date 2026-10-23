@@ -7,9 +7,10 @@ struct ConnectionDetailsView: View {
     @State private var copied = ""
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
+    private var modelID: String { engine.loadedMode == .chat ? engine.loadedID : "" }
     private var curl: String {
         let request: [String: Any] = [
-            "model": engine.loadedID,
+            "model": modelID,
             "messages": [["role": "user", "content": "Hello"]],
             "temperature": 0,
             "stream": true,
@@ -28,7 +29,7 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
-            field("Model ID", value: engine.loadedID, placeholder: "Run a model first")
+            field("Model ID", value: modelID, placeholder: "Run a model in Chat mode first")
             VStack(alignment: .leading, spacing: 5) {
                 Text("API key").font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -42,9 +43,9 @@ struct ConnectionDetailsView: View {
             }
             Divider()
             StatusLine(engine: engine)
-            Text(engine.loadedID.isEmpty ? "Choose a model in Stark and select Run before connecting." : "Running model: \(engine.activeName)")
+            Text(modelID.isEmpty ? "Choose Chat mode and a model in Stark, then select Run before connecting." : "Running model: \(engine.activeName)")
                 .font(.callout)
-            if !engine.loadedID.isEmpty {
+            if !modelID.isEmpty {
                 Text("Context: \(engine.apiContextTokens) tokens · Reply limit: \(engine.apiMaxNewTokens) tokens")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -56,7 +57,7 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Copy curl Example") { copy(curl, label: "curl example (includes API key)") }
-                    .disabled(!canConnect || engine.loadedID.isEmpty)
+                    .disabled(!canConnect || modelID.isEmpty)
                 Spacer()
                 Text(copied.isEmpty ? "" : "Copied \(copied)").font(.caption).foregroundStyle(.secondary)
             }

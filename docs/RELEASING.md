@@ -1,22 +1,20 @@
 # Publishing a standalone Mac release
 
-The `Signed release` workflow signs and notarizes a pinned prebuilt bundle from protected `main`. The separate `Prebuilt release` workflow constructs unsigned inputs. Both create drafts for receiving-Mac verification before publication. Neither runs the inherited Uzu release, cloud or signing workflows.
+The `Signed release` workflow builds, signs and notarizes a combined CLI and menu bar application distribution from protected `main`. The separate `Prebuilt release` workflow constructs unsigned combined archives. Both create drafts for receiving-Mac verification before publication. Neither runs the inherited Uzu release, cloud or signing workflows.
 
-## Sign the existing prebuilt engine
+## Release the combined CLI and application distribution
 
-The first signed distribution is `v0.1.1`. Its input is the immutable `v0.1.0` archive with SHA-256 `20f43b0f62fbe58dd026241031856a5f901067a88ed0f9cf27f2c3ea67d9e05b`, built from engine source `8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e`. The signing workflow pins both identities in reviewed source. Repackaging changes signatures, distribution version and manifest hashes; it does not rebuild the engine or replace the original archive.
+The original signed `v0.1.1` release used the immutable `v0.1.0` archive with SHA-256 `20f43b0f62fbe58dd026241031856a5f901067a88ed0f9cf27f2c3ea67d9e05b`, built from engine source `8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e`. That historical input and receipt remain immutable; they are not the recipe for the combined application release.
 
-After merging the signing recipe with successful required checks, tag that exact commit and dispatch from `main`:
+After merging the reviewed changes with successful required checks, open **Actions → Signed release → Run workflow**, select `main`, and choose a `major`, `minor` or `patch` bump (default: `patch`). The equivalent command is:
 
 ```sh
-git switch main
-git pull --ff-only
-git tag -a v0.1.1 -m 'Stark 0.1.1 signed and notarized Mac release'
-git push origin v0.1.1
-gh workflow run signed-release.yml --ref main -f version=0.1.1
+gh workflow run signed-release.yml --ref main -f bump=patch
 ```
 
-The tag must identify the workflow's exact source commit. A new input engine requires updating the pinned input archive hash and engine revision in a reviewed workflow change. Never move a published tag or replace published archive bytes.
+The workflow selects the highest stable `vMAJOR.MINOR.PATCH` Git tag or Cargo workspace version, then applies the selected bump. For example, a baseline of `0.1.2` produces `1.0.0`, `0.2.0` or `0.1.3`. Prerelease tags are excluded. All stable tags count, including tags belonging to drafts, so reserved versions are never reused. The selected version appears in the action log.
+
+The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from the exact dispatched `main` commit, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. After signing and verification succeed, the separate publishing job creates `vVERSION` at that same commit and uploads a draft. No manual tag is required. An existing tag or release causes publication to fail; tags and assets are never overwritten. A failure after tag creation leaves that version reserved; a fresh dispatch selects the next version. Never move a published tag or replace published archive bytes.
 
 The `macos-release` environment is restricted to protected branches. It contains these six secrets:
 
@@ -29,31 +27,31 @@ The `macos-release` environment is restricted to protected branches. It contains
 
 Keep the certificate export, API key and passwords outside Git and command output. The action imports them into a temporary Keychain, removes the private files, and unconditionally restores the previous Keychain search list and deletes the temporary Keychain. Only the import step receives all six secrets. Signing receives the public certificate identity and accesses the temporary Keychain profile. A separate publishing job receives repository write access and has no Apple credentials.
 
-Before importing credentials, the action verifies the pinned input's checksum, source, exact file inventory and standalone installation. It then signs every runtime Mach-O image individually, including the workers, interpreter, libpython, native Python extensions and bundled dynamic libraries. It requires the exact Developer ID Application certificate, hardened runtime, secure timestamps and no extra entitlements. Relocatable object files and static libraries are build support, not runtime code-signing targets; skipped Mach-O object paths are recorded explicitly.
+Before importing credentials, the action verifies the combined archive, application identity, exact file inventory and standalone installation. It then signs every runtime Mach-O image inside the CLI and application, signing nested code before its containing app, including the workers, interpreter, libpython, native Python extensions and bundled dynamic libraries. It requires the exact Developer ID Application certificate, hardened runtime, secure timestamps and no extra entitlements. Relocatable object files and static libraries are build support, not runtime code-signing targets; skipped Mach-O object paths are recorded explicitly.
 
-After signing, the finalizer refreshes the file manifest and creates a ZIP of the exact signed tree for Apple. It requires notarization status `Accepted` and online ticket checks for both workers and the interpreter. Signing or notarization failure publishes no release outputs. A source-bound aggregate receipt records the engine revision, signing recipe revision and hashes, signer certificate and Team ID, native image count, Apple submission identifier and exact archive hashes. It contains no credentials or runtime payloads.
+After signing, the finalizer refreshes the file manifest, submits the application package for notarization, staples and validates the app ticket, then creates the final TAR and ZIP hashes. It requires notarization status `Accepted`, a valid stapled app ticket and online ticket checks for standalone executables. Signing or notarization failure publishes no release outputs. A source-bound aggregate receipt records the source and signing-recipe revisions and hashes, signer certificate and Team ID, native image count, Apple submission identifier and exact archive hashes. It contains no credentials or runtime payloads.
 
 The signed draft has seven assets: the signed TAR archive and checksum, notarized ZIP and checksum, aggregate notarization receipt, installation verification JSON and `install.sh`. Download them and verify the actual archive on a receiving Mac:
 
 ```sh
-gh release download v0.1.1 --dir artifacts/release-0.1.1
+gh release download v0.1.2 --dir artifacts/release-0.1.2
 uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
-  --archive artifacts/release-0.1.1/stark-0.1.1-aarch64-apple-darwin.tar.gz \
-  --version 0.1.1 --expected-source 8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e \
+  --archive artifacts/release-0.1.2/stark-0.1.2-aarch64-apple-darwin.tar.gz \
+  --version 0.1.2 --expected-source TAGGED_SOURCE_COMMIT \
   --expected-distribution-source SIGNING_RECIPE_COMMIT \
-  --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 --require-notarized \
-  --output artifacts/release-0.1.1/receiving-mac-verification.json
+  --expected-signer EFE6CD2666B9106E68724C38ADD1C405267A2F94 --require-notarized --require-application \
+  --output artifacts/release-0.1.2/receiving-mac-verification.json
 ```
 
-Replace `SIGNING_RECIPE_COMMIT` with the full tagged commit. This adds checks of all native signatures and executable notarization tickets to the normal installation, conversion, hashes, relocation and uninstall checks. After the actual draft passes:
+Replace `TAGGED_SOURCE_COMMIT` and `SIGNING_RECIPE_COMMIT` with the full tagged commit. This adds checks of all native signatures, the installed app's seal and stapled ticket, and standalone executable notarization tickets to the normal installation, conversion, hashes, relocation and uninstall checks. After the actual draft passes:
 
 ```sh
-gh release edit v0.1.1 --draft=false --latest
+gh release edit v0.1.2 --draft=false --latest
 ```
 
-Test the public installer download and `--version 0.1.1` route from outside a checkout after publication. Preserve the earlier validation packets; record this run separately.
+Test the public installer download, `stark doctor`, `stark --version` and `open "$HOME/Applications/Stark.app"` route from outside a checkout after publication. Preserve the earlier validation packets; record this run separately.
 
-Apple cannot staple tickets to standalone command-line binaries or ZIP files. Gatekeeper retrieves their tickets online. The distributed TAR contains the same signed native bytes submitted in the ZIP. See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow). The installer never removes quarantine or changes Gatekeeper policy.
+Apple staples the ticket to `Stark.app`; standalone command-line binaries and ZIP files use online tickets. The distributed TAR and ZIP contain the same final signed and stapled application bytes. See [Apple's notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow). The installer never removes quarantine or changes Gatekeeper policy.
 
 ## Build an unsigned input from source
 
@@ -101,6 +99,6 @@ Finally, test the public installer download and its `--version` route from outsi
 
 ## Scope
 
-The release supports Apple silicon and macOS 26.4 or newer. It contains embedded Metal kernels, the two private-protocol workers, the converter, its Python runtime, license notices and a source/file-hash manifest. It contains no models or private evaluation artifacts. Model loading, numerical correctness and performance retain their separate source-bound qualification requirements.
+The release supports Apple silicon and macOS 26.4 or newer. It contains terminal chat, the menu bar app, embedded Metal kernels, the two private-protocol workers, the converter, private Python runtimes, license notices and source/file-hash manifests. It contains no models or private evaluation artifacts. Model loading, numerical correctness and performance retain their separate source-bound qualification requirements.
 
 The source builder and `Prebuilt release` action produce unsigned archives. `Signed release` is the separate signing and notarization boundary. Complete byte reproducibility across independent builds or signing runs is not promised; secure timestamps and the immutable archive checksum identify the exact tested distribution.

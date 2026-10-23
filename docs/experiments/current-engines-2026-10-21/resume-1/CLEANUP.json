@@ -1,0 +1,14 @@
+{
+  "scope": "task-owned disposable setup caches only",
+  "removed": [
+    "resume-1/uv-cache",
+    "uv-cache-python/archive-v0",
+    "uv-cache-harness/archive-v0"
+  ],
+  "recovered_bytes": 346079232,
+  "free_bytes_after_cleanup": 5393477632,
+  "models_executables_and_environments_retained": true,
+  "final_preflight_status": "passed",
+  "quiet_window_required_seconds": 120,
+  "quiet_wait_seconds": 320.3940893749241
+}

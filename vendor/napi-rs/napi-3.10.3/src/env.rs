@@ -982,23 +982,9 @@ impl Env {
     native_object: T,
     size_hint: Option<i64>,
   ) -> Result<JsExternal<'env>> {
-    let mut object_value = ptr::null_mut();
-    check_status!(unsafe {
-      sys::napi_create_external(
-        self.0,
-        Box::into_raw(Box::new(TaggedObject::new(native_object))).cast(),
-        Some(raw_finalize::<TaggedObject<T>>),
-        Box::into_raw(Box::new(size_hint.unwrap_or(0))).cast(),
-        &mut object_value,
-      )
-    })?;
-    if let Some(changed) = size_hint {
-      if changed != 0 {
-        let mut adjusted_value = 0i64;
-        check_status!(unsafe {
-          sys::napi_adjust_external_memory(self.0, changed, &mut adjusted_value)
-        })?;
-      }
+    let (object_value, _) = unsafe {
+      crate::bindgen_runtime::External::new(native_object)
+        .to_napi_value_with_size_hint(self.0, size_hint.unwrap_or(0))?
     };
     unsafe { JsExternal::from_napi_value(self.0, object_value) }
   }
@@ -1008,29 +994,10 @@ impl Env {
   #[allow(clippy::mut_from_ref)]
   pub fn get_value_external<T: 'static>(&self, js_external: &JsExternal) -> Result<&mut T> {
     unsafe {
-      let mut unknown_tagged_object = ptr::null_mut();
-      check_status!(sys::napi_get_value_external(
-        self.0,
-        js_external.0.value,
-        &mut unknown_tagged_object,
-      ))?;
-
-      let type_id = unknown_tagged_object as *const TypeId;
-      if *type_id == TypeId::of::<T>() {
-        let tagged_object = unknown_tagged_object as *mut TaggedObject<T>;
-        (*tagged_object).object.as_mut().ok_or_else(|| {
-          Error::new(
-            Status::InvalidArg,
-            "nothing attach to js_external".to_owned(),
-          )
-        })
-      } else {
-        Err(Error::new(
-          Status::InvalidArg,
-          "T on get_value_external is not the type of wrapped object".to_owned(),
-        ))
-      }
-    }
+      <crate::bindgen_runtime::External<T> as crate::bindgen_runtime::FromNapiMutRef>::from_napi_mut_ref(
+        self.0, js_external.0.value,
+      )
+    }.map(|external| external.as_mut())
   }
 
   /// Create a JavaScript error object from `Error`

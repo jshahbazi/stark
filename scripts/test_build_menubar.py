@@ -5,9 +5,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import plistlib
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -44,7 +47,66 @@ def make_runtime(path: Path) -> None:
     )
 
 
+def make_converter_wheel(
+    wheel: Path, snapshot: Path, source: dict, omit: str | None = None
+) -> None:
+    wheel.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(wheel, "w") as archive:
+        for name in source["source_files_sha256"]:
+            if name.startswith("stark_convert/") and name != omit:
+                archive.write(snapshot / name, name)
+        for name in source["source_inputs"]:
+            member = "stark_convert/_build_inputs/" + name
+            if member != omit:
+                archive.write(snapshot / name, member)
+        metadata = f"stark_convert-{source['version']}.dist-info"
+        archive.writestr(
+            metadata + "/METADATA",
+            f"Name: {source['project_name']}\nVersion: {source['version']}\nLicense-File: LICENSE.lalamo\n",
+        )
+        archive.writestr(metadata + "/WHEEL", "Wheel-Version: 1.0\nTag: py3-none-any\n")
+        archive.writestr(metadata + "/RECORD", "fixture record\n")
+        license_path = metadata + "/licenses/LICENSE.lalamo"
+        if license_path != omit:
+            archive.write(snapshot / "LICENSE.lalamo", license_path)
+
+
 class RuntimeVerificationTests(unittest.TestCase):
+    def test_release_version_is_recorded_without_a_build_timestamp(self):
+        info = {}
+        builder.set_application_version(info, "0.1.2-preview.1")
+        self.assertEqual(info["CFBundleShortVersionString"], "0.1.2")
+        self.assertEqual(info["CFBundleVersion"], "0.1.2")
+        with self.assertRaisesRegex(builder.BuildError, "application_version_invalid"):
+            builder.set_application_version({}, "../../0.1.2")
+
+    def test_combined_runtime_is_pruned_without_recursive_application_embedding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            make_runtime(runtime)
+            (runtime / "app/Stark.app").mkdir(parents=True)
+            (runtime / "app/Stark.app/payload").write_bytes(b"old application")
+            manifest_path = runtime / builder.RUNTIME_MANIFEST
+            manifest = json.loads(manifest_path.read_text())
+            manifest["files_sha256"]["app/Stark.app/payload"] = builder.sha256(
+                runtime / "app/Stark.app/payload"
+            )
+            manifest_path.write_text(json.dumps(manifest))
+            parent_manifest = manifest_path.read_bytes()
+            builder.verify_runtime(runtime)
+            embedded = root / "new-app/Contents/Resources/runtime"
+            excluded = builder.copy_runtime_for_application(runtime, embedded, manifest)
+            self.assertEqual(excluded, ["app"])
+            self.assertFalse((embedded / "app").exists())
+            self.assertEqual(manifest_path.read_bytes(), parent_manifest)
+            derived = builder.verify_runtime(embedded)
+            self.assertEqual(
+                derived["application_embedding"]["parent_manifest_sha256"],
+                builder.sha256(manifest_path),
+            )
+            self.assertNotIn("app/Stark.app/payload", derived["files_sha256"])
+
     def test_worker_probe_accepts_only_fixed_model_free_protocol_reply(self):
         valid = subprocess.CompletedProcess(
             [], 1, b'{"ready":false,"error":"invalid_arguments"}\n'
@@ -59,6 +121,36 @@ class RuntimeVerificationTests(unittest.TestCase):
             ),
         ):
             builder.verify_worker(Path("worker"))
+
+    def test_score_worker_probe_uses_distinct_failure_code(self):
+        invalid = subprocess.CompletedProcess([], 0, b'{"ready":true}\n')
+        with (
+            patch.object(builder.subprocess, "run", return_value=invalid),
+            self.assertRaisesRegex(
+                builder.BuildError, "score_worker_self_check_failed"
+            ),
+        ):
+            builder.verify_worker(Path("score-worker"), "score")
+
+    def test_missing_score_worker_is_rejected_before_packaging(self):
+        with self.assertRaisesRegex(
+            builder.BuildError, "score_worker_self_check_failed"
+        ):
+            builder.verify_worker(Path("/definitely/missing/stark-score"), "score")
+
+    def test_score_build_record_must_match_score_binary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "stark-score"
+            record = root / "score-worker-build.json"
+            binary.write_bytes(b"score worker")
+            record.write_text(json.dumps({"worker_sha256": "0" * 64}))
+            with self.assertRaisesRegex(
+                builder.BuildError, "score_worker_build_record_hash_mismatch"
+            ):
+                builder.verify_worker_build_record(
+                    record, binary, "score_worker_build_record_hash_mismatch"
+                )
 
     def test_preserves_manifest_and_rejects_modified_base_runtime(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,6 +248,8 @@ class DesktopDependencyTests(unittest.TestCase):
                 self.assertIn("--require-hashes", command)
                 self.assertEqual(command[command.index("--only-binary") + 1], ":all:")
                 overlay = Path(command[command.index("--target") + 1])
+                overlay.mkdir()
+                (overlay / ".lock").touch()
                 for name, version in {"jinja2": "3.1.6", "markupsafe": "3.0.4"}.items():
                     (overlay / name).mkdir(parents=True)
                     (overlay / name / "__init__.py").write_text("fixture")
@@ -178,9 +272,292 @@ class DesktopDependencyTests(unittest.TestCase):
             self.assertFalse(
                 any(path.endswith("uv_cache.json") for path in result["files_sha256"])
             )
+            self.assertFalse(
+                any(path.endswith("/.lock") for path in result["files_sha256"])
+            )
             self.assertTrue(
                 (embedded.parent / "menu-bar-python-requirements.txt").is_file()
             )
+
+
+class ConverterPackageTests(unittest.TestCase):
+    def test_snapshot_uses_only_the_standard_library(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            code = (
+                "import json, runpy, sys; from pathlib import Path; "
+                "builder = runpy.run_path(sys.argv[1]); "
+                "source = builder['converter_snapshot'](Path(sys.argv[2]), Path(sys.argv[3])); "
+                "assert not any(name.split('.')[0] in "
+                "{'numpy', 'tokenizers', 'huggingface_hub', 'stark_convert'} for name in sys.modules); "
+                "print(json.dumps(source['toolchain_provenance']))"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-S",
+                    "-c",
+                    code,
+                    str(builder.ROOT / "scripts/build_menubar.py"),
+                    str(builder.ROOT / "tools/converter"),
+                    str(Path(temporary) / "source"),
+                ],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode, 0, "dependency_free_converter_snapshot_failed"
+            )
+            self.assertEqual(
+                json.loads(result.stdout)["converter_lock_sha256"],
+                builder.sha256(builder.ROOT / "tools/converter/uv.lock"),
+            )
+
+    def test_python_target_lock_accepts_only_empty_regular_uv_lock(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = root / ".lock"
+            lock.touch()
+            builder.remove_python_target_lock(root)
+            self.assertFalse(lock.exists())
+            lock.write_text("unexpected contents")
+            with self.assertRaisesRegex(
+                builder.BuildError, "python_target_lock_invalid"
+            ):
+                builder.remove_python_target_lock(root)
+            lock.unlink()
+            lock.symlink_to(root / "missing-target")
+            with self.assertRaises(builder.BuildError):
+                builder.remove_python_target_lock(root)
+
+    def test_snapshot_and_wheel_preserve_current_modules_capsule_and_license(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "source"
+            source = builder.converter_snapshot(
+                builder.ROOT / "tools/converter", snapshot
+            )
+            for name in (
+                "cli.py",
+                "sources.py",
+                "streaming.py",
+                "progress.py",
+                "desktop.py",
+                "chat.py",
+            ):
+                relative = "stark_convert/" + name
+                self.assertEqual(
+                    source["source_files_sha256"][relative],
+                    builder.sha256(builder.ROOT / "tools/converter" / relative),
+                )
+            self.assertEqual(source["build_system"]["requires"], ["setuptools==83.0.0"])
+            self.assertEqual(
+                source["toolchain_provenance"]["converter_lock_sha256"],
+                builder.sha256(builder.ROOT / "tools/converter/uv.lock"),
+            )
+            wheel = root / f"stark_convert-{source['version']}-py3-none-any.whl"
+            make_converter_wheel(wheel, snapshot, source)
+            result = builder.validate_converter_wheel(wheel, source)
+            self.assertEqual(result["wheel_sha256"], builder.sha256(wheel))
+            self.assertEqual(
+                result["toolchain_provenance"], source["toolchain_provenance"]
+            )
+
+    def test_wheel_rejects_missing_progress_capsule_license_and_invalid_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            snapshot = root / "source"
+            source = builder.converter_snapshot(
+                builder.ROOT / "tools/converter", snapshot
+            )
+            wheel = root / f"stark_convert-{source['version']}-py3-none-any.whl"
+            for missing in (
+                "stark_convert/progress.py",
+                "stark_convert/_build_inputs/uv.lock",
+                f"stark_convert-{source['version']}.dist-info/licenses/LICENSE.lalamo",
+            ):
+                with self.subTest(missing=missing):
+                    make_converter_wheel(wheel, snapshot, source, omit=missing)
+                    with self.assertRaisesRegex(
+                        builder.BuildError, "converter_wheel_validation_failed"
+                    ):
+                        builder.validate_converter_wheel(wheel, source)
+            wheel.write_bytes(b"not a wheel")
+            with self.assertRaises(builder.BuildError):
+                builder.validate_converter_wheel(wheel, source)
+
+    def test_install_replaces_stale_package_and_records_full_overlay(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            embedded = root / "resources/runtime"
+            work = root / "work"
+            work.mkdir()
+            stale_package = embedded / builder.CONVERTER
+            stale_package.mkdir(parents=True)
+            (stale_package / "stale.py").write_text("old module")
+            stale_metadata = stale_package.parent / "stark_convert-0.0.0.dist-info"
+            stale_metadata.mkdir()
+
+            def command_result(command, stage):
+                if stage == "current_converter_wheel":
+                    self.assertIn("--wheel", command)
+                    self.assertEqual(
+                        command[command.index("--python") + 1],
+                        str(embedded / builder.PYTHON),
+                    )
+                    snapshot = Path(command[command.index("build") + 1])
+                    source = builder.converter_snapshot(
+                        builder.ROOT / "tools/converter", root / "expected-source"
+                    )
+                    wheels = Path(command[command.index("--out-dir") + 1])
+                    make_converter_wheel(
+                        wheels / f"stark_convert-{source['version']}-py3-none-any.whl",
+                        snapshot,
+                        source,
+                    )
+                elif stage == "current_converter_install":
+                    self.assertIn("--no-deps", command)
+                    overlay = Path(command[command.index("--target") + 1])
+                    with zipfile.ZipFile(command[-1]) as archive:
+                        archive.extractall(overlay)
+                    (overlay / ".lock").touch()
+                    (overlay / "bin").mkdir()
+                    (overlay / "bin/stark-convert").write_text("staging path")
+                    (overlay / "stark_convert" / "__pycache__").mkdir()
+                    (
+                        overlay / "stark_convert" / "__pycache__/progress.pyc"
+                    ).write_bytes(b"bytecode")
+                    (next(overlay.glob("*.dist-info")) / "direct_url.json").write_text(
+                        "staging path"
+                    )
+                else:
+                    self.fail("unexpected subprocess stage")
+                return ""
+
+            with (
+                patch.object(builder.shutil, "which", return_value="/uv"),
+                patch.object(builder, "run", side_effect=command_result),
+            ):
+                result = builder.install_converter(embedded, work)
+            self.assertFalse((stale_package / "stale.py").exists())
+            self.assertFalse(stale_metadata.exists())
+            self.assertEqual(
+                builder.sha256(stale_package / "progress.py"),
+                result["source_files_sha256"]["stark_convert/progress.py"],
+            )
+            self.assertEqual(
+                builder.sha256(stale_package / "_build_inputs/uv.lock"),
+                builder.sha256(builder.ROOT / "tools/converter/uv.lock"),
+            )
+            self.assertTrue(
+                any(
+                    name.endswith("/licenses/LICENSE.lalamo")
+                    for name in result["files_sha256"]
+                )
+            )
+            self.assertFalse(
+                any(
+                    name.endswith((".pyc", "direct_url.json")) or "/bin/" in name
+                    for name in result["files_sha256"]
+                )
+            )
+            self.assertFalse(
+                any(name.endswith("/.lock") for name in result["files_sha256"])
+            )
+            self.assertEqual(
+                len(list(stale_package.parent.glob("stark_convert-*.dist-info"))), 1
+            )
+
+
+@unittest.skipUnless(
+    sys.platform == "darwin" and shutil.which("swiftc"),
+    "native controller regression requires macOS and swiftc",
+)
+class NativeControllerTests(unittest.TestCase):
+    def test_failed_install_requests_finish_progress_and_retry_resets_counts(self):
+        source = (builder.ROOT / "apps/menu-bar/Sources/StarkApp.swift").read_text()
+        controller, separator, _views = source.partition("struct StatusLine: View {")
+        self.assertTrue(separator, "cannot locate the native controller source")
+        harness = r"""
+extension EngineController {
+    func receiveTestEvent(_ event: [String: Any]) {
+        let bytes = try! JSONSerialization.data(withJSONObject: event)
+        apply(try! JSONSerialization.jsonObject(with: bytes) as! [String: Any])
+    }
+}
+
+func snapshot(_ engine: EngineController) -> [String: Any] {
+    func stage(_ value: InstallProgress) -> [String: Any] {
+        ["state": value.state, "completed_bytes": value.completedBytes,
+         "total_bytes": value.totalBytes.map { $0 as Any } ?? NSNull(), "fraction": value.fraction]
+    }
+    return ["status": engine.state, "download": stage(engine.downloadProgress),
+            "conversion": stage(engine.conversionProgress)]
+}
+
+let remote = EngineController()
+remote.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
+let local = EngineController()
+local.install(source: "/unavailable/model", kind: "local")
+let retry = EngineController()
+retry.receiveTestEvent(["event": "status", "state": "error", "message": "Operation failed"])
+for phase in ["download", "conversion"] {
+    retry.receiveTestEvent(["event": "progress", "phase": phase, "state": "failed",
+                            "completed_bytes": 75, "total_bytes": 100])
+}
+let beforeReset = snapshot(retry)
+retry.resetInstallProgress(kind: "huggingface")
+let afterReset = snapshot(retry)
+retry.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
+let result: [String: Any] = ["remote": snapshot(remote), "local": snapshot(local),
+                           "before_reset": beforeReset, "after_reset": afterReset,
+                           "retry": snapshot(retry)]
+print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding: .utf8)!)
+"""
+        with tempfile.TemporaryDirectory(prefix="stark-controller-test-") as temporary:
+            root = Path(temporary)
+            swift = root / "main.swift"
+            executable = root / "controller-check"
+            swift.write_text(controller + harness)
+            compiled = subprocess.run(
+                ["swiftc", str(swift), "-o", str(executable)],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+            self.assertEqual(
+                compiled.returncode, 0, "native controller harness failed to compile"
+            )
+            checked = subprocess.run(
+                [str(executable)], capture_output=True, timeout=10, check=False
+            )
+            self.assertEqual(
+                checked.returncode, 0, "native controller harness failed to run"
+            )
+            result = json.loads(checked.stdout)
+
+        for name in ("remote", "local", "retry"):
+            with self.subTest(install=name):
+                self.assertEqual(result[name]["status"], "error")
+                self.assertEqual(result[name]["conversion"]["state"], "failed")
+                self.assertEqual(
+                    result[name]["download"]["state"],
+                    "skipped" if name == "local" else "failed",
+                )
+        for phase in ("download", "conversion"):
+            self.assertEqual(result["before_reset"][phase]["completed_bytes"], 75)
+            self.assertEqual(result["before_reset"][phase]["total_bytes"], 100)
+            self.assertEqual(
+                result["after_reset"][phase],
+                {
+                    "state": "waiting",
+                    "completed_bytes": 0,
+                    "total_bytes": None,
+                    "fraction": 0,
+                },
+            )
+            self.assertEqual(result["retry"][phase]["completed_bytes"], 0)
+            self.assertIsNone(result["retry"][phase]["total_bytes"])
 
 
 class InstallTests(unittest.TestCase):

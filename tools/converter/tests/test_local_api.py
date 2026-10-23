@@ -44,10 +44,15 @@ class LocalAPITest(unittest.TestCase):
         port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
         try:
-            connection.request("POST", "/v1/chat/completions", body=b"{}", headers={
-                "Authorization": "Bearer " + info["api_key"],
-                "Content-Type": "application/json",
-            })
+            connection.request(
+                "POST",
+                "/v1/chat/completions",
+                body=b"{}",
+                headers={
+                    "Authorization": "Bearer " + info["api_key"],
+                    "Content-Type": "application/json",
+                },
+            )
             self.assertTrue(monitor_entered.wait(2))
             self.assertTrue(completion_entered.wait(2))
             api.close()
@@ -79,8 +84,10 @@ class LocalAPITest(unittest.TestCase):
             sock.sendall(
                 b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                 b"Authorization: Bearer " + info["api_key"].encode() + b"\r\n"
-                b"Content-Type: application/json\r\nContent-Length: " + str(len(body) + 10).encode()
-                + b"\r\n\r\n" + body
+                b"Content-Type: application/json\r\nContent-Length: "
+                + str(len(body) + 10).encode()
+                + b"\r\n\r\n"
+                + body
             )
             sock.shutdown(socket.SHUT_WR)
             response = b""

@@ -67,8 +67,9 @@ impl CancelSignal {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
+
+    use super::*;
 
     #[test]
     fn cancellation_is_scoped_and_handles_partial_frames_and_eof() {

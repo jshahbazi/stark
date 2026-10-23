@@ -165,7 +165,10 @@ class Worker:
                 self.process.wait()
         self.process.stdin.close()
         self.process.stdout.close()
-        os.close(self.cancel_fd)
+        cancel_fd = getattr(self, "cancel_fd", None)
+        if cancel_fd is not None:
+            self.cancel_fd = None
+            os.close(cancel_fd)
 
 
 def run_chat(args, worker):

@@ -68,6 +68,9 @@ impl<T: 'static> External<T> {
   pub(crate) unsafe fn from_raw_impl(
     unknown_tagged_object: *mut c_void,
   ) -> Option<&'static mut Self> {
+    if unknown_tagged_object.is_null() {
+      return None;
+    }
     let type_id = unknown_tagged_object as *const TypeId;
     if unsafe { *type_id } == TypeId::of::<T>() {
       let tagged_object = unknown_tagged_object as *mut External<T>;
@@ -124,22 +127,37 @@ impl<T: 'static> External<T> {
     self,
     env: sys::napi_env,
   ) -> Result<(sys::napi_value, *mut External<T>)> {
-    let mut napi_value = ptr::null_mut();
     let size_hint = self.size_hint as i64;
-    let size_hint_ptr = Box::into_raw(Box::new(size_hint));
+    unsafe { self.to_napi_value_with_size_hint(env, size_hint) }
+  }
+
+  pub(crate) unsafe fn to_napi_value_with_size_hint(
+    self,
+    env: sys::napi_env,
+    size_hint: i64,
+  ) -> Result<(sys::napi_value, *mut External<T>)> {
+    let mut napi_value = ptr::null_mut();
+    // The finalizer may only undo an adjustment that actually succeeded.
+    let size_hint_ptr = Box::into_raw(Box::new(0i64));
     let obj_ptr = Box::into_raw(Box::new(self));
-    check_status!(
+    let status = unsafe {
+      sys::napi_create_external(
+        env,
+        obj_ptr.cast(),
+        Some(crate::raw_finalize::<External<T>>),
+        size_hint_ptr.cast(),
+        &mut napi_value,
+      )
+    };
+    if status != sys::Status::napi_ok {
       unsafe {
-        sys::napi_create_external(
-          env,
-          obj_ptr.cast(),
-          Some(crate::raw_finalize::<External<T>>),
-          size_hint_ptr.cast(),
-          &mut napi_value,
-        )
-      },
-      "Create external value failed"
-    )?;
+        drop(Box::from_raw(obj_ptr));
+        drop(Box::from_raw(size_hint_ptr));
+      }
+      check_status!(status, "Create external value failed")?;
+    }
+    // Node now owns the allocation and its finalizer, including on later errors.
+    unsafe { crate::bindgen_runtime::tag_native_type::<External<T>>(env, napi_value)? };
 
     #[cfg(not(target_family = "wasm"))]
     {
@@ -156,6 +174,7 @@ impl<T: 'static> External<T> {
           },
           "Adjust external memory failed"
         )?;
+        unsafe { *size_hint_ptr = size_hint };
       };
 
       (Box::leak(unsafe { Box::from_raw(obj_ptr) })).adjusted_size =
@@ -171,6 +190,7 @@ impl<T: 'static> FromNapiMutRef for External<T> {
     env: sys::napi_env,
     napi_val: sys::napi_value,
   ) -> crate::Result<&'static mut Self> {
+    unsafe { crate::bindgen_runtime::validate_native_type::<External<T>>(env, napi_val)? };
     let mut unknown_tagged_object = ptr::null_mut();
     check_status!(
       unsafe { sys::napi_get_value_external(env, napi_val, &mut unknown_tagged_object) },
@@ -292,25 +312,7 @@ impl<T: 'static> ExternalRef<T> {
 
 impl<T: 'static> FromNapiValue for ExternalRef<T> {
   unsafe fn from_napi_value(env: sys::napi_env, napi_val: sys::napi_value) -> crate::Result<Self> {
-    let mut unknown_tagged_object = ptr::null_mut();
-    check_status!(
-      unsafe { sys::napi_get_value_external(env, napi_val, &mut unknown_tagged_object) },
-      "Failed to get external value"
-    )?;
-
-    let type_id = unknown_tagged_object as *const TypeId;
-    let external = if unsafe { *type_id } == TypeId::of::<T>() {
-      let tagged_object = unknown_tagged_object as *mut External<T>;
-      Box::leak(unsafe { Box::from_raw(tagged_object) })
-    } else {
-      return Err(Error::new(
-        Status::InvalidArg,
-        format!(
-          "<{}> on `External` is not the type of wrapped object",
-          std::any::type_name::<T>()
-        ),
-      ));
-    };
+    let external = unsafe { External::<T>::from_napi_mut_ref(env, napi_val)? };
 
     let mut ref_ptr = ptr::null_mut();
     check_status!(

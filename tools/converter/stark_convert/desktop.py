@@ -7,7 +7,6 @@ import argparse
 import json
 import math
 import os
-import re
 import select
 import shutil
 import signal
@@ -22,10 +21,14 @@ from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
 from .chat import ChatCancelled, ChatError, Worker, load_template
+from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .local_api import APIError, LocalAPI
 from .registry import get_model
+from .sources import huggingface_repository
 
 MAX_COMMAND_BYTES = 1024 * 1024
+MAX_PROGRESS_BYTES = 4096
+PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
 
@@ -78,9 +81,31 @@ def metric(reply, key):
     return value if valid else None
 
 
+def converter_progress(value):
+    """Accept only the content-free converter pipe contract."""
+    if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
+        return None
+    if (
+        not isinstance(value["phase"], str)
+        or value["phase"] not in PROGRESS_PHASES
+        or not isinstance(value["state"], str)
+        or value["state"] not in {"waiting", "running", "complete", "skipped"}
+    ):
+        return None
+    completed, total = value["completed_bytes"], value["total_bytes"]
+    if type(completed) is not int or not 0 <= completed <= 2**63 - 1:
+        return None
+    if total is not None and (type(total) is not int or not completed <= total <= 2**63 - 1):
+        return None
+    if value["state"] == "complete" and total is not None and completed != total:
+        return None
+    return {key: value[key] for key in ("phase", "state", "completed_bytes", "total_bytes")}
+
+
 class Desktop:
-    def __init__(self, executable, data_dir, output=None, timeout=300):
+    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None):
         self.executable = executable
+        self.score_executable = score_executable or Path(executable).with_name("stark-score")
         self.data_dir = data_dir.expanduser().absolute()
         self.output = output or sys.stdout
         self.timeout = timeout
@@ -91,12 +116,20 @@ class Desktop:
         self.job = None
         self.worker = None
         self.converter = None
+        self.install_epoch = None
+        self.install_progress = {}
         self.active_model = None
+        self.active_mode = None
+        self.vocab_size = None
         self.template = None
         self.codec = None
         self.messages = []
         self.context = 8192
         self.maximum = 512
+        self.system_prompt = None
+        self.thinking = False
+        self.context_limit = 8192
+        self.output_limit = 512
         self.models = []
         self.api = None
         self.api_closing = False
@@ -165,6 +198,8 @@ class Desktop:
         with self.lock:
             worker, self.worker = self.worker, None
             self.active_model = None
+            self.active_mode = None
+            self.vocab_size = None
             self.messages = []
             self.codec = None
             self.template = None
@@ -172,11 +207,54 @@ class Desktop:
             terminate(worker.process)
             worker.close()
 
+    def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
+        with self.lock:
+            if epoch != self.epoch or self.install_epoch != epoch:
+                return
+            value = {"state": state, "completed_bytes": completed_bytes, "total_bytes": total_bytes}
+            previous = self.install_progress.get(phase)
+            if previous and previous["state"] in {"complete", "skipped", "cancelled", "failed"}:
+                return
+            if previous and completed_bytes < previous["completed_bytes"]:
+                return
+            self.install_progress[phase] = value
+            self.emit("progress", epoch, phase=phase, **value)
+
+    def begin_install_progress(self, epoch, kind):
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            self.install_epoch = epoch
+            self.install_progress = {}
+            self.progress(epoch, "download", "running" if kind == "huggingface" else "skipped")
+            self.progress(epoch, "conversion", "waiting")
+
+    def finish_install_progress(self, epoch, skipped=False):
+        for phase in PROGRESS_PHASES:
+            previous = self.install_progress.get(phase, {})
+            self.progress(
+                epoch,
+                phase,
+                "skipped" if skipped else "complete",
+                previous.get("completed_bytes", 0),
+                previous.get("total_bytes"),
+            )
+
+    def fail_install_progress(self, epoch):
+        for phase in PROGRESS_PHASES:
+            previous = self.install_progress.get(phase, {})
+            self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
+
     def stop(self, quiet=False):
         with self.lock:
+            cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
             self.api_condition.notify_all()
+            self.install_epoch = None
             converter, job = self.converter, self.job
+            for phase, previous in cancelled.items():
+                if previous["state"] in {"waiting", "running"}:
+                    self.emit("progress", phase=phase, **{**previous, "state": "cancelled"})
         terminate(converter)
         self.close_worker()
         if job is not None and job is not threading.current_thread():
@@ -196,6 +274,9 @@ class Desktop:
                 self.emit("error", message="Wait for the current operation or choose Stop.")
                 return
             epoch = self.epoch
+            installing = state == "installing"
+            if installing:
+                self.begin_install_progress(epoch, args[0])
             self.status(state, message, epoch)
 
             def execute():
@@ -203,12 +284,16 @@ class Desktop:
                     function(epoch, *args)
                 except DesktopError as error:
                     if epoch == self.epoch:
+                        if installing:
+                            self.fail_install_progress(epoch)
                         self.emit("error", epoch, message=str(error))
                         self.status(
                             "ready" if self.worker else "error", "Ready" if self.worker else "Operation failed", epoch
                         )
                 except BaseException:
                     if epoch == self.epoch:
+                        if installing:
+                            self.fail_install_progress(epoch)
                         self.close_worker()
                         self.emit(
                             "error", epoch, message="Unable to complete the operation. Check the model and try again."
@@ -216,11 +301,86 @@ class Desktop:
                         self.status("error", "Operation failed", epoch)
                 finally:
                     with self.lock:
+                        if installing and self.install_epoch == epoch:
+                            self.install_epoch = None
                         if self.job is threading.current_thread():
                             self.job = None
 
             self.job = threading.Thread(target=execute, name="stark-desktop-operation", daemon=True)
             self.job.start()
+
+    def read_converter_progress(self, descriptor, process, epoch):
+        pending = b""
+        discarding = False
+        exited_at = None
+        while True:
+            if process.poll() is not None:
+                exited_at = exited_at or time.monotonic()
+                if time.monotonic() - exited_at >= 0.5:
+                    break
+            if not select.select([descriptor], [], [], 0.1)[0]:
+                if exited_at is not None:
+                    break
+                continue
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            pending += chunk
+            while b"\n" in pending:
+                line, pending = pending.split(b"\n", 1)
+                if discarding:
+                    discarding = False
+                    continue
+                if len(line) > MAX_PROGRESS_BYTES:
+                    continue
+                try:
+                    event = converter_progress(json.loads(line))
+                except (ValueError, UnicodeError):
+                    continue
+                if event is not None:
+                    # The app still validates/publishes the model and registry.
+                    if event["phase"] == "conversion" and event["state"] == "complete":
+                        event["state"] = "running"
+                    self.progress(epoch, **event)
+            if len(pending) > MAX_PROGRESS_BYTES:
+                pending = b""
+                discarding = True
+
+    def run_converter(self, command, environment, epoch):
+        read_descriptor, write_descriptor = os.pipe()
+        process = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                process = subprocess.Popen(
+                    [*command, "--progress-fd", str(write_descriptor)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                    pass_fds=(write_descriptor,),
+                )
+                self.converter = process
+            os.close(write_descriptor)
+            write_descriptor = None
+            self.read_converter_progress(read_descriptor, process, epoch)
+            return process.wait()
+        finally:
+            os.close(read_descriptor)
+            if write_descriptor is not None:
+                os.close(write_descriptor)
+            if process is not None:
+                terminate(process)
+                # A child must not leave descendants holding its private pipe.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                with self.lock:
+                    if self.converter is process:
+                        self.converter = None
 
     def install(self, epoch, kind, source):
         if kind == "local":
@@ -237,8 +397,10 @@ class Desktop:
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
         elif kind == "huggingface":
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*", source):
-                raise DesktopError("Enter a Hugging Face repository as owner/model.")
+            try:
+                source = huggingface_repository(source)
+            except ValueError:
+                raise DesktopError("Enter a model name or a https://huggingface.co/owner/model URL.") from None
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
@@ -249,6 +411,7 @@ class Desktop:
             if previous is not None:
                 if not model_valid(Path(previous["path"])):
                     raise DesktopError("The installed model folder is missing or incomplete.")
+                self.finish_install_progress(epoch, skipped=True)
                 self.emit("installed", epoch, model={k: previous[k] for k in ("id", "name", "path")})
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
                 return
@@ -274,22 +437,8 @@ class Desktop:
                 if kind == "local":
                     command.append("--offline")
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+                result = self.run_converter(command, environment, epoch)
                 with self.lock:
-                    if epoch != self.epoch:
-                        return
-                    process = subprocess.Popen(
-                        command,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        env=environment,
-                        start_new_session=True,
-                    )
-                    self.converter = process
-                result = process.wait()
-                with self.lock:
-                    if self.converter is process:
-                        self.converter = None
                     if epoch != self.epoch:
                         return
                 if result != 0 or not model_valid(output):
@@ -313,6 +462,7 @@ class Desktop:
                     self.models.remove(model)
                     raise
                 managed = None  # The registry now owns the managed folder.
+                self.finish_install_progress(epoch, skipped=converted)
                 self.library()
                 self.emit("installed", epoch, model={k: model[k] for k in ("id", "name", "path")})
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
@@ -321,7 +471,7 @@ class Desktop:
             if managed is not None:
                 shutil.rmtree(managed, ignore_errors=True)
 
-    def run(self, epoch, identifier):
+    def run(self, epoch, identifier, mode="chat"):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
@@ -329,9 +479,32 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
-            worker = Worker(self.executable, Path(model["path"]), self.timeout)
+            worker = (
+                ScoreWorker(self.score_executable, Path(model["path"]), self.timeout)
+                if mode == "decision"
+                else Worker(self.executable, Path(model["path"]), self.timeout)
+            )
             self.worker = worker
         ready = worker.read()
+        if mode == "decision":
+            if (
+                ready.get("ready") is not True
+                or ready.get("mode") != "exact-token-scoring-cache-v1"
+                or type(ready.get("vocab_size")) is not int
+                or not 0 < ready["vocab_size"] <= 2**32 - 1
+            ):
+                self.close_worker()
+                raise DesktopError("Stark could not load this model for decisions. Check model support and memory.")
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                self.codec, self.template = codec, template
+                self.active_model, self.active_mode = identifier, mode
+                self.vocab_size = ready["vocab_size"]
+                self.messages = []
+                self.emit("ready", epoch, model_id=identifier, mode=mode)
+                self.status("ready", "Ready", epoch)
+            return
         if (
             ready.get("ready") is not True
             or ready.get("mode") != "text-generation-v1"
@@ -348,26 +521,66 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             self.codec, self.template = codec, template
-            self.context = min(8192, ready["max_context_tokens"])
-            self.maximum = min(512, ready["max_new_tokens"], self.context - 1)
-            self.api_context = min(16384, ready["max_context_tokens"])
-            self.api_maximum = min(4096, ready["max_new_tokens"], self.api_context - 1)
+            self.context_limit = min(16384, ready["max_context_tokens"])
+            self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
+            self.context = min(self.context, self.context_limit)
+            self.maximum = min(self.maximum, self.output_limit, self.context - 1)
+            self.api_context = self.context_limit
+            self.api_maximum = min(self.output_limit, self.api_context - 1)
             self.api_vocab = ready.get("vocab_size", 0)
             self.active_model = identifier
+            self.active_mode = mode
             self.reset()
-            self.emit("ready", epoch, model_id=identifier,
-                      max_context_tokens=self.api_context, max_new_tokens=self.api_maximum)
+            self.emit("ready", epoch, model_id=identifier, mode=mode, **self.settings_summary())
             self.status("ready", "Ready", epoch)
+
+    def settings_summary(self):
+        # The system prompt stays in memory; acknowledgements contain only limits.
+        return {
+            "context_tokens": self.context,
+            "max_new_tokens": self.maximum,
+            "max_context_tokens": self.context_limit,
+            "max_output_tokens": self.output_limit,
+        }
+
+    def configure(self, payload):
+        with self.lock:
+            if self.job is not None:
+                raise DesktopError("Wait for the current operation or choose Stop.")
+            if self.worker is None:
+                raise DesktopError("Run a model before changing advanced options.")
+            if self.active_mode != "chat":
+                raise DesktopError("Advanced chat options are available in Chat mode.")
+            context, maximum = payload.get("context_tokens"), payload.get("max_new_tokens")
+            system, thinking = payload.get("system_prompt"), payload.get("thinking")
+            if (
+                set(payload) != {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
+                or type(context) is not int
+                or not 2 <= context <= self.context_limit
+                or type(maximum) is not int
+                or not 1 <= maximum <= min(self.output_limit, context - 1)
+                or (system is not None and not isinstance(system, str))
+                or type(thinking) is not bool
+            ):
+                raise DesktopError("Invalid advanced options. Check the model's token limits.")
+            self.context, self.maximum = context, maximum
+            self.system_prompt, self.thinking = system, thinking
+            self.reset()
+            self.emit("configured", **self.settings_summary())
 
     def reset(self):
         with self.lock:
-            system = (self.codec or {}).get("default_system_prompt")
+            system = self.system_prompt
+            if system is None:
+                system = (self.codec or {}).get("default_system_prompt")
             self.messages = [{"role": "system", "content": system}] if system else []
 
     def generate(self, epoch, text):
         with self.lock:
+            if self.active_mode != "chat":
+                raise DesktopError("Choose Chat mode and run a model before sending a message.")
             candidate = [*self.messages, {"role": "user", "content": text}]
-        reply = self.infer(candidate, self.maximum, epoch=epoch)
+        reply = self.infer(candidate, self.maximum, epoch=epoch, thinking=self.thinking)
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -404,6 +617,7 @@ class Desktop:
         stop=None,
         cancelled=None,
         epoch=None,
+        thinking=False,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
@@ -423,7 +637,7 @@ class Desktop:
                 messages=messages,
                 tools=None,
                 add_generation_prompt=True,
-                enable_thinking=False,
+                enable_thinking=thinking,
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
@@ -475,7 +689,7 @@ class Desktop:
 
     def api_models(self):
         with self.lock:
-            if self.active_model is None:
+            if self.active_model is None or self.active_mode != "chat":
                 return []
             model = next(m for m in self.models if m["id"] == self.active_model)
             return [
@@ -494,7 +708,7 @@ class Desktop:
         with self.lock:
             return {
                 "status": "ok",
-                "model_loaded": self.active_model is not None,
+                "model_loaded": self.active_model is not None and self.active_mode == "chat",
                 "busy": self.job is not None,
                 "queued_requests": len(self.api_queue),
                 "queue_limit": self.api_queue_limit,
@@ -504,8 +718,8 @@ class Desktop:
                     "chat_completions": True,
                     "streaming": True,
                     "sampling": ["temperature", "top_p", "top_k", "min_p", "seed"],
-                    "stop_sequences": bool(self.worker and self.worker.stop_sequences),
-                    "cancellation": bool(self.worker and self.worker.cancellation),
+                    "stop_sequences": bool(self.active_mode == "chat" and self.worker and self.worker.stop_sequences),
+                    "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
                     "tool_calling": False,
                     "structured_output": False,
                     "images": False,
@@ -522,7 +736,7 @@ class Desktop:
             messages = request["messages"]
             if self.api_closing:
                 raise APIError(503, "Stark is shutting down.", "server_stopped")
-            if self.active_model is None or self.worker is None:
+            if self.active_model is None or self.worker is None or self.active_mode != "chat":
                 raise APIError(503, "Run a model in Stark first.", "model_not_loaded")
             active = next(m for m in self.models if m["id"] == self.active_model)
             if request["model"] not in (None, self.active_model, active["name"]):
@@ -618,6 +832,21 @@ class Desktop:
                         "ready" if self.worker else "error", "Ready" if self.worker else "Model stopped", epoch
                     )
 
+    def decide(self, epoch, text, question, answers):
+        with self.lock:
+            if self.active_mode != "decision" or self.worker is None:
+                raise DesktopError("Choose Decision mode and run a model before evaluating a decision.")
+            worker, codec, template, vocab_size = self.worker, self.codec, self.template, self.vocab_size
+        try:
+            reply = decide(worker, codec, template, text, question, answers, vocab_size)
+        except DecisionInputError as error:
+            raise DesktopError(str(error)) from None
+        with self.lock:
+            if epoch != self.epoch:
+                return
+            self.emit("decision", epoch, **reply)
+            self.status("ready", "Ready", epoch)
+
     def monitor(self):
         with self.lock:
             if self.worker is None or self.job is not None or self.worker.process.poll() is None:
@@ -636,17 +865,28 @@ class Desktop:
             self.stop()
             return command != "quit"
         elif command == "run" and isinstance(payload.get("model_id"), str):
+            mode = payload.get("mode", "chat")
+            if mode not in ("chat", "decision"):
+                raise DesktopError("Choose Chat or Decision mode.")
             self.stop(quiet=True)
-            self.start(self.run, "loading", "Loading model…", payload["model_id"])
+            self.start(self.run, "loading", "Loading model…", payload["model_id"], mode)
         elif command == "install" and isinstance(payload.get("source"), str) and isinstance(payload.get("kind"), str):
             self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
         elif command == "generate" and isinstance(payload.get("text"), str) and payload["text"].strip():
             self.start(self.generate, "generating", "Generating…", payload["text"])
+        elif command == "decide":
+            try:
+                answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))
+            except DecisionInputError as error:
+                raise DesktopError(str(error)) from None
+            self.start(self.decide, "deciding", "Evaluating decision…", payload["text"], payload["question"], answers)
         elif command == "reset":
             with self.lock:
                 if self.job is not None:
                     raise DesktopError("Wait for the current operation or choose Stop.")
                 self.reset()
+        elif command == "configure":
+            self.configure(payload)
         else:
             raise DesktopError("Invalid app command.")
         return True
@@ -692,6 +932,7 @@ def serve(desktop):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--worker", type=Path, required=True)
+    parser.add_argument("--score-worker", type=Path)
     parser.add_argument("--data-dir", type=Path, required=True)
     args = parser.parse_args(argv)
     desktop = None
@@ -702,7 +943,7 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        desktop = Desktop(args.worker, args.data_dir)
+        desktop = Desktop(args.worker, args.data_dir, score_executable=args.score_worker)
         serve(desktop)
         return 0
     except (KeyboardInterrupt, BrokenPipeError):
