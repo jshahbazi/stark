@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import platform
+import plistlib
 import pprint
 import re
 import shutil
@@ -32,6 +33,8 @@ UV_VERSION = "0.12.24"
 RUST_VERSION = "1.98.1"
 RECIPE_INPUTS = (
     "scripts/build_distribution.py",
+    "scripts/build_menubar.py",
+    "scripts/install_app.py",
     "scripts/stark",
     "install.sh",
     "scripts/install-from-source.sh",
@@ -48,6 +51,7 @@ SOURCE_PATHS = (
     "crates",
     "vendor/cxx",
     "tools/converter",
+    "apps/menu-bar",
     "LICENSE",
     "provenance/UPSTREAM.md",
     "scripts/licenses/distribution",
@@ -652,7 +656,11 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
     """Move the completed tree before checks so checkout paths cannot mask bugs."""
     print("Checking relocated bundle without a model", flush=True)
     relocated = bundle.parent / "relocated bundle" / "stark"
-    relocated.parent.mkdir()
+    if relocated.parent.is_symlink():
+        raise BuildError("relocation_parent_is_symlink")
+    relocated.parent.mkdir(exist_ok=True)
+    if relocated.exists() or relocated.is_symlink():
+        raise BuildError("relocation_destination_exists")
     bundle.rename(relocated)
     try:
         python = relocated / "libexec" / "python" / "bin" / "python3.13"
@@ -736,8 +744,89 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             raise BuildError("relocated_launcher_converter_help_identity")
         for name in ("stark-score", "stark-generate"):
             verify_native(relocated / "libexec" / name, environment)
+        if (relocated / "app" / "Stark.app").exists():
+            verify_application(relocated / "app" / "Stark.app", environment)
     finally:
         relocated.rename(bundle)
+
+
+def verify_application(app: Path, environment: dict[str, str]) -> None:
+    """Check the app at its final location without opening it or loading a model."""
+    try:
+        with (app / "Contents/Info.plist").open("rb") as stream:
+            info = plistlib.load(stream)
+        if (
+            info.get("CFBundleIdentifier") != "com.starkengine.menubar"
+            or info.get("LSMinimumSystemVersion") != MIN_MACOS
+            or not (app / "Contents/MacOS/Stark").is_file()
+        ):
+            raise ValueError
+    except (OSError, ValueError, plistlib.InvalidFileException) as error:
+        raise BuildError("menu_bar_bundle_metadata_invalid") from error
+    run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
+        "menu_bar_signature_verification",
+        environment,
+        cwd=app.parent,
+    )
+    embedded = app / "Contents/Resources/runtime"
+    run(
+        [
+            str(embedded / "libexec/python/bin/python3.13"),
+            "-I",
+            "-B",
+            "-c",
+            (
+                "import stark_convert.desktop, stark_convert.chat, jinja2; "
+                "from stark_convert import progress; assert callable(progress.FDProgressSink)"
+            ),
+        ],
+        "relocated_menu_bar_python_imports",
+        environment,
+        cwd=app.parent,
+    )
+    run(
+        [
+            str(embedded / "libexec/python/bin/python3.13"),
+            "-I",
+            "-B",
+            "-m",
+            "stark_convert.desktop",
+            "--help",
+        ],
+        "relocated_menu_bar_desktop_help",
+        environment,
+        cwd=app.parent,
+    )
+
+
+def build_application(
+    bundle: Path, temporary: Path, version: str, environment: dict[str, str]
+) -> None:
+    """Build outside the CLI tree so the app never embeds itself recursively."""
+    print("Building the self-contained menu bar application", flush=True)
+    output = temporary / "menu-bar"
+    run(
+        [
+            sys.executable,
+            "-B",
+            str(ROOT / "scripts/build_menubar.py"),
+            "--runtime",
+            str(bundle),
+            "--worker",
+            str(bundle / "libexec/stark-generate"),
+            "--output",
+            str(output),
+            "--version",
+            version,
+        ],
+        "menu_bar_build",
+        environment,
+    )
+    destination = bundle / "app" / "Stark.app"
+    destination.parent.mkdir()
+    shutil.copytree(output / "Stark.app", destination, symlinks=False)
+    verify_application(destination, environment)
 
 
 def file_manifest(bundle: Path) -> dict[str, str]:
@@ -834,6 +923,7 @@ def build(options: argparse.Namespace) -> Path:
         shutil.copyfile(ROOT / "scripts" / "stark", bundle / "bin" / "stark")
         (bundle / "bin" / "stark").chmod(0o755)
         shutil.copyfile(ROOT / "install.sh", share / "install.sh")
+        shutil.copyfile(ROOT / "scripts/install_app.py", share / "install_app.py")
         (share / "VERSION").write_text(options.version + "\n")
         (share / "INSTALL_FORMAT").write_text("1\n")
         build_native(bundle, cargo, environment)
@@ -872,6 +962,27 @@ def build(options: argparse.Namespace) -> Path:
         (share / "manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
+        if not getattr(options, "cli_only", False):
+            build_application(bundle, temporary, options.version, environment)
+            verify_relocation(bundle, environment)
+            manifest["components"] = {
+                "terminal_chat": True,
+                "menu_bar_app": "app/Stark.app",
+            }
+            manifest["validation"]["menu_bar_relocation"] = "passed"
+            # The embedded app retains the base CLI manifest. The outer
+            # manifest then covers every combined payload file except itself.
+            (share / "manifest.json").unlink()
+            manifest["files_sha256"] = file_manifest(bundle)
+            (share / "manifest.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+            )
+        current_source = source_provenance(environment, options.allow_dirty)
+        if (
+            current_source["revision"] != source["revision"]
+            or current_source["files_sha256"] != source["files_sha256"]
+        ):
+            raise BuildError("source_changed_during_build")
         digest = create_archive(bundle, output)
     installer = output_directory / "install.sh"
     temporary_installer = output_directory / ".install.sh.partial"
@@ -895,6 +1006,11 @@ def main() -> int:
     )
     parser.add_argument(
         "--output-dir", type=Path, default=ROOT / "artifacts" / "distributions"
+    )
+    parser.add_argument(
+        "--cli-only",
+        action="store_true",
+        help="omit the menu bar app for a development CLI-only bundle",
     )
     parser.add_argument(
         "--allow-dirty",

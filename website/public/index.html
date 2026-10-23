@@ -34,7 +34,7 @@
         <h1 id="hero-title">Local models.<br>Native <em>execution.</em></h1>
         <p class="hero-description">Run AI models on your Mac. Generate text, score decisions and prepare models with one open-source engine.</p>
         <div class="hero-actions"><a class="button primary" href="#start">Get started <span aria-hidden="true">↗</span></a><a class="text-link" href="#benchmarks">See the benchmarks <span aria-hidden="true">↓</span></a></div>
-        <p class="hero-footnote">Built from source today. Installer packages aren't available yet.</p>
+        <p class="hero-footnote">One signed installer. Menu bar app + terminal chat. macOS 26.4 or newer.</p>
       </div>
       <figure class="brand-figure">
         <div class="figure-top"><span>STARK / 001</span><span>RUST · METAL</span></div>
@@ -47,7 +47,7 @@
       <div class="wrap proof-grid">
         <div class="proof-main"><span class="metric">7.36<span>%</span></span><p>higher generation throughput<br>than MLX-LM in our comparison</p></div>
         <div class="proof-detail"><strong>Qwen3.5-2B · 4-bit</strong><span>M5 Max · one request at a time</span></div>
-        <div class="proof-detail"><strong>Source build available</strong><span>Rust + Metal on your Mac</span><a href="#start">See the setup steps <span aria-hidden="true">↓</span></a></div>
+        <div class="proof-detail"><strong>Signed Mac installer</strong><span>Menu bar app and terminal chat included</span><a href="#start">See the install steps <span aria-hidden="true">↓</span></a></div>
       </div>
     </section>
 
@@ -72,8 +72,30 @@
     </section>
 
     <section class="start-section section-pad wrap" id="start" aria-labelledby="start-title">
-      <div class="start-heading"><p class="eyebrow">02 / GET STARTED</p><h2 id="start-title">Build it on<br>your Mac.</h2><p>Stark currently requires a source build. You'll need Apple's Metal tools, Rust and <code>uv</code>. An installer isn't available yet.</p><a class="button primary" href="https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/README.md#quickstart">Open the setup guide <span aria-hidden="true">↗</span></a></div>
-      <ol class="start-steps"><li><span>01</span><div><h3>Install the build tools.</h3><p>Use an Apple silicon Mac with Xcode's Metal tools, Rust 1.98.1 and <code>uv</code> for the converter.</p></div></li><li><span>02</span><div><h3>Convert a supported model.</h3><p>Choose a supported checkpoint and prepare it with Stark's converter. The documentation lists model compatibility and tested configurations.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/MODEL_CONVERSION_PLAN.md">Supported models <span aria-hidden="true">↗</span></a></div></li><li><span>03</span><div><h3>Connect Stark to your app.</h3><p>Build the generation or scoring worker, then connect it to your application using the documented interface.</p><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/GENERATION.md">Generation guide <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div></li></ol>
+      <div class="start-heading">
+        <p class="eyebrow">02 / GET STARTED</p>
+        <h2 id="start-title">Install it on<br>your Mac.</h2>
+        <p>Use an Apple silicon Mac with macOS 26.4 or newer and a native arm64 terminal. The signed v0.1.2 release includes the menu bar app, terminal chat, model converter and private runtimes. No developer tools are required.</p>
+        <a class="button primary" href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/INSTALLATION.md">Installation guide <span aria-hidden="true">↗</span></a>
+        <p class="source-install-note">The app installs to <code>~/Applications/Stark.app</code> and the CLI to <code>~/.local</code>. Models download separately. <a href="https://github.com/jshahbazi/stark/blob/v0.1.2/apps/menu-bar/README.md">Menu bar guide</a> · <a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/GENERATION.md#interactive-cli-chat">Terminal chat guide</a></p>
+      </div>
+      <div class="start-content">
+        <div class="terminal install-terminal">
+          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>INSTALL STARK / V0.1.2</span></div>
+          <pre tabindex="0" role="region" aria-label="Installation commands"><code id="install-code">curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.2
+export PATH="$HOME/.local/bin:$PATH"
+stark doctor
+open "$HOME/Applications/Stark.app"</code></pre>
+          <div class="terminal-bottom"><span>App + CLI · no sudo</span><button type="button" class="copy-button" data-copy="install-code" data-copy-status="install-copy-status">Copy install commands</button></div>
+          <p class="copy-status" id="install-copy-status" aria-live="polite"></p>
+        </div>
+        <ol class="start-steps">
+          <li><span>01</span><div><h3>Install and check.</h3><p>Run the commands above in Terminal to install both interfaces and open Stark. <code>stark doctor</code> should report <code>Installation checks passed. No model was loaded.</code> Add the PATH line to <code>~/.zprofile</code> for future terminals.</p><a href="https://github.com/jshahbazi/stark/releases/tag/v0.1.2">Release and downloads <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>02</span><div><h3>Choose a model.</h3><p>Click the cat in your menu bar, choose <strong>Install Model</strong> and select a supported local folder or Hugging Face repository. In Terminal, use <code>stark convert</code>; the Convert tab below has an example.</p><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/MODEL_CONVERSION_PLAN.md">Supported models <span aria-hidden="true">↗</span></a></div></li>
+          <li><span>03</span><div><h3>Start chatting.</h3><p>Select your model and choose <strong>Run</strong> in the app to open chat. In Terminal, use <code>stark chat --model-path /path/to/converted-model</code>. Use <code>/reset</code> for a new conversation and <code>/exit</code> to quit.</p><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/GENERATION.md">Generation guide <span aria-hidden="true">↗</span></a><a href="https://github.com/jshahbazi/stark/blob/v0.1.2/docs/SCORING.md">Scoring guide <span aria-hidden="true">↗</span></a></div></li>
+        </ol>
+      </div>
     </section>
 
     <section class="engine-section wrap section-pad" id="engine" aria-labelledby="engine-title">
@@ -85,14 +107,11 @@
           <article><span class="index">03</span><div><h3>Prepare your models.</h3><p>Convert supported Hugging Face and MLX checkpoints for Stark. Check model compatibility before getting started.</p></div></article>
         </div>
         <div class="terminal">
-          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>BUILD COMMANDS</span></div>
-          <div class="code-tabs" role="tablist" aria-label="Worker commands"><button type="button" role="tab" id="tab-generate" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
-          <div id="command-panel" role="tabpanel" aria-labelledby="tab-generate" tabindex="0"><pre><code id="command-code">cargo +1.98.1 build --release --locked \
-  -p stark-generate
-
-./target/release/stark-generate \
+          <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>INSTALLED COMMANDS</span></div>
+          <div class="code-tabs" role="tablist" aria-label="Stark commands"><button type="button" role="tab" id="tab-chat" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="chat">Chat</button><button type="button" role="tab" id="tab-generate" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
+          <div id="command-panel" role="tabpanel" aria-labelledby="tab-chat" tabindex="0"><pre><code id="command-code">stark chat \
   --model-path /path/to/converted-model</code></pre></div>
-          <div class="terminal-bottom"><span>Run from the repository folder</span><button type="button" class="copy-button" id="copy-command">Copy commands</button></div>
+          <div class="terminal-bottom"><span>Run after installing Stark</span><button type="button" class="copy-button" id="copy-command" data-copy="command-code" data-copy-status="copy-status">Copy commands</button></div>
           <p class="copy-status" id="copy-status" aria-live="polite"></p>
         </div>
       </div>

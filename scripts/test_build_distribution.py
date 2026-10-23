@@ -8,6 +8,7 @@ import importlib.util
 import io
 import json
 import os
+import plistlib
 import subprocess
 import sys
 import tarfile
@@ -25,6 +26,64 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_menu_app_uses_new_runtime_worker_and_external_staging_directory(self):
+        with tempfile.TemporaryDirectory() as temporary_name:
+            temporary = Path(temporary_name)
+            bundle = temporary / "stark"
+            (bundle / "libexec").mkdir(parents=True)
+            worker = bundle / "libexec/stark-generate"
+            worker.write_bytes(b"fresh release worker")
+            calls = []
+
+            def command_result(command, stage, *_args, **_kwargs):
+                self.assertEqual(stage, "menu_bar_build")
+                calls.append(command)
+                self.assertEqual(command[command.index("--runtime") + 1], str(bundle))
+                self.assertEqual(command[command.index("--worker") + 1], str(worker))
+                self.assertEqual(command[command.index("--version") + 1], "0.1.2")
+                output = Path(command[command.index("--output") + 1])
+                self.assertFalse(output.is_relative_to(bundle))
+                app = output / "Stark.app/Contents"
+                app.mkdir(parents=True)
+                (app / "payload").write_bytes(b"complete application")
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+            with (
+                patch.object(distribution, "run", side_effect=command_result),
+                patch.object(distribution, "verify_application") as verification,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                distribution.build_application(bundle, temporary, "0.1.2", {})
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                (bundle / "app/Stark.app/Contents/payload").read_bytes(),
+                b"complete application",
+            )
+            verification.assert_called_once_with(bundle / "app/Stark.app", {})
+
+    def test_menu_app_verification_rejects_wrong_identity_before_executing(self):
+        with tempfile.TemporaryDirectory() as temporary_name:
+            app = Path(temporary_name) / "Stark.app"
+            contents = app / "Contents"
+            (contents / "MacOS").mkdir(parents=True)
+            (contents / "MacOS/Stark").write_bytes(b"synthetic app")
+            with (contents / "Info.plist").open("wb") as stream:
+                plistlib.dump(
+                    {
+                        "CFBundleIdentifier": "unrelated.app",
+                        "LSMinimumSystemVersion": "26.4",
+                    },
+                    stream,
+                )
+            with (
+                patch.object(distribution, "run") as command,
+                self.assertRaisesRegex(
+                    distribution.BuildError, "menu_bar_bundle_metadata_invalid"
+                ),
+            ):
+                distribution.verify_application(app, {})
+            command.assert_not_called()
+
     def test_sysconfig_normalization_is_deterministic_and_uses_relocated_prefix(self):
         with tempfile.TemporaryDirectory() as temporary_name:
             root = Path(temporary_name)
@@ -251,6 +310,75 @@ class BundleConstructionTests(unittest.TestCase):
                             distribution.verify_relocation(bundle, {})
                 self.assertTrue(bundle.is_dir())
                 self.assertFalse((root / "relocated bundle" / "stark").exists())
+
+    def test_relocation_can_repeat_after_adding_the_application(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "stark"
+            bundle.mkdir()
+            project = root / "tools/converter"
+            project.mkdir(parents=True)
+            (project / "pyproject.toml").write_text('[project]\nversion = "7.8.9"\n')
+
+            def response(command, stage, *_args, **_kwargs):
+                output = {
+                    "relocated_launcher_converter_version": b"stark-convert 7.8.9\n",
+                    "relocated_launcher_converter_help": b"usage: stark-convert [-h]\n",
+                }.get(stage, b"")
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=output, stderr=b""
+                )
+
+            with (
+                patch.object(distribution, "ROOT", root),
+                patch.object(distribution, "run", side_effect=response),
+                patch.object(distribution, "verify_native"),
+                patch.object(distribution, "verify_application") as application,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                distribution.verify_relocation(bundle, {})
+                (bundle / "app/Stark.app").mkdir(parents=True)
+                distribution.verify_relocation(bundle, {})
+            self.assertTrue((bundle / "app/Stark.app").is_dir())
+            self.assertFalse((root / "relocated bundle/stark").exists())
+            application.assert_called_once_with(
+                root / "relocated bundle/stark/app/Stark.app", {}
+            )
+
+    def test_relocation_preserves_conflicting_or_symlink_staging_paths(self):
+        for kind in ("directory", "broken-link", "parent-link"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                bundle = root / "stark"
+                bundle.mkdir()
+                (bundle / "payload").write_bytes(b"original bundle")
+                destination = root / "relocated bundle/stark"
+                if kind == "parent-link":
+                    outside = root / "outside"
+                    outside.mkdir()
+                    destination.parent.symlink_to(outside, target_is_directory=True)
+                else:
+                    destination.parent.mkdir()
+                    if kind == "directory":
+                        destination.mkdir()
+                        (destination / "payload").write_bytes(b"existing staging data")
+                    else:
+                        destination.symlink_to(root / "missing")
+                with (
+                    patch.object(distribution, "run") as command,
+                    contextlib.redirect_stdout(io.StringIO()),
+                    self.assertRaisesRegex(
+                        distribution.BuildError,
+                        "relocation_(destination_exists|parent_is_symlink)",
+                    ),
+                ):
+                    distribution.verify_relocation(bundle, {})
+                command.assert_not_called()
+                self.assertEqual((bundle / "payload").read_bytes(), b"original bundle")
+                if kind == "directory":
+                    self.assertEqual(
+                        (destination / "payload").read_bytes(), b"existing staging data"
+                    )
 
     def test_supplemental_notices_require_matching_crate_source_and_hashes(self):
         with tempfile.TemporaryDirectory() as temporary:
