@@ -17,7 +17,7 @@ usage() {
         '       ./install.sh --uninstall [--prefix DIR]' \
         '' \
         'Default prefix: ~/.local. Requires Apple silicon and macOS 26.4 or newer.' \
-        'A checkout builds from source by default. Downloads require an explicit release version.' \
+        'Downloads and installs the latest stable GitHub release by default.' \
         '--archive FILE    Install a local bundle; requires FILE.sha256 or --sha256 HASH.' \
         '--version VERSION Download the exact vVERSION GitHub release and its checksum.' \
         '--from-source     Build and install from this source checkout.' \
@@ -56,15 +56,12 @@ case "$prefix" in /*) ;; *) fail '--prefix must be an absolute path' ;; esac
 case "$app_dir" in /*) ;; *) fail '--app-dir must be an absolute path' ;; esac
 
 source_root=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || source_root=
-if [ -z "$mode" ] && [ -f "$source_root/scripts/build_distribution.py" ]; then
-    mode=from-source
-fi
+[ -n "$mode" ] || mode=download
 if [ "$mode" = from-source ]; then
     [ -z "$expected_hash" ] || fail '--sha256 applies only to binary bundles'
     [ -f "$source_root/scripts/install-from-source.sh" ] || fail '--from-source requires a source checkout'
     exec /bin/sh "$source_root/scripts/install-from-source.sh" --prefix "$prefix" --app-dir "$app_dir"
 fi
-[ -n "$mode" ] || { usage >&2; fail 'select --archive or --version; no binary release is assumed'; }
 [ "$mode" != uninstall ] || [ -z "$expected_hash" ] || fail '--sha256 cannot be used with --uninstall'
 
 base=$prefix/lib/stark
@@ -121,6 +118,23 @@ fi
 if [ -n "$expected_hash" ]; then
     valid_hash "$expected_hash" || fail '--sha256 must be 64 lowercase hexadecimal characters'
 fi
+if [ "$mode" = download ] && [ -z "$version" ]; then
+    latest_url=$(curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --fail --silent --show-error --location --retry 3 \
+        --connect-timeout 15 --max-time 60 --head --output /dev/null \
+        --write-out '%{url_effective}' https://github.com/jshahbazi/stark/releases/latest) \
+        || fail 'latest stable release unavailable; installation stopped'
+    case "$latest_url" in
+        https://github.com/jshahbazi/stark/releases/tag/v*)
+            version=${latest_url#https://github.com/jshahbazi/stark/releases/tag/v} ;;
+        *) fail 'invalid latest release redirect; installation stopped' ;;
+    esac
+    case "$version" in
+        ''|*[!0-9.]*) fail 'invalid latest stable release version; installation stopped' ;;
+    esac
+    printf '%s\n' "$version" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+        || fail 'invalid latest stable release version; installation stopped'
+fi
 
 [ ! -L "$base" ] || fail 'installation directory must not be a symlink'
 if [ -e "$base" ]; then
@@ -154,11 +168,11 @@ if [ "$mode" = download ]; then
     archive=$stage/$asset
     url=https://github.com/jshahbazi/stark/releases/download/v$version/$asset
     printf 'Downloading Stark %s...\n' "$version"
-    curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
         --connect-timeout 15 --max-time 600 "$url" -o "$archive" \
-        || fail 'release bundle unavailable; check the version, or run ./install.sh in a source checkout'
+        || fail 'release bundle unavailable; check the release, or use ./install.sh --from-source in a source checkout'
     if [ -z "$expected_hash" ]; then
-        curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
+        curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --silent --show-error --location --retry 3 \
             --connect-timeout 15 --max-time 60 "$url.sha256" -o "$archive.sha256" \
             || fail 'release checksum unavailable; installation stopped'
     fi

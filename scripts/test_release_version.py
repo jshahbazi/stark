@@ -78,6 +78,56 @@ class ReleaseVersionTests(unittest.TestCase):
                 self.assertEqual(release_version.main(), 0)
             self.assertEqual(output.read_text(), "version=0.1.3\n")
             self.assertEqual(git("tag", "--list"), "v0.1.2\n")
+            revision = git("rev-parse", "HEAD").strip()
+            with patch.object(release_version, "ROOT", root):
+                self.assertEqual(
+                    release_version.existing_release_source("0.1.2"), revision
+                )
+                for invalid in (
+                    "v0.1.2",
+                    "0.1.2\nsource=bad",
+                    "../main",
+                    "0.1.2-preview.1",
+                ):
+                    with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                        release_version.existing_release_source(invalid)
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release_version.existing_release_source("9.0.0")
+            output.unlink()
+            with (
+                patch.object(release_version, "ROOT", root),
+                patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}),
+                patch(
+                    "sys.argv",
+                    [
+                        "release_version.py",
+                        "--bump",
+                        "patch",
+                        "--existing-version",
+                        "0.1.2",
+                    ],
+                ),
+            ):
+                self.assertEqual(release_version.main(), 0)
+            self.assertEqual(
+                output.read_text(), f"version=0.1.2\nsource_revision={revision}\n"
+            )
+            git("checkout", "--orphan", "unrelated")
+            git(
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "unrelated",
+            )
+            with (
+                patch.object(release_version, "ROOT", root),
+                self.assertRaises(subprocess.CalledProcessError),
+            ):
+                release_version.existing_release_source("0.1.2")
 
 
 if __name__ == "__main__":
