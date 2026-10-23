@@ -1,0 +1,34 @@
+name: Rust build cache
+description: Reuse locked Cargo dependencies and compatible native build outputs
+inputs:
+  scope:
+    description: Job, profile and feature configuration namespace
+    required: true
+  metal:
+    description: Include the installed Metal compiler in the cache identity
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Fingerprint Rust and native build inputs
+      id: key
+      shell: bash
+      env:
+        CACHE_SCOPE: ${{ inputs.scope }}
+        CACHE_METAL: ${{ inputs.metal }}
+      run: bash scripts/ci/rust-cache-key.sh "$CACHE_SCOPE" "$CACHE_METAL" >> "$GITHUB_OUTPUT"
+    - name: Restore Rust build cache
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/registry/src
+          ~/.cargo/git/db
+          ~/.cargo/git/checkouts
+          target
+          crates/legacy/download-manager/examples/wasm/target
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.restore-prefix }}
+      env:
+        SEGMENT_DOWNLOAD_TIMEOUT_MINS: '2'
