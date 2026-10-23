@@ -328,6 +328,7 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
+            worker.streaming = ready.get("streaming") == "text-delta-v1"
             self.codec, self.template = codec, template
             self.context = min(8192, ready["max_context_tokens"])
             self.maximum = min(512, ready["max_new_tokens"], self.context - 1)
@@ -369,12 +370,16 @@ class Desktop:
             )
             self.status("ready", "Ready", epoch)
 
-    def infer(self, messages, maximum):
+    def infer(self, messages, maximum, on_delta=None):
         with self.lock:
             worker, template, codec = self.worker, self.template, self.codec
             context = self.context
         if worker is None or template is None:
             raise DesktopError("Run a model before sending a prompt.")
+        if on_delta is not None and not worker.streaming:
+            raise APIError(
+                503, "This worker needs an update for streaming. Rebuild or reinstall Stark.", "streaming_unavailable"
+            )
         prompt = template.render(
             messages=messages,
             tools=None,
@@ -389,15 +394,18 @@ class Desktop:
             raise ValueError
         if count + maximum > context:
             raise DesktopError("Conversation is full. Start a new conversation and try again.")
-        reply = worker.request(
-            {
-                "operation": "generate",
-                "rendered_prompt": prompt,
-                "context_tokens": context,
-                "max_new_tokens": maximum,
-                "sampling": {"mode": "greedy"},
-            }
-        )
+        request = {
+            "operation": "generate",
+            "rendered_prompt": prompt,
+            "context_tokens": context,
+            "max_new_tokens": maximum,
+            "sampling": {"mode": "greedy"},
+        }
+        if on_delta is not None:
+            request["stream"] = True
+            reply = worker.request(request, on_delta=on_delta)
+        else:
+            reply = worker.request(request)
         if not isinstance(reply.get("text"), str) or "error" in reply:
             raise ValueError
         return reply
@@ -418,13 +426,34 @@ class Desktop:
                 return []
             return [{"id": self.active_model, "object": "model", "created": 0, "owned_by": "stark"}]
 
-    def api_complete(self, payload):
-        supported = {"model", "messages", "stream", "max_tokens", "max_completion_tokens", "temperature", "n"}
+    def api_complete(self, payload, on_delta=None):
+        supported = {
+            "model",
+            "messages",
+            "stream",
+            "stream_options",
+            "max_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "n",
+        }
         if set(payload) - supported:
             raise APIError(
                 400,
                 "Unsupported request fields. Use text messages, greedy sampling and one completion.",
                 "unsupported_parameter",
+            )
+        if "stream_options" in payload and (
+            payload.get("stream") is not True
+            or not isinstance(payload["stream_options"], dict)
+            or set(payload["stream_options"]) - {"include_usage"}
+            or (
+                "include_usage" in payload["stream_options"]
+                and type(payload["stream_options"]["include_usage"]) is not bool
+            )
+        ):
+            raise APIError(
+                400, "stream_options supports only include_usage for streaming requests.", "invalid_request"
             )
         if (
             "temperature" in payload
@@ -470,7 +499,7 @@ class Desktop:
                 candidate.insert(0, {"role": "system", "content": system})
             self.status("generating", "Generating for connected application…", epoch)
         try:
-            reply = self.infer(candidate, maximum)
+            reply = self.infer(candidate, maximum, on_delta=on_delta)
             with self.lock:
                 if epoch != self.epoch:
                     raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")

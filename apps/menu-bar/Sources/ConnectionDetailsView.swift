@@ -12,11 +12,12 @@ struct ConnectionDetailsView: View {
             "model": engine.loadedID,
             "messages": [["role": "user", "content": "Hello"]],
             "temperature": 0,
+            "stream": true,
             "max_tokens": 128
         ]
         let data = (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])) ?? Data()
         let body = String(data: data, encoding: .utf8) ?? "{}"
-        return "curl '\(engine.apiBaseURL)/chat/completions' \\\n  -H 'Authorization: Bearer \(engine.apiKey)' \\\n  -H 'Content-Type: application/json' \\\n  -d '\(body)'"
+        return "curl --no-buffer '\(engine.apiBaseURL)/chat/completions' \\\n  -H 'Authorization: Bearer \(engine.apiKey)' \\\n  -H 'Content-Type: application/json' \\\n  -d '\(body)'"
     }
 
     var body: some View {
@@ -46,7 +47,7 @@ struct ConnectionDetailsView: View {
             Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key changes when Stark reopens.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Supports text Chat Completions and model discovery. Set temperature to 0 and the reply limit to 512 tokens or less. Streaming responses arrive after generation finishes. Tools, images and the Responses API are unavailable. Busy requests return an error for the client to retry.")
+            Text("Supports text Chat Completions and model discovery. Set temperature to 0 and the reply limit to 512 tokens or less. Enable streaming in your application to display text as it is generated. Tools, images and the Responses API are unavailable. Busy requests return an error for the client to retry.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {

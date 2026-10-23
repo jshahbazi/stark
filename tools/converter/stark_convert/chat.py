@@ -73,7 +73,7 @@ class Worker:
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
 
-    def request(self, payload):
+    def request(self, payload, on_delta=None):
         data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
         if len(data) > 1024 * 1024:
             raise ChatError("Conversation exceeds the worker request limit; use /reset.")
@@ -84,7 +84,22 @@ class Worker:
             if not count:
                 raise ChatError("Cannot send request to worker.")
             view = view[count:]
-        return self.read()
+        chunks = []
+        while True:
+            reply = self.read()
+            if "event" not in reply:
+                if on_delta is not None and "error" not in reply and reply.get("text") != "".join(chunks):
+                    raise ChatError("Invalid worker stream; restart the model.")
+                return reply
+            if (
+                on_delta is None
+                or set(reply) != {"event", "text"}
+                or reply["event"] != "delta"
+                or not isinstance(reply["text"], str)
+            ):
+                raise ChatError("Invalid worker stream; restart the model.")
+            chunks.append(reply["text"])
+            on_delta(reply["text"])
 
     def close(self):
         if self.process.poll() is None:

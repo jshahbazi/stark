@@ -61,7 +61,9 @@ Options include `--system "Your system message"`, `--context-tokens 8192`, `--ma
 
 Start the worker with exactly `--model-path PATH`. Read its readiness reply before sending requests. Readiness includes `ready`, `engine`, `version`, `mode` (`text-generation-v1`), supported `operations`, `state_policy` (`fresh-per-request`), `vocab_size`, context/output bounds, `eos_token_ids` and `sampling_modes`.
 
-Send one JSON object per line and read one reply per request. Each request line is limited to 1 MiB. Unknown fields, wrong types and invalid IDs are rejected with fixed error codes. Malformed and oversized lines are consumed independently so a subsequent valid request can proceed. A native failure fences the process; the caller must observe exit and restart.
+Send one JSON object per line and read one reply per request by default. Each request line is limited to 1 MiB. Unknown fields, wrong types and invalid IDs are rejected with fixed error codes. Malformed and oversized lines are consumed independently so a subsequent valid request can proceed. A native failure fences the process; the caller must observe exit and restart.
+
+Workers advertising `streaming: "text-delta-v1"` in readiness accept `stream: true` on a generate request. They flush zero or more `{"event":"delta","text":"…"}` lines during generation, then the normal complete reply after native cleanup. Consume every delta and the final reply before issuing another operation. The concatenated deltas equal the final reply's `text`; terminal EOS and stop tokens are excluded. Incremental tokenizer decoding buffers incomplete Unicode characters and preserves decoder context. Output failure drops and drains the native iterator before the process exits. Streaming timing measurements include decoding and output backpressure; earlier non-streaming qualification remains source-bound. Omitting `stream`, or sending `false`, retains one-reply behavior.
 
 ### Tokenize and decode
 

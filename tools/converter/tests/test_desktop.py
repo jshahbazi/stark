@@ -43,11 +43,14 @@ def executable(tmp_path):
     path.write_text(
         f"#!{sys.executable}\n"
         "import json, sys, time\n"
-        "print(json.dumps({'ready':True,'mode':'text-generation-v1','max_context_tokens':8192,'max_new_tokens':4096}),flush=True)\n"
+        "print(json.dumps({'ready':True,'mode':'text-generation-v1',"
+        "'max_context_tokens':8192,'max_new_tokens':4096,'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
         "    if 'wait fixture' in request.get('rendered_prompt',''): time.sleep(30)\n"
         "    if 'failure fixture' in request.get('rendered_prompt',''): raise SystemExit(2)\n"
+        "    if request.get('stream'):\n"
+        "        for chunk in ['synthetic ', 'answer']: print(json.dumps({'event':'delta','text':chunk}),flush=True)\n"
         "    reply={'token_count':20} if request['operation']=='tokenize' else {\n"
         "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'finish_reason':'eos',\n"
         "        'input_tokens_per_second':100.0,'output_tokens_per_second':50.0,\n"
@@ -191,7 +194,9 @@ def test_api_live_http_uses_desktop_model(desktop, model):
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read()
-        assert b"synthetic answer" in body
+        chunks = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
+        text = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
+        assert text == "synthetic answer"
         assert b"data: [DONE]" in body
         assert details["api_key"] not in desktop.registry.read_text()
     finally:
@@ -210,6 +215,55 @@ def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
     desktop.dispatch({"command": "run", "model_id": identifier})
     finish(desktop)
     assert desktop.active_model == identifier
+
+
+def test_api_streams_native_deltas_and_retains_worker(desktop, model):
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    chunks = []
+    response = desktop.api_complete(
+        {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+        on_delta=chunks.append,
+    )
+    assert chunks == ["synthetic ", "answer"]
+    assert "".join(chunks) == response["choices"][0]["message"]["content"]
+    assert desktop.worker.process is process
+    assert desktop.job is None
+
+
+def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+
+    def disconnected(_):
+        raise BrokenPipeError
+
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete(
+            {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            on_delta=disconnected,
+        )
+    assert failed.value.status == 503
+    assert desktop.worker is None
+    assert desktop.job is None
+    assert process.poll() is not None
+
+
+def test_old_worker_streaming_is_explicitly_rejected(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    desktop.worker.streaming = False
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete(
+            {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
+            on_delta=lambda _: None,
+        )
+    assert failed.value.code == "streaming_unavailable"
+    assert desktop.worker is not None
+    assert desktop.job is None
 
 
 def test_api_context_rejection_keeps_loaded_worker(desktop, model):

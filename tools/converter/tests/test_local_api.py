@@ -1,6 +1,9 @@
 import http.client
 import io
 import json
+import socket
+import struct
+import threading
 import unittest
 import urllib.error
 import urllib.request
@@ -19,8 +22,10 @@ class LocalAPITest(unittest.TestCase):
     def tearDown(self):
         self.api.close()
 
-    def complete(self, payload):
+    def complete(self, payload, on_delta=None):
         self.calls.append(payload)
+        if on_delta is not None:
+            on_delta("hello")
         return {
             "id": "chatcmpl-test",
             "object": "chat.completion",
@@ -68,6 +73,153 @@ class LocalAPITest(unittest.TestCase):
         self.assertEqual(headers.get_content_type(), "text/event-stream")
         self.assertIn(b'"role":"assistant"', body)
         self.assertIn(b"data: [DONE]", body)
+
+    def test_stream_content_is_sent_before_completion_returns(self):
+        content_written = threading.Event()
+        release_completion = threading.Event()
+
+        def complete(payload, on_delta=None):
+            self.assertIsNotNone(on_delta)
+            on_delta("first")
+            content_written.set()
+            self.assertTrue(release_completion.wait(2))
+            return {
+                "id": "ignored-after-stream-start",
+                "model": "stark",
+                "choices": [{"message": {"content": "first"}, "finish_reason": "stop"}],
+            }
+
+        api = LocalAPI(lambda: [], complete, port=0)
+        info = api.start()
+        try:
+            port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request(
+                "POST",
+                "/v1/chat/completions",
+                body=json.dumps({"stream": True}),
+                headers={"Authorization": "Bearer " + info["api_key"], "Content-Type": "application/json"},
+            )
+            response = conn.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(content_written.wait(2))
+            line = response.fp.readline()
+            self.assertIn(b'"role":"assistant"', line)
+            self.assertEqual(response.fp.readline(), b"\n")
+            line = response.fp.readline()
+            self.assertIn(b'"content":"first"', line)
+            release_completion.set()
+            body = response.read()
+            self.assertIn(b"[DONE]", body)
+            conn.close()
+        finally:
+            release_completion.set()
+            api.close()
+
+    def test_empty_stream_and_usage_keep_one_stream_metadata(self):
+        def complete(payload, on_delta=None):
+            return {
+                "id": "returned-id",
+                "created": 1,
+                "model": "returned-model",
+                "usage": {"prompt_tokens": 1, "completion_tokens": 0, "total_tokens": 1},
+                "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
+            }
+
+        api = LocalAPI(lambda: [], complete, port=0)
+        info = api.start()
+        try:
+            status, headers, body = self.request_to(info, {"stream": True, "stream_options": {"include_usage": True}})
+            self.assertEqual(status, 200)
+            self.assertEqual(headers.get_content_type(), "text/event-stream")
+            events = [json.loads(line[6:]) for line in body.decode().splitlines() if line.startswith("data: {")]
+            self.assertGreaterEqual(len(events), 3)
+            self.assertEqual(
+                {(event["id"], event["created"], event["model"]) for event in events},
+                {(events[0]["id"], events[0]["created"], events[0]["model"])},
+            )
+            self.assertEqual(events[-1]["choices"], [])
+            self.assertIn(b"data: [DONE]", body)
+        finally:
+            api.close()
+
+    def request_to(self, info, body):
+        req = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps(body).encode(),
+            headers={"Authorization": "Bearer " + info["api_key"], "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=2) as response:
+            return response.status, response.headers, response.read()
+
+    def test_stream_errors_after_content_have_no_success_terminator(self):
+        for failure in (APIError(422, "bad request", "bad"), RuntimeError("secret")):
+
+            def complete(payload, on_delta=None, failure=failure):
+                on_delta("before-error")
+                raise failure
+
+            api = LocalAPI(lambda: [], complete, port=0)
+            info = api.start()
+            try:
+                status, _, body = self.request_to(info, {"stream": True})
+                self.assertEqual(status, 200)
+                self.assertIn(b"before-error", body)
+                self.assertIn(b'"error"', body)
+                self.assertNotIn(b"[DONE]", body)
+                self.assertNotIn(b'"finish_reason":"stop"', body)
+            finally:
+                api.close()
+
+    def test_stream_client_reset_propagates_to_callback(self):
+        content_written = threading.Event()
+        client_gone = threading.Event()
+        write_failed = threading.Event()
+
+        def complete(payload, on_delta=None):
+            on_delta("first")
+            content_written.set()
+            self.assertTrue(client_gone.wait(2))
+            try:
+                for index in range(16):
+                    on_delta("after-reset-" + ("x" * (1024 * 1024)) + str(index))
+            except Exception:
+                write_failed.set()
+                raise
+            return {"choices": [{"message": {"content": "ignored"}, "finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, port=0)
+        info = api.start()
+        sock = None
+        try:
+            port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+            body = b'{"stream":true}'
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            sock.sendall(
+                b"POST /v1/chat/completions HTTP/1.1\r\n"
+                b"Host: 127.0.0.1\r\n"
+                b"Authorization: Bearer " + info["api_key"].encode() + b"\r\n"
+                b"Content-Type: application/json\r\nContent-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body
+            )
+            self.assertTrue(content_written.wait(2))
+            received = b""
+            while b'"content":"first"' not in received:
+                chunk = sock.recv(4096)
+                self.assertTrue(chunk)
+                received += chunk
+                self.assertLess(len(received), 64 * 1024)
+            self.assertIn(b"HTTP/1.1 200", received)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            sock.close()
+            sock = None
+            client_gone.set()
+            self.assertTrue(write_failed.wait(2))
+        finally:
+            client_gone.set()
+            if sock is not None:
+                sock.close()
+            api.close()
 
     def test_bad_json_and_callback_error(self):
         req = urllib.request.Request(

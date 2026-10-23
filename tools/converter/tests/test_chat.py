@@ -167,3 +167,52 @@ def test_startup_failure_does_not_echo_worker_diagnostics(model, capsys):
         run_chat(options(model), worker)
     output = capsys.readouterr()
     assert "private marker" not in output.out + output.err
+
+
+def test_worker_dispatches_deltas_before_reading_final_response():
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    frames = iter(
+        [
+            {"event": "delta", "text": "é"},
+            {"event": "delta", "text": "界"},
+            {"text": "é界"},
+        ]
+    )
+    received = []
+    reads = []
+
+    def read():
+        reads.append(True)
+        return next(frames)
+
+    def on_delta(text):
+        assert len(reads) < 3
+        received.append(text)
+
+    worker.read = read
+    assert worker.request({"operation": "generate", "stream": True}, on_delta=on_delta) == {"text": "é界"}
+    assert received == ["é", "界"]
+
+
+@pytest.mark.parametrize(
+    "frames",
+    [
+        [{"event": "delta", "text": 5}],
+        [{"event": "unexpected", "text": "hello"}],
+        [{"event": "delta", "text": "hello"}, {"text": "different"}],
+    ],
+)
+def test_worker_rejects_invalid_or_mismatched_streams(frames):
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    replies = iter(frames)
+    worker.read = lambda: next(replies)
+    with pytest.raises(ChatError, match="Invalid worker stream"):
+        worker.request({"operation": "generate", "stream": True}, on_delta=lambda _: None)

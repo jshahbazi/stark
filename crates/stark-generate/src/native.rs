@@ -9,7 +9,10 @@ use stark_engine::{
     },
 };
 
-use crate::generation::{GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, collect_tokens};
+use crate::generation::{
+    GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens,
+    collect_tokens_observed,
+};
 
 pub(crate) struct NativeBackend {
     model: LanguageModel<Metal>,
@@ -86,6 +89,7 @@ impl GenerationBackend for NativeBackend {
         &mut self,
         input: &[u32],
         options: &GenerationOptions,
+        on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         // Include native state allocation, stream setup and the first GPU wait.
         // The engine's iterator can encode one lookahead decode before returning
@@ -114,13 +118,18 @@ impl GenerationBackend for NativeBackend {
             },
         };
         let stream = self.model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?;
-        let result = collect_tokens(
-            stream.map(|token| token.map_err(|_| "native_generation_failed")),
-            input.len(),
-            options,
-            self.vocab_size,
-            started,
-        );
+        let tokens = stream.map(|token| token.map_err(|_| "native_generation_failed"));
+        let result = if let Some(on_text) = on_text {
+            let mut decoder = self.model.tokenizer().decode_stream(false);
+            collect_tokens_observed(tokens, input.len(), options, self.vocab_size, started, &mut |token| {
+                if let Some(text) = decoder.step(token).map_err(|_| "decoding_failed")? {
+                    on_text(&text)?;
+                }
+                Ok(())
+            })
+        } else {
+            collect_tokens(tokens, input.len(), options, self.vocab_size, started)
+        };
         // collect_tokens has dropped and drained the stream, including its lookahead.
         drop(state);
         result

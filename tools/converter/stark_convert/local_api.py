@@ -1,7 +1,6 @@
 """Small, private OpenAI-compatible HTTP API for the menu-bar app.
 
-Generation is deliberately buffered: a streaming request is translated into
-server-generated SSE events after the completion callback returns.
+Streaming requests are written as inference produces text deltas.
 """
 
 from __future__ import annotations
@@ -10,6 +9,7 @@ import hmac
 import json
 import secrets
 import threading
+import time
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -60,7 +60,7 @@ class LocalAPI:
     def __init__(
         self,
         models: Callable[[], list[dict[str, Any]]],
-        complete: Callable[[dict[str, Any]], dict[str, Any]],
+        complete: Callable[..., dict[str, Any]],
         *,
         port: int = 8000,
         max_connections: int = 16,
@@ -139,38 +139,38 @@ class LocalAPI:
                 self.end_headers()
                 self.wfile.write(payload)
 
-            def _send_sse(self, value):
-                choices = value.get("choices") or [{}]
-                choice = choices[0] if isinstance(choices[0], dict) else {}
-                message = choice.get("message") or {}
-                ident = value.get("id", "chatcmpl-buffered")
-                model = value.get("model", "stark")
-                created = value.get("created")
+            def _sse_item(self, ident, model, created, delta, finish=None):
+                return {
+                    "id": ident,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+                }
 
-                def event(delta, finish=None):
-                    item = {
-                        "id": ident,
-                        "object": "chat.completion.chunk",
-                        "model": model,
-                        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
-                    }
-                    if created is not None:
-                        item["created"] = created
-                    return "data: " + json.dumps(item, separators=(",", ":")) + "\n\n"
-
-                text = event({"role": "assistant"})
-                content = message.get("content")
-                if content:
-                    text += event({"content": content})
-                text += event({}, choice.get("finish_reason", "stop")) + "data: [DONE]\n\n"
-                payload = text.encode("utf-8")
+            def _start_sse(self, ident, model, created):
+                self.close_connection = True
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
-                self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Connection", "close")
                 self.end_headers()
+
+                self._sse_write(self._sse_item(ident, model, created, {"role": "assistant"}))
+
+            def _sse_write(self, value):
+                payload = ("data: " + json.dumps(value, separators=(",", ":")) + "\n\n").encode("utf-8")
                 self.wfile.write(payload)
+                self.wfile.flush()
+
+            def _sse_done(self):
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
+
+            def _sse_error(self, error):
+                self._sse_write(
+                    {"error": {"message": error.message, "type": "invalid_request_error", "code": error.code}}
+                )
 
             def _guard(self):
                 if "Origin" in self.headers:
@@ -223,16 +223,74 @@ class LocalAPI:
                         raise APIError(400, "Request body must be an object", "invalid_request")
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
-                    result = api._complete(payload)
+                    streaming = payload.get("stream", False)
+                    if not streaming:
+                        result = api._complete(payload)
+                    else:
+                        ident = "chatcmpl-" + secrets.token_urlsafe(16)
+                        created = int(time.time())
+                        model = payload.get("model", "stark")
+                        started = False
+
+                        def on_delta(text):
+                            nonlocal started
+                            if not isinstance(text, str):
+                                raise APIError(500, "Internal server error", "internal_error")
+                            if not started:
+                                started = True
+                                self._start_sse(ident, model, created)
+                            if text:
+                                self._sse_write(self._sse_item(ident, model, created, {"content": text}))
+
+                        try:
+                            result = api._complete(payload, on_delta)
+                        except APIError as exc:
+                            if started:
+                                self._sse_error(exc)
+                                return
+                            raise
+                        if not isinstance(result, dict):
+                            raise APIError(500, "Internal server error", "internal_error")
+                        if not started:
+                            started = True
+                            self._start_sse(ident, model, created)
                     if not isinstance(result, dict):
                         raise APIError(500, "Internal server error", "internal_error")
-                    if payload.get("stream", False):
-                        self._send_sse(result)
+                    if streaming:
+                        choices = result.get("choices") or [{}]
+                        choice = choices[0] if isinstance(choices[0], dict) else {}
+                        self._sse_write(
+                            self._sse_item(
+                                ident,
+                                model,
+                                created,
+                                {},
+                                choice.get("finish_reason", "stop"),
+                            )
+                        )
+                        stream_options = payload.get("stream_options")
+                        if isinstance(stream_options, dict) and stream_options.get("include_usage"):
+                            usage = result.get("usage")
+                            if isinstance(usage, dict):
+                                item = self._sse_item(ident, model, created, {}, None)
+                                item["choices"] = []
+                                item["usage"] = usage
+                                self._sse_write(item)
+                        self._sse_done()
                     else:
                         self._send_json(200, result)
                 except APIError as exc:
-                    self._error(exc)
+                    if "streaming" in locals() and streaming and "started" in locals() and started:
+                        self._sse_error(exc)
+                    else:
+                        self._error(exc)
+                except OSError:
+                    return
                 except Exception:
-                    self._error(APIError(500, "Internal server error", "internal_error"))
+                    error = APIError(500, "Internal server error", "internal_error")
+                    if "streaming" in locals() and streaming and "started" in locals() and started:
+                        self._sse_error(error)
+                    else:
+                        self._error(error)
 
         return Handler
