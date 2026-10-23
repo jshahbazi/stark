@@ -159,10 +159,8 @@ def apply_update(
                 raise installer.AppError(
                     "update rollback failed; private app backup was preserved"
                 ) from error
-            with contextlib.suppress(installer.AppError):
-                installer.command(
-                    ["/usr/bin/open", "-n", target], "previous app could not launch"
-                )
+            # main() persists the failure before reopening the previous app so
+            # its startup can reliably display the diagnostic.
             raise
     finally:
         if stage_directory is not None and not preserve_backup:
@@ -194,9 +192,10 @@ def main() -> int:
             if isinstance(error, installer.AppError)
             else "app update failed; previous installation was kept"
         )
-        (options.workspace / "result.json").write_text(
-            json.dumps({"error": message}) + "\n"
-        )
+        with contextlib.suppress(OSError):
+            (options.workspace / "result.json").write_text(
+                json.dumps({"error": message}) + "\n"
+            )
         if (options.workspace / "ready").exists():
             with contextlib.suppress(Exception):
                 if not installer.running(options.target):

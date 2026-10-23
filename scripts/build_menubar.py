@@ -570,6 +570,14 @@ def app_running(destination: Path) -> bool:
     return executable in (line.strip() for line in listing.splitlines())
 
 
+def stop_app(destination: Path) -> None:
+    installer = runpy.run_path(str(ROOT / "scripts/install_app.py"))
+    try:
+        installer["stop_app"](destination)
+    except installer["AppError"]:
+        raise BuildError("app_termination_failed_previous_installation_kept") from None
+
+
 def exchange_paths(first: Path, second: Path) -> None:
     library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
     rename = library.renamex_np
@@ -583,15 +591,12 @@ def install_app(app: Path, destination: Path) -> None:
     """Stage a complete app, then atomically replace only a matching Stark app."""
     if destination.is_symlink():
         raise BuildError("install_destination_is_symlink")
-    if destination.exists():
-        if (
-            not destination.is_dir()
-            or read_plist(destination / "Contents/Info.plist").get("CFBundleIdentifier")
-            != APP_ID
-        ):
-            raise BuildError("install_destination_is_unrelated")
-        if app_running(destination):
-            raise BuildError("installed_app_is_running_quit_stark_first")
+    if destination.exists() and (
+        not destination.is_dir()
+        or read_plist(destination / "Contents/Info.plist").get("CFBundleIdentifier")
+        != APP_ID
+    ):
+        raise BuildError("install_destination_is_unrelated")
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".stark-install-", dir=destination.parent
@@ -603,6 +608,7 @@ def install_app(app: Path, destination: Path) -> None:
             "staged_signature",
         )
         if destination.exists():
+            stop_app(destination)
             exchange_paths(stage, destination)
         else:
             stage.rename(destination)
@@ -665,8 +671,6 @@ def build(options: argparse.Namespace) -> Path:
         and read_plist(app / "Contents/Info.plist").get("CFBundleIdentifier") != APP_ID
     ):
         raise BuildError("output_app_is_unrelated")
-    if app.exists() and app_running(app):
-        raise BuildError("output_app_is_running_quit_stark_first")
     with tempfile.TemporaryDirectory(
         prefix=".stark-build-", dir=output
     ) as temporary_name:
@@ -824,6 +828,7 @@ def build(options: argparse.Namespace) -> Path:
             "app_signature_verification",
         )
         if app.exists():
+            stop_app(app)
             exchange_paths(staged, app)
         else:
             staged.rename(app)

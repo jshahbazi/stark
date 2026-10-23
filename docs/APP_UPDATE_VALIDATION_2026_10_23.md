@@ -32,3 +32,11 @@ The local app is recorded as version 0.3.0 with a clean source identity and ad-h
 - App updates preserve models and leave the separate CLI runtime at its existing version. New CLI ownership records include the exact state path; older default-prefix records are recognized by equality of both ownership records. Legacy custom-prefix records and relocated CLI records require an installer refresh before app-only updates.
 - Team identity is pinned to production team `S5BT2PRN5B`, allowing certificate renewal within that team. The updater requires GitHub's exact release asset digest and macOS signature/Gatekeeper checks. It does not use the optional release verification receipt as an update feed.
 - Tests cover detected failures and rollback. They do not establish recovery from power loss at every filesystem operation or health of a newly launched model session.
+
+## Pre-merge review follow-up
+
+The requested second review found a failure-report ordering race: rollback could reopen the old app before saving the error that its dropdown should display. Recovery now writes the fixed diagnostic before reopening, with a regression test. A failed diagnostic write still permits the recovery launch.
+
+The original automatic-quit installation change was also reconciled into this release-based branch. Both the combined CLI/app installer and source app builder stage and verify the replacement before quitting the exact installed executable. Normal AppKit termination is followed by bounded TERM/KILL escalation only if necessary. Ownership and app contents are checked before shutdown and again before exchange. Failed shutdown preserves the old installation.
+
+All 120 model-free checks passed across the same seven suites on the reviewed follow-up, including an actual compiled AppKit fixture that exited normally with status 0 through the shared quit helper. Ruff checks passed. The previously recorded clean-build hashes continue to identify the earlier implementation commit; this follow-up is qualified by its new test run and does not overwrite that provenance. Full model startup health and power-loss recovery remain outside this validation.

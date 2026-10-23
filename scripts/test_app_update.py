@@ -138,7 +138,43 @@ class UpdateTransactionTests(unittest.TestCase):
         self.assertEqual(installer.validate(self.target), self.old_digest)
         self.assertEqual(state.read_bytes(), previous)
         self.assertEqual(owner.read_bytes(), previous)
-        self.assertEqual(self.command.call_count, 2)
+        self.assertEqual(self.command.call_count, 1)
+
+    def test_failure_is_recorded_before_reopening_previous_app(self):
+        launches = []
+
+        def command(arguments, _message):
+            launches.append(arguments)
+            if len(launches) == 1:
+                raise installer.AppError("updated app could not launch")
+            result = json.loads((self.workspace / "result.json").read_text())
+            self.assertEqual(result["error"], "updated app could not launch")
+            self.assertEqual(installer.validate(self.target), self.old_digest)
+            return b""
+
+        self.command.side_effect = command
+        with (
+            patch.object(installer, "running", return_value=False),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "update_app.py",
+                    "--candidate",
+                    str(self.candidate),
+                    "--target",
+                    str(self.target),
+                    "--version",
+                    "0.4.0",
+                    "--pid",
+                    str(os.getpid()),
+                    "--workspace",
+                    str(self.workspace),
+                ],
+            ),
+        ):
+            self.assertEqual(updater.main(), 1)
+        self.assertEqual(len(launches), 2)
 
     def test_record_failure_rolls_back_app_and_both_records(self):
         state, owner = self.managed()
