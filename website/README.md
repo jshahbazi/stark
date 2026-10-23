@@ -16,6 +16,7 @@ Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the so
 ## Content and interactions
 
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
+- The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`. The photo loads lazily below the main content.
 - The install section provides copyable, versioned v0.1.1 release commands, the Apple silicon/macOS 26.4 minimum, PATH setup and a model-free `doctor` check. It links source installation separately for terminal chat and the menu bar app, which are newer than that release.
 - Generation, scoring and conversion tabs provide installed CLI command references. They do not execute a model in the browser. Tabs support arrow keys, Home and End; both command panels support copying with a selection fallback.
 - The benchmark defaults to tokens/second. Relative mode normalizes MLX-LM to 1.000× using the recorded paired percentage gain. Rounded displayed rates are not used to reconstruct those gains.
