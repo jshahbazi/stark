@@ -6,17 +6,15 @@ The `Signed release` workflow builds, signs and notarizes a combined CLI and men
 
 The original signed `v0.1.1` release used the immutable `v0.1.0` archive with SHA-256 `20f43b0f62fbe58dd026241031856a5f901067a88ed0f9cf27f2c3ea67d9e05b`, built from engine source `8c6f78c473c12fb9f86474d5c1aa8de4fb2d4b7e`. That historical input and receipt remain immutable; they are not the recipe for the combined application release.
 
-For the next release, after merging the reviewed workflow and signing changes with successful required checks, tag the exact merged `main` commit and dispatch from `main`:
+After merging the reviewed changes with successful required checks, open **Actions → Signed release → Run workflow**, select `main`, and choose a `major`, `minor` or `patch` bump (default: `patch`). The equivalent command is:
 
 ```sh
-git switch main
-git pull --ff-only
-git tag -a v0.1.2 -m 'Stark 0.1.2 signed and notarized Mac release'
-git push origin v0.1.2
-gh workflow run signed-release.yml --ref main -f version=0.1.2
+gh workflow run signed-release.yml --ref main -f bump=patch
 ```
 
-The tag must identify the workflow's exact source commit. The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from that tagged source, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. Never move a published tag or replace published archive bytes.
+The workflow selects the highest stable `vMAJOR.MINOR.PATCH` Git tag or Cargo workspace version, then applies the selected bump. For example, a baseline of `0.1.2` produces `1.0.0`, `0.2.0` or `0.1.3`. Prerelease tags are excluded. All stable tags count, including tags belonging to drafts, so reserved versions are never reused. The selected version appears in the action log.
+
+The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from the exact dispatched `main` commit, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. After signing and verification succeed, the separate publishing job creates `vVERSION` at that same commit and uploads a draft. No manual tag is required. An existing tag or release causes publication to fail; tags and assets are never overwritten. A failure after tag creation leaves that version reserved; a fresh dispatch selects the next version. Never move a published tag or replace published archive bytes.
 
 The `macos-release` environment is restricted to protected branches. It contains these six secrets:
 
