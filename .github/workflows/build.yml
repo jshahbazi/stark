@@ -1,0 +1,83 @@
+name: Build
+
+on:
+  push:
+    branches: [main, 'codex/**']
+    paths:
+      - '.github/workflows/build.yml'
+      - '.cargo/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'crates/**'
+      - 'vendor/cxx/**'
+      - 'tools/converter/**'
+      - 'scripts/build_distribution.py'
+      - 'scripts/verify_distribution.py'
+      - 'scripts/stark'
+      - 'scripts/install-from-source.sh'
+      - 'scripts/licenses/distribution/**'
+      - 'install.sh'
+      - 'LICENSE'
+      - 'provenance/UPSTREAM.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  standalone:
+    name: Apple silicon standalone bundle
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      STARK_BUILD_VERSION: 0.0.0-dev.${{ github.sha }}.${{ github.run_id }}.${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Check Apple silicon and Metal tools
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          xcodebuild -version
+          if ! xcrun -sdk macosx metal --version; then
+            xcodebuild -downloadComponent MetalToolchain
+          fi
+          xcrun -sdk macosx metal --version
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.98.1 --profile minimal --no-self-update
+      - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+        with:
+          version: '0.12.24'
+          enable-cache: false
+      - name: Build the standalone bundle
+        run: |
+          uv run --no-project --python 3.13.13 python scripts/build_distribution.py \
+            --version "$STARK_BUILD_VERSION"
+      - name: Verify standalone installation without a model
+        run: |
+          archive="artifacts/distributions/stark-$STARK_BUILD_VERSION-aarch64-apple-darwin.tar.gz"
+          uv run --project tools/converter --locked --python 3.13.13 python scripts/verify_distribution.py \
+            --archive "$archive" --version "$STARK_BUILD_VERSION" \
+            --expected-source "$GITHUB_SHA" --output artifacts/distributions/verification.json
+      - name: Upload verified development bundle
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stark-${{ env.STARK_BUILD_VERSION }}-aarch64-apple-darwin
+          path: |
+            artifacts/distributions/stark-${{ env.STARK_BUILD_VERSION }}-aarch64-apple-darwin.tar.gz
+            artifacts/distributions/stark-${{ env.STARK_BUILD_VERSION }}-aarch64-apple-darwin.tar.gz.sha256
+            artifacts/distributions/install.sh
+            artifacts/distributions/verification.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
