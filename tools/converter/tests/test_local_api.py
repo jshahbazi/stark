@@ -54,6 +54,45 @@ class LocalAPITest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["data"][0]["id"], "stark")
 
+    def test_health_capabilities_and_model_metadata(self):
+        api = LocalAPI(
+            lambda: [{"id": "stark", "object": "model", "owned_by": "test"}],
+            self.complete,
+            status=lambda: {"status": "ready", "streaming": True},
+            port=0,
+        )
+        info = api.start()
+        try:
+            for path in ("/health", "/v1/health"):
+                status, _, body = self.request_to_path(info, path, "GET")
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["status"], "ready")
+            status, _, body = self.request_to_path(info, "/v1/capabilities", "GET")
+            self.assertEqual(status, 200)
+            self.assertTrue(json.loads(body)["streaming"])
+            status, _, body = self.request_to_path(info, "/v1/models/stark", "GET")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["owned_by"], "test")
+        finally:
+            api.close()
+
+    def request_to_path(self, info, path, method, raw=None, headers=None):
+        req = urllib.request.Request(
+            info["base_url"].replace("/v1", "") + path,
+            data=raw,
+            headers={
+                "Authorization": "Bearer " + info["api_key"],
+                "Content-Type": "application/json",
+                **(headers or {}),
+            },
+            method=method,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2) as response:
+                return response.status, response.headers, response.read()
+        except urllib.error.HTTPError as error:
+            return error.code, error.headers, error.read()
+
     def test_origin_and_host_are_rejected(self):
         self.assertEqual(
             self.request("GET", "/models", key=self.info["api_key"], headers={"Origin": "http://evil"})[0], 403
@@ -221,11 +260,125 @@ class LocalAPITest(unittest.TestCase):
                 sock.close()
             api.close()
 
+    def test_disconnect_before_first_delta_sets_cancellation(self):
+        cancelled = threading.Event()
+        entered = threading.Event()
+
+        def complete(payload, on_delta, request_cancelled):
+            entered.set()
+            self.assertIsNotNone(on_delta)
+            self.assertTrue(request_cancelled.wait(2))
+            cancelled.set()
+            return {"choices": [{"finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, port=0, cancellable=True)
+        info = api.start()
+        try:
+            self.disconnect_request(info, {"stream": True})
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(cancelled.wait(2))
+        finally:
+            api.close()
+
+    def test_disconnect_before_nonstream_completion_sets_cancellation(self):
+        cancelled = threading.Event()
+        entered = threading.Event()
+
+        def complete(payload, on_delta, request_cancelled):
+            entered.set()
+            self.assertIsNone(on_delta)
+            self.assertTrue(request_cancelled.wait(2))
+            cancelled.set()
+            return {"choices": [{"finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, port=0, cancellable=True)
+        info = api.start()
+        try:
+            self.disconnect_request(info, {})
+            self.assertTrue(entered.wait(2))
+            self.assertTrue(cancelled.wait(2))
+        finally:
+            api.close()
+
+    def disconnect_request(self, info, body):
+        port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+        payload = json.dumps(body).encode()
+        sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+        sock.sendall(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer "
+            + info["api_key"].encode()
+            + b"\r\nContent-Type: application/json\r\nContent-Length: "
+            + str(len(payload)).encode()
+            + b"\r\n\r\n"
+            + payload
+        )
+        sock.close()
+
+    def test_deadline_sets_cancellation(self):
+        cancelled = threading.Event()
+
+        def complete(payload, on_delta, request_cancelled):
+            self.assertTrue(request_cancelled.wait(2))
+            cancelled.set()
+            return {"choices": [{"finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, port=0, cancellable=True, request_timeout=0.1)
+        info = api.start()
+        try:
+            status, _, _ = self.request_to(info, {})
+            self.assertEqual(status, 200)
+            self.assertTrue(cancelled.wait(2))
+        finally:
+            api.close()
+
+    def test_strict_json_and_duplicate_headers(self):
+        for raw in (b'{"x":NaN}', b'{"x":1,"x":2}'):
+            status, _, _ = self.request_to_path(
+                self.info,
+                "/v1/chat/completions",
+                "POST",
+                raw=raw,
+                headers={"Content-Type": "application/json", "Content-Length": str(len(raw))},
+            )
+            self.assertEqual(status, 400)
+        status, _, _ = self.request_to_path(self.info, "/models", "GET", headers={"Host": "127.0.0.1,127.0.0.1"})
+        self.assertIn(status, (400, 403))
+
+    def test_capacity_returns_retryable_429(self):
+        entered = threading.Event()
+        release = threading.Event()
+
+        def complete(payload, on_delta=None):
+            entered.set()
+            release.wait(2)
+            return {"choices": [{"finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [], complete, port=0, max_connections=1)
+        info = api.start()
+        try:
+            first = threading.Thread(target=lambda: self.request_to(info, {}), daemon=True)
+            first.start()
+            self.assertTrue(entered.wait(2))
+            try:
+                self.request_to(info, {})
+                self.fail("capacity request unexpectedly succeeded")
+            except urllib.error.HTTPError as error:
+                status, headers = error.code, error.headers
+            self.assertEqual(status, 429)
+            self.assertEqual(headers.get("Retry-After"), "1")
+        finally:
+            release.set()
+            api.close()
+
     def test_bad_json_and_callback_error(self):
         req = urllib.request.Request(
             self.info["base_url"] + "/chat/completions",
             data=b"{",
-            headers={"Authorization": "Bearer " + self.info["api_key"], "Content-Length": "1"},
+            headers={
+                "Authorization": "Bearer " + self.info["api_key"],
+                "Content-Type": "application/json",
+                "Content-Length": "1",
+            },
             method="POST",
         )
         with self.assertRaises(urllib.error.HTTPError) as context:
@@ -246,7 +399,11 @@ class LocalAPITest(unittest.TestCase):
             req = urllib.request.Request(
                 info["base_url"] + "/chat/completions",
                 data=b"{}",
-                headers={"Authorization": "Bearer " + info["api_key"], "Content-Length": "2"},
+                headers={
+                    "Authorization": "Bearer " + info["api_key"],
+                    "Content-Type": "application/json",
+                    "Content-Length": "2",
+                },
                 method="POST",
             )
             with urllib.request.urlopen(req):
@@ -347,7 +504,6 @@ class LocalAPITest(unittest.TestCase):
         )
         try:
             conn.putrequest("POST", "/v1/chat/completions")
-            conn.putheader("Host", "127.0.0.1")
             conn.putheader("Authorization", "Bearer " + self.info["api_key"])
             conn.putheader("Content-Length", str(1024 * 1024 + 1))
             conn.endheaders()

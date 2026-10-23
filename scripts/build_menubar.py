@@ -400,7 +400,7 @@ def build(options: argparse.Namespace) -> Path:
         embedded = resources / "runtime"
         shutil.copytree(runtime, embedded, symlinks=False)
         shutil.copy2(worker, embedded / "libexec/stark-generate")
-        for module in ("desktop.py", "chat.py", "local_api.py"):
+        for module in ("desktop.py", "chat.py", "local_api.py", "api_request.py"):
             shutil.copy2(
                 ROOT / "tools/converter/stark_convert" / module,
                 embedded / CONVERTER / module,
@@ -465,7 +465,7 @@ def build(options: argparse.Namespace) -> Path:
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
                 **{
                     str(CONVERTER / module): sha256(embedded / CONVERTER / module)
-                    for module in ("desktop.py", "chat.py", "local_api.py")
+                    for module in ("desktop.py", "chat.py", "local_api.py", "api_request.py")
                 },
                 **desktop_dependencies["files_sha256"],
             },

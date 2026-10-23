@@ -23,6 +23,8 @@ final class EngineController: ObservableObject {
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
+    @Published var apiContextTokens = 0
+    @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
     @Published var draft = ""
     @Published var finishReason = ""
@@ -138,6 +140,8 @@ final class EngineController: ObservableObject {
             }
         case "ready":
             loadedID = event["model_id"] as? String ?? selectedID
+            apiContextTokens = event["max_context_tokens"] as? Int ?? 0
+            apiMaxNewTokens = event["max_new_tokens"] as? Int ?? 0
             state = "ready"
             message = "Ready"
         case "installed":

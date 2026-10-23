@@ -85,6 +85,10 @@ enum Request {
         stop_token_ids: Vec<u32>,
         #[serde(default)]
         stream: bool,
+        #[serde(default)]
+        stop: Vec<String>,
+        #[serde(default)]
+        request_id: u64,
     },
 }
 
@@ -95,6 +99,8 @@ pub(crate) struct GenerationOptions {
     pub sampling: Sampling,
     pub eos_token_ids: Vec<u32>,
     pub extra_stop_token_ids: Vec<u32>,
+    pub stop: Vec<String>,
+    pub request_id: u64,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -102,6 +108,7 @@ pub(crate) struct GenerationOptions {
 pub(crate) enum FinishReason {
     Eos,
     StopToken,
+    StopSequence,
     Length,
     Context,
 }
@@ -114,6 +121,7 @@ pub(crate) struct GeneratedTokens {
     pub stop_token_id: Option<u32>,
     pub prefill_seconds: Option<f64>,
     pub decode_seconds: Option<f64>,
+    pub text: Option<String>,
 }
 
 fn tokens_per_second(
@@ -127,6 +135,7 @@ fn tokens_per_second(
 }
 
 /// Own the stream so its Drop drains native work before the result is observable.
+#[cfg(test)]
 pub(crate) fn collect_tokens(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
@@ -137,6 +146,7 @@ pub(crate) fn collect_tokens(
     collect_tokens_observed(stream, input_tokens, options, vocab_size, started, &mut |_| Ok(()))
 }
 
+#[cfg(test)]
 pub(crate) fn collect_tokens_observed(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
@@ -145,7 +155,35 @@ pub(crate) fn collect_tokens_observed(
     started: Instant,
     on_token: &mut dyn FnMut(u32) -> Result<(), &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
-    collect_tokens_with_clock_and_callback(stream, input_tokens, options, vocab_size, || started.elapsed(), on_token)
+    collect_tokens_controlled(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        started,
+        &mut |token| on_token(token).map(|()| true),
+        &mut || Ok(false),
+    )
+}
+
+pub(crate) fn collect_tokens_controlled(
+    stream: impl Iterator<Item = Result<u64, &'static str>>,
+    input_tokens: usize,
+    options: &GenerationOptions,
+    vocab_size: usize,
+    started: Instant,
+    on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
+) -> Result<GeneratedTokens, &'static str> {
+    collect_tokens_with_clock_and_callback(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        || started.elapsed(),
+        on_token,
+        cancelled,
+    )
 }
 
 #[cfg(test)]
@@ -156,7 +194,15 @@ fn collect_tokens_with_clock(
     vocab_size: usize,
     elapsed: impl FnMut() -> Duration,
 ) -> Result<GeneratedTokens, &'static str> {
-    collect_tokens_with_clock_and_callback(stream, input_tokens, options, vocab_size, elapsed, &mut |_| Ok(()))
+    collect_tokens_with_clock_and_callback(
+        stream,
+        input_tokens,
+        options,
+        vocab_size,
+        elapsed,
+        &mut |_| Ok(true),
+        &mut || Ok(false),
+    )
 }
 
 fn collect_tokens_with_clock_and_callback(
@@ -165,7 +211,8 @@ fn collect_tokens_with_clock_and_callback(
     options: &GenerationOptions,
     vocab_size: usize,
     mut elapsed: impl FnMut() -> Duration,
-    on_token: &mut dyn FnMut(u32) -> Result<(), &'static str>,
+    on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
     let capacity = options.context_tokens as usize - input_tokens;
     let budget = capacity.min(options.max_new_tokens as usize);
@@ -180,11 +227,18 @@ fn collect_tokens_with_clock_and_callback(
         stop_token_id: None,
         prefill_seconds: None,
         decode_seconds: None,
+        text: None,
     };
     let mut first_sample = None;
     let mut last_sample = None;
     for _ in 0..budget {
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
         let token = stream.next().ok_or("invalid_generation_output")??;
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
         let sample_time = elapsed();
         if token >= vocab_size as u64 {
             return Err("invalid_generation_output");
@@ -204,7 +258,10 @@ fn collect_tokens_with_clock_and_callback(
             break;
         }
         result.generated_token_ids.push(token);
-        on_token(token)?;
+        if !on_token(token)? {
+            result.finish_reason = FinishReason::StopSequence;
+            break;
+        }
     }
     result.prefill_seconds = first_sample.map(|time| time.as_secs_f64());
     if result.sampled_tokens > 1 {
@@ -316,12 +373,16 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 sampling,
                 stop_token_ids,
                 stream,
+                stop,
+                request_id,
             } => {
                 if context_tokens == 0
                     || context_tokens > MAX_CONTEXT_TOKENS
                     || max_new_tokens == 0
                     || max_new_tokens > MAX_NEW_TOKENS
                     || stop_token_ids.len() > MAX_EXTRA_STOPS
+                    || stop.len() > 4
+                    || stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
                     || !valid_ids(&stop_token_ids, self.backend.vocab_size())
                     || stop_token_ids.iter().collect::<HashSet<_>>().len() != stop_token_ids.len()
                 {
@@ -349,6 +410,8 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     sampling,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
+                    stop,
+                    request_id,
                 };
                 let started = Instant::now();
                 let mut emitted = String::new();
@@ -379,7 +442,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     return Err("invalid_generation_output");
                 }
                 // Decode the complete vector, preserving UTF-8 boundaries and specials.
-                let text = self.backend.decode(&generated.generated_token_ids, false)?;
+                let text = match &generated.text {
+                    Some(text) => text.clone(),
+                    None => self.backend.decode(&generated.generated_token_ids, false)?,
+                };
                 if stream {
                     // Byte-fallback decoders may retain an incomplete character at EOS.
                     // Reconcile only after native cleanup; never retract emitted text.
@@ -421,6 +487,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                         | "invalid_generation_output"
                         | "invalid_tokenization_output"
                         | "decoding_failed"
+                        | "cancel_channel_failed"
                 ) {
                     Err("native_operation_failed")
                 } else {
@@ -443,7 +510,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":MAX_CONTEXT_TOKENS.min(worker.backend.max_context_length().unwrap_or(MAX_CONTEXT_TOKENS)),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
-        "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1"}),
+        "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
+        "stop_sequences":true,"cancellation":"pipe-v1"}),
     )?;
     loop {
         let mut bytes = Vec::new();
@@ -625,6 +693,8 @@ mod tests {
             sampling: Sampling::Greedy {},
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
+            stop: Vec::new(),
+            request_id: 0,
         };
         let drained = Arc::new(AtomicBool::new(false));
         let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();

@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import hmac
 import json
+import math
 import secrets
+import select
+import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -25,6 +29,18 @@ class APIError(Exception):
         self.message = message
         self.code = code
 
+    def payload(self):
+        error_type = (
+            "authentication_error"
+            if self.status == 401
+            else "rate_limit_error"
+            if self.status == 429
+            else "server_error"
+            if self.status >= 500
+            else "invalid_request_error"
+        )
+        return {"error": {"message": self.message, "type": error_type, "code": self.code}}
+
 
 class _BoundedHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
@@ -39,7 +55,20 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
 
     def process_request(self, request, client_address):
         if not self.slots.acquire(blocking=False):
-            request.close()
+            try:
+                request.settimeout(0.01)
+                body = b'{"error":{"message":"Server is busy","type":"rate_limit_error","code":"server_busy"}}'
+                request.sendall(
+                    b"HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n"
+                    b"Retry-After: 1\r\nContent-Length: "
+                    + str(len(body)).encode()
+                    + b"\r\nConnection: close\r\n\r\n"
+                    + body
+                )
+            except OSError:
+                pass
+            finally:
+                request.close()
             return
         try:
             super().process_request(request, client_address)
@@ -64,6 +93,10 @@ class LocalAPI:
         *,
         port: int = 8000,
         max_connections: int = 16,
+        status: Callable[[], dict[str, Any]] | None = None,
+        cancellable: bool = False,
+        request_timeout: float = 300,
+        write_timeout: float = 10,
     ):
         self._models = models
         self._complete = complete
@@ -73,9 +106,15 @@ class LocalAPI:
         self._thread: threading.Thread | None = None
         self._api_key: str | None = None
         self._lock = threading.Lock()
+        self._status = status
+        self._cancellable = cancellable
+        self._request_timeout = request_timeout
+        self._write_timeout = write_timeout
+        self._closing = threading.Event()
 
     def start(self) -> dict[str, str]:
         with self._lock:
+            self._closing.clear()
             if self._server is not None:
                 raise RuntimeError("LocalAPI is already running")
             handler = self._handler_class()
@@ -92,6 +131,7 @@ class LocalAPI:
             return {"base_url": f"http://127.0.0.1:{server.server_port}/v1", "api_key": self._api_key}
 
     def close(self) -> None:
+        self._closing.set()
         with self._lock:
             server, thread = self._server, self._thread
             self._server = self._thread = None
@@ -125,10 +165,7 @@ class LocalAPI:
                     return
 
             def _error(self, error: APIError):
-                self._send_json(
-                    error.status,
-                    {"error": {"message": error.message, "type": "invalid_request_error", "code": error.code}},
-                )
+                self._send_json(error.status, error.payload())
 
             def _send_json(self, status, value):
                 payload = json.dumps(value, separators=(",", ":")).encode("utf-8")
@@ -136,6 +173,10 @@ class LocalAPI:
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.send_header("Connection", "close")
+                if status == 429:
+                    self.send_header("Retry-After", "1")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Request-Id", "req-" + uuid.uuid4().hex)
                 self.end_headers()
                 self.wfile.write(payload)
 
@@ -152,8 +193,10 @@ class LocalAPI:
                 self.close_connection = True
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
-                self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Accel-Buffering", "no")
+                self.send_header("X-Request-Id", "req-" + uuid.uuid4().hex)
                 self.end_headers()
 
                 self._sse_write(self._sse_item(ident, model, created, {"role": "assistant"}))
@@ -168,11 +211,11 @@ class LocalAPI:
                 self.wfile.flush()
 
             def _sse_error(self, error):
-                self._sse_write(
-                    {"error": {"message": error.message, "type": "invalid_request_error", "code": error.code}}
-                )
+                self._sse_write(error.payload())
 
             def _guard(self):
+                if len(self.headers.get_all("Host", [])) > 1 or len(self.headers.get_all("Authorization", [])) > 1:
+                    raise APIError(400, "Duplicate request headers are not allowed", "invalid_request")
                 if "Origin" in self.headers:
                     raise APIError(403, "Origin requests are not allowed", "origin_not_allowed")
                 host = self.headers.get("Host", "")
@@ -189,6 +232,20 @@ class LocalAPI:
             def do_GET(self):
                 try:
                     self._guard()
+                    if self.path in {"/health", "/v1/health"}:
+                        self._send_json(200, api._status() if api._status else {"status": "ok"})
+                        return
+                    if self.path == "/v1/capabilities":
+                        self._send_json(200, api._status() if api._status else {})
+                        return
+                    if self.path.startswith("/v1/models/"):
+                        model_id = self.path[len("/v1/models/") :]
+                        models = api._models()
+                        model = next((item for item in models if item.get("id") == model_id), None)
+                        if model is None:
+                            raise APIError(404, "Not found", "not_found")
+                        self._send_json(200, model)
+                        return
                     if self.path != "/v1/models":
                         raise APIError(404, "Not found", "not_found")
                     self._send_json(200, {"object": "list", "data": api._models()})
@@ -198,6 +255,8 @@ class LocalAPI:
                     self._error(APIError(500, "Internal server error", "internal_error"))
 
             def do_POST(self):
+                cancelled = threading.Event()
+                monitor = None
                 try:
                     self._guard()
                     if self.path != "/v1/chat/completions":
@@ -215,21 +274,39 @@ class LocalAPI:
                         raise APIError(400, "Invalid Content-Length", "invalid_request")
                     if length > 1024 * 1024:
                         raise APIError(413, "Request body is too large", "body_too_large")
+                    content_type = self.headers.get("Content-Type")
+                    if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
+                        raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
                     try:
-                        payload = json.loads(self.rfile.read(length))
-                    except (ValueError, UnicodeDecodeError):
+                        payload = json.loads(
+                            self.rfile.read(length),
+                            object_pairs_hook=self._pairs,
+                            parse_constant=self._constant,
+                            parse_float=self._float,
+                        )
+                    except (ValueError, UnicodeDecodeError, RecursionError):
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
                     streaming = payload.get("stream", False)
+                    self.request.settimeout(api._write_timeout)
+                    if api._cancellable:
+                        monitor = threading.Thread(target=self._monitor_peer, args=(cancelled,), daemon=True)
+                        monitor.start()
                     if not streaming:
-                        result = api._complete(payload)
+                        result = (
+                            api._complete(payload, None, cancelled) if api._cancellable else api._complete(payload)
+                        )
                     else:
                         ident = "chatcmpl-" + secrets.token_urlsafe(16)
                         created = int(time.time())
-                        model = payload.get("model", "stark")
+                        model = payload.get("model")
+                        models = api._models()
+                        if len(models) == 1 and model in (None, models[0].get("id"), models[0].get("name")):
+                            model = models[0]["id"]
+                        model = model or "stark"
                         started = False
 
                         def on_delta(text):
@@ -243,7 +320,11 @@ class LocalAPI:
                                 self._sse_write(self._sse_item(ident, model, created, {"content": text}))
 
                         try:
-                            result = api._complete(payload, on_delta)
+                            result = (
+                                api._complete(payload, on_delta, cancelled)
+                                if api._cancellable
+                                else api._complete(payload, on_delta)
+                            )
                         except APIError as exc:
                             if started:
                                 self._sse_error(exc)
@@ -292,5 +373,48 @@ class LocalAPI:
                         self._sse_error(error)
                     else:
                         self._error(error)
+                finally:
+                    cancelled.set()
+                    if monitor is not None:
+                        monitor.join(timeout=0.2)
+
+            @staticmethod
+            def _pairs(pairs):
+                result = {}
+                for key, value in pairs:
+                    if key in result:
+                        raise ValueError("duplicate JSON key")
+                    result[key] = value
+                return result
+
+            @staticmethod
+            def _constant(value):
+                raise ValueError(value)
+
+            @staticmethod
+            def _float(value):
+                number = float(value)
+                if not math.isfinite(number):
+                    raise ValueError("nonfinite number")
+                return number
+
+            def _monitor_peer(self, cancelled):
+                deadline = time.monotonic() + api._request_timeout
+                while not cancelled.wait(0.05):
+                    if api._closing.is_set():
+                        cancelled.set()
+                        return
+                    if time.monotonic() >= deadline:
+                        cancelled.reason = "deadline"
+                        cancelled.set()
+                        return
+                    try:
+                        ready, _, _ = select.select([self.request], [], [], 0)
+                        if ready and not self.request.recv(1, socket.MSG_PEEK):
+                            cancelled.set()
+                            return
+                    except (OSError, ValueError):
+                        cancelled.set()
+                        return
 
         return Handler

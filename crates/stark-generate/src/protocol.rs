@@ -52,7 +52,8 @@ pub fn main() {
         let path = arguments(std::env::args_os().skip(1))?;
         #[cfg(feature = "metal")]
         {
-            let backend = crate::native::NativeBackend::load(&path)?;
+            let cancellation = crate::cancel::CancelSignal::from_environment()?;
+            let backend = crate::native::NativeBackend::load(&path, cancellation)?;
             let mut worker = crate::generation::GenerationWorker::new(backend)?;
             crate::generation::run_lines(&mut worker, &mut io::stdin().lock(), &mut output)
         }

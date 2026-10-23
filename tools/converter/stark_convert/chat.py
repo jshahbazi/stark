@@ -6,6 +6,7 @@ import os
 import select
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 class ChatError(Exception):
     """Content-free user-facing failure."""
+
+
+class ChatCancelled(ChatError):
+    """A cancelled request whose terminal response has been consumed."""
 
 
 def terminal_text(text):
@@ -43,21 +48,51 @@ class Worker:
     def __init__(self, executable, model, timeout):
         self.timeout = timeout
         self.pending = b""
-        self.process = subprocess.Popen(
-            [str(executable), "--model-path", str(model)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            bufsize=0,
-            start_new_session=True,
-        )
+        self.cancellation = False
+        self.request_sequence = 0
+        self.cancelled_id = None
+        read_fd, self.cancel_fd = os.pipe()
+        os.set_blocking(self.cancel_fd, False)
+        try:
+            self.process = subprocess.Popen(
+                [str(executable), "--model-path", str(model)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+                start_new_session=True,
+                pass_fds=(read_fd,),
+                env=dict(os.environ, STARK_CANCEL_FD=str(read_fd)),
+            )
+        except BaseException:
+            os.close(self.cancel_fd)
+            raise
+        finally:
+            os.close(read_fd)
 
-    def read(self):
+    def cancel(self, request_id):
+        if self.cancelled_id == request_id:
+            return
+        if not self.cancellation:
+            raise ChatError("Worker cannot cancel safely; restart the model.")
+        try:
+            os.write(self.cancel_fd, request_id.to_bytes(8, "little"))
+            self.cancelled_id = request_id
+        except OSError:
+            raise ChatError("Cannot cancel worker; restart the model.") from None
+
+    def read(self, cancelled=None, request_id=None):
         deadline = time.monotonic() + self.timeout
         while b"\n" not in self.pending:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or not select.select([self.process.stdout], [], [], remaining)[0]:
+            if cancelled is not None and cancelled.is_set() and request_id is not None:
+                self.cancel(request_id)
+            if remaining <= 0:
                 raise ChatError("Worker timed out; chat closed.")
+            if not select.select(
+                [self.process.stdout], [], [], min(remaining, 0.1) if cancelled is not None else remaining
+            )[0]:
+                continue
             chunk = os.read(self.process.stdout.fileno(), 65536)
             if not chunk:
                 raise ChatError("Worker stopped; chat closed.")
@@ -69,11 +104,20 @@ class Worker:
             reply = json.loads(line)
             if not isinstance(reply, dict):
                 raise ValueError
+            if reply.get("ready") is True:
+                self.cancellation = reply.get("cancellation") == "pipe-v1"
             return reply
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
 
-    def request(self, payload, on_delta=None):
+    def request(self, payload, on_delta=None, cancelled=None):
+        if cancelled is not None and cancelled.is_set():
+            raise ChatCancelled("Request cancelled.")
+        request_id = 0 if payload.get("operation") == "generate" else None
+        if payload.get("operation") == "generate" and getattr(self, "cancellation", False):
+            self.request_sequence += 1
+            request_id = self.request_sequence
+            payload = {**payload, "request_id": request_id}
         data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
         if len(data) > 1024 * 1024:
             raise ChatError("Conversation exceeds the worker request limit; use /reset.")
@@ -85,9 +129,14 @@ class Worker:
                 raise ChatError("Cannot send request to worker.")
             view = view[count:]
         chunks = []
+        control = cancelled
         while True:
-            reply = self.read()
+            if control is not None and control.is_set() and request_id is not None:
+                self.cancel(request_id)
+            reply = self.read(control, request_id) if control is not None else self.read()
             if "event" not in reply:
+                if (control is not None and control.is_set()) or reply.get("error") == "generation_cancelled":
+                    raise ChatCancelled("Request cancelled.")
                 if on_delta is not None and "error" not in reply and reply.get("text") != "".join(chunks):
                     raise ChatError("Invalid worker stream; restart the model.")
                 return reply
@@ -99,7 +148,12 @@ class Worker:
             ):
                 raise ChatError("Invalid worker stream; restart the model.")
             chunks.append(reply["text"])
-            on_delta(reply["text"])
+            if control is None or not control.is_set():
+                try:
+                    on_delta(reply["text"])
+                except OSError:
+                    control = control or threading.Event()
+                    control.set()
 
     def close(self):
         if self.process.poll() is None:
@@ -111,6 +165,7 @@ class Worker:
                 self.process.wait()
         self.process.stdin.close()
         self.process.stdout.close()
+        os.close(self.cancel_fd)
 
 
 def run_chat(args, worker):

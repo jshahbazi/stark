@@ -47,11 +47,12 @@ def executable(tmp_path):
         "'max_context_tokens':8192,'max_new_tokens':4096,'streaming':'text-delta-v1'}),flush=True)\n"
         "for line in sys.stdin:\n"
         "    request=json.loads(line)\n"
-        "    if 'wait fixture' in request.get('rendered_prompt',''): time.sleep(30)\n"
-        "    if 'failure fixture' in request.get('rendered_prompt',''): raise SystemExit(2)\n"
+        "    if request['operation']=='tokenize': last_prompt=request['text']\n"
+        "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
+        "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
         "    if request.get('stream'):\n"
         "        for chunk in ['synthetic ', 'answer']: print(json.dumps({'event':'delta','text':chunk}),flush=True)\n"
-        "    reply={'token_count':20} if request['operation']=='tokenize' else {\n"
+        "    reply={'token_count':20,'token_ids':[2]*20} if request['operation']=='tokenize' else {\n"
         "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'finish_reason':'eos',\n"
         "        'input_tokens_per_second':100.0,'output_tokens_per_second':50.0,\n"
         "        'prefill_seconds':0.2,'decode_seconds':0.08}\n"
@@ -122,14 +123,14 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
 @pytest.mark.parametrize(
     "extra",
     [
-        {"temperature": 0.5},
+        {"temperature": 3},
         {"temperature": False},
         {"n": 2},
         {"tools": []},
         {"max_tokens": True},
-        {"max_tokens": 513},
+        {"max_tokens": 4097},
         {"max_tokens": 1, "max_completion_tokens": 1},
-        {"messages": [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]},
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": "unsupported"}]}]},
         {"model": "unknown"},
     ],
 )
@@ -165,9 +166,10 @@ def test_api_busy_and_stop_fence_inflight_request(desktop, model):
     deadline = time.monotonic() + 2
     while desktop.job is None and time.monotonic() < deadline:
         time.sleep(0.01)
+    desktop.api_queue_timeout = 0.05
     with pytest.raises(APIError) as busy:
         desktop.api_complete(payload)
-    assert busy.value.status == 409
+    assert busy.value.status == 429
     desktop.dispatch({"command": "generate", "text": "competing request"})
     assert any("Wait for the current operation" in e.get("message", "") for e in events(desktop))
     desktop.stop()
@@ -271,12 +273,119 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
 
     identifier = running(desktop, model)
     process = desktop.worker.process
-    desktop.context = 21
+    desktop.api_context = 21
     with pytest.raises(APIError) as oversized:
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "hello"}]})
     assert oversized.value.code == "context_length_exceeded"
     assert desktop.job is None
     assert desktop.worker.process is process
+
+
+def test_api_sampling_limits_aliases_and_message_parts(desktop, model):
+    running(desktop, model)
+    seen = []
+    infer = desktop.infer
+
+    def capture(messages, maximum, **options):
+        seen.append((messages, maximum, options))
+        return infer(messages, maximum, **options)
+
+    desktop.infer = capture
+    result = desktop.api_complete(
+        {
+            "model": desktop.models[0]["name"],
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "seed": 42,
+            "max_tokens": 1000,
+            "messages": [
+                {"role": "developer", "content": "system"},
+                {"role": "user", "content": [{"type": "text", "text": "hello"}]},
+            ],
+        }
+    )
+    assert result["model"] == desktop.active_model
+    assert seen[0][0] == [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}]
+    assert seen[0][1] == 1000
+    assert seen[0][2]["sampling"] == {"mode": "stochastic", "temperature": 0.7, "top_p": 0.8}
+    assert seen[0][2]["seed"] == 42
+
+
+def test_stale_epoch_and_expired_deadline_preserve_worker(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    process = desktop.worker.process
+    with patch.object(desktop.worker, "request") as request:
+        with pytest.raises(APIError) as stale:
+            desktop.infer([{"role": "user", "content": "hello"}], 16, epoch=desktop.epoch - 1)
+        assert stale.value.code == "model_changed"
+        request.assert_not_called()
+    control = threading.Event()
+    control.reason = "deadline"
+    control.set()
+    with pytest.raises(APIError) as expired:
+        desktop.api_complete({"messages": [{"role": "user", "content": "hello"}]}, cancelled=control)
+    assert expired.value.status == 504
+    assert desktop.worker.process is process and process.poll() is None
+
+
+def test_api_fifo_queue_and_waiter_cancellation(desktop, model):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    entered, release = threading.Event(), threading.Event()
+    order, errors = [], []
+
+    def infer(messages, maximum, **options):
+        text = messages[-1]["content"]
+        order.append(text)
+        if text == "first":
+            entered.set()
+            assert release.wait(2)
+        return {"text": "answer", "input_tokens": 1, "output_tokens": 1, "finish_reason": "eos"}
+
+    desktop.infer = infer
+
+    def call(text, control=None):
+        try:
+            desktop.api_complete({"messages": [{"role": "user", "content": text}]}, cancelled=control)
+        except APIError as error:
+            errors.append(error.code)
+
+    def queued(count):
+        deadline = time.monotonic() + 2
+        while len(desktop.api_queue) != count and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert len(desktop.api_queue) == count
+
+    first = threading.Thread(target=call, args=("first",))
+    cancelled = threading.Event()
+    second = threading.Thread(target=call, args=("cancelled", cancelled))
+    third = threading.Thread(target=call, args=("third",))
+    first.start()
+    assert entered.wait(2)
+    second.start()
+    queued(1)
+    third.start()
+    queued(2)
+    desktop.api_queue_limit = 2
+    with pytest.raises(APIError) as full:
+        desktop.api_complete({"messages": [{"role": "user", "content": "over limit"}]})
+    assert full.value.status == 429 and full.value.code == "queue_full"
+    cancelled.set()
+    second.join(timeout=2)
+    release.set()
+    first.join(timeout=2)
+    third.join(timeout=2)
+    assert not any(t.is_alive() for t in (first, second, third))
+    assert order == ["first", "third"]
+    assert errors == ["request_cancelled"]
+    assert desktop.api_queue == [] and desktop.job is None
 
 
 def test_local_registration_is_private_atomic_persistent_and_deduplicated(desktop, model):

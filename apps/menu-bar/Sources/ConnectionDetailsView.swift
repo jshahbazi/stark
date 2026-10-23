@@ -13,7 +13,7 @@ struct ConnectionDetailsView: View {
             "messages": [["role": "user", "content": "Hello"]],
             "temperature": 0,
             "stream": true,
-            "max_tokens": 128
+            "max_tokens": min(128, max(1, engine.apiMaxNewTokens))
         ]
         let data = (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])) ?? Data()
         let body = String(data: data, encoding: .utf8) ?? "{}"
@@ -44,10 +44,14 @@ struct ConnectionDetailsView: View {
             StatusLine(engine: engine)
             Text(engine.loadedID.isEmpty ? "Choose a model in Stark and select Run before connecting." : "Running model: \(engine.activeName)")
                 .font(.callout)
+            if !engine.loadedID.isEmpty {
+                Text("Context: \(engine.apiContextTokens) tokens · Reply limit: \(engine.apiMaxNewTokens) tokens")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key changes when Stark reopens.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Supports text Chat Completions and model discovery. Set temperature to 0 and the reply limit to 512 tokens or less. Enable streaming in your application to display text as it is generated. Tools, images and the Responses API are unavailable. Busy requests return an error for the client to retry.")
+            Text("Supports text Chat Completions, live streaming, temperature, top-p, seed and stop sequences. Up to 8 requests can wait in order. Cancelled requests keep the model loaded. Tools, images and the Responses API are unavailable. Model limits and capabilities are available through the API.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {

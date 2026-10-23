@@ -65,6 +65,10 @@ Send one JSON object per line and read one reply per request by default. Each re
 
 Workers advertising `streaming: "text-delta-v1"` in readiness accept `stream: true` on a generate request. They flush zero or more `{"event":"delta","text":"…"}` lines during generation, then the normal complete reply after native cleanup. Consume every delta and the final reply before issuing another operation. The concatenated deltas equal the final reply's `text`; terminal EOS and stop tokens are excluded. Incremental tokenizer decoding buffers incomplete Unicode characters and preserves decoder context. Output failure drops and drains the native iterator before the process exits. Streaming timing measurements include decoding and output backpressure; earlier non-streaming qualification remains source-bound. Omitting `stream`, or sending `false`, retains one-reply behavior.
 
+Workers advertising `stop_sequences: true` accept `stop`, an array of at most four non-empty strings of up to 1024 Unicode characters each. Matching is performed during incremental decoding, including across token boundaries. A matched sequence and later text are withheld from both streamed and final text; `finish_reason` is `stop_sequence`. Generated token IDs and usage still include the sampled token containing the match, so decoding that vector may include withheld text when string stops are used. No extra token is requested after a complete match.
+
+The optional inherited `STARK_CANCEL_FD` pipe carries eight-byte little-endian request IDs. Generate requests use an unsigned `request_id` (default 0). A matching cancellation returns the fixed `generation_cancelled` error after native stream/state cleanup and leaves the model loaded for the next request. Old IDs are discarded. Cancellation is checked before state allocation and around token reads; it waits for any already-running GPU work to reach a safe boundary. Owner EOF cancels work. The app client assigns increasing IDs and consumes the terminal response before reusing the worker. The pipe and IDs are private control state, not persisted caches.
+
 ### Tokenize and decode
 
 ```json
