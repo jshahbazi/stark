@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = ROOT / "apps/menu-bar/Sources/StarkApp.swift"
 BOUNDARY = "\nstruct StatusLine: View"
-DRIVER = r'''
+DRIVER = r"""
 
 extension EngineController {
     static func exercise(_ scenario: String, backendError: String) -> Bool {
@@ -118,10 +118,13 @@ extension EngineController {
 let scenario = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""
 let backendError = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
 exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
-'''
+"""
 
 
-@unittest.skipUnless(sys.platform == "darwin" and platform.machine() == "arm64", "Apple silicon macOS required")
+@unittest.skipUnless(
+    sys.platform == "darwin" and platform.machine() == "arm64",
+    "Apple silicon macOS required",
+)
 class ControllerLifecycleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -136,7 +139,15 @@ class ControllerLifecycleTests(unittest.TestCase):
         cls.executable = directory / "controller-checks"
         try:
             compiled = subprocess.run(
-                ["xcrun", "swiftc", "-target", "arm64-apple-macosx26.4", str(test_source), "-o", str(cls.executable)],
+                [
+                    "xcrun",
+                    "swiftc",
+                    "-target",
+                    "arm64-apple-macosx26.4",
+                    str(test_source),
+                    "-o",
+                    str(cls.executable),
+                ],
                 cwd=ROOT,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -166,7 +177,9 @@ class ControllerLifecycleTests(unittest.TestCase):
         from stark_convert.decision import DecisionInputError, validate_inputs
 
         try:
-            validate_inputs("synthetic context", "synthetic question", ["straße", "STRASSE"])
+            validate_inputs(
+                "synthetic context", "synthetic question", ["straße", "STRASSE"]
+            )
         except DecisionInputError as error:
             backend_error = str(error)
         else:
@@ -196,5 +209,7 @@ if __name__ == "__main__":
     suite = unittest.defaultTestLoader.loadTestsFromTestCase(ControllerLifecycleTests)
     result = unittest.TextTestRunner(stream=io.StringIO()).run(suite)
     failed = len(result.failures) + len(result.errors)
-    print(f"controller_checks: run={result.testsRun} failed={failed} skipped={len(result.skipped)}")
+    print(
+        f"controller_checks: run={result.testsRun} failed={failed} skipped={len(result.skipped)}"
+    )
     raise SystemExit(0 if result.wasSuccessful() else 1)

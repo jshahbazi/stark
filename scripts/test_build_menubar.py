@@ -133,7 +133,9 @@ class RuntimeVerificationTests(unittest.TestCase):
             builder.verify_worker(Path("score-worker"), "score")
 
     def test_missing_score_worker_is_rejected_before_packaging(self):
-        with self.assertRaisesRegex(builder.BuildError, "score_worker_self_check_failed"):
+        with self.assertRaisesRegex(
+            builder.BuildError, "score_worker_self_check_failed"
+        ):
             builder.verify_worker(Path("/definitely/missing/stark-score"), "score")
 
     def test_score_build_record_must_match_score_binary(self):

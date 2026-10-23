@@ -614,16 +614,20 @@ def build(options: argparse.Namespace) -> Path:
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
-    worker_record = None
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
         worker_record_path = worker_record_path.expanduser().resolve()
-        verify_worker_build_record(worker_record_path, worker, "worker_build_record_hash_mismatch")
-    score_worker_record = None
+        verify_worker_build_record(
+            worker_record_path, worker, "worker_build_record_hash_mismatch"
+        )
     score_worker_record_path = getattr(options, "score_worker_build_record", None)
     if score_worker_record_path is not None:
         score_worker_record_path = score_worker_record_path.expanduser().resolve()
-        verify_worker_build_record(score_worker_record_path, score_worker, "score_worker_build_record_hash_mismatch")
+        verify_worker_build_record(
+            score_worker_record_path,
+            score_worker,
+            "score_worker_build_record_hash_mismatch",
+        )
     runtime_manifest = verify_runtime(runtime)
     if (
         not worker.is_file()
@@ -686,7 +690,9 @@ def build(options: argparse.Namespace) -> Path:
         if worker_record_path is not None:
             shutil.copy2(worker_record_path, resources / "worker-build.json")
         if score_worker_record_path is not None:
-            shutil.copy2(score_worker_record_path, resources / "score-worker-build.json")
+            shutil.copy2(
+                score_worker_record_path, resources / "score-worker-build.json"
+            )
         make_icon(artwork, resources, temporary)
         info = read_plist(source_directory / "Info.plist")
         set_application_version(info, getattr(options, "version", None))
@@ -736,7 +742,11 @@ def build(options: argparse.Namespace) -> Path:
             ],
             "desktop_entrypoint",
         )
-        if "--worker" not in response or "--score-worker" not in response or "--data-dir" not in response:
+        if (
+            "--worker" not in response
+            or "--score-worker" not in response
+            or "--data-dir" not in response
+        ):
             raise BuildError("desktop_entrypoint_contract_failed")
         manifest = {
             "schema_version": 1,
