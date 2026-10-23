@@ -134,18 +134,6 @@ fn tokens_per_second(
     })
 }
 
-/// Own the stream so its Drop drains native work before the result is observable.
-#[cfg(test)]
-pub(crate) fn collect_tokens(
-    stream: impl Iterator<Item = Result<u64, &'static str>>,
-    input_tokens: usize,
-    options: &GenerationOptions,
-    vocab_size: usize,
-    started: Instant,
-) -> Result<GeneratedTokens, &'static str> {
-    collect_tokens_observed(stream, input_tokens, options, vocab_size, started, &mut |_| Ok(()))
-}
-
 #[cfg(test)]
 pub(crate) fn collect_tokens_observed(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
@@ -166,6 +154,7 @@ pub(crate) fn collect_tokens_observed(
     )
 }
 
+/// Own the stream so its Drop drains native work before the result is observable.
 pub(crate) fn collect_tokens_controlled(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
     input_tokens: usize,
