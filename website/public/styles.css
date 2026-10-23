@@ -941,12 +941,13 @@ code {
   margin-top:28px
 }
 
-.api-connect h4 {
-  margin:0;
-  font-size:21px;
-  font-weight:550;
-  letter-spacing:-.025em;
-  line-height:1.2
+.api-connect .start-steps p {
+  margin-top:0;
+  font-size:15px
+}
+
+.api-connect .start-steps strong {
+  color:var(--ink)
 }
 
 .api-connect .start-steps li {
