@@ -946,6 +946,41 @@ code {
   font-size:12px
 }
 
+.cat-note {
+  display:flex;
+  align-items:center;
+  gap:26px;
+  border-top:1px solid #414b39;
+  margin-top:31px;
+  padding-top:31px
+}
+
+.cat-note img {
+  flex:0 0 auto;
+  width:160px;
+  height:120px;
+  border-radius:8px;
+  object-fit:cover
+}
+
+.cat-eyebrow {
+  margin-bottom:9px;
+  color:var(--gold);
+  font:9px var(--mono);
+  letter-spacing:.1em
+}
+
+.cat-note h2 {
+  font-size:26px;
+  margin-bottom:10px
+}
+
+.cat-description {
+  max-width:440px;
+  color:#b6c1ad;
+  font-size:14px
+}
+
 .footer-bottom {
   display:flex;
   justify-content:space-between;
@@ -1361,6 +1396,11 @@ code {
   .footer-bottom {
     flex-direction:column;
     gap:14px
+  }
+  .cat-note {
+    align-items:flex-start;
+    flex-direction:column;
+    gap:20px
   }
   .site-footer {
     padding-block:33px 25px
