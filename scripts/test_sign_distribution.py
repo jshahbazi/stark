@@ -7,11 +7,13 @@ import contextlib
 import importlib.util
 import io
 import json
+import plistlib
 import subprocess
 import sys
 import tarfile
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,7 +69,269 @@ def result(stdout: bytes = b"", stderr: bytes = b""):
     return subprocess.CompletedProcess([], 0, stdout=stdout, stderr=stderr)
 
 
+def app_fixture(bundle: Path) -> Path:
+    app = bundle / signing.APPLICATION
+    contents = app / "Contents"
+    runtime = contents / "Resources/runtime"
+    for name in NATIVE_NAMES:
+        target = runtime / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((bundle / name).read_bytes())
+    executable = contents / "MacOS/Stark"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes((bundle / NATIVE_NAMES[0]).read_bytes())
+    (contents / "Info.plist").write_bytes(
+        plistlib.dumps(
+            {
+                "CFBundleIdentifier": signing.APPLICATION_ID,
+                "CFBundleExecutable": "Stark",
+                "CFBundleVersion": "0.1.0",
+            }
+        )
+    )
+    share = runtime / "share/stark"
+    share.mkdir(parents=True)
+    (share / "VERSION").write_text("0.1.0\n")
+    (share / "manifest.json").write_text(
+        json.dumps({"version": "0.1.0", "source": {"revision": SOURCE}})
+    )
+    (contents / "Resources/menu-bar-manifest.json").write_text(
+        json.dumps(
+            {
+                "base_runtime": {"manifest_sha256": "f" * 64},
+                "overlays_sha256": {NATIVE_NAMES[1]: "e" * 64},
+                "executable_before_signing_sha256": "d" * 64,
+            }
+        )
+    )
+    return app
+
+
 class SigningTests(unittest.TestCase):
+    def sign_application_with_stubbed_apple_tools(
+        self, root: Path, *, fail_stapling=False
+    ):
+        archive, _digest, manifest = fixture(root)
+        bundle = root / "source/stark"
+        app_fixture(bundle)
+        manifest["files_sha256"] = signing.distribution.file_manifest(bundle)
+        manifest["files_sha256"].pop(signing.MANIFEST)
+        (bundle / signing.MANIFEST).write_text(json.dumps(manifest))
+        digest = signing.distribution.create_archive(bundle, archive)
+        options = argparse.Namespace(
+            archive=archive,
+            input_sha256=digest,
+            expected_source=SOURCE,
+            version="0.1.2",
+            sign_identity=IDENTITY["sha1"],
+            notary_profile="test-profile",
+            keychain=None,
+            sign_only=False,
+            output_dir=root / "output",
+        )
+        recipe = {"revision": "d" * 40, "dirty": False, "files_sha256": {}}
+
+        def sealed_files(app):
+            return {
+                path.relative_to(app).as_posix(): signing.distribution.sha256(path)
+                for path in sorted(app.rglob("*"))
+                if path.is_file() and "_CodeSignature" not in path.parts
+            }
+
+        def apple_tool(arguments, stage, _env):
+            path = Path(arguments[-1])
+            if stage == "code_signing_failed":
+                path.write_bytes(path.read_bytes() + b"signed native component")
+            elif stage == "application_signing_failed":
+                executable = path / "Contents/MacOS/Stark"
+                executable.write_bytes(executable.read_bytes() + b"signed application")
+                seal = path / "Contents/_CodeSignature/CodeResources"
+                seal.parent.mkdir()
+                seal.write_text(json.dumps(sealed_files(path), sort_keys=True))
+            elif stage == "application_seal_invalid":
+                recorded = json.loads(
+                    (path / "Contents/_CodeSignature/CodeResources").read_text()
+                )
+                self.assertEqual(recorded, sealed_files(path))
+            elif stage == "application_stapling_failed":
+                if fail_stapling:
+                    raise signing.SigningError("application_stapling_failed")
+                (path / "Contents/_CodeSignature/NotarizationTicket").write_bytes(
+                    b"accepted app ticket"
+                )
+            elif stage == "application_ticket_invalid":
+                self.assertEqual(
+                    (path / "Contents/_CodeSignature/NotarizationTicket").read_bytes(),
+                    b"accepted app ticket",
+                )
+            elif stage == "notary_zip_failed":
+                payload = Path(arguments[-2])
+                with zipfile.ZipFile(
+                    path, "w", compression=zipfile.ZIP_DEFLATED
+                ) as contents:
+                    for file in sorted(payload.rglob("*")):
+                        if file.is_file():
+                            contents.write(
+                                file,
+                                arcname="stark/" + file.relative_to(payload).as_posix(),
+                            )
+            else:
+                self.fail("unexpected Apple tool stage: " + stage)
+            return result()
+
+        with (
+            patch.object(signing.platform, "system", return_value="Darwin"),
+            patch.object(signing.platform, "machine", return_value="arm64"),
+            patch.object(signing, "recipe_provenance", return_value=recipe),
+            patch.object(signing, "resolve_identity", return_value=IDENTITY),
+            patch.object(signing.distribution, "verify_relocation"),
+            patch.object(signing, "verify_signature"),
+            patch.object(signing, "run", side_effect=apple_tool),
+            patch.object(
+                signing,
+                "notarize",
+                return_value={"status": "accepted", "submission_id": UUID},
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            return signing.sign(options)
+
+    def test_final_archives_include_stapled_app_and_match_final_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = self.sign_application_with_stubbed_apple_tools(root)
+            stem = "stark-0.1.2-aarch64-apple-darwin"
+            archive = root / "output" / (stem + ".tar.gz")
+            zipped = root / "output" / (stem + ".zip")
+            with tarfile.open(archive) as contents:
+                delivered = {
+                    entry.name.removeprefix("stark/"): contents.extractfile(
+                        entry
+                    ).read()
+                    for entry in contents
+                    if entry.isfile()
+                }
+            with zipfile.ZipFile(zipped) as contents:
+                self.assertEqual(
+                    delivered,
+                    {
+                        name.removeprefix("stark/"): contents.read(name)
+                        for name in contents.namelist()
+                    },
+                )
+            self.assertEqual(
+                delivered[
+                    signing.APPLICATION + "/Contents/_CodeSignature/NotarizationTicket"
+                ],
+                b"accepted app ticket",
+            )
+            manifest = json.loads(delivered[signing.MANIFEST])
+            self.assertEqual(
+                manifest["files_sha256"],
+                {
+                    name: signing.hashlib.sha256(data).hexdigest()
+                    for name, data in delivered.items()
+                    if name != signing.MANIFEST
+                },
+            )
+            runtime = signing.APPLICATION + "/Contents/Resources/runtime/"
+            runtime_manifest = json.loads(delivered[runtime + signing.MANIFEST])
+            self.assertEqual(
+                runtime_manifest["files_sha256"],
+                {
+                    name.removeprefix(runtime): signing.hashlib.sha256(data).hexdigest()
+                    for name, data in delivered.items()
+                    if name.startswith(runtime) and name != runtime + signing.MANIFEST
+                },
+            )
+            self.assertEqual(
+                receipt["archive_sha256"], signing.distribution.sha256(archive)
+            )
+            self.assertEqual(receipt["zip_sha256"], signing.distribution.sha256(zipped))
+            self.assertNotEqual(
+                receipt["notarization_submission_sha256"], receipt["zip_sha256"]
+            )
+            self.assertEqual(
+                receipt["notarization"]["application_ticket"], "stapled_and_validated"
+            )
+
+    def test_failed_app_stapling_does_not_publish_an_accepted_submission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                signing.SigningError, "application_stapling_failed"
+            ):
+                self.sign_application_with_stubbed_apple_tools(root, fail_stapling=True)
+            self.assertEqual(list((root / "output").iterdir()), [])
+
+    def test_application_is_sealed_after_nested_signatures_and_manifest_refresh(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            bundle = root / "source/stark"
+            app = app_fixture(bundle)
+            calls = []
+
+            def command(arguments, stage, _env):
+                path = Path(arguments[-1])
+                calls.append((stage, path))
+                if stage == "code_signing_failed":
+                    path.write_bytes(path.read_bytes() + b"signed")
+                elif stage == "application_signing_failed":
+                    manifest = json.loads(
+                        (app / "Contents/Resources/menu-bar-manifest.json").read_bytes()
+                    )
+                    self.assertEqual(
+                        manifest["base_runtime"]["manifest_sha256"], "f" * 64
+                    )
+                    self.assertEqual(manifest["signed_runtime"]["version"], "0.1.2")
+                    worker = app / "Contents/Resources/runtime" / NATIVE_NAMES[1]
+                    self.assertEqual(
+                        manifest["signed_overlays_sha256"][NATIVE_NAMES[1]],
+                        signing.distribution.sha256(worker),
+                    )
+                return result()
+
+            signing.prepare_application_version(bundle, "0.1.2")
+            with (
+                patch.object(signing, "run", side_effect=command),
+                patch.object(signing, "verify_signature"),
+            ):
+                paths = signing.sign_bundle(bundle, IDENTITY, None, {})
+            self.assertEqual(len(paths), len(NATIVE_NAMES) * 2 + 1)
+            stages = [stage for stage, _ in calls]
+            self.assertGreater(
+                stages.index("application_signing_failed"),
+                max(
+                    index
+                    for index, stage in enumerate(stages)
+                    if stage == "code_signing_failed"
+                ),
+            )
+            self.assertEqual(
+                plistlib.loads((app / "Contents/Info.plist").read_bytes())[
+                    "CFBundleVersion"
+                ],
+                "0.1.2",
+            )
+
+    def test_application_ticket_is_required_when_notarization_is_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            bundle = root / "source/stark"
+            app = app_fixture(bundle)
+            with (
+                patch.object(signing, "verify_signature") as signature,
+                patch.object(signing, "run") as command,
+            ):
+                signing.verify_application(bundle, IDENTITY, {}, notarized=True)
+            signature.assert_called_once_with(app, IDENTITY, {}, notarized=True)
+            self.assertEqual(
+                command.call_args_list[-1].args[0],
+                ["/usr/bin/xcrun", "stapler", "validate", app],
+            )
+
     def test_verified_input_retains_its_original_source_and_hashes(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

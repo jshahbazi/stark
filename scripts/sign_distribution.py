@@ -12,6 +12,7 @@ import hashlib
 import json
 import os
 import platform
+import plistlib
 import re
 import shutil
 import subprocess
@@ -25,6 +26,8 @@ import build_distribution as distribution
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = "share/stark/manifest.json"
 RECIPE_FILES = ("scripts/sign_distribution.py", "scripts/build_distribution.py")
+APPLICATION = "app/Stark.app"
+APPLICATION_ID = "com.starkengine.menubar"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
 MACHO_MAGIC = {
@@ -321,6 +324,98 @@ def verify_signature(
     )
 
 
+def application(bundle: Path) -> Path | None:
+    app = bundle / APPLICATION
+    if not app.exists():
+        return None
+    require(app.is_dir() and not app.is_symlink(), "application_layout_invalid")
+    try:
+        metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    except (OSError, ValueError, plistlib.InvalidFileException) as error:
+        raise SigningError("application_plist_invalid") from error
+    require(
+        metadata.get("CFBundleIdentifier") == APPLICATION_ID
+        and metadata.get("CFBundleExecutable") == "Stark"
+        and (app / "Contents/MacOS/Stark").is_file(),
+        "application_identity_invalid",
+    )
+    return app
+
+
+def prepare_application_version(bundle: Path, version: str) -> None:
+    app = application(bundle)
+    if app is None:
+        return
+    plist = app / "Contents/Info.plist"
+    metadata = plistlib.loads(plist.read_bytes())
+    metadata["CFBundleShortVersionString"] = version
+    metadata["CFBundleVersion"] = ".".join(version.split(".")[:3]).split("-")[0]
+    plist.write_bytes(plistlib.dumps(metadata, sort_keys=True))
+    (app / "Contents/Resources/runtime/share/stark/VERSION").write_text(version + "\n")
+
+
+def refresh_application_manifest(bundle: Path, identity: dict[str, str]) -> None:
+    """Record signed overlay bytes before sealing the app's resources."""
+    app = application(bundle)
+    if app is None:
+        return
+    runtime = app / "Contents/Resources/runtime"
+    runtime_manifest_path = runtime / MANIFEST
+    runtime_manifest = json.loads(runtime_manifest_path.read_bytes())
+    runtime_manifest["version"] = (runtime / "share/stark/VERSION").read_text().strip()
+    runtime_manifest["signing"] = {
+        "certificate_sha1": identity["sha1"],
+        "team_id": identity["team_id"],
+        "hardened_runtime": True,
+        "secure_timestamp": True,
+    }
+    runtime_manifest_path.unlink()
+    runtime_manifest["files_sha256"] = distribution.file_manifest(runtime)
+    runtime_manifest_path.write_text(
+        json.dumps(runtime_manifest, indent=2, sort_keys=True) + "\n"
+    )
+    path = app / "Contents/Resources/menu-bar-manifest.json"
+    manifest = json.loads(path.read_bytes())
+    # base_runtime and executable_before_signing_sha256 retain their original
+    # source-bound build evidence; the signed view describes the delivered bytes.
+    manifest["signed_runtime"] = {
+        "version": runtime_manifest["version"],
+        "manifest_sha256": distribution.sha256(runtime_manifest_path),
+        "certificate_sha1": identity["sha1"],
+        "team_id": identity["team_id"],
+    }
+    manifest["signed_overlays_sha256"] = {
+        name: distribution.sha256(runtime / relative_path(name))
+        for name in manifest.get("overlays_sha256", {})
+    }
+    manifest["signature"] = "Developer ID; hardened runtime and secure timestamp"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+
+def verify_application(
+    bundle: Path,
+    identity: dict[str, str],
+    env: dict[str, str],
+    *,
+    notarized: bool = False,
+) -> None:
+    app = application(bundle)
+    if app is None:
+        return
+    verify_signature(app, identity, env, notarized=notarized)
+    run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", app],
+        "application_seal_invalid",
+        env,
+    )
+    if notarized:
+        run(
+            ["/usr/bin/xcrun", "stapler", "validate", app],
+            "application_ticket_invalid",
+            env,
+        )
+
+
 def sign_bundle(
     bundle: Path, identity: dict[str, str], keychain: Path | None, env: dict[str, str]
 ) -> list[str]:
@@ -344,6 +439,24 @@ def sign_bundle(
         arguments.append(str(path))
         run(arguments, "code_signing_failed", env)
         verify_signature(path, identity, env)
+    app = application(bundle)
+    if app is not None:
+        refresh_application_manifest(bundle, identity)
+        arguments = [
+            "/usr/bin/codesign",
+            "--force",
+            "--sign",
+            identity["sha1"],
+            "--options",
+            "runtime",
+            "--timestamp",
+            "--identifier",
+            APPLICATION_ID,
+        ]
+        if keychain is not None:
+            arguments.extend(["--keychain", str(keychain)])
+        run([*arguments, app], "application_signing_failed", env)
+        verify_application(bundle, identity, env)
     return [path.relative_to(bundle).as_posix() for path in paths]
 
 
@@ -460,6 +573,7 @@ def sign(options: argparse.Namespace) -> dict:
         )
         identity = resolve_identity(options.sign_identity, options.keychain, env)
         (bundle / "share/stark/VERSION").write_text(options.version + "\n")
+        prepare_application_version(bundle, options.version)
         signed_paths = sign_bundle(bundle, identity, options.keychain, env)
         try:
             distribution.verify_relocation(bundle, env)
@@ -487,15 +601,12 @@ def sign(options: argparse.Namespace) -> dict:
         (bundle / MANIFEST).write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
-        archive = work / f"{stem}.tar.gz"
-        digest = distribution.create_archive(bundle, archive)
         receipt = {
             "schema_version": 1,
             "version": options.version,
             "source_revision": options.expected_source,
             "distribution_source": recipe,
             "input_archive_sha256": options.input_sha256,
-            "archive_sha256": digest,
             "certificate_sha1": identity["sha1"],
             "team_id": identity["team_id"],
             "mach_o_count": len(signed_paths),
@@ -512,7 +623,7 @@ def sign(options: argparse.Namespace) -> dict:
                 "notary_zip_failed",
                 env,
             )
-            receipt["zip_sha256"] = distribution.sha256(zipped)
+            receipt["notarization_submission_sha256"] = distribution.sha256(zipped)
             receipt["notarization"] = notarize(
                 zipped, options.notary_profile, options.keychain, env
             )
@@ -523,9 +634,35 @@ def sign(options: argparse.Namespace) -> dict:
             ):
                 verify_signature(bundle / name, identity, env, notarized=True)
             receipt["notarization"]["standalone_executable_tickets"] = "verified_online"
+            app = application(bundle)
+            if app is not None:
+                run(
+                    ["/usr/bin/xcrun", "stapler", "staple", app],
+                    "application_stapling_failed",
+                    env,
+                )
+                verify_application(bundle, identity, env, notarized=True)
+                receipt["notarization"]["application_ticket"] = "stapled_and_validated"
+                # Stapling can add ticket files. Hash the final delivered app,
+                # then rebuild containers after Apple acceptance and stapling.
+                (bundle / MANIFEST).unlink()
+                manifest["files_sha256"] = distribution.file_manifest(bundle)
+                (bundle / MANIFEST).write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+                )
+                zipped.unlink()
+                run(
+                    ["/usr/bin/ditto", "-c", "-k", "--keepParent", bundle, zipped],
+                    "notary_zip_failed",
+                    env,
+                )
+            receipt["zip_sha256"] = distribution.sha256(zipped)
             (work / f"{stem}.zip.sha256").write_text(
                 f"{receipt['zip_sha256']}  {zipped.name}\n"
             )
+        archive = work / f"{stem}.tar.gz"
+        digest = distribution.create_archive(bundle, archive)
+        receipt["archive_sha256"] = digest
         require(
             recipe_provenance(env, allow_dirty=options.sign_only) == recipe,
             "signing_recipe_changed",

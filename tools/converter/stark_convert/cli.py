@@ -30,7 +30,7 @@ from .registry import (
     get_model,
     model_kind_for_architecture,
 )
-from .sources import SourceSnapshot, resolve_source
+from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, write_plan
 
 
@@ -377,7 +377,9 @@ class _Parser(argparse.ArgumentParser):
 def main() -> int:
     parser = _Parser(description="Convert selected HF catalog profiles with independent Stark streaming adapters.")
     parser.add_argument("--version", action="version", version="%(prog)s " + __version__)
-    parser.add_argument("source", nargs="?", help="HF repository ID or local checkpoint directory")
+    parser.add_argument(
+        "source", nargs="?", help="HF repository ID, full repository URL or local checkpoint directory"
+    )
     parser.add_argument(
         "--repo", help="Catalog identity for a local checkpoint; omit with --metadata-profile hf-generic"
     )
@@ -415,6 +417,8 @@ def main() -> int:
             progress.emit("download", "waiting", force=True)
             progress.emit("conversion", "waiting", force=True)
         repo = args.repo or (args.source if args.source and not Path(args.source).expanduser().is_dir() else None)
+        if repo is not None:
+            repo = huggingface_repository(repo)
         request = ConversionRequest(
             repo,
             args.dtype,
