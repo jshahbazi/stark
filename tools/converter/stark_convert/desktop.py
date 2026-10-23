@@ -112,6 +112,10 @@ class Desktop:
         self.messages = []
         self.context = 8192
         self.maximum = 512
+        self.system_prompt = None
+        self.thinking = False
+        self.context_limit = 8192
+        self.output_limit = 512
         self.models = []
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.data_dir.chmod(0o700)
@@ -466,16 +470,52 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.codec, self.template = codec, template
-            self.context = min(8192, ready["max_context_tokens"])
-            self.maximum = min(512, ready["max_new_tokens"], self.context - 1)
+            self.context_limit = min(16384, ready["max_context_tokens"])
+            self.output_limit = min(4096, ready["max_new_tokens"])
+            self.context = min(self.context, self.context_limit)
+            self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             self.active_model = identifier
             self.reset()
-            self.emit("ready", epoch, model_id=identifier)
+            self.emit("ready", epoch, model_id=identifier, **self.settings_summary())
             self.status("ready", "Ready", epoch)
+
+    def settings_summary(self):
+        # The system prompt stays in memory; acknowledgements contain only limits.
+        return {
+            "context_tokens": self.context,
+            "max_new_tokens": self.maximum,
+            "max_context_tokens": self.context_limit,
+            "max_output_tokens": self.output_limit,
+        }
+
+    def configure(self, payload):
+        with self.lock:
+            if self.job is not None:
+                raise DesktopError("Wait for the current operation or choose Stop.")
+            if self.worker is None:
+                raise DesktopError("Run a model before changing advanced options.")
+            context, maximum = payload.get("context_tokens"), payload.get("max_new_tokens")
+            system, thinking = payload.get("system_prompt"), payload.get("thinking")
+            if (
+                set(payload) != {"command", "context_tokens", "max_new_tokens", "system_prompt", "thinking"}
+                or type(context) is not int
+                or not 2 <= context <= self.context_limit
+                or type(maximum) is not int
+                or not 1 <= maximum <= min(self.output_limit, context - 1)
+                or (system is not None and not isinstance(system, str))
+                or type(thinking) is not bool
+            ):
+                raise DesktopError("Invalid advanced options. Check the model's token limits.")
+            self.context, self.maximum = context, maximum
+            self.system_prompt, self.thinking = system, thinking
+            self.reset()
+            self.emit("configured", **self.settings_summary())
 
     def reset(self):
         with self.lock:
-            system = (self.codec or {}).get("default_system_prompt")
+            system = self.system_prompt
+            if system is None:
+                system = (self.codec or {}).get("default_system_prompt")
             self.messages = [{"role": "system", "content": system}] if system else []
 
     def generate(self, epoch, text):
@@ -488,7 +528,7 @@ class Desktop:
             messages=candidate,
             tools=None,
             add_generation_prompt=True,
-            enable_thinking=False,
+            enable_thinking=self.thinking,
             bos_token=codec.get("bos_token") or "",
             eos_token=codec.get("eos_token") or "",
         )
@@ -562,6 +602,8 @@ class Desktop:
                 if self.job is not None:
                     raise DesktopError("Wait for the current operation or choose Stop.")
                 self.reset()
+        elif command == "configure":
+            self.configure(payload)
         else:
             raise DesktopError("Invalid app command.")
         return True
