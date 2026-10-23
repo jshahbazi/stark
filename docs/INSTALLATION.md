@@ -2,22 +2,25 @@
 
 Stark runs on an Apple silicon Mac with macOS 26.4 or newer. The native engine currently compiles Metal 4 kernels for that minimum OS. Use a native arm64 terminal; Intel Macs and Rosetta terminals are rejected.
 
-Install the [v0.1.1 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.1) without a source checkout or developer tools:
+Install the [v0.1.2 signed release](https://github.com/jshahbazi/stark/releases/tag/v0.1.2), including terminal chat and the menu bar app, without a source checkout or developer tools:
 
 ```sh
-curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.1/install.sh -o stark-install.sh
-sh stark-install.sh --version 0.1.1
+curl -fL https://github.com/jshahbazi/stark/releases/download/v0.1.2/install.sh -o stark-install.sh
+sh stark-install.sh --version 0.1.2
 export PATH="$HOME/.local/bin:$PATH"
 stark doctor
+open "$HOME/Applications/Stark.app"
 ```
 
-The installer downloads and verifies the versioned archive and installs to `~/.local`, without sudo. Add `~/.local/bin` to your shell profile to keep it on PATH. The runtime includes Python and the converter; Rust, Xcode and uv are only needed to build Stark itself. The signed release includes Developer ID signatures, hardened runtime and secure timestamps for every runtime-loadable native component, including the private Python interpreter and extensions.
+The installer downloads and verifies the versioned archive, installs the CLI to `~/.local` and the self-contained app to `~/Applications/Stark.app`, without sudo. Add `~/.local/bin` to your shell profile to keep it on PATH. Both interfaces include their private runtimes; Rust, Xcode and uv are only needed to build Stark itself. The signed release includes Developer ID signatures, hardened runtime and secure timestamps for every runtime-loadable native component, including private Python interpreters and extensions. The app's notarization ticket is stapled and validated.
 
 The [2026-10-21 installation validation](INSTALLATION_VALIDATION_2026_10_21.md) records 41 passing tests plus a real source install, upgrade, offline conversion, relocation and uninstall on the named build.
 
 ## Menu bar application
 
-Stark also has a native menu bar controller with model installation, Run/Stop controls, a small chat window, status and last-request input/output token speeds. From a configured source checkout with the standalone CLI runtime already installed:
+The installed app provides model installation, Run/Stop controls, a small chat window, status and last-request input/output token speeds. Open `~/Applications/Stark.app`, click the cat icon, choose **Install Model**, select a supported folder or Hugging Face repository, then choose **Run** to open chat. **Stop** unloads the worker. Models download separately and remain outside the application bundle. See the [menu bar guide](../apps/menu-bar/README.md).
+
+To rebuild only the app during development, use a configured source checkout with a standalone CLI runtime already installed:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
@@ -57,6 +60,8 @@ stark doctor
 
 A bundle contains the native scoring and generation workers, embedded Metal kernels, a private Python runtime, the converter with locked dependencies, provenance and license notices. No compiler, package manager or Python setup is needed on the receiving Mac. A local archive supplies the installation files; macOS may need a network connection to retrieve its notarization tickets on first execution.
 
+Combined releases also contain `app/Stark.app` with an independent embedded runtime. The installer copies this app to the selected Applications folder. Earlier CLI-only archives remain supported.
+
 Keep the archive, its adjacent `.sha256` file and the companion `install.sh` together. The builder emits all three; the receiving Mac does not need a source checkout:
 
 ```sh
@@ -85,6 +90,14 @@ The version is explicit. A missing release or checksum stops the installation wi
 
 ## Use Stark
 
+Start an interactive terminal conversation with a converted model:
+
+```sh
+stark chat --model-path /absolute/path/to/converted-model
+```
+
+Enter one message per line; `/reset` clears history and `/exit` quits. Chat uses the model's chat template and keeps history in memory. See [chat options](GENERATION.md#interactive-cli-chat).
+
 Convert a supported Hugging Face model:
 
 ```sh
@@ -111,23 +124,23 @@ These launch the existing [scoring](SCORING.md) and [generation](GENERATION.md) 
 
 ## Update, choose a location, or uninstall
 
-Install a newer archive with the same command and prefix. The installer verifies its checksum, extracts into a temporary directory and runs `doctor` before switching the `current` link. A failed self-check keeps the previous version active. Version directories are immutable: installing different contents under an existing version is refused. Reinstalling the same archive is allowed.
+Quit the menu bar app, then install a newer archive with the same command, prefix and app directory. The installer verifies its checksum, extracts into a temporary directory, runs `doctor` and validates the app before activation. Combined installation failures roll back the app, command links and active CLI version. Version directories are immutable: installing different contents under an existing version is refused. Reinstalling the same archive is allowed. A running app or unrelated application at the destination stops installation.
 
 Choose a prefix consistently for installation and updates:
 
 ```sh
 ./install.sh --prefix "$HOME/tools"
 sh install.sh --archive /path/to/stark-VERSION-aarch64-apple-darwin.tar.gz \
-  --prefix "$HOME/tools"
+  --prefix "$HOME/tools" --app-dir "$HOME/Applications"
 ```
 
-Commands go into `PREFIX/bin`; bundles go into `PREFIX/lib/stark/releases/VERSION`. Other commands at that prefix are preserved, and collisions with existing Stark commands are refused. Old versions remain available in the release directory until uninstall. Models and Hugging Face caches remain at the locations you selected.
+Commands go into `PREFIX/bin`; bundles go into `PREFIX/lib/stark/releases/VERSION`. `--app-dir` selects the parent folder for `Stark.app`. Other commands at that prefix are preserved, and collisions with existing Stark commands are refused. Old CLI versions remain available in the release directory until uninstall. The installer records ownership of the app separately so one CLI installation cannot remove another installation's app. Models and Hugging Face caches remain at the locations you selected.
 
 ```sh
 stark uninstall
 ```
 
-If the launcher is broken, use `sh install.sh --uninstall --prefix /absolute/prefix`. Uninstall removes the managed binaries and command links, while keeping models and other commands. An interrupted install can leave `PREFIX/lib/stark/.install-lock`. After confirming no installer is running, remove that empty lock directory and rerun the installer.
+Quit the app before uninstalling. If the launcher is broken, use `sh install.sh --uninstall --prefix /absolute/prefix`. Uninstall removes the managed app, binaries and command links, while keeping models, Application Support data and other commands. An interrupted install can leave `PREFIX/lib/stark/.install-lock`. After confirming no installer is running, remove that empty lock directory and rerun the installer.
 
 ## Build a distributable archive
 
@@ -148,7 +161,7 @@ The builder uses separate Cargo invocations for the optimized scorer and default
 
 Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
-The builder creates local archives. The [release workflows](RELEASING.md) build unsigned input archives or sign and notarize a pinned reviewed input on a GitHub-hosted Mac, then create a draft for publication. The signing action retains the engine's original source identity and records its signing recipe separately. The inherited Uzu release, cloud and signing workflows remain disabled.
+The builder creates combined local archives by default; `--cli-only` creates a development bundle without the app. The [release workflows](RELEASING.md) build from the tagged source on a GitHub-hosted Mac, sign and notarize the combined distribution, staple the app ticket, and create a draft for verification before publication. The signing action retains the engine's original source identity and records its signing recipe separately. The inherited Uzu release, cloud and signing workflows remain disabled.
 
 ## What other engines do
 
