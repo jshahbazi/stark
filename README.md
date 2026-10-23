@@ -63,6 +63,20 @@ Use a new output directory for each conversion. The worker exposes `tokenize`, `
 
 For downloaded or fine-tuned checkpoints, follow the [offline conversion and generic-model instructions](tools/converter/README.md#future-checkpoints-and-architecture-tracking). Generic outputs start native-unverified; check the exact model/configuration's qualification before relying on it.
 
+### Use Stark in another app
+
+Stark can run a local model for another desktop app on your Mac. Look for **OpenAI-compatible** or **Custom OpenAI** in that app's provider settings.
+
+1. [Build and open the menu bar app](apps/menu-bar/README.md), select a model and choose **Run**.
+2. Open **Connection Details…** from Stark's menu or chat window.
+3. In the other app, choose its OpenAI-compatible provider and paste the **Base URL**, **API key** and **Model ID** from that window. Save the settings and start a chat.
+
+Keep Stark open with the model running. After reopening Stark, copy the connection details again: the API key changes, and the address may change. If you switch models, update the Model ID in the other app.
+
+To try a request in Terminal, click **Copy curl Example** in Connection Details and paste the command into Terminal.
+
+The API supports text chat and streaming. Browser-based clients and remote devices cannot connect. Tool calls, embeddings, image input and OpenAI's Responses API are not supported. See the [local API guide](docs/LOCAL_API.md) for the full compatibility details.
+
 ## Evidence you can inspect
 
 Stark keeps source revisions, build hashes, protocols, aggregate results and rejected attempts with its measurements.
