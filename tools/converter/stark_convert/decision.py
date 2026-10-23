@@ -9,6 +9,7 @@ Request content and native readouts remain in memory and private process pipes.
 import json
 import math
 import os
+import re
 import subprocess
 
 from .chat import Worker
@@ -19,6 +20,8 @@ SYSTEM = (
     "Select the answer that best satisfies the question using the provided text. "
     "Reply with one uppercase option letter only."
 )
+THINK_TAG = re.compile(r"<(/?)think\s*>", re.IGNORECASE)
+BOUNDARY_ERROR = "This model's template cannot establish a direct-answer boundary for decisions."
 
 
 class DecisionInputError(Exception):
@@ -79,6 +82,46 @@ def token_ids(reply, vocab_size):
     return ids
 
 
+def decision_prompt(codec, template, payload):
+    """Inspect only the assistant suffix, never reasoning tags in supplied text."""
+    arguments = {
+        "messages": [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+        ],
+        "tools": None,
+        "enable_thinking": False,
+        "bos_token": codec.get("bos_token") or "",
+        "eos_token": codec.get("eos_token") or "",
+    }
+    reasoning = codec.get("reasoning_config")
+    if reasoning is not None:
+        if (
+            not isinstance(reasoning, dict)
+            or reasoning.get("field_name") not in ("enable_thinking", "thinking")
+            or not isinstance(reasoning.get("reasoning_effort_to_field_value"), dict)
+            or reasoning["reasoning_effort_to_field_value"].get("no_reasoning") is not False
+        ):
+            raise DecisionInputError(BOUNDARY_ERROR)
+        arguments[reasoning["field_name"]] = False
+    end_tag = codec.get("end_of_thinking_tag")
+    if end_tag is not None and (not isinstance(end_tag, str) or end_tag.strip() != "</think>"):
+        raise DecisionInputError(BOUNDARY_ERROR)
+    try:
+        prefix = template.render(**arguments, add_generation_prompt=False)
+        prompt = template.render(**arguments, add_generation_prompt=True)
+    except Exception:
+        raise DecisionInputError(BOUNDARY_ERROR) from None
+    if not prompt.startswith(prefix) or len(prompt) == len(prefix):
+        raise DecisionInputError(BOUNDARY_ERROR)
+    depth = 0
+    for tag in THINK_TAG.finditer(prompt[len(prefix) :]):
+        depth = max(0, depth - 1) if tag.group(1) else depth + 1
+    if depth:
+        raise DecisionInputError("This model's template starts in reasoning mode and cannot score answers directly.")
+    return prompt
+
+
 def decide(worker, codec, template, text, question, answers, vocab_size):
     labels = validate_inputs(text, question, answers)
     payload = {
@@ -86,17 +129,7 @@ def decide(worker, codec, template, text, question, answers, vocab_size):
         "question": question,
         "answers": [{"letter": LETTERS[index], "label": label} for index, label in enumerate(labels)],
     }
-    prompt = template.render(
-        messages=[
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-        ],
-        tools=None,
-        add_generation_prompt=True,
-        enable_thinking=False,
-        bos_token=codec.get("bos_token") or "",
-        eos_token=codec.get("eos_token") or "",
-    )
+    prompt = decision_prompt(codec, template, payload)
     candidates = []
     for letter in LETTERS[: len(labels)]:
         ids = token_ids(

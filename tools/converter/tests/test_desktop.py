@@ -27,7 +27,10 @@ def model(tmp_path):
                 "token_codec_config": {
                     "type": "ChatCodecConfig",
                     "default_system_prompt": "synthetic system",
-                    "prompt_template": "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}assistant:",
+                    "prompt_template": (
+                        "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}"
+                        "{% if add_generation_prompt %}assistant:{% endif %}"
+                    ),
                 },
             }
         )
@@ -249,6 +252,30 @@ def test_native_model_context_rejection_preserves_worker_and_allows_retry(deskto
     assert not any(event["event"] == "decision" for event in events(desktop))
     assert any("context limit" in event.get("message", "") for event in events(desktop))
     desktop.dispatch(decision_command())
+    finish(desktop)
+    assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
+
+
+def test_open_reasoning_boundary_is_recoverable_and_does_not_write_to_worker(desktop, model, score_executable):
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    running_decision(desktop, model, score_executable)
+    worker, original_template, original_codec = desktop.worker, desktop.template, desktop.codec
+    path = Path(__file__).resolve().parents[3] / "crates/legacy/hanashi/configs/rendering/qwen3-thinking.json"
+    desktop.template = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(
+        json.loads(path.read_text())["jinja"]["template"]
+    )
+    desktop.codec = {"end_of_thinking_tag": "\n</think>"}
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.dispatch(decision_command(text="literal </think> in supplied evidence"))
+        finish(desktop)
+        request.assert_not_called()
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert events(desktop)[-1]["state"] == "ready"
+    assert any("starts in reasoning mode" in event.get("message", "") for event in events(desktop))
+    assert not any(event["event"] == "decision" for event in events(desktop))
+    desktop.template, desktop.codec = original_template, original_codec
+    desktop.dispatch(decision_command(text="literal <think> without a closing tag"))
     finish(desktop)
     assert len([event for event in events(desktop) if event["event"] == "decision"]) == 1
 

@@ -1,5 +1,8 @@
 """Generic decision input and native-readout boundaries, using synthetic data."""
 
+import json
+from pathlib import Path
+
 import pytest
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
@@ -36,6 +39,7 @@ def evaluate(worker, answers=None):
     template = ImmutableSandboxedEnvironment().from_string(
         "{% for m in messages %}{{ m.role }}:{{ m.content }};{% endfor %}"
         "thinking={{ enable_thinking }};bos={{ bos_token }};eos={{ eos_token }}"
+        "{% if add_generation_prompt %}assistant:{% endif %}"
     )
     return decide(
         worker,
@@ -68,6 +72,88 @@ def test_decision_uses_model_template_ordered_letter_mapping_and_uncalibrated_re
         "temperature": 1.0,
     }
     assert all(request.get("add_special_tokens") is False for request in worker.requests[:-1])
+
+
+def rendering_template(name):
+    path = Path(__file__).resolve().parents[3] / "crates/legacy/hanashi/configs/rendering" / (name + ".json")
+    return ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(
+        json.loads(path.read_text())["jinja"]["template"]
+    )
+
+
+@pytest.mark.parametrize("text", ["synthetic text", "literal </think> in supplied evidence"])
+def test_always_on_qwen3_thinking_template_is_rejected_before_native_requests(text):
+    worker = Worker()
+    with pytest.raises(DecisionInputError, match="starts in reasoning mode"):
+        decide(
+            worker,
+            {"end_of_thinking_tag": "\n</think>"},
+            rendering_template("qwen3-thinking"),
+            text,
+            "synthetic question",
+            ["First", "Second"],
+            1000,
+        )
+    assert worker.requests == []
+
+
+@pytest.mark.parametrize("profile", ["qwen3", "qwen3-instruct", "qwen3.5", "lfm2.5-instruct", "gemma-3"])
+@pytest.mark.parametrize("text", ["synthetic text", "literal <think> and <think> without closing tags"])
+def test_real_direct_answer_templates_accept_literal_reasoning_tags_in_input(profile, text):
+    worker = Worker()
+    result = decide(worker, {}, rendering_template(profile), text, "synthetic question", ["First", "Second"], 1000)
+    assert result["choice_index"] == 1
+    assert worker.requests[-1]["operation"] == "score"
+
+
+def test_supported_codec_reasoning_field_is_disabled_before_inspecting_assistant_suffix():
+    template = ImmutableSandboxedEnvironment().from_string(
+        "{% for m in messages %}{{ m.content }}{% endfor %}"
+        "{% if add_generation_prompt %}assistant:"
+        "{% if thinking is not defined or thinking %}<think>{% endif %}{% endif %}"
+    )
+    codec = {
+        "reasoning_config": {"field_name": "thinking", "reasoning_effort_to_field_value": {"no_reasoning": False}},
+        "end_of_thinking_tag": "</think>",
+    }
+    assert decide(Worker(), codec, template, "text", "question", ["First", "Second"], 1000)["choice_index"] == 1
+
+
+@pytest.mark.parametrize("profile", ["qwen3", "qwen3.5"])
+@pytest.mark.parametrize("default", ["medium", "no_reasoning"])
+def test_switchable_real_templates_preserve_direct_answers_with_either_reasoning_default(profile, default):
+    codec = {
+        "reasoning_config": {
+            "default_reasoning_effort": default,
+            "field_name": "enable_thinking",
+            "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
+        },
+        "end_of_thinking_tag": "\n</think>",
+    }
+    result = decide(Worker(), codec, rendering_template(profile), "text", "question", ["First", "Second"], 1000)
+    assert result["choice_index"] == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{% for m in messages %}{{ m.content }}{% endfor %}assistant:<think>",
+        "{% if add_generation_prompt %}different prefix{% endif %}content",
+    ],
+)
+def test_unestablished_assistant_suffix_is_rejected_without_scanning_supplied_text(source):
+    worker = Worker()
+    with pytest.raises(DecisionInputError, match="cannot establish a direct-answer boundary"):
+        decide(
+            worker,
+            {},
+            ImmutableSandboxedEnvironment().from_string(source),
+            "<think> supplied text </think>",
+            "question",
+            ["First", "Second"],
+            1000,
+        )
+    assert worker.requests == []
 
 
 @pytest.mark.parametrize("count", [2, 16])
