@@ -18,6 +18,9 @@ defaults:
   run:
     shell: bash
 
+env:
+  CARGO_INCREMENTAL: '0'
+
 jobs:
   quality:
     name: Repository checks
@@ -35,6 +38,9 @@ jobs:
         run: rustup toolchain install 1.98.1 --profile minimal
       - name: Install pinned formatter
         run: rustup toolchain install nightly-2026-10-01 --profile minimal --component rustfmt
+      - uses: ./.github/actions/rust-cache
+        with:
+          scope: quality-debug-no-default-features
       - name: Check repository security policy
         run: uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
       - name: Test dependency-report gate
@@ -145,6 +151,10 @@ jobs:
           xcrun -sdk macosx metal --version
       - name: Install pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --component clippy
+      - uses: ./.github/actions/rust-cache
+        with:
+          scope: scoring-release-${{ matrix.configuration }}
+          metal: 'true'
       - name: Build scoring worker
         run: cargo build --release --locked -p stark-score --features "$SCORING_FEATURES"
       - name: Lint scoring targets
@@ -176,6 +186,9 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
+      - uses: ./.github/actions/rust-cache
+        with:
+          scope: compatibility-cpu-check-release-wasm
       - name: Check Python binding dependencies
         run: cargo check --locked -p stark --no-default-features --features bindings-pyo3,backend-cpu
       - name: Check HTTP/1.1 server
@@ -198,6 +211,9 @@ jobs:
           persist-credentials: false
       - name: Install pinned Rust
         run: rustup toolchain install 1.98.1 --profile minimal
+      - uses: ./.github/actions/rust-cache
+        with:
+          scope: cxx-test-cpu-grammar
       - name: Test CXX panic safety and grammar compatibility
         run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
 
