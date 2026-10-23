@@ -123,6 +123,41 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     assert desktop.worker.process is process
 
 
+def test_api_assistant_reasoning_history_reaches_model_template(desktop, model):
+    config_path = model / "config.json"
+    config = json.loads(config_path.read_text())
+    config["token_codec_config"]["prompt_template"] = (
+        "{% for m in messages %}{{ m.role }}:{{ m.content }}"
+        "{% if m.reasoning_content is defined %}[{{ m.reasoning_content }}]{% endif %};{% endfor %}"
+    )
+    config_path.write_text(json.dumps(config))
+    running(desktop, model)
+    process = desktop.worker.process
+    history = list(desktop.messages)
+    request = desktop.worker.request
+    prompts = []
+
+    def capture(payload, **options):
+        if payload["operation"] == "tokenize":
+            prompts.append(payload["text"])
+        return request(payload, **options)
+
+    desktop.worker.request = capture
+    response = desktop.api_complete(
+        {
+            "messages": [
+                {"role": "user", "content": "first synthetic turn"},
+                {"role": "assistant", "content": "synthetic reply", "reasoning_content": "synthetic reasoning"},
+                {"role": "user", "content": "second synthetic turn"},
+            ]
+        }
+    )
+    assert response["choices"][0]["message"]["content"] == "synthetic answer"
+    assert "assistant:synthetic reply[synthetic reasoning];user:second synthetic turn;" in prompts[0]
+    assert desktop.worker.process is process and desktop.messages == history
+    assert desktop.job is None
+
+
 @pytest.mark.parametrize(
     "extra",
     [

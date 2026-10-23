@@ -21,6 +21,40 @@ def test_normalizes_messages_and_defaults():
     assert result["sampling"] == {"mode": "greedy"}
 
 
+@pytest.mark.parametrize("reasoning", ["", "synthetic reasoning"])
+def test_assistant_reasoning_content_in_multiturn_history(reasoning):
+    messages = [
+        {"role": "user", "content": "first synthetic turn"},
+        {"role": "assistant", "content": "synthetic reply", "reasoning_content": reasoning},
+        {"role": "user", "content": "second synthetic turn"},
+    ]
+    assert parse(messages=messages)["messages"] == messages
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": "x", "reasoning_content": ""},
+        {"role": "system", "content": "x", "reasoning_content": ""},
+        {"role": "developer", "content": "x", "reasoning_content": ""},
+        {"role": "assistant", "content": "x", "reasoning_content": None},
+        {"role": "assistant", "content": "x", "reasoning_content": []},
+        {"role": "assistant", "content": "x", "reasoning_content": {}},
+        {"role": "assistant", "content": "x", "reasoning_content": 1},
+        {"role": "assistant", "content": "x", "reasoning_content": "\ud800"},
+        {"role": "assistant", "content": "x", "reasoning_details": []},
+        {"role": "assistant", "content": "x", "reasoning": ""},
+        {"role": "assistant", "content": "x", "tool_calls": []},
+        {"role": "assistant", "content": "x", "function_call": None},
+        {"role": "tool", "content": "x", "tool_call_id": "synthetic"},
+    ],
+)
+def test_reasoning_compatibility_preserves_unsupported_message_rejections(message):
+    with pytest.raises(APIError) as error:
+        parse(messages=[message])
+    assert error.value.status == 400
+
+
 def test_stochastic_and_aliases():
     result = parse(max_completion_tokens=12, temperature=0.7, top_p=0.8, seed=4, stop=["END"])
     assert result["maximum"] == 12

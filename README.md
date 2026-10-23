@@ -46,7 +46,7 @@ The script selects the latest stable release automatically. Installation puts th
 
 ### Use Stark in another app
 
-Stark can run a local model for another desktop app on your Mac. Look for **OpenAI-compatible** or **Custom OpenAI** in that app's provider settings.
+Stark exposes an OpenAI-style text-chat API for compatible clients on the same Mac. Look for **OpenAI-compatible** or **Custom OpenAI** in the client's provider settings. Check the [tested clients](docs/LOCAL_API.md#client-compatibility) first: some desktop apps send browser-origin requests or unsupported message fields.
 
 1. Open Stark, select a model and choose **Run**.
 2. Open **Connection Details…** from Stark's menu or chat window.
@@ -56,7 +56,9 @@ Keep Stark open with the model running. After reopening Stark, copy the connecti
 
 To try a request in Terminal, click **Copy curl Example** in Connection Details and paste the command into Terminal.
 
-The API supports text chat and streaming. Browser-based clients and remote devices cannot connect. Tool calls, embeddings, image input and OpenAI's Responses API are not supported. See the [local API guide](docs/LOCAL_API.md) for the full compatibility details.
+The API supports text chat and streaming. Browser-origin requests are rejected; remote devices and container deployments are unsupported. Tool calls, embeddings, image input, structured output and the Responses API are unsupported.
+
+Requests default to the smaller of 512 output tokens and the worker limit, with temperature 0 for greedy sampling. Unsupported generation settings return errors; neutral settings such as zero penalties are accepted. See [API setup and limits](docs/LOCAL_API.md) and the [scoped client validation](docs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md) for settings and observed results.
 
 ### Chat in Terminal
 

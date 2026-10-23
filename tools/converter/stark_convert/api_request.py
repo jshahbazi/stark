@@ -79,7 +79,7 @@ def _messages(value: Any) -> list[dict[str, str]]:
     for message in value:
         if not isinstance(message, dict) or "role" not in message or "content" not in message:
             raise _bad("Each message requires role and content.")
-        if set(message) - {"role", "content", "name"}:
+        if set(message) - {"role", "content", "name", "reasoning_content"}:
             raise _bad("Unsupported message fields.", "unsupported_parameter")
         role = message["role"]
         if role == "developer":
@@ -90,7 +90,15 @@ def _messages(value: Any) -> list[dict[str, str]]:
             not isinstance(message["name"], str) or len(message["name"]) > 64 or not _NAME.fullmatch(message["name"])
         ):
             raise _bad("Message name must be an ASCII identifier of at most 64 characters.")
-        result.append({"role": role, "content": _content(message["content"])})
+        normalized = {"role": role, "content": _content(message["content"])}
+        if "reasoning_content" in message:
+            reasoning = message["reasoning_content"]
+            if role != "assistant" or not isinstance(reasoning, str):
+                raise _bad("reasoning_content must be text on an assistant message.", "unsupported_parameter")
+            # Some clients replay this text field even when empty. Preserve it
+            # for templates that consume assistant reasoning in the history.
+            normalized["reasoning_content"] = _content(reasoning)
+        result.append(normalized)
     return result
 
 
