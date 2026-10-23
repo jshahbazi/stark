@@ -497,6 +497,7 @@ struct SpeedView: View {
 
 struct MenuView: View {
     @ObservedObject var engine: EngineController
+    @ObservedObject var updater: AppUpdateController
     let install: () -> Void
     let run: () -> Void
     let console: () -> Void
@@ -537,6 +538,7 @@ struct MenuView: View {
             Divider()
             Button("Connection Details…", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
+            AppUpdateView(updater: updater)
             HStack {
                 Button("Open Playground", action: console).buttonStyle(.link)
                 Spacer()
@@ -899,8 +901,10 @@ private final class MenuPanel: NSPanel {
     override func cancelOperation(_ sender: Any?) { onEscape?() }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let engine = EngineController()
+    private let updater = AppUpdateController()
     private var status: NSStatusItem!
     private let menuPanel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var localMenuMonitor: Any?
@@ -951,9 +955,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
-            engine: engine, install: { [weak self] in self?.showInstall() },
+            engine: engine, updater: updater, install: { [weak self] in self?.showInstall() },
             run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
+            .onChange(of: updater.message) { [weak self] _, _ in
+                DispatchQueue.main.async { self?.resizeMenuForUpdate() }
+            }
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
             .clipShape(RoundedRectangle(cornerRadius: 13)))
         engine.onInstalled = { [weak self] in self?.installWindow?.orderOut(nil); self?.showPrompt() }
@@ -1005,6 +1012,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.status.button?.highlight(self.menuPanel.isVisible)
         }
+    }
+
+    private func resizeMenuForUpdate() {
+        guard menuPanel.isVisible, let screen = menuPanel.screen,
+              let size = menuPanel.contentView?.fittingSize else { return }
+        let safe = screen.visibleFrame.insetBy(dx: 8, dy: 8)
+        let height = min(size.height, safe.height)
+        let frame = menuPanel.frame
+        menuPanel.setFrame(NSRect(x: frame.minX, y: max(safe.minY, frame.maxY - height),
+                                 width: frame.width, height: height), display: true)
     }
 
     private func dismissMenu() {
@@ -1059,6 +1076,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 @main
 struct StarkApplication {
+    @MainActor
     static func main() {
         let application = NSApplication.shared
         let delegate = AppDelegate()

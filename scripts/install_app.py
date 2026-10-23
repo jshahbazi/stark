@@ -150,9 +150,28 @@ def read_record(path: Path) -> dict | None:
         raise AppError("managed app record is invalid") from error
     require(
         isinstance(record, dict)
-        and set(record)
-        == {"schema_version", "installation_id", "path", "app_id", "sha256"}
-        and record["schema_version"] == 1
+        and (
+            (
+                record.get("schema_version") == 1
+                and set(record)
+                == {"schema_version", "installation_id", "path", "app_id", "sha256"}
+            )
+            or (
+                record.get("schema_version") == 2
+                and set(record)
+                == {
+                    "schema_version",
+                    "installation_id",
+                    "path",
+                    "app_id",
+                    "sha256",
+                    "state_path",
+                }
+                and isinstance(record["state_path"], str)
+                and Path(record["state_path"]).is_absolute()
+                and Path(record["state_path"]).name == STATE_NAME
+            )
+        )
         and record["app_id"] == APP_ID
         and isinstance(record["installation_id"], str)
         and re.fullmatch(r"[0-9a-f]{32}", record["installation_id"]) is not None
@@ -285,7 +304,8 @@ def install(bundle: Path, prefix: Path, app_dir: Path) -> None:
         activated = False
         created_links: list[Path] = []
         record = {
-            "schema_version": 1,
+            "schema_version": 2,
+            "state_path": str(state_path),
             "installation_id": state["installation_id"] if state else uuid.uuid4().hex,
             "path": str(target),
             "app_id": APP_ID,

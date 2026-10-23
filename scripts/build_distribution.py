@@ -35,6 +35,7 @@ RECIPE_INPUTS = (
     "scripts/build_distribution.py",
     "scripts/build_menubar.py",
     "scripts/install_app.py",
+    "scripts/update_app.py",
     "scripts/stark",
     "install.sh",
     "scripts/install-from-source.sh",

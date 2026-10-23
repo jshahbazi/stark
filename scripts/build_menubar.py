@@ -677,6 +677,8 @@ def build(options: argparse.Namespace) -> Path:
         executable.parent.mkdir(parents=True)
         resources = contents / "Resources"
         resources.mkdir()
+        for helper in ("update_app.py", "install_app.py"):
+            shutil.copy2(ROOT / "scripts" / helper, resources / helper)
         embedded = resources / "runtime"
         excluded_runtime_payload = copy_runtime_for_application(
             runtime, embedded, runtime_manifest
@@ -781,7 +783,13 @@ def build(options: argparse.Namespace) -> Path:
             },
             "resources_sha256": {
                 name: sha256(resources / name)
-                for name in ("Stark.jpg", "MenuBarTemplate.png", "Stark.icns")
+                for name in (
+                    "Stark.jpg",
+                    "MenuBarTemplate.png",
+                    "Stark.icns",
+                    "update_app.py",
+                    "install_app.py",
+                )
             },
             "executable_before_signing_sha256": sha256(executable),
             "validation": {
