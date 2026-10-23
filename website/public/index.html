@@ -94,7 +94,6 @@ open "$HOME/Applications/Stark.app"</code></pre>
         <p>Keep Stark open while you use it. The API listens only on this Mac and issues a new in-memory key each launch. After reopening Stark, update the key and check the URL; it prefers port 8000 and uses another port if occupied.</p>
         <p class="api-compatibility">Text chat and streaming only. Direct browser or webview requests and remote connections are unsupported, along with tool calls, embeddings, images, structured output and the Responses API.</p>
         <p>Requests default to 512 output tokens, or the worker's lower limit, and temperature 0 for greedy sampling. Adjust supported generation settings in your client. Other options may be rejected; check the API limits if a request fails.</p>
-        <p>In our 23 October 2026 check with Stark 0.3.0, the LLM 0.36 and AIChat 0.30.0 terminal clients passed basic chat tests. Cherry Studio 2.1.7 discovered the model and completed first-turn replies, but follow-up chat failed. See the client results for settings and scope.</p>
         <p><a href="https://github.com/jshahbazi/stark/blob/78d40c122832b1ce03ef86a7440d0585f0a50195/docs/LOCAL_API.md">Client results and API limits <span aria-hidden="true">↗</span></a></p>
       </section>
     </section>
