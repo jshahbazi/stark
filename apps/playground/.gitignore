@@ -63,3 +63,6 @@ fastlane/test_output
 
 Derived/
 Generated/
+
+# Firebase local configuration
+Resources/GoogleService-Info.plist
