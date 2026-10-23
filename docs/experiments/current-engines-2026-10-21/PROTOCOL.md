@@ -1,0 +1,29 @@
+# Fresh optimized-Stark multi-engine comparison
+
+Frozen before admission or timing on 2026-10-21. This campaign replaces no historical observations. The older public multi-engine presentation was withdrawn because it described a pre-optimization Stark build; its report and results remain unchanged.
+
+## Scope and artifacts
+
+Use the optimized Stark default binary from `045d0ca6cca8eafae89f32a303e5123f001eaf43`, SHA-256 `66c0aae91af87dadcfb461de536b27479822ea446ffddc78897e5bd98301ba89`. Its engine source matches the current public branch; a later legacy WASM example lockfile change does not alter the native binary's source. No engine or model patches are permitted.
+
+Rerun every peer in the same new campaign: MLX-LM `72be8c955d9a0d3099bd01865af288e0e947c3fa` with MLX 0.32.4; TensorFold 1.1.1 with drafting on and off; llama.cpp b11747; vLLM Metal 0.31.0 with its upstream-pinned core/dependencies. These are explicit pinned comparison versions, not a claim about moving latest releases. Verify retained archive, executable, model and dependency-lock hashes before admission. Record new environment metadata separately.
+
+Use Qwen3.5-2B affine W4/G64 revision `93760be4f1f69842a46bc13dbdc0f19e291392a3` and its existing unchanged Stark repack. llama.cpp uses the existing Unsloth Q4_K_M GGUF, SHA-256 `aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223`; this is a separately labelled engine-plus-format stack because the quantizers differ and original source-weight equivalence is unverified. Borrowed model files are read-only. New environments and caches are task-owned.
+
+## Admission and acquisition
+
+1. Run the existing stock driver's `--probe` once over all six configurations after setup. This verifies readiness, tokenization where exposed, input counts, fixed work and safe teardown. It is admission evidence, not comparative performance. Preserve all admission failures. Correct only setup paths/stock invocation problems, with a separate recorded admission attempt; do not modify engine implementations or model data.
+2. Use the unchanged `benchmark_clean_qwen.py` for timed acquisition. Four independent loads per configuration, three measured repeats of each of six performance fixtures, one measured repeat of each of four sanity fixtures, and one full warmup of all ten fixtures per load. One loaded task model and one in-flight request at a time. Context 8192, greedy decoding and seed zero where available.
+3. Retain the driver's exact rotate/reverse ordering. Four blocks do not fully balance every engine across all six order positions; report the realized order and per-block ranges. Do not infer confidence intervals or universal rankings from this bounded campaign.
+4. Primary rate is actual output tokens divided by complete client request seconds, including prefill, generation, transport/readout and request cleanup. Loading, warmup and quiet admission are excluded. Fixed work requires the explicit output limit and limit termination. Sanity results remain outside speed aggregates.
+5. Apply the previous quiet-window guards unchanged: ten newly observed contiguous quiet seconds before loading and after full warmup, 120-second admission timeout; per-process/total external CPU at most 80%/150%, known model CPU at most 10%, device GPU at most 5%, nominal thermal state. During measurement reject external process CPU above 100%, total above 200%, known model CPU above 10%, non-nominal thermal state, monitor failure/gaps above two seconds, or pageout/swapout increases. Retain load/warmup monitor observations as diagnostics. Do not stop unrelated processes or disable security services.
+6. Finish all setup, builds, tests and agent investigations before acquisition. Hide the Codex window during measurement if needed to avoid its previously observed renderer activity, restoring it afterward. Keep the owned idle-sleep assertion and whole-window sleep/wall-clock checks. Device GPU and basename CPU attribution do not prove exclusive hardware isolation.
+
+## Acceptance and reporting
+
+- A campaign qualifies for a fresh cross-engine table only if every planned configuration and all four loads complete with fixed work, correct input counts, passing host screens, verified artifact provenance and successful cleanup. Require the driver's whole-campaign `timing_accepted: true`, checked zero sleep events and less than two seconds of wall/monotonic discrepancy.
+- Preserve failed/excluded blocks. Do not replace individual loads, pool favorable cells from separate attempts, or relax guards after observing results. At most one subsequent complete campaign may be started if the first is invalidated by interference; keep both receipts and their dispositions separate.
+- If a campaign is not accepted, retain block-level values as diagnostics and publish no replacement all-engine ranking or speedup. A missing/unsupported arm is an admission result, not zero throughput.
+- Summarize within-load medians and geometric means across the four accepted load medians; retain all per-load values, rates/ranges, output-token/text hashes, fixed-work checks and sanity outcomes. Use paired block/workload ratios only within this campaign and state the estimator. Never substitute Oct-20 Stark numbers into Oct-19 peer results.
+- Cache reuse is not fully observable across stacks. Preserve reported counters and stock cache controls; do not claim identical verified cache behavior. HTTP versus private-pipe overhead and upstream dependency differences remain part of the measured stack.
+- Do not infer answer quality from throughput or output hashes. Report sanity failures and output differences, and retain broader quality limitations. No prompts, responses, token vectors, logits, probabilities, credentials or exception dumps are persisted; publish scalar/hash aggregates and path-redacted provenance only.
