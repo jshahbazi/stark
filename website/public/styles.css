@@ -797,7 +797,42 @@ code {
 .start-section {
   display:grid;
   grid-template-columns:1fr 1fr;
-  gap:120px
+  gap:48px 120px
+}
+
+.hero-provenance {
+  margin-top:18px;
+  max-width:420px;
+  color:var(--muted);
+  font-size:13px
+}
+
+.install-option-title {
+  margin-top:30px;
+  font-size:24px
+}
+
+.start-content>.install-option-title {
+  margin-top:0
+}
+
+.install-option-description,.install-check {
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.8;
+  margin-block:16px 24px
+}
+
+.install-check code,.start-steps code {
+  overflow-wrap:anywhere
+}
+
+.engine-provenance {
+  max-width:850px;
+  margin-top:25px;
+  color:var(--muted);
+  font-size:13px;
+  line-height:1.8
 }
 
 .start-heading .eyebrow {
@@ -841,7 +876,11 @@ code {
 .start-steps {
   list-style:none;
   padding:0;
-  margin:0
+  margin:0;
+  grid-column:1/-1;
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:30px
 }
 
 .start-steps li {
@@ -1193,6 +1232,10 @@ code {
   .start-section {
     grid-template-columns:1fr;
     gap:42px
+  }
+  .start-steps {
+    grid-template-columns:1fr;
+    gap:0
   }
   .start-heading>p:not(.eyebrow) {
     max-width:450px
