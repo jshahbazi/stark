@@ -1,4 +1,5 @@
 const commands = {
+  chat: 'stark chat \\\n  --model-path /path/to/converted-model',
   generate: 'stark generate \\\n  --model-path /path/to/converted-model',
   score: 'stark score \\\n  --score-model-path /path/to/converted-model',
   convert: 'stark convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3',

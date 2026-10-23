@@ -6,7 +6,11 @@ import hashlib
 import io
 import os
 import platform
+import plistlib
+import shlex
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -55,7 +59,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
 
-    def bundle(self, version="0.1.0-test.1", *, doctor_ok=True, extra=None):
+    def bundle(self, version="0.1.0-test.1", *, doctor_ok=True, extra=None, app=False):
         archive = (
             self.root / f"bundle-{len(list(self.root.glob('bundle-*.tar.gz')))}.tar.gz"
         )
@@ -70,10 +74,48 @@ class InstallerTests(unittest.TestCase):
             "stark/libexec/stark-generate": ("#!/bin/sh\nexit 0\n", 0o755),
             "stark/libexec/python/bin/python3.13": ("#!/bin/sh\nexit 0\n", 0o755),
         }
+        if app:
+            members["stark/libexec/python/bin/python3.13"] = (
+                "#!/bin/sh\nexec " + shlex.quote(sys.executable) + ' "$@"\n',
+                0o755,
+            )
+            members["stark/share/stark/install_app.py"] = (
+                (ROOT / "scripts/install_app.py").read_text(),
+                0o644,
+            )
+            payload = self.root / (archive.stem + ".app-source") / "Stark.app"
+            executable = payload / "Contents/MacOS/Stark"
+            executable.parent.mkdir(parents=True)
+            shutil.copyfile("/usr/bin/true", executable)
+            executable.chmod(0o755)
+            (payload / "Contents/Info.plist").write_bytes(
+                plistlib.dumps(
+                    {
+                        "CFBundleIdentifier": "com.starkengine.menubar",
+                        "CFBundleExecutable": "Stark",
+                        "CFBundlePackageType": "APPL",
+                        "CFBundleVersion": version,
+                    }
+                )
+            )
+            signed = subprocess.run(
+                ["/usr/bin/codesign", "--force", "--sign", "-", payload],
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(signed.returncode, 0, "synthetic app signing failed")
+            for path in payload.rglob("*"):
+                if path.is_file():
+                    members[
+                        "stark/app/Stark.app/" + path.relative_to(payload).as_posix()
+                    ] = (
+                        path.read_bytes(),
+                        path.stat().st_mode & 0o777,
+                    )
         with tarfile.open(archive, "w:gz") as output:
             for name, (text, mode) in members.items():
                 entry = tarfile.TarInfo(name)
-                data = text.encode()
+                data = text.encode() if isinstance(text, str) else text
                 entry.size, entry.mode = len(data), mode
                 output.addfile(entry, io.BytesIO(data))
             if extra:
@@ -242,6 +284,56 @@ class InstallerTests(unittest.TestCase):
         (base / "keep").write_text("user data")
         self.run_install("--uninstall", expected=1)
         self.assertTrue((base / "keep").exists())
+
+    @unittest.skipUnless(platform.system() == "Darwin", "uses signed synthetic app")
+    def test_combined_install_upgrade_reinstall_uninstall_preserves_models(self):
+        first = self.bundle("0.1.2", app=True)
+        self.run_install("--archive", first)
+        target = self.root / "Applications/Stark.app"
+        self.assertTrue(target.is_dir())
+        self.assertFalse(target.is_symlink())
+        self.run_install("--archive", first)
+        self.run_install("--archive", self.bundle("0.1.3", app=True))
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(), Path("releases/0.1.3")
+        )
+        info = plistlib.loads((target / "Contents/Info.plist").read_bytes())
+        self.assertEqual(info["CFBundleVersion"], "0.1.3")
+        model = self.root / "Library/Application Support/Stark/models/keep"
+        model.parent.mkdir(parents=True)
+        model.write_text("private model placeholder")
+        self.run_install("--uninstall")
+        self.assertFalse(target.exists())
+        self.assertFalse((target.parent / ".Stark.app.installation.json").exists())
+        self.assertEqual(model.read_text(), "private model placeholder")
+
+    @unittest.skipUnless(platform.system() == "Darwin", "uses signed synthetic app")
+    def test_combined_app_directory_override_and_collision(self):
+        archive = self.bundle("0.1.2", app=True)
+        apps = self.root / "custom apps with spaces"
+        target = apps / "Stark.app"
+        target.mkdir(parents=True)
+        (target / "keep").write_text("unrelated app")
+        self.run_install("--archive", archive, "--app-dir", apps, expected=1)
+        self.assertFalse((self.prefix / "lib/stark/current").exists())
+        self.assertEqual((target / "keep").read_text(), "unrelated app")
+        shutil.rmtree(target)
+        self.run_install("--archive", archive, "--app-dir", apps)
+        self.assertTrue(target.is_dir())
+        self.assertFalse((self.root / "Applications/Stark.app").exists())
+        self.run_install("--uninstall")
+        self.assertFalse(target.exists())
+
+    @unittest.skipUnless(platform.system() == "Darwin", "uses signed synthetic app")
+    def test_cli_only_downgrade_does_not_orphan_managed_app(self):
+        self.run_install("--archive", self.bundle("0.1.2", app=True))
+        result = self.run_install("--archive", self.bundle("0.1.1"), expected=1)
+        self.assertIn("CLI-only bundle", result.stderr)
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(), Path("releases/0.1.2")
+        )
+        self.assertTrue((self.root / "Applications/Stark.app").is_dir())
+        self.run_install("--uninstall")
 
 
 if __name__ == "__main__":

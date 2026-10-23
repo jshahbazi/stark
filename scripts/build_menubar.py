@@ -71,6 +71,18 @@ def read_plist(path: Path) -> dict:
         raise BuildError("app_metadata_invalid") from None
 
 
+def set_application_version(info: dict, version: str | None) -> None:
+    """Use a release's numeric version in Apple bundle metadata when supplied."""
+    if version is None:
+        info["CFBundleVersion"] = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        return
+    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)(?:[.-][A-Za-z0-9]+)*", version)
+    if match is None:
+        raise BuildError("application_version_invalid")
+    info["CFBundleShortVersionString"] = match.group(1)
+    info["CFBundleVersion"] = match.group(1)
+
+
 def verify_runtime(runtime: Path) -> dict:
     """Check the immutable input before recording local app overlays separately."""
     try:
@@ -129,6 +141,35 @@ def source_identity() -> dict:
         "dirty": bool(run(["git", "status", "--porcelain"], "source_status")),
         "files_sha256": files,
     }
+
+
+def copy_runtime_for_application(
+    runtime: Path, embedded: Path, manifest: dict
+) -> list[str]:
+    """Derive a CLI runtime from a combined install without embedding another app."""
+    excluded = ["app"] if (runtime / "app").exists() else []
+
+    def ignore(directory: str, _names: list[str]) -> list[str]:
+        return excluded if Path(directory) == runtime else []
+
+    shutil.copytree(runtime, embedded, symlinks=False, ignore=ignore)
+    (embedded / ".archive-sha256").unlink(missing_ok=True)
+    if excluded:
+        derived = json.loads(json.dumps(manifest))
+        (embedded / RUNTIME_MANIFEST).unlink()
+        derived["files_sha256"] = {
+            path.relative_to(embedded).as_posix(): sha256(path)
+            for path in sorted(embedded.rglob("*"))
+            if path.is_file()
+        }
+        derived["application_embedding"] = {
+            "parent_manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
+            "excluded_payload": excluded,
+        }
+        (embedded / RUNTIME_MANIFEST).write_text(
+            json.dumps(derived, indent=2, sort_keys=True) + "\n"
+        )
+    return excluded
 
 
 def verify_worker(worker: Path) -> None:
@@ -611,7 +652,9 @@ def build(options: argparse.Namespace) -> Path:
         resources = contents / "Resources"
         resources.mkdir()
         embedded = resources / "runtime"
-        shutil.copytree(runtime, embedded, symlinks=False)
+        excluded_runtime_payload = copy_runtime_for_application(
+            runtime, embedded, runtime_manifest
+        )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
@@ -621,7 +664,7 @@ def build(options: argparse.Namespace) -> Path:
             shutil.copy2(worker_record_path, resources / "worker-build.json")
         make_icon(artwork, resources, temporary)
         info = read_plist(source_directory / "Info.plist")
-        info["CFBundleVersion"] = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        set_application_version(info, getattr(options, "version", None))
         with (contents / "Info.plist").open("wb") as stream:
             plistlib.dump(info, stream)
         run(
@@ -674,12 +717,15 @@ def build(options: argparse.Namespace) -> Path:
             "schema_version": 1,
             "application_id": APP_ID,
             "minimum_macos": MIN_MACOS,
+            "distribution_version": getattr(options, "version", None),
             "source": source_identity(),
             "base_runtime": {
                 "manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
+                "embedded_manifest_sha256": sha256(embedded / RUNTIME_MANIFEST),
+                "excluded_payload": excluded_runtime_payload,
                 "version": runtime_manifest.get("version"),
                 "source": runtime_manifest.get("source", {}),
-                "note": "The embedded runtime manifest identifies the base CLI distribution. App overlays are recorded here.",
+                "note": "The embedded runtime manifest identifies the CLI snapshot; a combined parent app is excluded. App overlays are recorded here.",
             },
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
@@ -773,6 +819,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional source-bound build record for a development worker",
     )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/menu-bar")
+    parser.add_argument(
+        "--version", help="distribution version to record in the application bundle"
+    )
     parser.add_argument(
         "--install",
         action="store_true",

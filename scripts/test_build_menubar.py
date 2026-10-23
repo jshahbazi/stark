@@ -72,6 +72,41 @@ def make_converter_wheel(
 
 
 class RuntimeVerificationTests(unittest.TestCase):
+    def test_release_version_is_recorded_without_a_build_timestamp(self):
+        info = {}
+        builder.set_application_version(info, "0.1.2-preview.1")
+        self.assertEqual(info["CFBundleShortVersionString"], "0.1.2")
+        self.assertEqual(info["CFBundleVersion"], "0.1.2")
+        with self.assertRaisesRegex(builder.BuildError, "application_version_invalid"):
+            builder.set_application_version({}, "../../0.1.2")
+
+    def test_combined_runtime_is_pruned_without_recursive_application_embedding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            runtime = root / "runtime"
+            make_runtime(runtime)
+            (runtime / "app/Stark.app").mkdir(parents=True)
+            (runtime / "app/Stark.app/payload").write_bytes(b"old application")
+            manifest_path = runtime / builder.RUNTIME_MANIFEST
+            manifest = json.loads(manifest_path.read_text())
+            manifest["files_sha256"]["app/Stark.app/payload"] = builder.sha256(
+                runtime / "app/Stark.app/payload"
+            )
+            manifest_path.write_text(json.dumps(manifest))
+            parent_manifest = manifest_path.read_bytes()
+            builder.verify_runtime(runtime)
+            embedded = root / "new-app/Contents/Resources/runtime"
+            excluded = builder.copy_runtime_for_application(runtime, embedded, manifest)
+            self.assertEqual(excluded, ["app"])
+            self.assertFalse((embedded / "app").exists())
+            self.assertEqual(manifest_path.read_bytes(), parent_manifest)
+            derived = builder.verify_runtime(embedded)
+            self.assertEqual(
+                derived["application_embedding"]["parent_manifest_sha256"],
+                builder.sha256(manifest_path),
+            )
+            self.assertNotIn("app/Stark.app/payload", derived["files_sha256"])
+
     def test_worker_probe_accepts_only_fixed_model_free_protocol_reply(self):
         valid = subprocess.CompletedProcess(
             [], 1, b'{"ready":false,"error":"invalid_arguments"}\n'
