@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 
 enum InstallerError: Error, LocalizedError {
     case source, prepare, install
@@ -23,6 +24,41 @@ struct InstallerFailure: Error, LocalizedError {
 }
 
 enum InstallerFiles {
+    static func createWorkspace() throws -> URL {
+        let manager = FileManager.default
+        let temporary = manager.temporaryDirectory.appendingPathComponent("stark-install-" + UUID().uuidString)
+        try manager.createDirectory(at: temporary, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o700])
+        // Foundation can shorten /private/var back to /var even after
+        // resolvingSymlinksInPath(). The helper rejects symlink ancestors,
+        // so hand it the physical path returned by the filesystem itself.
+        guard let resolved = realpath(temporary.path, nil) else {
+            try? manager.removeItem(at: temporary)
+            throw InstallerError.prepare
+        }
+        defer { free(resolved) }
+        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+    }
+
+    static func helperResult(status: Int32, output: Data, workspace: URL) throws -> InstallerResult {
+        if status != 0 {
+            let recorded = try? Data(contentsOf: workspace.appendingPathComponent("result.json"))
+            // Workspace validation can fail before result.json may be written.
+            // The verified helper also returns these fixed errors over stdout.
+            for data in [recorded, output] {
+                if let data, data.count <= 16_384,
+                   let failure = try? JSONDecoder().decode([String: String].self, from: data),
+                   let message = failure["error"] { throw InstallerFailure(message: message) }
+            }
+            throw InstallerError.install
+        }
+        guard output.count <= 16_384,
+              let installed = try? JSONDecoder().decode(InstallerResult.self, from: output) else {
+            throw InstallerError.install
+        }
+        return installed
+    }
+
     static func install(bundle: URL) throws -> InstallerResult {
         let manager = FileManager.default
         // Keep the payload inside the signed installer. Gatekeeper may
@@ -37,10 +73,7 @@ enum InstallerFiles {
         // Verify before executing any interpreter or helper from the payload.
         try AppUpdateFiles.verifySignature(source, app: true)
         try AppUpdateFiles.verifyMetadata(source, version: version)
-        let workspace = manager.temporaryDirectory.resolvingSymlinksInPath()
-            .appendingPathComponent("stark-install-" + UUID().uuidString)
-        try manager.createDirectory(at: workspace, withIntermediateDirectories: false,
-                                    attributes: [.posixPermissions: 0o700])
+        let workspace = try createWorkspace()
         defer { try? manager.removeItem(at: workspace) }
         let candidate = workspace.appendingPathComponent("Stark.app")
         try manager.copyItem(at: source, to: candidate)
@@ -63,17 +96,7 @@ enum InstallerFiles {
         try process.run()
         let result = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            if let data = try? Data(contentsOf: workspace.appendingPathComponent("result.json")),
-               let failure = try? JSONDecoder().decode([String: String].self, from: data),
-               let message = failure["error"] { throw InstallerFailure(message: message) }
-            throw InstallerError.install
-        }
-        guard result.count <= 16_384,
-              let installed = try? JSONDecoder().decode(InstallerResult.self, from: result) else {
-            throw InstallerError.install
-        }
-        return installed
+        return try helperResult(status: process.terminationStatus, output: result, workspace: workspace)
     }
 }
 
@@ -139,6 +162,7 @@ final class InstallerDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+#if !STARK_INSTALLER_LIBRARY
 @main
 struct StarkInstallerApplication {
     @MainActor
@@ -151,3 +175,4 @@ struct StarkInstallerApplication {
         withExtendedLifetime(delegate) {}
     }
 }
+#endif
