@@ -158,10 +158,13 @@ def test_api_assistant_reasoning_history_reaches_model_template(desktop, model):
     assert desktop.job is None
 
 
-@pytest.mark.parametrize("source, expected", [
-    ("huggingface:Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B"),
-    ("local:/synthetic/JevK5", "JevK5"),
-])
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        ("huggingface:Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B"),
+        ("local:/synthetic/JevK5", "JevK5"),
+    ],
+)
 def test_public_model_ids_preserve_private_library_identity(desktop, model, source, expected):
     identifier = installed(desktop, model)
     desktop.models[0].update(source=source, name="JevK5")
@@ -195,8 +198,9 @@ def test_http_rejects_unknown_model_with_public_ids(desktop, model, stream):
     try:
         request = Request(
             info["base_url"] + "/chat/completions",
-            data=json.dumps({"model": "unknown", "stream": stream,
-                             "messages": [{"role": "user", "content": "fixture"}]}).encode(),
+            data=json.dumps(
+                {"model": "unknown", "stream": stream, "messages": [{"role": "user", "content": "fixture"}]}
+            ).encode(),
             headers={"Authorization": "Bearer " + info["api_key"], "Content-Type": "application/json"},
         )
         with pytest.raises(HTTPError) as error:
