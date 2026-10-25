@@ -7,7 +7,7 @@ Read [AGENTS.md](AGENTS.md) for the repository rules (provenance, logging, cachi
 | Tool | Version | Used for |
 | --- | --- | --- |
 | Rust | 1.98.1 via rustup (`rust-toolchain.toml`) | Building and testing the engine and workers |
-| Rust nightly | `nightly-2026-10-01` | `cargo fmt` only, because the inherited rustfmt configuration needs nightly options; also needed to run the engine unit suite (see below) |
+| Rust nightly | `nightly-2026-10-01` | `cargo fmt`, because the inherited rustfmt configuration needs nightly options, and the engine unit suite (see below) |
 | Xcode with the Metal Toolchain | current | Compiling `.metal` kernels; the Command Line Tools package alone is not enough |
 | uv | 0.12.24 | Every Python environment |
 | Python | 3.13.13 for the converter and installer tests, 3.12.13 for the repository policy scripts | Managed by uv; nothing uses the system Python |
@@ -50,10 +50,10 @@ cargo +1.98.1 build --release --locked -p stark-score --features optimized
 
 ## Engine tests
 
-The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. It is not run in CI. To run it locally:
+The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. CI runs it in the `engine-unit` job on the Apple silicon runner. To run it locally with the same pinned nightly:
 
 ```sh
-cargo +nightly test -p stark-engine --features cpu,metal -- --test-threads=1
+cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal -- --test-threads=1
 ```
 
 Nothing in this run needs a model or the network. The ignored `test_metadata_loading` test and the model-loading benchmark read a converted model from `STARK_TEST_MODEL_PATH`; point it at a directory such as the one the smoke test below produces and add `--include-ignored` (or `--bench`, see `crates/stark-engine/unit/BENCHMARKS.md`). Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.
