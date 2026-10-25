@@ -1050,6 +1050,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dismissMenu()
         if connectionWindow == nil {
             connectionWindow = window(title: "Stark — Connection Details", view: ConnectionDetailsView(engine: engine), resizable: false)
+        } else {
+            // Reset the inspected model so each opening defaults to the running model.
+            connectionWindow?.contentViewController = NSHostingController(rootView: ConnectionDetailsView(engine: engine))
         }
         present(connectionWindow)
     }
