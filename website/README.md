@@ -13,14 +13,14 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory website/dist
 
 Open `http://127.0.0.1:4173`. `public/` is the source and `dist/` is ignored generated output. From a standalone site checkout, run `node build.mjs`.
 
-`release.json` records the latest published release: version, date and release-notes URL. The build validates it and substitutes the `{{release.*}}` placeholders in `index.html` and `404.html`, failing on an unknown placeholder or a notes URL that does not match the version. After a release is published, update `release.json`, rebuild and redeploy. Download links keep using the stable `releases/latest` URLs and need no change.
+Release copy is evergreen. Download and release-note links use GitHub's stable `releases/latest` URLs, so publishing a release requires no website rebuild. Update the site when installation steps, compatibility requirements or feature claims change. Benchmark, validation and provenance references stay pinned to the source revisions behind their evidence.
 
 ## Content and interactions
 
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
 - The social preview card `public/assets/stark-social-card.jpg` (1200 by 630) is rendered from the original logo by `scripts/render_social_card.swift`, which places the unmodified logo in the hero's framed card beside the headline. The Open Graph and Twitter card tags reference it; the original logo remains the favicon and hero image.
 - The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`, resized to 480 by 360 for its 160 by 120 display box. The full-resolution original remains in Git history at commit `c21f1b74`. The photo loads lazily below the main content.
-- The hero footnote and the installation intro show the latest release version and date from `release.json`, linking to that release's notes.
+- The hero footnote and installation intro link to the latest release notes without displaying a release version or date.
 - The hero identifies the menu bar app, terminal tools and experimental Uzu-derived Rust/Metal engine. The install section precedes the benchmark and labels two alternatives: the Mac app DMG, and the app plus terminal tools installer. Both use the latest signed, notarized release. The terminal path includes PATH setup, a model-free `doctor` check and the app launch command.
 - Model compatibility links go to the converter's catalog and qualification guide. Copy distinguishes converter coverage from verification of exact checkpoints and formats.
 - The optional local API subsection covers native/backend client requests on the same Mac, the Connection Details location, port/key lifecycle, defaults and unsupported features. It links to the scoped client-validation report for API behavior, settings and limitations. This optional subsection stays within Get started.
