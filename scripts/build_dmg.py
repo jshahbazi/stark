@@ -21,7 +21,89 @@ RECIPE_FILES = (
     "scripts/build_dmg.py",
     "scripts/sign_distribution.py",
     "scripts/build_distribution.py",
+    "scripts/update_app.py",
+    "scripts/install_app.py",
+    "apps/installer/Sources/InstallerApp.swift",
+    "apps/menu-bar/Sources/AppUpdate.swift",
 )
+INSTALLER_NAME = "Install Stark.app"
+INSTALLER_ID = "com.starkengine.installer"
+
+
+def build_installer(
+    staging: Path,
+    version: str,
+    identity: dict[str, str],
+    keychain: Path | None,
+    env: dict[str, str],
+) -> Path:
+    """Give DMG installation its own identity so an older Stark cannot intercept it."""
+    app = staging / INSTALLER_NAME
+    contents = app / "Contents"
+    executable = contents / "MacOS/InstallStark"
+    executable.parent.mkdir(parents=True)
+    resources = contents / "Resources"
+    resources.mkdir()
+    info = {
+        "CFBundleIdentifier": INSTALLER_ID,
+        "CFBundleExecutable": "InstallStark",
+        "CFBundleName": "Install Stark",
+        "CFBundleDisplayName": "Install Stark",
+        "CFBundlePackageType": "APPL",
+        "CFBundleInfoDictionaryVersion": "6.0",
+        "CFBundleShortVersionString": version,
+        "CFBundleVersion": version,
+        "LSMinimumSystemVersion": signing.distribution.MIN_MACOS,
+        "LSMultipleInstancesProhibited": True,
+        "NSHighResolutionCapable": True,
+    }
+    icon = staging / "Stark.app/Contents/Resources/Stark.icns"
+    if icon.is_file():
+        shutil.copyfile(icon, resources / "Stark.icns")
+        info["CFBundleIconFile"] = "Stark"
+    (contents / "Info.plist").write_bytes(plistlib.dumps(info))
+    for name in ("update_app.py", "install_app.py"):
+        shutil.copyfile(ROOT / "scripts" / name, resources / name)
+    # The installer must survive Gatekeeper App Translocation. Keep its payload
+    # inside its own seal; the root copy remains for existing in-app updaters.
+    helpers = contents / "Helpers"
+    helpers.mkdir()
+    shutil.copytree(staging / "Stark.app", helpers / "Stark.app")
+    signing.run(
+        [
+            "/usr/bin/xcrun",
+            "swiftc",
+            "-O",
+            "-target",
+            "arm64-apple-macos" + signing.distribution.MIN_MACOS,
+            "-framework",
+            "AppKit",
+            "-framework",
+            "SwiftUI",
+            ROOT / "apps/menu-bar/Sources/AppUpdate.swift",
+            ROOT / "apps/installer/Sources/InstallerApp.swift",
+            "-o",
+            executable,
+        ],
+        "dmg_installer_compilation_failed",
+        env,
+        timeout=300,
+    )
+    arguments = [
+        "/usr/bin/codesign",
+        "--sign",
+        identity["sha1"],
+        "--timestamp",
+        "--options",
+        "runtime",
+        "--identifier",
+        INSTALLER_ID,
+    ]
+    if keychain is not None:
+        arguments.extend(["--keychain", str(keychain)])
+    signing.run([*arguments, app], "dmg_installer_signing_failed", env)
+    signing.verify_signature(app, identity, env)
+    return app
 
 
 def inventory_digest(app: Path) -> str:
@@ -103,6 +185,7 @@ def verify_image(
     mountpoint: Path,
     source: str,
     version: str,
+    installer_digest: str | None = None,
 ) -> None:
     """Inspect an attached read-only image without opening or installing its app."""
     verify_image_signature(image, identity, env)
@@ -172,6 +255,31 @@ def verify_image(
             "dmg_application_ticket_invalid",
             env,
         )
+        if installer_digest is not None:
+            launcher = mountpoint / INSTALLER_NAME
+            signing.require(
+                launcher.is_dir()
+                and not launcher.is_symlink()
+                and inventory_digest(launcher) == installer_digest,
+                "dmg_installer_bytes_changed",
+            )
+            metadata = plistlib.loads((launcher / "Contents/Info.plist").read_bytes())
+            signing.require(
+                metadata.get("CFBundleIdentifier") == INSTALLER_ID
+                and metadata.get("CFBundleShortVersionString") == version,
+                "dmg_installer_identity_invalid",
+            )
+            signing.verify_signature(launcher, identity, env, notarized=True)
+            signing.run(
+                ["/usr/bin/codesign", "--verify", "--deep", "--strict", launcher],
+                "dmg_installer_seal_invalid",
+                env,
+            )
+            signing.run(
+                ["/usr/sbin/spctl", "--assess", "--type", "execute", launcher],
+                "dmg_installer_gatekeeper_rejected",
+                env,
+            )
     finally:
         if attached or mountpoint.is_mount():
             try:
@@ -234,6 +342,10 @@ def build(options: argparse.Namespace) -> dict:
         staging = work / "image"
         staging.mkdir()
         shutil.copytree(app, staging / "Stark.app")
+        launcher = build_installer(
+            staging, options.version, identity, options.keychain, env
+        )
+        installer_digest = inventory_digest(launcher)
         (staging / "Applications").symlink_to("/Applications", target_is_directory=True)
         image = work / names[0]
         signing.run(
@@ -281,6 +393,7 @@ def build(options: argparse.Namespace) -> dict:
             work / "mounted",
             options.expected_source,
             options.version,
+            installer_digest,
         )
         digest = signing.distribution.sha256(image)
         receipt = {
@@ -292,6 +405,8 @@ def build(options: argparse.Namespace) -> dict:
             "dmg_sha256": digest,
             "application_inventory_sha256": app_digest,
             "application_bytes_preserved": True,
+            "installer_inventory_sha256": installer_digest,
+            "installer_bundle_id": INSTALLER_ID,
             "application_ticket": "stapled_and_validated",
             "certificate_sha1": identity["sha1"],
             "team_id": identity["team_id"],
@@ -357,6 +472,14 @@ def verify_download(options: argparse.Namespace) -> dict:
         and signing.SHA256.fullmatch(app_digest) is not None,
         "dmg_receipt_application_hash_invalid",
     )
+    installer_digest = receipt.get("installer_inventory_sha256")
+    if installer_digest is not None:
+        signing.require(
+            isinstance(installer_digest, str)
+            and signing.SHA256.fullmatch(installer_digest) is not None
+            and receipt.get("installer_bundle_id") == INSTALLER_ID,
+            "dmg_receipt_installer_hash_invalid",
+        )
     signing.require(
         receipt.get("notarization", {}).get("status") == "accepted",
         "dmg_receipt_notarization_missing",
@@ -370,6 +493,7 @@ def verify_download(options: argparse.Namespace) -> dict:
             Path(temporary) / "mounted",
             options.expected_source,
             options.version,
+            installer_digest,
         )
     result = {
         "status": "passed",
@@ -394,6 +518,11 @@ def verify_download(options: argparse.Namespace) -> dict:
         "models_loaded": 0,
         "native_inference_calls": 0,
     }
+    if installer_digest is not None:
+        result["installer_inventory_sha256"] = installer_digest
+        result["checks"].extend(
+            ["installer_file_hashes", "installer_signature", "installer_gatekeeper"]
+        )
     options.output.parent.mkdir(parents=True, exist_ok=True)
     options.output.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(

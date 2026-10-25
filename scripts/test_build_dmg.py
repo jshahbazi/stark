@@ -74,8 +74,11 @@ class DMGTests(unittest.TestCase):
         self.commands = []
         self.fail_stage = None
         self.tamper = False
+        self.tamper_installer = False
         self.notarization_status = "Accepted"
         self.image_app = self.app
+        self.image_installer = None
+        self.installer_snapshot = self.root / "installer-snapshot.app"
         self.metadata = (
             f"CodeDirectory v=20500 flags=0x10000(runtime)\nTeamIdentifier={IDENTITY['team_id']}\nTimestamp=Oct 23, 2026\n"
         ).encode()
@@ -104,10 +107,16 @@ class DMGTests(unittest.TestCase):
         stdout, stderr = b"", b""
         if stage == "dmg_recipe_revision":
             stdout = (SOURCE + "\n").encode()
+        elif stage == "dmg_installer_compilation_failed":
+            Path(arguments[arguments.index("-o") + 1]).write_bytes(
+                b"synthetic installer"
+            )
         elif stage == "dmg_creation_failed":
             self.image_app = (
                 Path(arguments[arguments.index("-srcfolder") + 1]) / "Stark.app"
             )
+            self.image_installer = self.image_app.parent / dmg.INSTALLER_NAME
+            shutil.copytree(self.image_installer, self.installer_snapshot)
             Path(arguments[-1]).write_bytes(b"synthetic compressed image")
         elif stage in {"code_signature_metadata", "dmg_signature_metadata"}:
             stderr = self.metadata
@@ -121,9 +130,15 @@ class DMGTests(unittest.TestCase):
             self.assertIn("-noautoopen", arguments)
             destination = Path(arguments[arguments.index("-mountpoint") + 1])
             shutil.copytree(self.image_app, destination / "Stark.app")
+            if self.image_installer is not None:
+                shutil.copytree(self.image_installer, destination / dmg.INSTALLER_NAME)
             (destination / "Applications").symlink_to("/Applications")
             if self.tamper:
                 (destination / "Stark.app/Contents/MacOS/Stark").write_bytes(b"changed")
+            if self.tamper_installer:
+                (
+                    destination / dmg.INSTALLER_NAME / "Contents/MacOS/InstallStark"
+                ).write_bytes(b"changed")
         return subprocess.CompletedProcess(arguments, 0, stdout=stdout, stderr=stderr)
 
     def build(self):
@@ -142,6 +157,26 @@ class DMGTests(unittest.TestCase):
             receipt["application_inventory_sha256"], dmg.inventory_digest(self.app)
         )
         self.assertTrue(receipt["application_bytes_preserved"])
+        self.assertEqual(receipt["installer_bundle_id"], dmg.INSTALLER_ID)
+        self.assertEqual(
+            receipt["installer_inventory_sha256"],
+            dmg.inventory_digest(self.installer_snapshot),
+        )
+        self.assertEqual(
+            dmg.inventory_digest(
+                self.installer_snapshot / "Contents/Helpers/Stark.app"
+            ),
+            dmg.inventory_digest(self.app),
+        )
+        metadata = plistlib.loads(
+            (self.installer_snapshot / "Contents/Info.plist").read_bytes()
+        )
+        self.assertNotEqual(metadata["CFBundleIdentifier"], dmg.signing.APPLICATION_ID)
+        for name in ("install_app.py", "update_app.py"):
+            self.assertEqual(
+                (self.installer_snapshot / "Contents/Resources" / name).read_bytes(),
+                (dmg.ROOT / "scripts" / name).read_bytes(),
+            )
         self.assertEqual(receipt["notarization"]["status"], "accepted")
         self.assertEqual(receipt["distribution_source"]["revision"], SOURCE)
         self.assertIn(
@@ -152,6 +187,11 @@ class DMGTests(unittest.TestCase):
             stages.index("application_ticket_invalid"),
             stages.index("dmg_creation_failed"),
         )
+        self.assertLess(
+            stages.index("dmg_installer_signing_failed"),
+            stages.index("dmg_creation_failed"),
+        )
+        self.assertIn("dmg_installer_gatekeeper_rejected", stages)
         self.assertLess(
             stages.index("dmg_signing_failed"), stages.index("notarization_failed")
         )
@@ -233,6 +273,27 @@ class DMGTests(unittest.TestCase):
             self.build()
         self.assertEqual(self.stages()[-1], "dmg_detach_failed")
 
+    def test_installer_tampering_detaches_and_publishes_nothing(self):
+        self.tamper_installer = True
+        with self.assertRaisesRegex(
+            dmg.signing.SigningError, "dmg_installer_bytes_changed"
+        ):
+            self.build()
+        self.assertEqual(self.stages()[-1], "dmg_detach_failed")
+        self.assertEqual(list(self.options.output_dir.iterdir()), [])
+
+    def test_installer_compilation_and_signing_failure_publish_nothing(self):
+        for stage in (
+            "dmg_installer_compilation_failed",
+            "dmg_installer_signing_failed",
+        ):
+            with self.subTest(stage=stage):
+                self.fail_stage = stage
+                with self.assertRaisesRegex(dmg.signing.SigningError, stage):
+                    self.build()
+                self.assertNotIn("dmg_creation_failed", self.stages())
+                self.assertEqual(list(self.options.output_dir.iterdir()), [])
+
     def test_disk_image_requires_secure_timestamp(self):
         self.metadata = f"TeamIdentifier={IDENTITY['team_id']}\n".encode()
         with self.assertRaisesRegex(
@@ -257,6 +318,7 @@ class DMGTests(unittest.TestCase):
     def test_receiving_verification_never_imports_signing_credentials(self):
         receipt = self.build()
         self.image_app = self.app
+        self.image_installer = self.installer_snapshot
         image = self.options.output_dir / "stark-0.3.0-aarch64-apple-darwin.dmg"
         receipt_path = image.with_suffix(".dmg.notarization.json")
         options = argparse.Namespace(
@@ -278,11 +340,41 @@ class DMGTests(unittest.TestCase):
             result = dmg.verify_download(options)
         self.assertEqual(result["status"], "passed")
         self.assertEqual(result["dmg_sha256"], receipt["dmg_sha256"])
+        self.assertIn("installer_gatekeeper", result["checks"])
         image.write_bytes(b"different downloaded bytes")
         with self.assertRaisesRegex(
             dmg.signing.SigningError, "dmg_download_hash_mismatch"
         ):
             dmg.verify_download(options)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Xcode Swift compiler required")
+class NativeInstallerTests(unittest.TestCase):
+    def test_installer_compiles_with_shared_release_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [
+                    "xcrun",
+                    "swiftc",
+                    "-O",
+                    "-target",
+                    "arm64-apple-macos26.4",
+                    "-framework",
+                    "AppKit",
+                    "-framework",
+                    "SwiftUI",
+                    str(dmg.ROOT / "apps/menu-bar/Sources/AppUpdate.swift"),
+                    str(dmg.ROOT / "apps/installer/Sources/InstallerApp.swift"),
+                    "-o",
+                    str(Path(temporary) / "InstallStark"),
+                ],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            self.assertEqual(
+                result.returncode, 0, "native installer compilation failed"
+            )
 
 
 if __name__ == "__main__":

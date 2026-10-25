@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import plistlib
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
@@ -233,6 +236,500 @@ class UpdateTransactionTests(unittest.TestCase):
             self.assertRaisesRegex(installer.AppError, "did not exit"),
         ):
             self.wait_for_exit(os.getpid(), self.target, 1)
+
+
+@unittest.skipUnless(sys.platform == "darwin", "Darwin atomic exchange required")
+class DMGInstallTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="stark dmg install ")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.system = self.root / "Applications"
+        self.system.mkdir()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.candidate = fixture(self.root / "disk image/Stark.app", "0.4.0")
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir(mode=0o700)
+        self.processes = b""
+        self.addCleanup(patch.stopall)
+        patch.object(updater, "SYSTEM_APPLICATIONS", self.system).start()
+        patch.object(Path, "home", return_value=self.home).start()
+        self.verify = patch.object(
+            updater,
+            "verify_release",
+            side_effect=lambda app, _version: installer.validate(app),
+        ).start()
+        self.signature = patch.object(installer, "verify_signature").start()
+        self.stop = patch.object(installer, "stop_app").start()
+        self.wait_for_launch = updater.wait_for_launch
+        self.launch = patch.object(updater, "wait_for_launch").start()
+        self.command = patch.object(
+            installer,
+            "command",
+            side_effect=lambda arguments, _message: (
+                self.processes if arguments[0] == "/bin/ps" else b""
+            ),
+        ).start()
+
+    def running(self, *applications):
+        self.processes = "".join(
+            f"{os.getuid()} {app}/Contents/MacOS/Stark\n" for app in applications
+        ).encode()
+
+    def invoke(self):
+        output = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "update_app.py",
+                    "--candidate",
+                    str(self.candidate),
+                    "--workspace",
+                    str(self.workspace),
+                    "--install-from-dmg",
+                ],
+            ),
+            patch.object(sys, "stdout", output),
+        ):
+            result = updater.main()
+        return result, json.loads(output.getvalue())
+
+    def test_running_custom_copy_is_replaced_and_other_copy_is_preserved(self):
+        target = fixture(self.root / "custom apps/Stark.app", "0.3.0")
+        other = fixture(self.system / "Stark.app", "0.2.0")
+        previous_other = installer.validate(other)
+        self.running(target)
+        result, output = self.invoke()
+        self.assertEqual(result, 0)
+        self.assertEqual(output, {"path": str(target), "version": "0.4.0"})
+        self.stop.assert_called_once_with(target)
+        self.assertEqual(installer.validate(other), previous_other)
+        self.assertEqual(installer.validate(target), installer.validate(self.candidate))
+        self.assertEqual(
+            self.command.call_args.args[0], ["/usr/bin/open", "-n", target]
+        )
+        self.assertFalse(self.workspace.exists())
+
+    def test_first_install_uses_system_directory_and_launches_exact_target(self):
+        target = self.system / "Stark.app"
+        result, output = self.invoke()
+        self.assertEqual(result, 0)
+        self.assertEqual(output["path"], str(target))
+        self.assertEqual(installer.validate(target), installer.validate(self.candidate))
+        self.assertEqual(
+            self.command.call_args.args[0], ["/usr/bin/open", "-n", target]
+        )
+        self.assertTrue(self.candidate.is_dir())
+
+    def test_first_install_creates_user_applications_when_system_is_unwritable(self):
+        access = os.access
+        with patch.object(
+            os,
+            "access",
+            side_effect=lambda path, mode: (
+                False if Path(path) == self.system else access(path, mode)
+            ),
+        ):
+            result, output = self.invoke()
+        self.assertEqual(result, 0)
+        self.assertEqual(output["path"], str(self.home / "Applications/Stark.app"))
+
+    def test_existing_user_copy_is_selected_before_empty_system_directory(self):
+        target = fixture(self.home / "Applications/Stark.app", "0.3.0")
+        result, output = self.invoke()
+        self.assertEqual(result, 0)
+        self.assertEqual(output["path"], str(target))
+
+    def test_staging_and_signature_verification_finish_before_quitting(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        old_digest = installer.validate(target)
+
+        def stop(app):
+            self.assertEqual(app, target)
+            self.assertEqual(installer.validate(target), old_digest)
+            staged = list(self.system.glob(".stark-update-*/Stark.app"))
+            self.assertEqual(len(staged), 1)
+            self.assertGreaterEqual(
+                sum(call.args[0] == staged[0] for call in self.verify.call_args_list), 1
+            )
+            self.assertEqual(
+                installer.validate(staged[0]), installer.validate(self.candidate)
+            )
+
+        self.stop.side_effect = stop
+        self.assertEqual(self.invoke()[0], 0)
+
+    def test_invalid_staged_signature_never_quits_the_old_app(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        previous = installer.validate(target)
+
+        def verify(app, _version):
+            if app != self.candidate:
+                raise installer.AppError("update signature verification failed")
+            return installer.validate(app)
+
+        self.verify.side_effect = verify
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(output, {"error": "update signature verification failed"})
+        self.stop.assert_not_called()
+        self.assertEqual(installer.validate(target), previous)
+        self.assertTrue((self.workspace / "result.json").is_file())
+
+    def test_managed_cli_records_are_updated_without_changing_the_cli_release(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        state = self.root / "CLI/lib/stark/managed-app.json"
+        state.parent.mkdir(parents=True)
+        current = state.parent / "current"
+        current.symlink_to("releases/0.3.0")
+        record = {
+            "schema_version": 2,
+            "installation_id": "a" * 32,
+            "path": str(target),
+            "state_path": str(state),
+            "app_id": installer.APP_ID,
+            "sha256": installer.validate(target),
+        }
+        owner = self.system / installer.OWNER_NAME
+        state.write_bytes(installer.record_bytes(record))
+        owner.write_bytes(state.read_bytes())
+        self.assertEqual(self.invoke()[0], 0)
+        self.assertEqual(installer.read_record(state), installer.read_record(owner))
+        self.assertEqual(
+            installer.read_record(state)["sha256"], installer.validate(target)
+        )
+        self.assertEqual(current.readlink(), Path("releases/0.3.0"))
+
+    def test_launch_failure_restores_old_app_and_retains_fixed_error(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        previous = installer.validate(target)
+        launches = []
+
+        def command(arguments, _message):
+            if arguments[0] == "/bin/ps":
+                return self.processes
+            launches.append(arguments)
+            if len(launches) == 1:
+                raise installer.AppError("updated app could not launch")
+            self.assertEqual(installer.validate(target), previous)
+            self.assertEqual(
+                json.loads((self.workspace / "result.json").read_text()),
+                {"error": "updated app could not launch"},
+            )
+            return b""
+
+        self.command.side_effect = command
+        with patch.object(installer, "running", return_value=False):
+            result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(output, {"error": "updated app could not launch"})
+        self.assertEqual(installer.validate(target), previous)
+        self.assertEqual(len(launches), 2)
+
+    def test_first_install_launch_failure_removes_new_app_without_reopening_it(self):
+        def command(arguments, _message):
+            if arguments[0] != "/bin/ps":
+                raise installer.AppError("updated app could not launch")
+            return b""
+
+        self.command.side_effect = command
+        self.assertEqual(self.invoke()[0], 1)
+        self.assertFalse((self.system / "Stark.app").exists())
+        self.assertEqual(
+            sum(
+                call.args[0][0] == "/usr/bin/open"
+                for call in self.command.call_args_list
+            ),
+            1,
+        )
+
+    def test_process_start_failure_restores_previous_app(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        previous = installer.validate(target)
+        self.launch.side_effect = installer.AppError(
+            "installed app did not start; previous installation was kept"
+        )
+        with patch.object(installer, "running", return_value=False):
+            result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output,
+            {"error": "installed app did not start; previous installation was kept"},
+        )
+        self.assertEqual(installer.validate(target), previous)
+
+    def test_launch_wait_requires_exact_same_user_target_process(self):
+        target = self.system / "Stark.app"
+        executable = str(target / "Contents/MacOS/Stark")
+        with (
+            patch.object(
+                updater,
+                "application_processes",
+                side_effect=[
+                    [[str(os.getuid() + 1), executable]],
+                    [[str(os.getuid()), executable + " other"]],
+                    [[str(os.getuid()), executable]],
+                ],
+            ),
+            patch.object(updater.time, "sleep") as sleep,
+        ):
+            self.wait_for_launch(target)
+        self.assertEqual(sleep.call_count, 2)
+
+    def test_launch_wait_times_out_with_fixed_failure(self):
+        with (
+            patch.object(updater, "application_processes", return_value=[]),
+            patch.object(updater.time, "monotonic", side_effect=[0, 11]),
+            self.assertRaisesRegex(installer.AppError, "installed app did not start"),
+        ):
+            self.wait_for_launch(self.system / "Stark.app")
+
+    def test_multiple_running_copies_are_preserved(self):
+        first = fixture(self.system / "Stark.app", "0.3.0")
+        second = fixture(self.home / "Applications/Stark.app", "0.3.0")
+        self.running(first, second)
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output,
+            {
+                "error": "multiple Stark copies are running; quit them and retry installation"
+            },
+        )
+        self.stop.assert_not_called()
+        self.assertEqual(updater.release_version(first), "0.3.0")
+        self.assertEqual(updater.release_version(second), "0.3.0")
+
+    def test_wrong_bundle_identifier_is_preserved(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        plist = target / "Contents/Info.plist"
+        info = plistlib.loads(plist.read_bytes())
+        info["CFBundleIdentifier"] = "example.unrelated"
+        plist.write_bytes(plistlib.dumps(info))
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output, {"error": "refusing to replace an unrelated application"}
+        )
+        self.stop.assert_not_called()
+        self.assertEqual(
+            plistlib.loads(plist.read_bytes())["CFBundleIdentifier"],
+            "example.unrelated",
+        )
+
+    def test_unsigned_running_copy_is_preserved(self):
+        target = fixture(self.root / "custom/Stark.app", "0.3.0")
+        self.running(target)
+        self.signature.side_effect = installer.AppError(
+            "app signature verification failed"
+        )
+        self.assertEqual(self.invoke()[0], 1)
+        self.stop.assert_not_called()
+        self.assertEqual(updater.release_version(target), "0.3.0")
+
+    def test_other_users_and_non_bundle_executables_are_ignored(self):
+        self.processes = (
+            f"{os.getuid() + 1} /does/not/exist/Stark.app/Contents/MacOS/Stark\n"
+            f"{os.getuid()} /does/not/exist/not-Stark.app/Contents/MacOS/Stark\n"
+            f"{os.getuid()} /does/not/exist/Stark.app/Contents/MacOS/Stark extra\n"
+        ).encode()
+        self.assertEqual(updater.running_installations(), [])
+        self.signature.assert_not_called()
+
+    def test_target_running_in_another_user_session_is_not_stopped(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+        self.processes = (f"{os.getuid() + 1} {target}/Contents/MacOS/Stark\n").encode()
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output,
+            {
+                "error": "Stark is running in another user session; quit it before installation"
+            },
+        )
+        self.stop.assert_not_called()
+        self.launch.assert_not_called()
+
+    def test_symlink_target_is_rejected(self):
+        actual = fixture(self.root / "elsewhere/Stark.app", "0.3.0")
+        (self.system / "Stark.app").symlink_to(actual)
+        self.assertEqual(self.invoke()[0], 1)
+        self.stop.assert_not_called()
+        self.assertTrue((self.system / "Stark.app").is_symlink())
+
+    def test_unwritable_running_target_does_not_fall_back_to_another_copy(self):
+        target = fixture(self.root / "read only/Stark.app", "0.3.0")
+        self.running(target)
+        access = os.access
+        with patch.object(
+            os,
+            "access",
+            side_effect=lambda path, mode: (
+                False if Path(path) == target.parent else access(path, mode)
+            ),
+        ):
+            result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(output, {"error": "installation destination is not writable"})
+        self.stop.assert_not_called()
+        self.assertFalse((self.system / "Stark.app").exists())
+
+    def test_source_destination_overlap_is_rejected_before_quitting(self):
+        self.running(self.candidate)
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output, {"error": "installation source and destination must not overlap"}
+        )
+        self.stop.assert_not_called()
+
+    def test_version_format_matches_published_release_format(self):
+        plist = self.candidate / "Contents/Info.plist"
+        for invalid in (
+            "0.3",
+            "01.2.3",
+            "1.2.3-beta",
+            "v1.2.3",
+            "1.2.3.4",
+            "1.2.9999999999",
+            "1.2.٣",
+        ):
+            info = plistlib.loads(plist.read_bytes())
+            info["CFBundleShortVersionString"] = invalid
+            plist.write_bytes(plistlib.dumps(info))
+            with (
+                self.subTest(version=invalid),
+                self.assertRaisesRegex(installer.AppError, "version is invalid"),
+            ):
+                updater.release_version(self.candidate)
+
+    def test_public_workspace_is_rejected_without_writing_into_it(self):
+        self.workspace.chmod(0o755)
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(output, {"error": "installation workspace must be private"})
+        self.assertEqual(list(self.workspace.iterdir()), [])
+        self.stop.assert_not_called()
+
+    def test_target_changed_during_staging_is_preserved_before_quitting(self):
+        target = fixture(self.system / "Stark.app", "0.3.0")
+
+        def verify(app, _version):
+            if app != self.candidate:
+                (target / "Contents/changed").write_text("concurrent installation")
+            return installer.validate(app)
+
+        self.verify.side_effect = verify
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(output, {"error": "installed app changed during update"})
+        self.stop.assert_not_called()
+        self.assertTrue((target / "Contents/changed").is_file())
+
+    def test_unexpected_exception_is_content_free(self):
+        self.verify.side_effect = RuntimeError("private exception contents")
+        result, output = self.invoke()
+        self.assertEqual(result, 1)
+        self.assertEqual(
+            output, {"error": "app update failed; previous installation was kept"}
+        )
+        self.assertEqual(
+            json.loads((self.workspace / "result.json").read_text()), output
+        )
+        self.stop.assert_not_called()
+
+
+@unittest.skipUnless(sys.platform == "darwin", "AppKit required")
+class NativeDMGHandoffTests(unittest.TestCase):
+    def test_real_old_app_quits_and_replaced_app_starts_at_exact_target(self):
+        with tempfile.TemporaryDirectory(prefix="stark native handoff ") as temporary:
+            root = Path(temporary).resolve()
+            target = fixture(root / "installed/Stark.app", "0.3.0")
+            candidate = fixture(root / "candidate/Stark.app", "0.4.0")
+            workspace = root / "workspace"
+            workspace.mkdir(mode=0o700)
+            source = root / "main.swift"
+            source.write_text(
+                "import AppKit\n"
+                "class Delegate: NSObject, NSApplicationDelegate {\n"
+                "    func applicationDidFinishLaunching(_ note: Notification) {\n"
+                "        if CommandLine.arguments.count > 1 {\n"
+                '            try! "ready".write(toFile: CommandLine.arguments[1], '
+                "atomically: true, encoding: .utf8)\n"
+                "        }\n"
+                "    }\n"
+                "}\n"
+                "let app = NSApplication.shared\n"
+                "let delegate = Delegate()\n"
+                "app.delegate = delegate\n"
+                "app.setActivationPolicy(.accessory)\n"
+                "app.run()\n"
+            )
+            binary = root / "fixture-app"
+            compiled = subprocess.run(
+                ["xcrun", "swiftc", str(source), "-o", str(binary)],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            self.assertEqual(
+                compiled.returncode, 0, "native handoff fixture did not compile"
+            )
+            identifier = "com.starkengine.install-test." + uuid.uuid4().hex
+            for app in (target, candidate):
+                shutil.copy2(binary, app / "Contents/MacOS/Stark")
+                plist = app / "Contents/Info.plist"
+                info = plistlib.loads(plist.read_bytes())
+                info.update(
+                    CFBundleIdentifier=identifier,
+                    CFBundlePackageType="APPL",
+                    CFBundleName="Stark Installer Test",
+                    CFBundleVersion=info["CFBundleShortVersionString"],
+                    LSUIElement=True,
+                )
+                plist.write_bytes(plistlib.dumps(info))
+            ready = root / "fixture-ready"
+            process = subprocess.Popen(
+                [str(target / "Contents/MacOS/Stark"), str(ready)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            try:
+                updater.wait_for_launch(target)
+                deadline = updater.time.monotonic() + 10
+                while not ready.exists():
+                    self.assertLess(
+                        updater.time.monotonic(), deadline, "fixture did not initialize"
+                    )
+                    updater.time.sleep(0.05)
+                with (
+                    patch.object(installer, "APP_ID", identifier),
+                    patch.object(
+                        updater,
+                        "verify_release",
+                        side_effect=lambda app, _version: installer.validate(app),
+                    ),
+                    patch.object(
+                        updater, "running_installations", return_value=[target]
+                    ),
+                ):
+                    updater.apply_update(candidate, target, "0.4.0", None, workspace)
+                    self.assertEqual(process.wait(timeout=10), 0)
+                    self.assertEqual(updater.release_version(target), "0.4.0")
+                    self.assertTrue(installer.running(target))
+                    self.assertEqual(
+                        installer.validate(target), installer.validate(candidate)
+                    )
+            finally:
+                installer.stop_app(target)
+                if process.poll() is None:
+                    process.terminate()
+                    process.wait(timeout=10)
 
 
 SWIFT_DRIVER = r"""
