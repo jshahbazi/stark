@@ -11,7 +11,7 @@ CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and ma
 | Prebuilt release | Manual; builds an unsigned archive from an existing version tag and uploads a draft. See [releasing](RELEASING.md). |
 | Signed release | Manual from protected `main`; builds a combined CLI and app distribution from the dispatched `main` commit, verifies it before credentials are imported, signs and notarizes, verifies the installation and DMG, and in a separate publishing job creates the version tag and publishes the latest stable release. |
 
-The inherited `Tests`, `Release`, `Run Benchmark` and `Run Stark Cargo Command` workflows are present but every job is `if: false`; the repository policy check requires them to stay disabled.
+The obsolete inherited `Tests` workflow was removed. The remaining inherited `Release`, `Run Benchmark` and `Run Stark Cargo Command` workflows are present but every job is `if: false`; the repository policy check requires them to stay disabled.
 
 ## Toolchains and runners
 

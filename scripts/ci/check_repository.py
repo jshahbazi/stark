@@ -23,7 +23,6 @@ INHERITED_DISABLED = {
     "release.yml",
     "run-benchmark.yml",
     "run-stark-cargo-command.yml",
-    "tests.yml",
 }
 APPROVED_RUNNERS = {"ubuntu-24.04", "macos-26"}
 # Every tracked supported lockfile must have an explicit OSV scan input in
