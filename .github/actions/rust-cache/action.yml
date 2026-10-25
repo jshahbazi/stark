@@ -27,7 +27,6 @@ runs:
           ~/.cargo/git/db
           ~/.cargo/git/checkouts
           target
-          crates/legacy/download-manager/examples/wasm/target
         key: ${{ steps.key.outputs.key }}
         restore-keys: ${{ steps.key.outputs.restore-prefix }}
       env:

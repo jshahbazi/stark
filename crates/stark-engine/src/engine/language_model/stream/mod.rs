@@ -10,7 +10,8 @@ use crate::{
     speculators::dflash_tfm::DFlashTreeError,
 };
 pub use crate::{
-    encodable_block::sampling::SamplingMethod, engine::language_model::stream::stream::LanguageModelStream,
+    encodable_block::sampling::SamplingMethod,
+    engine::language_model::stream::stream::{LanguageModelStream, TokenStreamMetrics},
 };
 
 mod stream;

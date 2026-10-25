@@ -87,11 +87,9 @@ jobs:
       - name: Check locked dependency resolution
         run: |
           cargo metadata --locked --format-version=1 > /dev/null
-          cargo metadata --locked --manifest-path crates/legacy/download-manager/examples/wasm/Cargo.toml --format-version=1 > /dev/null
           uv lock --check --directory tools
           uv lock --check --directory tools/converter
-          uv lock --check --directory crates/legacy/stark/bindings/python
-          git diff --exit-code -- Cargo.lock crates/legacy/download-manager/examples/wasm/Cargo.lock tools/uv.lock tools/converter/uv.lock crates/legacy/stark/bindings/python/uv.lock
+          git diff --exit-code -- Cargo.lock tools/uv.lock tools/converter/uv.lock
       - name: Validate workflow syntax
         run: |
           archive="$RUNNER_TEMP/actionlint.tar.gz"
@@ -182,31 +180,6 @@ jobs:
         if: matrix.configuration == 'default'
         run: uv run --no-project --python 3.12.13 python scripts/test_generation_process.py --binary target/release/stark-generate
 
-  compatibility:
-    name: Inherited dependency compatibility
-    runs-on: macos-26
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - name: Install pinned Rust
-        run: rustup toolchain install 1.98.1 --profile minimal --target wasm32-unknown-unknown
-      - uses: ./.github/actions/rust-cache
-        with:
-          scope: compatibility-cpu-check-release-wasm
-      - name: Check Python binding dependencies
-        run: cargo check --locked -p stark --no-default-features --features bindings-pyo3,backend-cpu
-      - name: Check HTTP/1.1 server
-        run: cargo check --locked -p cli --no-default-features --features backend-cpu
-      - name: Check binding tool commands
-        run: cargo check --locked -p cli-tools
-      - name: Check inherited wasm example
-        run: cargo check --locked --manifest-path crates/legacy/download-manager/examples/wasm/Cargo.toml --target wasm32-unknown-unknown
-      - name: Test model-free server contracts
-        run: |
-          cargo test --release --locked -p cli --no-default-features --features backend-cpu --bin cli server:: -- --test-threads=1
-
   cxx:
     name: CXX panic safety and grammar compatibility
     runs-on: macos-26
@@ -223,66 +196,20 @@ jobs:
       - name: Test CXX panic safety and grammar compatibility
         run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
 
-  typescript:
-    name: Model-free TypeScript binding checks
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    defaults:
-      run:
-        working-directory: crates/legacy/stark/bindings/typescript
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: '24.19.0'
-          package-manager-cache: false
-      - name: Install verified pnpm
-        run: |
-          archive="$RUNNER_TEMP/pnpm.tgz"
-          curl --fail --silent --show-error --location --retry 3 \
-            https://registry.npmjs.org/pnpm/-/pnpm-10.18.1.tgz --output "$archive"
-          printf '%s  %s\n' '77a884a165cbba2d8d1c19e3b4880eee6d2fcabd0d879121e282196b80042351d5eb3ca0935fa599da1dc51265cc68816ad2bddd2a2de5ea9fdf92adbec7cd34' "$archive" | shasum -a 512 --check
-          mkdir "$RUNNER_TEMP/pnpm"
-          tar -xzf "$archive" -C "$RUNNER_TEMP/pnpm"
-          ln -s pnpm.cjs "$RUNNER_TEMP/pnpm/package/bin/pnpm"
-          echo "$RUNNER_TEMP/pnpm/package/bin" >> "$GITHUB_PATH"
-      - name: Install locked dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
-      - name: Lint and type-check
-        run: |
-          pnpm exec eslint .
-          pnpm exec tsc --noEmit
-      - name: Run model-free tool tests
-        run: pnpm test
-      - name: Validate CommonJS, ESM and type outputs
-        env:
-          STARK_SKIP_NATIVE_BUILD_CHECK: '1'
-          MIRAI_DISABLE_DENO_BUILD: '1'
-        run: |
-          pnpm build
-          pnpm test:build
-          pnpm exec publint dist
-
   completed:
     name: ${{ github.event_name == 'pull_request' && 'CI completed' || 'Branch CI completed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [quality, lifecycle, scoring, compatibility, cxx, typescript]
+    needs: [quality, lifecycle, scoring, cxx]
     env:
       QUALITY_RESULT: ${{ needs.quality.result }}
       LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
       SCORING_RESULT: ${{ needs.scoring.result }}
-      COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
       CXX_RESULT: ${{ needs.cxx.result }}
-      TYPESCRIPT_RESULT: ${{ needs.typescript.result }}
     steps:
       - run: |
           test "$QUALITY_RESULT" = success
           test "$LIFECYCLE_RESULT" = success
           test "$SCORING_RESULT" = success
-          test "$COMPATIBILITY_RESULT" = success
           test "$CXX_RESULT" = success
-          test "$TYPESCRIPT_RESULT" = success

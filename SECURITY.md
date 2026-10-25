@@ -13,7 +13,7 @@ Security fixes target the current `main` branch and ship in the next signed rele
 - the menu bar application in `apps/menu-bar`;
 - the installer, build, signing and update scripts under `scripts/` and `install.sh`.
 
-The inherited Uzu crates under `crates/legacy`, the inherited sample application under `apps/playground`, and the inherited tools under `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are not part of the product. They can still contain reportable defects, but they are not built into any release.
+The inherited tools under `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are not part of the product. They can still contain reportable defects, but they are not built into any release.
 
 ## Trust boundaries
 
@@ -47,4 +47,4 @@ Use the DMG or the in-app updater when signature verification matters to you. Se
 
 Report memory safety flaws, unsafe model parsing, sensitive-data disclosure, protocol or cache isolation failures, unintended process or file access, loopback API authentication or availability defects, installer and updater trust failures, dependency vulnerabilities, and exploitable workflow changes. Establish a reachable input and concrete impact; severity depends on the caller's deployment and privileges.
 
-CI and CodeQL provide automated checks, not proof of runtime safety. CodeQL does not analyze Metal kernels, Swift, or model-dependent numerical results. GPU parity, performance, converted-model compatibility and host application integration require separate validation. No dependency vulnerability is accepted merely because an upstream configuration ignored it; accepted exceptions are time-boxed and listed in `deny.toml`.
+CI and CodeQL provide automated checks, not proof of runtime safety. CodeQL does not analyze Metal kernels, Swift, or model-dependent numerical results. GPU parity, performance, converted-model compatibility and host application integration require separate validation. No dependency vulnerability is accepted merely because an upstream configuration ignored it; `deny.toml` ignores no advisories, and any future exception must be time-boxed and enforced by both dependency gates.

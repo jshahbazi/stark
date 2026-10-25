@@ -14,12 +14,20 @@ Model weights, private fixtures, runtime executables, and host application archi
 
 ## Naming and compatibility
 
-Active Rust crates use the `stark-engine`, `stark-engine-macros`, `stark-score` and `stark-generate` names. The inherited crates under `crates/legacy` keep their Uzu-era names and are not part of the product. These upstream identifiers are kept on purpose:
+The Rust workspace contains only the `stark-engine`, `stark-engine-macros`, `stark-score` and `stark-generate` crates. These upstream identifiers are kept on purpose:
 
 - Uzu Git history, upstream license, revision metadata and original patch hashes.
-- Mirai model registry and provider IDs, API schema names, model downloads and dependency repository URLs inside the inherited crates.
-- Registry backend IDs `uzu`/`Uzu`, the serialized telemetry field `uzu_version`, and the fallback key `__uzu_unparsed_arguments`, which preserve external compatibility of the inherited bindings.
 - The historical `UZU_CAPTURE_` environment names, which both workers clear together with `STARK_CAPTURE_` names.
-- Mirai attribution and artwork in the inherited sample application.
 
-The root `Package.swift` describes the inherited Uzu Swift binding and expects a locally built `stark.xcframework` that no workflow produces; the menu bar app is built with `swiftc` directly. Inherited self-hosted CI, benchmark deployments, package publishing and cloud artifact destinations are disabled.
+The menu bar app is built with `swiftc` directly. Inherited self-hosted CI, benchmark deployments, package publishing and cloud artifact destinations are disabled.
+
+## Removed inherited code
+
+On 2026-10-25 the inherited Uzu code that no product component used was removed, together with the dependencies only it needed:
+
+- The seventeen crates under `crates/legacy` (the `stark` engine facade and its Python, Swift and TypeScript bindings, the HTTP server, `cli`, `cli-tools`, the model registry and download manager, and their support crates), including their example and binding lockfiles.
+- `vendor/napi-rs`, the patched napi crates used only by the TypeScript binding, and the matching `[patch.crates-io]` entries.
+- The root `Package.swift`, which described the Swift binding, and `apps/playground`, the sample application built on it.
+- `.config/platforms.toml`, read only by `cli-tools`.
+
+`stark-engine` used four plain types from the inherited `shoji` crate; they are now defined in the engine with the same fields. The engine unit suite used the inherited engine to download its test model and the inherited `keisoku` crate for a benchmark cooldown; it now reads a converted model from `STARK_TEST_MODEL_PATH` and has no cooldown. `Cargo.lock` went from 813 to 263 packages with no version changes. The removed files remain in Git history at the commit before the removal, and the originals are at the upstream base commit above. `provenance/BUILD_RECEIPT.json` still lists hashes of the removed files because it records the source of the build it describes.

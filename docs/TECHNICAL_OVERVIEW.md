@@ -19,7 +19,6 @@ crates/stark-generate/    text generation worker
 crates/stark-score/       next-token scoring worker (+ stark-score-digest probe)
 crates/stark-engine/      Rust/Metal inference engine
 crates/stark-engine-macros/
-crates/legacy/            inherited Uzu crates, not shipped
 ```
 
 Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scripts/stark`), or a worker binary. The app and the launcher both start `desktop.py` or `chat.py` from a private Python 3.13 runtime bundled with the installation, and those start the worker binaries from `libexec/`.
@@ -30,7 +29,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 
 | Path | Contents |
 | --- | --- |
-| `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (legacy consumers only) |
+| `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (classifier loading; no caller in this repository) |
 | `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
 | `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |
 | `src/backends/cpu/` | CPU reference kernels used by the unit tests (`cpu` feature); not used by the workers |

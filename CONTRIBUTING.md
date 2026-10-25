@@ -11,7 +11,6 @@ Read [AGENTS.md](AGENTS.md) for the repository rules (provenance, logging, cachi
 | Xcode with the Metal Toolchain | current | Compiling `.metal` kernels; the Command Line Tools package alone is not enough |
 | uv | 0.12.24 | Every Python environment |
 | Python | 3.13.13 for the converter and installer tests, 3.12.13 for the repository policy scripts | Managed by uv; nothing uses the system Python |
-| Node | 24.19.0 with pnpm 10.18.1 | Only the inherited TypeScript binding checks in CI |
 
 Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `tools/converter/uv.lock` and `scripts/ci/check_repository.py.lock` are checked in CI.
 
@@ -25,7 +24,7 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 | Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py` (needs Xcode, not run in CI) |
 | Installer and release | `install.sh`, `scripts/stark`, `scripts/*.py`, `.github/workflows` | `scripts/test_*.py`, `scripts/ci/test_*.py` |
 
-`crates/legacy`, `apps/playground`, `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
+`tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
 
 ## Local checks
 
@@ -51,13 +50,13 @@ cargo +1.98.1 build --release --locked -p stark-score --features optimized
 
 ## Engine tests
 
-The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, the `cpu` feature for its reference kernels, and the inherited `stark` crate to download its test model. It is not run in CI. To run it locally:
+The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. It is not run in CI. To run it locally:
 
 ```sh
 cargo +nightly test -p stark-engine --features cpu,metal -- --test-threads=1
 ```
 
-The first run downloads `meta-llama/Llama-3.2-1B-Instruct` through the Hugging Face cache, so it needs network access and, for gated models, your credentials. Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.
+Nothing in this run needs a model or the network. The ignored `test_metadata_loading` test and the model-loading benchmark read a converted model from `STARK_TEST_MODEL_PATH`; point it at a directory such as the one the smoke test below produces and add `--include-ignored` (or `--bench`, see `crates/stark-engine/unit/BENCHMARKS.md`). Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.
 
 ## Run a model-bound smoke test
 

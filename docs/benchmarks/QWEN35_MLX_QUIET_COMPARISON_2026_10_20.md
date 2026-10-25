@@ -61,7 +61,7 @@ Device GPU utilization is sampled for idle admission and diagnostics. It cannot 
 
 ## Evidence and replay
 
-The [aggregate packet](../experiments/clean-qwen-2026-10-20) preserves every attempt separately, [attempt dispositions](../archive/experiments/clean-qwen-2026-10-20/attempts.json), the [completed receipt](../archive/experiments/clean-qwen-2026-10-20/final-clean-results.json), [derived summary](../archive/experiments/clean-qwen-2026-10-20/summary.json), configuration template and checksums. Only scalar measurements, process basenames, counts and hashes are retained. No prompts, responses, token vectors, logits, model weights or full command arguments are committed.
+The [aggregate packet](../archive/experiments/clean-qwen-2026-10-20) preserves every attempt separately, [attempt dispositions](../archive/experiments/clean-qwen-2026-10-20/attempts.json), the [completed receipt](../archive/experiments/clean-qwen-2026-10-20/final-clean-results.json), [derived summary](../archive/experiments/clean-qwen-2026-10-20/summary.json), configuration template and checksums. Only scalar measurements, process basenames, counts and hashes are retained. No prompts, responses, token vectors, logits, model weights or full command arguments are committed.
 
 Resolve the placeholders in the private configuration template using the pinned artifacts above, then run through the existing locked stock-benchmark Python environment:
 

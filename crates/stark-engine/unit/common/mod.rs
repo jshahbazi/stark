@@ -7,7 +7,6 @@ pub mod env_vars;
 pub mod harness;
 pub mod helpers;
 pub mod matmul;
-pub mod metrics;
 pub mod path;
 pub mod perf;
 pub mod proptest;

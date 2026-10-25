@@ -97,7 +97,7 @@ Build the workers with `cargo +1.98.1 build --release --locked -p stark-generate
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 ```
 
-`crates/legacy/` holds inherited Uzu applications and bindings that are not part of the product; the inherited cloud, signing and release workflows stay disabled.
+The inherited Uzu bindings, server and command-line crates have been removed (see [upstream provenance](provenance/UPSTREAM.md#removed-inherited-code)); the inherited cloud, signing and release workflows stay disabled.
 
 ## Measured performance
 

@@ -35,7 +35,7 @@ class RustCacheTests(unittest.TestCase):
             "crates/stark-engine/build/main.rs": "fn main() {}\n",
             "crates/stark-engine/src/kernel.metal": "kernel void f() {}\n",
             "vendor/cxx/include/cxx.h": "// bridge\n",
-            "crates/legacy/download-manager/examples/wasm/Cargo.lock": "version = 4\n",
+            "vendor/cxx/Cargo.lock": "version = 4\n",
         }
         for name, contents in files.items():
             self.write(name, contents)
@@ -93,7 +93,7 @@ class RustCacheTests(unittest.TestCase):
             "crates/stark-engine/build/main.rs",
             "crates/stark-engine/src/kernel.metal",
             "vendor/cxx/include/cxx.h",
-            "crates/legacy/download-manager/examples/wasm/Cargo.lock",
+            "vendor/cxx/Cargo.lock",
         ):
             with self.subTest(path=name):
                 before = self.key()

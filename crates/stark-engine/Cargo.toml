@@ -88,7 +88,6 @@ xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 stark-engine-macros.workspace = true
 bitflags.workspace = true
 derive_more = { workspace = true, features = ["debug"] }
-shoji.workspace = true
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -114,7 +113,6 @@ schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
 cxx.workspace = true
-test-tag.workspace = true
 proptest.workspace = true
 criterion.workspace = true
 libtest-mimic.workspace = true
@@ -128,15 +126,7 @@ rstest.workspace = true
 objc2.workspace = true
 objc2-foundation.workspace = true
 
-# GPU temperature for bench cooldown. keisoku is macOS-only — its power /
-# IOReport subsystem does not build for iOS — and cooldown is a dev-machine
-# concern, so on-device (iOS) builds skip it (see metrics.rs stub).
-[target.'cfg(target_os = "macos")'.dev-dependencies]
-keisoku.workspace = true
-
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
-stark.workspace = true
 criterion = { workspace = true, default-features = true }
 proptest = { workspace = true, default-features = true }
 

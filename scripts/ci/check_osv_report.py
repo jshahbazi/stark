@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate OSV lockfile JSON, retaining explicit maintenance and accepted-risk warnings."""
+"""Gate OSV lockfile JSON, retaining explicit maintenance warnings."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-
-from check_dependency_exceptions import ExceptionPolicy, load_policy, validate_preflight
 
 ROOT = Path(__file__).resolve().parents[2]
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
@@ -168,9 +166,7 @@ def check_groups(groups: object, identifiers: set[str]) -> None:
         require(all(isinstance(value, str) and value in identifiers for value in values))
 
 
-def validate_report(
-    document: object, root: Path, lockfiles: list[str], exceptions: ExceptionPolicy | None = None
-) -> dict:
+def validate_report(document: object, root: Path, lockfiles: list[str]) -> dict:
     root = root.resolve()
     expected = expected_sources(root, lockfiles)
     require(isinstance(document, dict))
@@ -182,7 +178,6 @@ def validate_report(
     seen_sources: set[Path] = set()
     notices: set[tuple[str, str, str, str]] = set()
     failures: set[tuple[str, str, str, str]] = set()
-    accepted: set[tuple[str, str, str, str]] = set()
     package_count = 0
     for result in results:
         require(isinstance(result, dict) and set(result) == {"source", "packages"})
@@ -217,11 +212,7 @@ def validate_report(
                 advisory_ids.add(identifier)
                 identifiers.update(aliases)
                 finding = (*identity, identifier)
-                # Validate every affected entry before considering an exception.
-                maintenance = maintenance_only(advisory, identity)
-                if exceptions is not None and exceptions.accepts(root, path, identity, identifier):
-                    accepted.add(finding)
-                elif maintenance:
+                if maintenance_only(advisory, identity):
                     notices.add(finding)
                 else:
                     failures.add(finding)
@@ -229,7 +220,7 @@ def validate_report(
                 check_groups(package["groups"], identifiers)
     require(seen_sources == set(expected))
     return {"sources": len(seen_sources), "packages": package_count,
-            "maintenance": sorted(notices), "blocking": sorted(failures), "accepted": sorted(accepted)}
+            "maintenance": sorted(notices), "blocking": sorted(failures)}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -237,24 +228,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("report", type=Path)
     parser.add_argument("--lockfile", action="append", required=True)
     parser.add_argument("--root", type=Path, default=ROOT)
-    parser.add_argument("--exceptions", type=Path)
     arguments = parser.parse_args(argv)
     try:
         document = json.loads(arguments.report.read_text(encoding="utf-8"),
                               object_pairs_hook=unique_object, parse_constant=reject_constant)
-        exceptions = load_policy(arguments.exceptions) if arguments.exceptions is not None else None
-        if exceptions is not None:
-            validate_preflight(exceptions, arguments.root)
-        result = validate_report(document, arguments.root, arguments.lockfile, exceptions)
+        result = validate_report(document, arguments.root, arguments.lockfile)
     except (OSError, UnicodeError, ValueError, TypeError, KeyError, RecursionError, MemoryError):
         print("ERROR: osv_report_invalid", file=sys.stderr)
         return 2
-    for kind, label in (("maintenance", "WARNING maintenance"), ("accepted", "WARNING accepted-risk"),
-                        ("blocking", "ERROR advisory")):
+    for kind, label in (("maintenance", "WARNING maintenance"), ("blocking", "ERROR advisory")):
         for ecosystem, name, version, identifier in result[kind]:
             print(f"{label}: {ecosystem} {name}@{version} {identifier}")
     print(f"OSV summary: sources={result['sources']} packages={result['packages']} "
-          f"maintenance={len(result['maintenance'])} accepted={len(result['accepted'])} blocking={len(result['blocking'])}")
+          f"maintenance={len(result['maintenance'])} blocking={len(result['blocking'])}")
     return 1 if result["blocking"] else 0
 
 

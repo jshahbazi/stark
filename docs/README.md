@@ -29,7 +29,6 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [CI and security checks](CI.md) | Workflows, what they cover and do not cover, dependency gates, caches, local equivalents |
 | [Releasing](RELEASING.md) | Signed and prebuilt release workflows, verification on a receiving Mac, DMG handling |
 | [Cargo troubleshooting](CARGO_TROUBLESHOOTING.md) | Repairing a corrupted registry cache |
-| [rustls test exception](RUSTLS_TEST_EXCEPTION.md) | The time-boxed advisory exception recorded in `deny.toml` |
 | [Security policy](../SECURITY.md) | Reporting, supported code, trust boundaries and invariants |
 | [Upstream provenance](../provenance/UPSTREAM.md) | Fork point, import, naming and compatibility notes |
 

@@ -5,8 +5,6 @@ use std::{
     sync::Arc,
 };
 
-use shoji::traits::backend::chat_token::TokenStreamMetrics;
-
 #[cfg(grammar)]
 use crate::engine::language_model::grammar::Grammar;
 use crate::{
@@ -177,6 +175,16 @@ fn prefill_chunk_parts(
     } else {
         [Some((input_chunk, last_batch)), None]
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TokenStreamMetrics {
+    pub num_prefill_forward_passes: usize,
+    pub num_decode_forward_passes: usize,
+    pub num_tokens_prefilled: usize,
+    pub num_tokens_proposed: usize,
+    pub num_tokens_accepted: usize,
+    pub num_tokens_returned: usize,
 }
 
 pub struct LanguageModelStream<'a, B: Backend> {

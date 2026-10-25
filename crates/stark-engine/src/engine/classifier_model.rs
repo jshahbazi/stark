@@ -9,10 +9,6 @@ use std::{
 
 use derive_more::Debug;
 use half::bf16;
-use shoji::{
-    traits::backend::classification::ClassifierOutput,
-    types::session::classification::{ChatTokenCodecConfig, TokenCodecConfig},
-};
 use thiserror::Error;
 use tokenizers::Tokenizer;
 
@@ -26,6 +22,30 @@ use crate::{
     engine::Engine,
     parameters::{ParameterLoader, ParameterLoaderError},
 };
+
+pub struct ClassifierOutput {
+    pub logits: Vec<f32>,
+    pub probabilities: HashMap<String, f32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenCodecConfig {
+    Chat(ChatTokenCodecConfig),
+    RawText,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChatTokenCodecConfig {
+    pub prompt_template: String,
+    pub output_parser_regex: Option<String>,
+    pub system_role_name: String,
+    pub user_role_name: String,
+    pub assistant_role_name: String,
+    pub eos_token: Option<String>,
+    pub bos_token: Option<String>,
+    pub end_of_thinking_tag: Option<String>,
+    pub default_system_prompt: Option<String>,
+}
 
 pub struct ClassifierModel<B: Backend> {
     context: Arc<B::Context>,

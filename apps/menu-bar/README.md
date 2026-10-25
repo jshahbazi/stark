@@ -12,7 +12,7 @@ PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-sc
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app is compiled directly with `swiftc` from `Sources/*.swift` (the root `Package.swift` describes the inherited Uzu Swift package and is not used). It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker` and `--score-worker` select a different CLI bundle, generation binary or scoring binary (default `target/release/stark-score`).
+The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker` and `--score-worker` select a different CLI bundle, generation binary or scoring binary (default `target/release/stark-score`).
 
 Local builds are ad-hoc signed; they are not notarized and cannot be installed by the updater. Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
