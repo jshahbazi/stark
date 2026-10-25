@@ -87,6 +87,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
 | `request_id` | Optional unsigned 64-bit integer, default 0. See [Cancellation](#cancellation). |
 
+The worker honors the union of `generation_config.stop_token_ids` and the tokenizer ID for a nonempty `token_codec_config.eos_token`. The chat EOS must resolve to a single vocabulary token; an unresolved declaration fails model loading with `invalid_model_config`. This covers checkpoints whose end-of-text and end-of-turn declarations differ, including existing converted models. The ColGrep checkpoint declares both EOS IDs, `1` and `130073`; both are honored automatically. Caller stops supplement model stops. A terminal stop is excluded from `generated_token_ids` and `text`.
+
 The terminal reply:
 
 | Field | Meaning |
@@ -106,6 +108,8 @@ The terminal reply:
 | `timing_method` | `first-token-wall-clock-v1` |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
+
+The desktop bridge forwards these counts and timings in a content-free `metrics` event after successful built-in chat and local API requests, including streaming API requests. The menu-bar Input/Output display consumes this event independently of chat history. Failed, cancelled, or stale requests do not publish completion metrics; a missing or unmeasurable rate remains unavailable.
 
 ### Sampling
 

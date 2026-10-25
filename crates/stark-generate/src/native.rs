@@ -43,19 +43,17 @@ impl NativeBackend {
             .ok_or("invalid_model_config")? as usize;
         let engine = Engine::<Metal>::new().map_err(|_| "metal_initialization_failed")?;
         let model = engine.load_language_model(path).map_err(|_| "model_load_failed")?;
-        let mut eos_token_ids = Vec::new();
         let tokenizer_ids: HashSet<u32> = model.tokenizer().get_vocab(true).into_values().collect();
         if tokenizer_ids.iter().any(|id| *id as usize >= vocab_size) {
             return Err("invalid_model_config");
         }
-        for &id in &model.generation_config().stop_token_ids {
-            if id >= vocab_size as u64 || !tokenizer_ids.contains(&(id as u32)) {
-                return Err("invalid_model_config");
-            }
-            if !eos_token_ids.contains(&(id as u32)) {
-                eos_token_ids.push(id as u32);
-            }
-        }
+        let eos_token_ids = crate::model_stops::model_stop_token_ids(
+            &model.generation_config().stop_token_ids,
+            config.get("token_codec_config").and_then(|codec| codec.get("eos_token")).and_then(Value::as_str),
+            vocab_size,
+            |token| model.tokenizer().token_to_id(token),
+            |id| tokenizer_ids.contains(&id),
+        )?;
         Ok(Self {
             model,
             vocab_size,
