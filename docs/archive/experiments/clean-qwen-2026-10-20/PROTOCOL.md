@@ -1,6 +1,6 @@
 # Quiet-window Qwen3.5-2B comparison
 
-This protocol is frozen before the measurement campaign. It follows the [MLX optimization experiment](../../../benchmarks/MLX_GENERATION_OPTIMIZATION_2026_10_20.md). The earlier campaigns remain unchanged, including their timing exclusions.
+This protocol is frozen before the measurement campaign. It follows the [MLX optimization experiment](../../MLX_GENERATION_OPTIMIZATION_2026_10_20.md). The earlier campaigns remain unchanged, including their timing exclusions.
 
 ## Engines and work
 
