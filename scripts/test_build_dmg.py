@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import plistlib
 import shutil
 import subprocess
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_dmg as dmg
+import update_app as updater
 
 SOURCE = "a" * 40
 IDENTITY = {"sha1": "B" * 40, "team_id": "ABCDEFGHIJ"}
@@ -350,6 +352,86 @@ class DMGTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == "darwin", "Xcode Swift compiler required")
 class NativeInstallerTests(unittest.TestCase):
+    def test_native_workspace_passes_helper_validation_and_reports_early_errors(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "Harness.swift"
+            source.write_text(
+                """import Foundation
+@main struct Harness {
+    static func main() throws {
+        let workspace = try InstallerFiles.createWorkspace()
+        let early = Data(#"{"error":"installation workspace is invalid"}"#.utf8)
+        do {
+            _ = try InstallerFiles.helperResult(status: 1, output: early, workspace: workspace)
+            preconditionFailure("early helper failure was hidden")
+        } catch let failure as InstallerFailure {
+            precondition(failure.message == "installation workspace is invalid")
+        }
+        try Data(#"{"error":"recorded failure"}"#.utf8).write(to: workspace.appendingPathComponent("result.json"))
+        do {
+            _ = try InstallerFiles.helperResult(status: 1, output: early, workspace: workspace)
+            preconditionFailure("recorded helper failure was hidden")
+        } catch let failure as InstallerFailure {
+            precondition(failure.message == "recorded failure")
+        }
+        try FileManager.default.removeItem(at: workspace.appendingPathComponent("result.json"))
+        for output in [Data("invalid".utf8), Data(repeating: 65, count: 16_385)] {
+            do {
+                _ = try InstallerFiles.helperResult(status: 1, output: output, workspace: workspace)
+                preconditionFailure("invalid helper reply was accepted")
+            } catch InstallerError.install {}
+        }
+        let installed = try InstallerFiles.helperResult(status: 0,
+            output: Data(#"{"path":"/Applications/Stark.app","version":"0.6.1"}"#.utf8), workspace: workspace)
+        precondition(installed.version == "0.6.1")
+        let data = try JSONSerialization.data(withJSONObject: ["workspace": workspace.path])
+        FileHandle.standardOutput.write(data)
+    }
+}
+"""
+            )
+            executable = root / "harness"
+            compiled = subprocess.run(
+                [
+                    "xcrun",
+                    "swiftc",
+                    "-O",
+                    "-D",
+                    "STARK_INSTALLER_LIBRARY",
+                    "-target",
+                    "arm64-apple-macos26.4",
+                    "-framework",
+                    "AppKit",
+                    "-framework",
+                    "SwiftUI",
+                    str(dmg.ROOT / "apps/menu-bar/Sources/AppUpdate.swift"),
+                    str(dmg.ROOT / "apps/installer/Sources/InstallerApp.swift"),
+                    str(source),
+                    "-o",
+                    str(executable),
+                ],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            self.assertEqual(
+                compiled.returncode, 0, "native regression fixture compilation failed"
+            )
+            result = subprocess.run(
+                [str(executable)], capture_output=True, timeout=30, check=False
+            )
+            self.assertEqual(
+                result.returncode, 0, "native installer regression fixture failed"
+            )
+            workspace = Path(json.loads(result.stdout)["workspace"])
+            self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
+            self.assertEqual(
+                updater.physical_path(workspace, "invalid workspace"), workspace
+            )
+            self.assertEqual(workspace.stat().st_mode & 0o077, 0)
+            self.assertEqual(workspace.stat().st_uid, os.getuid())
+
     def test_installer_compiles_with_shared_release_verification(self):
         with tempfile.TemporaryDirectory() as temporary:
             result = subprocess.run(
