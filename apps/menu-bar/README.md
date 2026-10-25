@@ -46,7 +46,9 @@ Input throughput is a first-token wall-clock proxy that includes native setup; o
 
 ## Connect another application
 
-**Connection Details** in the menu or playground window shows the **Base URL**, **API key** and a **Model ID** picker. The picker defaults to the running model and can show any installed model's ID so that a client can be configured before the model is run; requests only succeed for the model currently running in Chat mode. **Copy curl Example** copies an authenticated streaming request for the selected model, including the key.
+Select **Connection Details…** in the menu or playground window. Choose an OpenAI-compatible provider in your application and copy the **Base URL**, **API key** and **Model ID** individually, or use **Copy All as JSON** to share formatted settings with an agent or LLM. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.
+
+The modal's model picker chooses which model ID to inspect and include in the JSON. Choose **Chat** mode and use **Run** in Stark to serve that model. The JSON includes the selected model, the running model, whether they match, running-model limits, endpoints, supported capabilities and usage notes. It includes the API key even when the key is hidden in the modal. **Copy curl Example** copies an authenticated streaming request for the running model with curl buffering disabled; that example is also included in the JSON when a model is running.
 
 The server starts with Stark, binds only to `127.0.0.1`, prefers port 8000 and otherwise picks a free port; always use the URL shown. Each launch generates a new random key, held in memory and delivered to the UI over the backend's private pipe. The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copying the key puts it on the system pasteboard, where clipboard managers and Universal Clipboard can read it.
 
@@ -75,3 +77,10 @@ uv run --no-project --python 3.13.13 python scripts/test_menubar_controller.py
 ```
 
 The first two run in CI. The controller test needs Xcode because it compiles `StarkApp.swift`.
+
+Check connection JSON serialization and curl escaping without loading a model:
+
+```sh
+xcrun swiftc apps/menu-bar/Sources/ConnectionInfo.swift apps/menu-bar/Tests/ConnectionInfoTests.swift -o /tmp/stark-connection-info-tests
+/tmp/stark-connection-info-tests
+```

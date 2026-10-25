@@ -165,6 +165,22 @@ class LocalAPITest(unittest.TestCase):
         finally:
             api.close()
 
+    def test_readable_model_detail_ids(self):
+        for model_id, paths in (
+            ("Qwen/Qwen3.8-27B", ["Qwen/Qwen3.8-27B", "Qwen%2FQwen3.8-27B"]),
+            ("Local model's name", ["Local%20model%27s%20name"]),
+            ("literal%2Fname", ["literal%252Fname"]),
+        ):
+            api = LocalAPI(lambda model_id=model_id: [{"id": model_id, "object": "model"}], self.complete, port=0)
+            info = api.start()
+            try:
+                for path in paths:
+                    status, _, body = self.request_to_path(info, "/v1/models/" + path, "GET")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(json.loads(body)["id"], model_id)
+            finally:
+                api.close()
+
     def request_to_path(self, info, path, method, raw=None, headers=None):
         req = urllib.request.Request(
             info["base_url"].replace("/v1", "") + path,
@@ -242,6 +258,27 @@ class LocalAPITest(unittest.TestCase):
             conn.close()
         finally:
             release_completion.set()
+            api.close()
+
+    def test_stream_uses_public_id_when_request_uses_legacy_alias(self):
+        public_id = "Qwen/Qwen3.8-27B"
+        calls = []
+
+        def complete(payload, on_delta=None):
+            calls.append(payload)
+            on_delta("fixture")
+            return {"model": public_id, "choices": [{"message": {"content": "fixture"}, "finish_reason": "stop"}]}
+
+        api = LocalAPI(lambda: [{"id": public_id}], complete, port=0)
+        info = api.start()
+        try:
+            status, _, body = self.request_to(info, {"model": "legacy-private-id", "stream": True})
+            self.assertEqual(status, 200)
+            events = [json.loads(line[6:]) for line in body.decode().splitlines() if line.startswith("data: {")]
+            self.assertTrue(events)
+            self.assertTrue(all(event["model"] == public_id for event in events))
+            self.assertEqual(calls[0]["model"], "legacy-private-id")
+        finally:
             api.close()
 
     def test_empty_stream_and_usage_keep_one_stream_metadata(self):

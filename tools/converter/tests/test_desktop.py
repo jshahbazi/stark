@@ -109,12 +109,12 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     history = list(desktop.messages)
     payload = {"model": identifier, "messages": [{"role": "user", "content": "synthetic API request"}]}
     response = desktop.api_complete(payload)
-    assert response["model"] == identifier
+    assert response["model"] == model.name
     assert response["choices"][0]["message"]["content"] == "synthetic answer"
     assert response["usage"] == {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
     assert desktop.messages == history
     assert desktop.worker.process is process
-    assert desktop.api_models()[0]["id"] == identifier
+    assert desktop.api_models()[0]["id"] == model.name
     assert desktop.job is None
     assert all(e["event"] != "reply" for e in events(desktop))
     desktop.dispatch({"command": "generate", "text": "synthetic desktop request"})
@@ -156,6 +156,55 @@ def test_api_assistant_reasoning_history_reaches_model_template(desktop, model):
     assert "assistant:synthetic reply[synthetic reasoning];user:second synthetic turn;" in prompts[0]
     assert desktop.worker.process is process and desktop.messages == history
     assert desktop.job is None
+
+
+@pytest.mark.parametrize("source, expected", [
+    ("huggingface:Qwen/Qwen3.8-27B", "Qwen/Qwen3.8-27B"),
+    ("local:/synthetic/JevK5", "JevK5"),
+])
+def test_public_model_ids_preserve_private_library_identity(desktop, model, source, expected):
+    identifier = installed(desktop, model)
+    desktop.models[0].update(source=source, name="JevK5")
+    desktop.persist()
+    desktop.library()
+    metadata = events(desktop)[-1]["models"][0]
+    assert metadata["id"] == identifier
+    assert metadata["api_id"] == expected
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert desktop.api_models()[0]["id"] == expected
+    for alias in (expected, identifier, "JevK5", None):
+        response = desktop.api_complete({"model": alias, "messages": [{"role": "user", "content": "fixture"}]})
+        assert response["model"] == expected
+    reloaded = Desktop(desktop.executable, desktop.data_dir, io.StringIO())
+    assert reloaded.models[0]["id"] == identifier
+    reloaded.library()
+    assert events(reloaded)[-1]["models"][0]["api_id"] == expected
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_http_rejects_unknown_model_with_public_ids(desktop, model, stream):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from stark_convert.local_api import LocalAPI
+
+    running(desktop, model)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({"model": "unknown", "stream": stream,
+                             "messages": [{"role": "user", "content": "fixture"}]}).encode(),
+            headers={"Authorization": "Bearer " + info["api_key"], "Content-Type": "application/json"},
+        )
+        with pytest.raises(HTTPError) as error:
+            urlopen(request, timeout=2)
+        assert error.value.code == 404
+        assert json.loads(error.value.read())["error"]["code"] == "model_not_found"
+    finally:
+        api.close()
 
 
 @pytest.mark.parametrize(
@@ -342,7 +391,7 @@ def test_api_sampling_limits_aliases_and_message_parts(desktop, model):
             ],
         }
     )
-    assert result["model"] == desktop.active_model
+    assert result["model"] == model.name
     assert seen[0][0] == [{"role": "system", "content": "system"}, {"role": "user", "content": "hello"}]
     assert seen[0][1] == 1000
     assert seen[0][2]["sampling"] == {"mode": "stochastic", "temperature": 0.7, "top_p": 0.8}
