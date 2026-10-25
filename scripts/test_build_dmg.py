@@ -361,6 +361,7 @@ class NativeInstallerTests(unittest.TestCase):
 @main struct Harness {
     static func main() throws {
         let workspace = try InstallerFiles.createWorkspace()
+        let updateWorkspace = try AppUpdateFiles.createWorkspace(prefix: "stark-update-")
         let early = Data(#"{"error":"installation workspace is invalid"}"#.utf8)
         do {
             _ = try InstallerFiles.helperResult(status: 1, output: early, workspace: workspace)
@@ -385,7 +386,12 @@ class NativeInstallerTests(unittest.TestCase):
         let installed = try InstallerFiles.helperResult(status: 0,
             output: Data(#"{"path":"/Applications/Stark.app","version":"0.6.1"}"#.utf8), workspace: workspace)
         precondition(installed.version == "0.6.1")
-        let data = try JSONSerialization.data(withJSONObject: ["workspace": workspace.path])
+        let paths = ["installer": workspace, "updater": updateWorkspace].mapValues { directory in
+            ["workspace": directory.path,
+             "candidate": directory.appendingPathComponent("Stark.app").path,
+             "helper": directory.appendingPathComponent("update_app.py").path]
+        }
+        let data = try JSONSerialization.data(withJSONObject: paths)
         FileHandle.standardOutput.write(data)
     }
 }
@@ -424,13 +430,31 @@ class NativeInstallerTests(unittest.TestCase):
             self.assertEqual(
                 result.returncode, 0, "native installer regression fixture failed"
             )
-            workspace = Path(json.loads(result.stdout)["workspace"])
-            self.addCleanup(shutil.rmtree, workspace, ignore_errors=True)
-            self.assertEqual(
-                updater.physical_path(workspace, "invalid workspace"), workspace
-            )
-            self.assertEqual(workspace.stat().st_mode & 0o077, 0)
-            self.assertEqual(workspace.stat().st_uid, os.getuid())
+            paths = json.loads(result.stdout)
+            for record in paths.values():
+                self.addCleanup(
+                    shutil.rmtree, Path(record["workspace"]), ignore_errors=True
+                )
+            self.assertEqual(set(paths), {"installer", "updater"})
+            for name, record in paths.items():
+                with self.subTest(workspace=name):
+                    workspace = Path(record["workspace"])
+                    self.assertTrue(workspace.is_dir())
+                    self.assertEqual(
+                        updater.physical_path(workspace, "invalid workspace"),
+                        workspace,
+                    )
+                    self.assertEqual(workspace.stat().st_mode & 0o777, 0o700)
+                    self.assertEqual(workspace.stat().st_uid, os.getuid())
+                    for field, filename in (
+                        ("candidate", "Stark.app"),
+                        ("helper", "update_app.py"),
+                    ):
+                        child = Path(record[field])
+                        self.assertEqual(child, workspace / filename)
+                        self.assertEqual(
+                            updater.physical_path(child, "invalid child path"), child
+                        )
 
     def test_installer_compiles_with_shared_release_verification(self):
         with tempfile.TemporaryDirectory() as temporary:

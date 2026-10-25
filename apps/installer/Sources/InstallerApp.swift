@@ -1,5 +1,4 @@
 import AppKit
-import Darwin
 
 enum InstallerError: Error, LocalizedError {
     case source, prepare, install
@@ -25,19 +24,8 @@ struct InstallerFailure: Error, LocalizedError {
 
 enum InstallerFiles {
     static func createWorkspace() throws -> URL {
-        let manager = FileManager.default
-        let temporary = manager.temporaryDirectory.appendingPathComponent("stark-install-" + UUID().uuidString)
-        try manager.createDirectory(at: temporary, withIntermediateDirectories: false,
-                                    attributes: [.posixPermissions: 0o700])
-        // Foundation can shorten /private/var back to /var even after
-        // resolvingSymlinksInPath(). The helper rejects symlink ancestors,
-        // so hand it the physical path returned by the filesystem itself.
-        guard let resolved = realpath(temporary.path, nil) else {
-            try? manager.removeItem(at: temporary)
-            throw InstallerError.prepare
-        }
-        defer { free(resolved) }
-        return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        do { return try AppUpdateFiles.createWorkspace(prefix: "stark-install-") }
+        catch { throw InstallerError.prepare }
     }
 
     static func helperResult(status: Int32, output: Data, workspace: URL) throws -> InstallerResult {

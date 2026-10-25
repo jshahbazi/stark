@@ -1,5 +1,6 @@
 import AppKit
 import CryptoKit
+import Darwin
 import SwiftUI
 
 struct ReleaseVersion: Comparable, Equatable {
@@ -76,6 +77,24 @@ struct AppUpdateDownload {
 enum AppUpdateFiles {
     static let team = "S5BT2PRN5B"
     static let appID = "com.starkengine.menubar"
+
+    static func createWorkspace(prefix: String) throws -> URL {
+        let manager = FileManager.default
+        let temporary = manager.temporaryDirectory.appendingPathComponent(prefix + UUID().uuidString)
+        do {
+            try manager.createDirectory(at: temporary, withIntermediateDirectories: false,
+                                        attributes: [.posixPermissions: 0o700])
+            // Foundation can shorten /private/var back to /var even after
+            // resolvingSymlinksInPath(). Use the filesystem's physical path
+            // for every Swift-to-Python workspace handoff.
+            guard let resolved = realpath(temporary.path, nil) else { throw AppUpdateError.helper }
+            defer { free(resolved) }
+            return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
+        } catch {
+            try? manager.removeItem(at: temporary)
+            throw AppUpdateError.helper
+        }
+    }
 
     static func command(_ executable: String, _ arguments: [String], timeout: TimeInterval = 90) throws {
         let process = Process()
@@ -218,9 +237,7 @@ struct AppUpdateOperations {
             guard target.pathExtension == "app", target.lastPathComponent == "Stark.app",
                   target == target.resolvingSymlinksInPath(),
                   manager.isWritableFile(atPath: target.deletingLastPathComponent().path) else { throw AppUpdateError.location }
-            let root = manager.temporaryDirectory.resolvingSymlinksInPath()
-                .appendingPathComponent("stark-update-" + UUID().uuidString)
-            try manager.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let root = try AppUpdateFiles.createWorkspace(prefix: "stark-update-")
             var prepared = false
             defer { if !prepared { try? manager.removeItem(at: root) } }
             let (file, response) = try await session.download(from: release.url)
