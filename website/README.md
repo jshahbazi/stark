@@ -13,10 +13,14 @@ python3 -m http.server 4173 --bind 127.0.0.1 --directory website/dist
 
 Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the source; `dist/` is ignored generated output. From a standalone Site checkout, run `node build.mjs` instead.
 
+`release.json` records the latest published release: version, date and release-notes URL. The build validates it and substitutes the `{{release.*}}` placeholders in `index.html` and `404.html`, failing on an unknown placeholder or a notes URL that does not match the version. After a release is published, update `release.json`, rebuild and redeploy. Download links keep using the stable `releases/latest` URLs and need no change.
+
 ## Content and interactions
 
 - The original logo is retained byte-for-byte in `public/assets/stark-engine.jpg`; [brand provenance](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/brand/README.md) records its source and hash.
-- The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`. The photo loads lazily below the main content.
+- The social preview card `public/assets/stark-social-card.jpg` (1200 by 630) is rendered from the original logo by `scripts/render_social_card.swift`, which places the unmodified logo in the hero's framed card beside the headline. The Open Graph and Twitter card tags reference it; the original logo remains the favicon and hero image.
+- The footer introduces Stark, the owner's cat and the app's namesake, with the supplied photo in `public/assets/stark-cat.jpg`, resized to 480 by 360 for its 160 by 120 display box. The full-resolution original remains in Git history at commit `c21f1b74`. The photo loads lazily below the main content.
+- The hero footnote and the installation intro show the latest release version and date from `release.json`, linking to that release's notes.
 - The hero identifies the menu bar app, terminal tools and experimental Uzu-derived Rust/Metal engine. The install section precedes the benchmark and labels two alternatives: the Mac app DMG, and the app plus terminal tools installer. Both use the latest signed, notarized release. The terminal path includes PATH setup, a model-free `doctor` check and the app launch command.
 - Model compatibility links go to the converter's catalog and qualification guide. Copy distinguishes converter coverage from verification of exact checkpoints and formats.
 - The optional local API subsection covers native/backend client requests on the same Mac, the Connection Details location, port/key lifecycle, defaults and unsupported features. It links to the scoped client-validation report for API behavior, settings and limitations. This optional subsection stays within Get started.
@@ -25,7 +29,8 @@ Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the so
 - The benchmark defaults to tokens/second and offers an overall view plus six workload selections across six configurations from five engines. Relative mode normalizes MLX-LM to 1.000× from the unrounded recorded rates; rounded display values are not used to reconstruct the speedups.
 - A semantic results table remains usable without JavaScript. Bar lengths compare engines within each workload. Narrow screens scroll the table within its own region.
 - Expandable methodology notes describe four independent loads, repeated workloads, complete request timing, worker-pipe versus local HTTP transports, quantizer differences and qualification limits. Exact engine revisions and answer-format checks remain in the linked immutable benchmark report. The page leads with installation and scopes the 12.2% result to the measured Qwen3.5-2B comparison.
-- Color, focus indicators, image descriptions, reduced-motion handling and keyboard controls are implemented directly in the source.
+- Color, focus indicators, image descriptions, reduced-motion handling and keyboard controls are implemented directly in the source. The page declares a light color scheme only; there is no dark theme.
+- `robots.txt`, `sitemap.xml` and `404.html` ship beside the page. The site is one document, so the sitemap lists one URL. The 404 page uses absolute asset paths and is marked `noindex`; whether unknown paths return a 404 status depends on the hosting platform, which served the home page for unknown paths before this file existed.
 
 ## Hosting
 

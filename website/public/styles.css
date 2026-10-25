@@ -1552,3 +1552,17 @@ code {
   .engine-table tbody th { font-size:13px }
   .engine-table small { max-width:145px; font-size:9px }
 }
+
+.not-found {
+  padding-block:70px 130px;
+  min-height:58vh
+}
+
+.not-found h1 {
+  margin-top:18px;
+  font-size:clamp(36px,6vw,72px)
+}
+
+.not-found .hero-description {
+  max-width:560px
+}

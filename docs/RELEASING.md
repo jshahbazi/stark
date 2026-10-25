@@ -39,6 +39,8 @@ The website can therefore use the stable download URL without a site update:
 https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg
 ```
 
+The site does display the latest version and date. After publishing a release, update `website/release.json` with the version, date and release-notes URL, rebuild with `node website/build.mjs` and redeploy. The build rejects a notes URL that does not match the version.
+
 The signing job creates the DMG from the final signed TAR, signs the container with Developer ID, submits the DMG to Apple, staples its own ticket, and checks Gatekeeper acceptance. It mounts the image read-only to verify that the application file inventory, source revision, signature, and app ticket are preserved, then detaches it. A separate verification pass runs after credentials are removed. No application is opened or installed during DMG verification. This follows [Apple's distribution packaging guidance](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
 
 Download the assets and verify the actual archive on a receiving Mac:
