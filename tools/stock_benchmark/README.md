@@ -88,6 +88,16 @@ their original vLLM 0.31.0 identity and acceptance limits. Historical replay
 requires the original source and a separately scoped environment; its archived
 dependency versions have known advisories.
 
+## 2026-10-25 setuptools override refresh
+
+The `vllm` recipe now overrides vLLM's setuptools pin with setuptools 84.1.0,
+the first fixed version for
+[`GHSA-xmj3-9gf7-h52w`](https://github.com/advisories/GHSA-xmj3-9gf7-h52w).
+No other locked package changed. The locked environment synchronized under
+Python 3.12.13, and a focused check constructing `setuptools.Distribution`
+passed. No native extension was built and no model was loaded; benchmark
+results for this recipe remain unqualified.
+
 The [quiet-window Qwen follow-up](../../docs/benchmarks/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md)
 uses `scripts/benchmark_clean_qwen.py` with the same workers and pinned artifacts.
 It attributes external CPU activity by phase and requires fresh quiet admission
