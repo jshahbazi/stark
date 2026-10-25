@@ -1,6 +1,6 @@
 # MLX-informed generation optimization: final comparison protocol
 
-This is an internal follow-up to the [stock-engine comparison](../../../benchmarks/STOCK_ENGINE_BENCHMARK_2026_10_19.md). Exploratory allocator, DeltaNet and GEMV experiments select the implementation before the final comparison. These are separate campaigns; earlier timing exclusions and changed outputs remain in their original receipts.
+This is an internal follow-up to the [stock-engine comparison](../../STOCK_ENGINE_BENCHMARK_2026_10_19.md). Exploratory allocator, DeltaNet and GEMV experiments select the implementation before the final comparison. These are separate campaigns; earlier timing exclusions and changed outputs remain in their original receipts.
 
 ## Final comparison
 

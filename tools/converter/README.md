@@ -152,7 +152,7 @@ A separate experimental route imports Qwen3 Q8_0 GGUF files, keeping the integer
 uv run --project tools/converter --locked python -m stark_convert.gguf_import \
   --source /path/to/qwen3.gguf --source-revision GGUF_COMMIT \
   --hf-source /path/to/Qwen3-0.6B --hf-revision HF_COMMIT \
-  --output models/qwen3-q8 [--repo Qwen/Qwen3-0.6B] [--chunk-mib 8]
+  --output models/qwen3-q8
 ```
 
 The Hugging Face directory must include `generation_config.json`. Only Qwen3 Q8_0 is supported; other quantization types fail. On failure the command prints `{"status":"failed","reason":"unsupported_or_invalid_gguf_experiment"}` for every cause, including an existing output directory. Its receipt records absolute local source paths. The [GGUF experiment](../../docs/benchmarks/QWEN3_GGUF_IMPORT_EXPERIMENT.md) and [prefill optimization](../../docs/benchmarks/QWEN3_GGUF_PREFILL_OPTIMIZATION.md) studies record its correctness and performance checks.
