@@ -197,7 +197,7 @@ jobs:
         run: cargo test --locked -p stark-engine --test cxx_string --no-default-features --features cpu,grammar -- --test-threads=1
 
   engine-unit:
-    name: Engine unit suite
+    name: Engine unit suite (CPU and Metal compilation)
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -221,23 +221,27 @@ jobs:
         with:
           scope: engine-unit-nightly
           metal: 'true'
-      - name: Run engine unit and kernel tests
-        run: cargo test --locked -p stark-engine --features cpu,metal -- --test-threads=1
+      - name: Compile engine unit and Metal kernel tests
+        run: cargo test --locked -p stark-engine --features cpu,metal --no-run
+      - name: Run CPU engine and grammar tests
+        run: cargo test --locked -p stark-engine --no-default-features --features cpu,grammar -- --test-threads=1
 
   completed:
     name: ${{ github.event_name == 'pull_request' && 'CI completed' || 'Branch CI completed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     if: ${{ always() }}
-    needs: [quality, lifecycle, scoring, cxx]
+    needs: [quality, lifecycle, scoring, cxx, engine-unit]
     env:
       QUALITY_RESULT: ${{ needs.quality.result }}
       LIFECYCLE_RESULT: ${{ needs.lifecycle.result }}
       SCORING_RESULT: ${{ needs.scoring.result }}
       CXX_RESULT: ${{ needs.cxx.result }}
+      ENGINE_UNIT_RESULT: ${{ needs.engine-unit.result }}
     steps:
       - run: |
           test "$QUALITY_RESULT" = success
           test "$LIFECYCLE_RESULT" = success
           test "$SCORING_RESULT" = success
           test "$CXX_RESULT" = success
+          test "$ENGINE_UNIT_RESULT" = success
