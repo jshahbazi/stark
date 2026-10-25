@@ -29,7 +29,9 @@ Input throughput uses first-token wall time as a prefill proxy, including native
 
 ## Connect another application
 
-Select **Connection Details…** in the menu or chat window. Choose an OpenAI-compatible provider in your application and copy the **Base URL**, **API key** and **Model ID** from this window. Select a model and **Run** first; the model ID refers to the model currently loaded, including when a different model is selected in the menu. **Copy curl Example** copies an authenticated streaming request for that model with curl buffering disabled. The copied command includes the API key.
+Select **Connection Details…** in the menu or chat window. Choose an OpenAI-compatible provider in your application and copy the **Base URL**, **API key** and **Model ID** individually, or use **Copy All as JSON** to share formatted settings with an agent or LLM. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.
+
+The modal's model picker chooses which model ID to inspect and include in the JSON. Use **Run** in Stark to serve that model. The JSON includes the selected model, the running model, whether they match, running-model limits, endpoints, supported capabilities and usage notes. It includes the API key even when the key is hidden in the modal. **Copy curl Example** copies an authenticated streaming request for the running model with curl buffering disabled; that example is also included in the JSON when a model is running.
 
 The server starts with Stark and binds only to `127.0.0.1`, preferring port `8000`. If that port is occupied it chooses an available port; always use the URL shown in Connection Details. The base URL includes `/v1`. Keep Stark open while connected. The address is for native applications on the same Mac; browser-origin requests, remote devices and containers are unsupported. Each app launch creates a new random bearer key held only in memory and sent to the UI through its private process pipe. Reopening Stark requires updating the key and possibly the URL in your client. No request access logs or exception dumps are written.
 
@@ -60,4 +62,11 @@ Run the model-free packaging checks with:
 
 ```sh
 uv run --no-project --python 3.13.13 python scripts/test_build_menubar.py
+```
+
+Check connection JSON serialization and curl escaping without loading a model:
+
+```sh
+xcrun swiftc apps/menu-bar/Sources/ConnectionInfo.swift apps/menu-bar/Tests/ConnectionInfoTests.swift -o /tmp/stark-connection-info-tests
+/tmp/stark-connection-info-tests
 ```

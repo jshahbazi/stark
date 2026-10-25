@@ -78,6 +78,12 @@ def metric(reply, key):
     return value if valid else None
 
 
+def api_model_id(model):
+    """Expose source names while preserving stable private library identifiers."""
+    source = model["source"]
+    return source.removeprefix("huggingface:") if source.startswith("huggingface:") else model["name"]
+
+
 class Desktop:
     def __init__(self, executable, data_dir, output=None, timeout=300):
         self.executable = executable
@@ -147,7 +153,9 @@ class Desktop:
         self.emit("status", epoch, state=state, message=message)
 
     def library(self):
-        self.emit("models", models=[{k: m[k] for k in ("id", "name", "path")} for m in self.models])
+        self.emit("models", models=[
+            {**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models
+        ])
 
     def persist(self):
         temporary = self.data_dir / (".models-" + uuid.uuid4().hex)
@@ -480,7 +488,7 @@ class Desktop:
             model = next(m for m in self.models if m["id"] == self.active_model)
             return [
                 {
-                    "id": self.active_model,
+                    "id": api_model_id(model),
                     "object": "model",
                     "created": 0,
                     "owned_by": "stark",
@@ -525,7 +533,8 @@ class Desktop:
             if self.active_model is None or self.worker is None:
                 raise APIError(503, "Run a model in Stark first.", "model_not_loaded")
             active = next(m for m in self.models if m["id"] == self.active_model)
-            if request["model"] not in (None, self.active_model, active["name"]):
+            public_id = api_model_id(active)
+            if request["model"] not in (None, public_id, self.active_model, active["name"]):
                 raise APIError(
                     404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
                 )
@@ -579,7 +588,7 @@ class Desktop:
                 "id": "chatcmpl-" + uuid.uuid4().hex,
                 "object": "chat.completion",
                 "created": int(time.time()),
-                "model": identifier,
+                "model": public_id,
                 "choices": [
                     {
                         "index": 0,

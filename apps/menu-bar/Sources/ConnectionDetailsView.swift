@@ -8,23 +8,21 @@ struct ConnectionDetailsView: View {
     @State private var inspectedModelID = ""
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
-    private var displayedModelID: String {
+    private var inspectedLibraryID: String {
         if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
         if engine.models.contains(where: { $0.id == engine.loadedID }) { return engine.loadedID }
         if engine.models.contains(where: { $0.id == engine.selectedID }) { return engine.selectedID }
         return engine.models.first?.id ?? ""
     }
-    private var curl: String {
-        let request: [String: Any] = [
-            "model": engine.loadedID,
-            "messages": [["role": "user", "content": "Hello"]],
-            "temperature": 0,
-            "stream": true,
-            "max_tokens": min(128, max(1, engine.apiMaxNewTokens))
-        ]
-        let data = (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])) ?? Data()
-        let body = String(data: data, encoding: .utf8) ?? "{}"
-        return "curl --no-buffer '\(engine.apiBaseURL)/chat/completions' \\\n  -H 'Authorization: Bearer \(engine.apiKey)' \\\n  -H 'Content-Type: application/json' \\\n  -d '\(body)'"
+    private var displayedModelID: String {
+        engine.models.first { $0.id == inspectedLibraryID }?.apiID ?? ""
+    }
+    private var connectionInfo: ConnectionInfo {
+        ConnectionInfo(
+            baseURL: engine.apiBaseURL, apiKey: engine.apiKey, modelID: displayedModelID,
+            runningModelID: engine.models.first { $0.id == engine.loadedID }?.apiID ?? "",
+            status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens
+        )
     }
 
     var body: some View {
@@ -42,11 +40,11 @@ struct ConnectionDetailsView: View {
                         .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                     Spacer()
                     Picker("Model", selection: Binding(
-                        get: { displayedModelID },
+                        get: { inspectedLibraryID },
                         set: { inspectedModelID = $0 }
                     )) {
                         if engine.models.isEmpty { Text("No models installed").tag("") }
-                        ForEach(engine.models) { Text($0.name).tag($0.id) }
+                        ForEach(engine.models) { Text($0.apiID).tag($0.id) }
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
@@ -57,7 +55,7 @@ struct ConnectionDetailsView: View {
                         .disabled(displayedModelID.isEmpty)
                         .accessibilityLabel("Copy Model ID")
                 }
-                Text("Select a model to view its ID. Use Run in Stark to serve that model. The curl example uses the running model.")
+                Text("Select a model to view its ID and copy its JSON settings. Use Run in Stark to serve that model. The curl example uses the running model.")
                     .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -87,11 +85,16 @@ struct ConnectionDetailsView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
-                Button("Copy curl Example") { copy(curl, label: "curl example (includes API key)") }
+                Button("Copy All as JSON") {
+                    if let json = connectionInfo.json { copy(json, label: "connection JSON (includes API key)") }
+                }
+                .disabled(!canConnect || displayedModelID.isEmpty)
+                .help("Copy connection settings, API key, model IDs, capabilities and usage notes as JSON.")
+                Button("Copy curl Example") { copy(connectionInfo.curl, label: "curl example (includes API key)") }
                     .disabled(!canConnect || engine.loadedID.isEmpty)
                 Spacer()
-                Text(copied.isEmpty ? "" : "Copied \(copied)").font(.caption).foregroundStyle(.secondary)
             }
+            Text(copied.isEmpty ? " " : "Copied \(copied)").font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 570)
     }
 

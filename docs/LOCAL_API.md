@@ -28,11 +28,13 @@ The following endpoints are available under the emitted `/v1` base path:
 
 The API does not expose embeddings, the Responses API, image input, structured output, tool calls, function calls, or batching. It runs one completion at a time through one loaded model.
 
+Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
+
 ## Chat completions
 
 Requests accept `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, and `metadata`.
 
-`model` may be omitted when the application selects the active model. The active model ID and its installed name are accepted. `messages` must be non-empty. Message roles `system`, `developer`, `user`, and `assistant` are accepted; `developer` is normalized to `system`. Content may be a string or an array containing only `{ "type": "text", "text": "..." }` parts. Text parts are concatenated. An optional ASCII identifier `name` up to 64 characters is validated and ignored because the native templates do not consume message names. Tool and function-call fields are rejected.
+`model` may be omitted when the application selects the active model. The active public model ID, installed name and previous private library ID are accepted for compatibility. `messages` must be non-empty. Message roles `system`, `developer`, `user`, and `assistant` are accepted; `developer` is normalized to `system`. Content may be a string or an array containing only `{ "type": "text", "text": "..." }` parts. Text parts are concatenated. An optional ASCII identifier `name` up to 64 characters is validated and ignored because the native templates do not consume message names. Tool and function-call fields are rejected.
 
 The default output limit is the smaller of 512 and the worker limit. `max_tokens` and `max_completion_tokens` are aliases and cannot both be supplied with values. The requested limit must be at least one and must fit the loaded worker. `n` must be 1.
 

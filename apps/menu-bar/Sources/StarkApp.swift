@@ -5,6 +5,7 @@ struct InstalledModel: Identifiable, Equatable {
     let id: String
     let name: String
     let path: String
+    let apiID: String
 }
 
 struct ChatMessage: Identifiable {
@@ -127,7 +128,7 @@ final class EngineController: ObservableObject {
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
                       let path = $0["path"] as? String else { return nil }
-                return InstalledModel(id: id, name: name, path: path)
+                return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name)
             }
             if !models.contains(where: { $0.id == selectedID }) { selectedID = models.first?.id ?? "" }
         case "status":

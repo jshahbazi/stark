@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 
 class APIError(Exception):
@@ -243,7 +243,7 @@ class LocalAPI:
                         self._send_json(200, api._status() if api._status else {})
                         return
                     if self.path.startswith("/v1/models/"):
-                        model_id = self.path[len("/v1/models/") :]
+                        model_id = unquote(self.path[len("/v1/models/") :])
                         models = api._models()
                         model = next((item for item in models if item.get("id") == model_id), None)
                         if model is None:
@@ -311,7 +311,7 @@ class LocalAPI:
                         created = int(time.time())
                         model = payload.get("model")
                         models = api._models()
-                        if len(models) == 1 and model in (None, models[0].get("id"), models[0].get("name")):
+                        if len(models) == 1:
                             model = models[0]["id"]
                         model = model or "stark"
                         started = False
