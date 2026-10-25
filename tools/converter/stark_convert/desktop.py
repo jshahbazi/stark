@@ -202,9 +202,10 @@ class Desktop:
         self.emit("status", epoch, state=state, message=message)
 
     def library(self):
-        self.emit("models", models=[
-            {**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models
-        ])
+        self.emit(
+            "models",
+            models=[{**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models],
+        )
 
     def persist(self):
         temporary = self.data_dir / (".models-" + uuid.uuid4().hex)
