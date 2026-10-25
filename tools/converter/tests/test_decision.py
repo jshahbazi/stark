@@ -75,9 +75,9 @@ def test_decision_uses_model_template_ordered_letter_mapping_and_uncalibrated_re
 
 
 def rendering_template(name):
-    path = Path(__file__).resolve().parents[3] / "crates/legacy/hanashi/configs/rendering" / (name + ".json")
+    path = Path(__file__).parent / "fixtures" / "rendering_templates.json"
     return ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(
-        json.loads(path.read_text())["jinja"]["template"]
+        json.loads(path.read_text())["templates"][name]
     )
 
 

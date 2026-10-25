@@ -96,6 +96,21 @@ where
     /// Evaluate exact token IDs with a fresh state and read only the last prompt
     /// position. Matches ordinary stream prefill batching and trailing-layer
     /// splitting, but does not sample or schedule a generated-token forward pass.
+    ///
+    /// Contract:
+    /// - `input` must be non-empty, every ID must be below the vocabulary size,
+    ///   and `input.len()` must not exceed `context_tokens`, which must be at
+    ///   least 1 and at most the model's maximum context. Violations return
+    ///   `InvalidInput` or `ContextOverflow` before any GPU work.
+    /// - `context_tokens` sizes the per-layer KV capacity of the temporary
+    ///   state; nothing is cached between calls and the state is dropped on
+    ///   every exit path, including errors.
+    /// - Logits are read from the engine's BF16 readout and widened to `f32`;
+    ///   `InvalidOutput` covers both a missing readout and non-finite values.
+    /// - The timing fields are wall-clock seconds; `readout_seconds` includes
+    ///   the full-vocabulary conversion.
+    /// - `&self` is not a concurrency guarantee: callers must serialize calls
+    ///   against one loaded model.
     pub fn score_next_token(
         &self,
         input: &[u32],

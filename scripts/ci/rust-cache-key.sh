@@ -71,7 +71,7 @@ cache_inputs=$({
   git ls-files -z -- Cargo.toml Cargo.lock '**/Cargo.toml' '**/Cargo.lock' \
     rust-toolchain.toml .cargo .github/workflows/ci.yml \
     .github/actions/rust-cache scripts/ci/rust-cache-key.sh \
-    '**/build.rs' '**/build/**' crates/legacy/hanashi/configs | hash_files
+    '**/build.rs' '**/build/**' | hash_files
   while IFS= read -r -d '' cache_file; do
     case "$cache_file" in
       (*.rs) ;;

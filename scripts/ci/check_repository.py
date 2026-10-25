@@ -30,10 +30,6 @@ APPROVED_RUNNERS = {"ubuntu-24.04", "macos-26"}
 # security.yml. Update this inventory and both scanner/gate inputs together.
 SCANNED_LOCKFILES = {
     "Cargo.lock",
-    "crates/legacy/bindings/tests/napi_identity/Cargo.lock",
-    "crates/legacy/download-manager/examples/wasm/Cargo.lock",
-    "crates/legacy/stark/bindings/python/uv.lock",
-    "crates/legacy/stark/bindings/typescript/pnpm-lock.yaml",
     "scripts/ci/check_repository.py.lock",
     "tools/uv.lock",
     "tools/converter/uv.lock",

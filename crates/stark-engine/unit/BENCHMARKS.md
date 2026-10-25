@@ -66,8 +66,7 @@ directory.
 
 Run one benchmark group at a time to avoid the iOS watchdog killing the app.
 
-Set `IPHONEOS_DEPLOYMENT_TARGET` (value from `.config/platforms.toml` `[envs]`)
-for all iOS builds; without it the link step fails with undefined symbols (e.g. `___chkstk_darwin`) because objects are
+Set `IPHONEOS_DEPLOYMENT_TARGET=26.4` for all iOS builds; without it the link step fails with undefined symbols (e.g. `___chkstk_darwin`) because objects are
 built for a newer SDK than the default deployment target.
 
 Key flags:

@@ -203,7 +203,6 @@ fn bench_tree_update_solve(c: &mut Criterion) {
             });
         }
         group.finish();
-        crate::tests::metrics::wait_gpu_cooldown();
     }
 }
 

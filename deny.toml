@@ -1,16 +1,5 @@
 [advisories]
-# Inspect the complete workspace, including inherited bindings and tools.
-# Run scripts/ci/check_dependency_exceptions.py before cargo-deny: it enforces
-# the exact lockfile/package/version/checksum scope and UTC expiry of these IDs.
-# The maintainer accepted this non-production test exception; see
-# docs/RUSTLS_TEST_EXCEPTION.md and scripts/ci/dependency-exceptions.toml.
 # CI reports unmaintained packages as warnings, without ignoring their advisories.
-ignore = [
-    { id = "RUSTSEC-2026-0346", reason = "Accepted for non-production model tests while Aikido blocks rustls 0.23.46; expires 2026-11-14 UTC." },
-    { id = "RUSTSEC-2026-0347", reason = "Accepted for non-production model tests while Aikido blocks rustls 0.23.46; expires 2026-11-14 UTC." },
-    { id = "RUSTSEC-2026-0348", reason = "Accepted for non-production model tests while Aikido blocks rustls 0.23.46; expires 2026-11-14 UTC." },
-    { id = "RUSTSEC-2026-0349", reason = "Accepted for non-production model tests while Aikido blocks rustls 0.23.46; expires 2026-11-14 UTC." },
-]
 unsound = "all"
 
 [licenses]

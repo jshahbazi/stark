@@ -609,9 +609,9 @@ def test_open_reasoning_boundary_is_recoverable_and_does_not_write_to_worker(des
 
     running_decision(desktop, model, score_executable)
     worker, original_template, original_codec = desktop.worker, desktop.template, desktop.codec
-    path = Path(__file__).resolve().parents[3] / "crates/legacy/hanashi/configs/rendering/qwen3-thinking.json"
+    path = Path(__file__).parent / "fixtures" / "rendering_templates.json"
     desktop.template = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(
-        json.loads(path.read_text())["jinja"]["template"]
+        json.loads(path.read_text())["templates"]["qwen3-thinking"]
     )
     desktop.codec = {"end_of_thinking_tag": "\n</think>"}
     with patch.object(worker, "request", wraps=worker.request) as request:

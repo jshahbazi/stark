@@ -84,7 +84,20 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
 
 
 class LocalAPI:
-    """Loopback-only API exposing model discovery and chat completion."""
+    """Loopback-only API exposing model discovery and chat completion.
+
+    ``models`` returns the ``/v1/models`` list and ``status`` the health document.
+    ``complete`` runs one completion and its calling convention depends on
+    ``cancellable``: with ``cancellable=False`` it is called as ``complete(payload)``
+    for buffered requests and ``complete(payload, on_delta)`` for streaming ones;
+    with ``cancellable=True`` (the menu bar app) it is always called as
+    ``complete(payload, on_delta, cancelled)`` where ``on_delta`` is ``None`` for
+    buffered requests and ``cancelled`` is a ``threading.Event`` that the handler
+    sets when the client disconnects or ``request_timeout`` seconds pass; in the
+    deadline case the handler also sets ``cancelled.reason = "deadline"`` so the
+    callee can distinguish the two. ``complete`` reports failures by raising
+    ``APIError``. The HTTP contract is documented in docs/LOCAL_API.md.
+    """
 
     def __init__(
         self,

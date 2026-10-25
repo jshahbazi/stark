@@ -1,6 +1,3 @@
-[alias]
-tools = "run --quiet -p cli-tools --"
-
 [env]
 RUST_TEST_THREADS = "1"
 

@@ -1,17 +1,17 @@
 # Stark website
 
-A static landing page built around Stark's supplied cat logo, native interfaces and source-bound Qwen3.5-2B results. HTML, CSS and a small browser script; no package installation, server-side application, analytics, external fonts or model execution.
+A static landing page: HTML, CSS and a small browser script, with no package installation, server-side code, analytics, external fonts or model execution. The logo is the owner-supplied image recorded in [brand provenance](../docs/brand/README.md).
 
 ## Build and preview
 
-From the Stark repository root, using the existing Node runtime:
+From the repository root, with Node installed:
 
 ```sh
 node website/build.mjs
 python3 -m http.server 4173 --bind 127.0.0.1 --directory website/dist
 ```
 
-Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the source; `dist/` is ignored generated output. From a standalone Site checkout, run `node build.mjs` instead.
+Open `http://127.0.0.1:4173`. `public/` is the source and `dist/` is ignored generated output. From a standalone site checkout, run `node build.mjs`.
 
 `release.json` records the latest published release: version, date and release-notes URL. The build validates it and substitutes the `{{release.*}}` placeholders in `index.html` and `404.html`, failing on an unknown placeholder or a notes URL that does not match the version. After a release is published, update `release.json`, rebuild and redeploy. Download links keep using the stable `releases/latest` URLs and need no change.
 
@@ -32,10 +32,8 @@ Open `http://127.0.0.1:4173`. Stop the server when finished. `public/` is the so
 - Color, focus indicators, image descriptions, reduced-motion handling and keyboard controls are implemented directly in the source. The page declares a light color scheme only; there is no dark theme.
 - `robots.txt`, `sitemap.xml` and `404.html` ship beside the page. The site is one document, so the sitemap lists one URL. The 404 page uses absolute asset paths and is marked `noindex`; whether unknown paths return a 404 status depends on the hosting platform, which served the home page for unknown paths before this file existed.
 
+When the current benchmark changes, update `public/benchmark-results.json`, the pinned report links in `public/index.html`, and the [benchmarks index](../docs/benchmarks/README.md) together.
+
 ## Hosting
 
-The Site identity is stored in `.openai/hosting.json`, with `dist` as its static directory. The project owner has requested public access without ChatGPT sign-in. The primary public URL is [starkengine.app](https://starkengine.app/), also used as the page's canonical URL. The generated [Sites URL](https://stark-inference.arcanepine32.chatgpt.site/) remains available. [starkengine.io](https://starkengine.io/) is active and serves the same site and benchmark data as `starkengine.app`; the repository's custom-domain receipt records the final verification.
-
-The source is mirrored into a separate ignored publication checkout. The Sites workflow opens that checkout, synchronizes only website source, builds it, commits and pushes its exact source state, then packages `dist/` with the hosting manifest for deployment. It does not publish the Stark repository, benchmark runtime data, models or local secrets. Credentials remain in session memory and are supplied only through the workflow's stdin.
-
-No inherited Stark cloud, signing, benchmark or release workflow is enabled. See the [presentation and launch notes](https://github.com/jshahbazi/stark/blob/feee52b4c7b07e29b4849684cd3dfba8690472d4/docs/PRESENTATION.md).
+The site identity is in `.openai/hosting.json` (a deployment project identifier, not a secret), with `dist` as the static directory. The public URL is [starkengine.app](https://starkengine.app/), which is also the canonical URL; [starkengine.io](https://starkengine.io/) serves the same site. Publication mirrors only the website source into a separate ignored checkout, builds it, and uploads `dist/` with the hosting manifest; credentials are supplied through the workflow's stdin and never stored. The domain setup and the first deployment are recorded in [the deployment record](../docs/archive/runs/WEBSITE_DEPLOYMENT_2026_10_21.md).

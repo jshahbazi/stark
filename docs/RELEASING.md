@@ -57,7 +57,7 @@ uv run --project tools/converter --locked --python 3.13.13 python scripts/verify
 
 Replace `TAGGED_SOURCE_COMMIT` and `SIGNING_RECIPE_COMMIT` with the full tagged commit. This adds checks of all native signatures, the installed app's seal and stapled ticket, and standalone executable notarization tickets to the normal installation, conversion, hashes, relocation and uninstall checks. Receiving-Mac checks supplement the automated checks that gate publication; they do not require a separate draft-promotion step.
 
-Test the public installer download, `stark doctor`, `stark --version` and `open "$HOME/Applications/Stark.app"` route from outside a checkout after publication. Preserve the earlier validation packets; record this run separately.
+Test the public installer download, `stark doctor`, `stark --version` and `open "$HOME/Applications/Stark.app"` from outside a checkout after publication, and record the result in the release's pull request or under `docs/archive/runs/`.
 
 Verify the actual published DMG separately:
 
@@ -144,7 +144,7 @@ uv run --project tools/converter --locked --python 3.13.13 python scripts/verify
   --output artifacts/release-0.1.0/verification.json
 ```
 
-Replace `SOURCE_COMMIT` with the tagged commit's full hash. Record aggregate verification results and archive/manifest hashes separately from earlier validation packets. Review the release notes and their installation command, then publish the verified draft:
+Replace `SOURCE_COMMIT` with the tagged commit's full hash and keep the verification output with the release record. Review the release notes and their installation command, then publish the verified draft:
 
 ```sh
 gh release edit v0.1.0 --draft=false --latest
