@@ -276,7 +276,7 @@ def apply_update(
                 not applications or applications == [target],
                 "running Stark installation changed; retry installation",
             )
-            require_same_user_session(target)
+        require_same_user_session(target)
         (workspace / "ready").write_text("ready\n")
         if from_dmg:
             installer.stop_app(target)
@@ -311,8 +311,7 @@ def apply_update(
             installer.command(
                 ["/usr/bin/open", "-n", target], "updated app could not launch"
             )
-            if from_dmg:
-                wait_for_launch(target)
+            wait_for_launch(target)
         except BaseException:
             try:
                 with installer.mutation():

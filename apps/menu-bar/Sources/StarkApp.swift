@@ -965,6 +965,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .clipShape(RoundedRectangle(cornerRadius: 13)))
         engine.onInstalled = { [weak self] in self?.installWindow?.orderOut(nil); self?.showPrompt() }
         engine.start()
+        updater.startAutomaticChecks()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self = self else { return }
             if self.engine.models.isEmpty { self.showInstall() } else { self.toggle() }
@@ -978,6 +979,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func toggle() {
         if menuPanel.isVisible { dismissMenu(); return }
+        updater.checkIfNeeded()
         guard let button = status.button, let statusWindow = button.window,
               let screen = statusWindow.screen else { return }
         let buttonFrame = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
@@ -1071,7 +1073,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func applicationWillTerminate(_ notification: Notification) { engine.shutdown() }
+    func applicationWillTerminate(_ notification: Notification) {
+        updater.stopAutomaticChecks()
+        engine.shutdown()
+    }
 }
 
 @main

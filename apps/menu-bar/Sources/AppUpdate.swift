@@ -182,39 +182,134 @@ enum AppUpdateFiles {
     }
 }
 
+struct PreparedAppUpdate {
+    let workspace: URL
+    let app: URL
+}
+
+private struct AppUpdateInstallFailure: LocalizedError {
+    let errorDescription: String?
+}
+
+// Keep network and installation effects injectable so controller transitions can
+// be checked without downloading an app or terminating the current process.
+@MainActor
+struct AppUpdateOperations {
+    var fetch: (String) async throws -> AppUpdateDownload?
+    var prepare: (AppUpdateDownload, @MainActor (String) -> Void) async throws -> PreparedAppUpdate
+    var install: (PreparedAppUpdate, AppUpdateDownload) async throws -> Void
+
+    static func live() -> Self {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 900
+        let session = URLSession(configuration: configuration)
+        return Self(fetch: { installed in
+            var request = URLRequest(url: URL(string: "https://api.github.com/repos/jshahbazi/stark/releases/latest")!)
+            request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+            request.setValue("Stark-App-Updater", forHTTPHeaderField: "User-Agent")
+            let (data, response) = try await session.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  data.count <= 4 * 1024 * 1024 else { throw AppUpdateError.download }
+            return try JSONDecoder().decode(AppRelease.self, from: data).update(after: installed)
+        }, prepare: { release, status in
+            let manager = FileManager.default
+            let target = Bundle.main.bundleURL
+            guard target.pathExtension == "app", target.lastPathComponent == "Stark.app",
+                  target == target.resolvingSymlinksInPath(),
+                  manager.isWritableFile(atPath: target.deletingLastPathComponent().path) else { throw AppUpdateError.location }
+            let root = manager.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("stark-update-" + UUID().uuidString)
+            try manager.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            var prepared = false
+            defer { if !prepared { try? manager.removeItem(at: root) } }
+            let (file, response) = try await session.download(from: release.url)
+            defer { try? manager.removeItem(at: file) }
+            guard (response as? HTTPURLResponse)?.statusCode == 200,
+                  response.url?.scheme == "https" else { throw AppUpdateError.download }
+            status("Verifying and preparing Stark \(release.version)…")
+            let app = try await Task.detached {
+                try AppUpdateFiles.prepare(file, release: release, workspace: root)
+            }.value
+            prepared = true
+            return PreparedAppUpdate(workspace: root, app: app)
+        }, install: { prepared, release in
+            guard let resources = Bundle.main.resourceURL else { throw AppUpdateError.helper }
+            let workspace = prepared.workspace
+            for name in ["update_app.py", "install_app.py"] {
+                let output = workspace.appendingPathComponent(name)
+                try? FileManager.default.removeItem(at: output)
+                try FileManager.default.copyItem(at: resources.appendingPathComponent(name), to: output)
+            }
+            for name in ["ready", "result.json"] { try? FileManager.default.removeItem(at: workspace.appendingPathComponent(name)) }
+            let process = Process()
+            process.executableURL = prepared.app.appendingPathComponent("Contents/Resources/runtime/libexec/python/bin/python3.13")
+            process.arguments = ["-I", "-B", workspace.appendingPathComponent("update_app.py").path,
+                                 "--candidate", prepared.app.path, "--target", Bundle.main.bundleURL.path,
+                                 "--version", release.version, "--pid", String(ProcessInfo.processInfo.processIdentifier),
+                                 "--workspace", workspace.path]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
+                                   "PYTHONDONTWRITEBYTECODE": "1", "LANG": "en_US.UTF-8"]
+            do { try process.run() } catch { throw AppUpdateError.helper }
+            UserDefaults.standard.set(workspace.path, forKey: "appUpdateWorkspace")
+            // The helper stages and verifies the replacement before allowing
+            // this process to quit. Its process object remains alive here.
+            while process.isRunning {
+                if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("ready").path) {
+                    NSApplication.shared.terminate(nil)
+                    return
+                }
+                try await Task.sleep(nanoseconds: 200_000_000)
+            }
+            UserDefaults.standard.removeObject(forKey: "appUpdateWorkspace")
+            if let data = try? Data(contentsOf: workspace.appendingPathComponent("result.json")),
+               let result = try? JSONDecoder().decode([String: String].self, from: data), let error = result["error"] {
+                throw AppUpdateInstallFailure(errorDescription: error)
+            }
+            throw AppUpdateError.helper
+        })
+    }
+}
+
 @MainActor
 final class AppUpdateController: ObservableObject {
     @Published private(set) var message = ""
     @Published private(set) var busy = false
-    @Published private(set) var ready = false
     @Published private(set) var available: AppUpdateDownload?
-    private var workspace: URL?
-    private var candidate: URL?
     private var task: Task<Void, Never>?
-    private var helper: Process?
-    private let installed = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
-    private let session: URLSession = {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 30
-        configuration.timeoutIntervalForResource = 900
-        return URLSession(configuration: configuration)
-    }()
+    private var automaticChecks: Task<Void, Never>?
+    private var lastCheck: Date?
+    private var installFailed = false
+    private let installed: String
+    private let operations: AppUpdateOperations
+    private let now: () -> Date
+    private let automaticCheckInterval: TimeInterval
+    private static let backgroundCheckInterval: TimeInterval = 15 * 60
 
     var actionTitle: String {
-        if ready { return "Install and Relaunch" }
-        if let available { return "Upgrade to \(available.version)…" }
+        if let available { return "Upgrade to \(available.version)" }
         return "Check for Updates…"
     }
 
     var versionLabel: String { "Version \(installed)" }
 
-    init() {
-        if let path = UserDefaults.standard.string(forKey: "appUpdateWorkspace") {
+    init(installed: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0",
+         operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
+         automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true) {
+        self.installed = installed
+        self.operations = operations ?? .live()
+        self.now = now
+        self.automaticCheckInterval = automaticCheckInterval
+        if restorePreviousFailure, let path = UserDefaults.standard.string(forKey: "appUpdateWorkspace") {
             let previous = URL(fileURLWithPath: path)
             if let data = try? Data(contentsOf: previous.appendingPathComponent("result.json")),
                let result = try? JSONDecoder().decode([String: String].self, from: data),
                let error = result["error"] {
                 message = error
+                installFailed = true
             }
             // Failed workspaces may retain a recovery backup; never delete them
             // automatically. Successful helpers remove their private workspace.
@@ -224,98 +319,79 @@ final class AppUpdateController: ObservableObject {
 
     func performAction() {
         guard !busy else { return }
-        if ready { install(); return }
-        if let available { download(available); return }
+        if let available { upgrade(available); return }
         check()
     }
 
-    func check() {
-        guard !busy else { return }
-        busy = true; message = "Checking for updates…"
-        task = Task {
-            do {
-                var request = URLRequest(url: URL(string: "https://api.github.com/repos/jshahbazi/stark/releases/latest")!)
-                request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-                request.setValue("Stark-App-Updater", forHTTPHeaderField: "User-Agent")
-                let (data, response) = try await session.data(for: request)
-                guard (response as? HTTPURLResponse)?.statusCode == 200, data.count <= 4 * 1024 * 1024 else { throw AppUpdateError.download }
-                available = try JSONDecoder().decode(AppRelease.self, from: data).update(after: installed)
-                message = available == nil ? "Stark is up to date." : "A new version is available."
-            } catch { message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription }
-            busy = false
+    func startAutomaticChecks() {
+        guard automaticChecks == nil else { return }
+        checkIfNeeded()
+        let interval = automaticCheckInterval
+        automaticChecks = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(interval)) }
+                catch { return }
+                guard let self else { return }
+                self.checkIfNeeded()
+            }
         }
     }
 
-    private func download(_ release: AppUpdateDownload) {
-        busy = true; message = "Downloading Stark \(release.version)…"
+    func stopAutomaticChecks() {
+        automaticChecks?.cancel()
+        automaticChecks = nil
+    }
+
+    func checkIfNeeded() {
+        guard lastCheck.map({ now().timeIntervalSince($0) >= Self.backgroundCheckInterval }) ?? true else { return }
+        check(background: true)
+    }
+
+    func check() { check(background: false) }
+
+    private func check(background: Bool) {
+        guard !busy else { return }
+        lastCheck = now()
+        busy = true
+        if !background { message = "Checking for updates…" }
         task = Task {
-            var directory: URL?
             do {
-                let target = Bundle.main.bundleURL
-                guard target.pathExtension == "app", target.lastPathComponent == "Stark.app",
-                      target == target.resolvingSymlinksInPath(),
-                      FileManager.default.isWritableFile(atPath: target.deletingLastPathComponent().path) else { throw AppUpdateError.location }
-                let root = FileManager.default.temporaryDirectory.appendingPathComponent("stark-update-" + UUID().uuidString)
-                directory = root
-                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-                let (file, response) = try await session.download(from: release.url)
-                guard (response as? HTTPURLResponse)?.statusCode == 200,
-                      response.url?.scheme == "https" else { throw AppUpdateError.download }
-                message = "Verifying and preparing Stark \(release.version)…"
-                let prepared = try await Task.detached {
-                    try AppUpdateFiles.prepare(file, release: release, workspace: root)
-                }.value
-                workspace = root; candidate = prepared; ready = true
-                message = "Ready to install. Relaunching stops active requests and clears the current conversation."
+                available = try await operations.fetch(installed)
+                if !background || !installFailed {
+                    message = available == nil ? (background ? "" : "Stark is up to date.") : "A new version is available."
+                    installFailed = false
+                }
             } catch {
-                if let directory { try? FileManager.default.removeItem(at: directory) }
-                message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription
+                if !background {
+                    message = (error as? AppUpdateError)?.localizedDescription ?? AppUpdateError.download.localizedDescription
+                }
             }
             busy = false
+            task = nil
         }
     }
 
-    private func install() {
-        guard let workspace, let candidate, let release = available,
-              let resources = Bundle.main.resourceURL else { return }
-        busy = true; message = "Preparing to relaunch…"
+    private func upgrade(_ release: AppUpdateDownload) {
+        busy = true; message = "Downloading Stark \(release.version)…"
+        installFailed = false
         task = Task {
+            var installing = false
             do {
-                for name in ["update_app.py", "install_app.py"] {
-                    let output = workspace.appendingPathComponent(name)
-                    try? FileManager.default.removeItem(at: output)
-                    try FileManager.default.copyItem(at: resources.appendingPathComponent(name), to: output)
-                }
-                for name in ["ready", "result.json"] { try? FileManager.default.removeItem(at: workspace.appendingPathComponent(name)) }
-                let process = Process()
-                process.executableURL = candidate.appendingPathComponent("Contents/Resources/runtime/libexec/python/bin/python3.13")
-                process.arguments = ["-I", "-B", workspace.appendingPathComponent("update_app.py").path,
-                                     "--candidate", candidate.path, "--target", Bundle.main.bundleURL.path,
-                                     "--version", release.version, "--pid", String(ProcessInfo.processInfo.processIdentifier),
-                                     "--workspace", workspace.path]
-                process.standardInput = FileHandle.nullDevice
-                process.standardOutput = FileHandle.nullDevice
-                process.standardError = FileHandle.nullDevice
-                process.environment = ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": FileManager.default.homeDirectoryForCurrentUser.path,
-                                       "PYTHONDONTWRITEBYTECODE": "1", "LANG": "en_US.UTF-8"]
-                try process.run()
-                helper = process
-                UserDefaults.standard.set(workspace.path, forKey: "appUpdateWorkspace")
-                // Staging can copy a large runtime. Keep the main thread and
-                // the current app usable until the helper explicitly reports ready.
-                while process.isRunning {
-                    if FileManager.default.fileExists(atPath: workspace.appendingPathComponent("ready").path) {
-                        NSApplication.shared.terminate(nil)
-                        return
-                    }
-                    try await Task.sleep(nanoseconds: 200_000_000)
-                }
-                if let data = try? Data(contentsOf: workspace.appendingPathComponent("result.json")),
-                   let result = try? JSONDecoder().decode([String: String].self, from: data), let error = result["error"] {
-                    message = error
-                } else { message = AppUpdateError.helper.localizedDescription }
-            } catch { message = AppUpdateError.helper.localizedDescription }
-            busy = false
+                let update = try await operations.prepare(release) { [weak self] status in self?.message = status }
+                installing = true
+                message = "Preparing to relaunch Stark \(release.version)…"
+                try await operations.install(update, release)
+                // Installation requests app termination only after helper
+                // readiness; keep the action disabled until the app exits.
+            } catch {
+                // Once installation starts, the helper may hold a recovery
+                // backup or still be staging. Preserve its private workspace.
+                message = (error as? LocalizedError)?.errorDescription ??
+                    (installing ? AppUpdateError.helper : AppUpdateError.download).localizedDescription
+                installFailed = true
+                busy = false
+            }
+            task = nil
         }
     }
 }
@@ -328,10 +404,20 @@ struct AppUpdateView: View {
                 Text(updater.versionLabel).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if updater.busy { ProgressView().controlSize(.small) }
-                Button(updater.actionTitle, action: updater.performAction).disabled(updater.busy)
+                if updater.available != nil {
+                    Button(updater.actionTitle, action: updater.performAction)
+                        .buttonStyle(.borderedProminent).disabled(updater.busy)
+                } else {
+                    Button(updater.actionTitle, action: updater.performAction).disabled(updater.busy)
+                }
             }
             if !updater.message.isEmpty {
                 Text(updater.message).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if updater.available != nil && !updater.busy {
+                Text("Upgrading restarts Stark and clears the current conversation.")
+                    .font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
