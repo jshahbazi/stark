@@ -3,14 +3,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
+  <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#171b19">
   <meta name="description" content="Run local language models on Apple silicon with Stark's menu bar app and terminal chat. Connect compatible local clients through its text-chat API. Open-source Rust and Metal, with model conversion and scoring.">
   <meta property="og:title" content="Stark — run local AI on your Mac">
   <meta property="og:description" content="Chat in Stark or connect a compatible local client through its OpenAI-style text-chat API. Includes terminal tools, model conversion and measured Qwen3.5-2B performance.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://starkengine.app/">
-  <meta property="og:image" content="https://starkengine.app/assets/stark-engine.jpg">
+  <meta property="og:image" content="https://starkengine.app/assets/stark-social-card.jpg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Stark's black cat logo beside the words Run local AI on your Mac.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="https://starkengine.app/assets/stark-social-card.jpg">
   <link rel="canonical" href="https://starkengine.app/">
   <link rel="icon" href="assets/stark-engine.jpg" type="image/jpeg">
   <link rel="stylesheet" href="styles.css">
@@ -35,7 +40,7 @@
         <p class="hero-description">Chat from your menu bar or Terminal. Connect a compatible local client through Stark's <a href="#connect">text-chat API</a>.</p>
         <p class="hero-provenance">An experimental, open-source Rust/Metal engine derived from <a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/provenance/UPSTREAM.md">Uzu</a>.</p>
         <div class="hero-actions"><a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a><a class="text-link" href="#start">App + terminal tools <span aria-hidden="true">↗</span></a></div>
-        <p class="hero-footnote">Latest release · Signed and notarized · Apple silicon · macOS 26.4 or newer.</p>
+        <p class="hero-footnote">Latest release <a href="{{release.notes_url}}">v{{release.version}}</a>, {{release.date_display}} · Signed and notarized · Any Apple silicon Mac · macOS Tahoe 26.4 or newer.</p>
       </div>
       <figure class="brand-figure">
         <div class="figure-top"><span>STARK / 001</span><span>RUST · METAL</span></div>
@@ -56,7 +61,7 @@
       <div class="start-heading">
         <p class="eyebrow">01 / GET STARTED</p>
         <h2 id="start-title">Choose your<br>installation.</h2>
-        <p>Both options use the latest signed, notarized release. Requires Apple silicon and macOS 26.4 or newer. Models download separately; no developer tools are required.</p>
+        <p>Both options use the latest signed, notarized release, <a href="{{release.notes_url}}">v{{release.version}}</a> from {{release.date_display}}. Runs on any Apple silicon Mac with macOS Tahoe 26.4 or newer: the engine's Metal 4 kernels are compiled for that minimum, and every M-series Mac can update to it. Intel Macs are not supported. Models download separately; no developer tools are required.</p>
         <h3 class="install-option-title">Mac app</h3>
         <p class="source-install-note">Download the DMG, open it and drag <code>Stark.app</code> to your Applications folder. Open Stark to install a model and chat from your menu bar.</p>
         <a class="button primary" href="https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg">Download Mac app <span aria-hidden="true">↓</span></a>
@@ -142,7 +147,7 @@ open "$HOME/Applications/Stark.app"</code></pre>
   <footer class="site-footer">
     <div class="wrap footer-top"><a class="wordmark" href="#">STARK<span>NATIVE INFERENCE. EVIDENCE INCLUDED.</span></a><div><a href="https://github.com/jshahbazi/stark">GitHub</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/SECURITY.md">Security</a><a href="https://github.com/jshahbazi/stark/blob/83dbc97e302b9a7b19463d3dbfcc0205ad49a8bb/LICENSE">MIT license</a></div></div>
     <section class="wrap cat-note" aria-labelledby="cat-title">
-      <img src="assets/stark-cat.jpg" width="4032" height="3024" alt="Stark, a black cat with golden eyes, relaxing on a lap" loading="lazy" decoding="async">
+      <img src="assets/stark-cat.jpg" width="480" height="360" alt="Stark, a black cat with golden eyes, relaxing on a lap" loading="lazy" decoding="async">
       <div>
         <p class="cat-eyebrow">THE CAT BEHIND THE NAME</p>
         <h2 id="cat-title">Meet Stark</h2>
