@@ -1,179 +1,99 @@
-# Stark
+# Technical guide
 
-**Model preparation, exact probability scoring and native text generation on Apple silicon.**
+How Stark is put together: the crates, the Python package, the app, how they talk to each other, and the engine's feature flags. For protocol contracts see [worker protocols](WORKER_PROTOCOLS.md); for measured results see [benchmarks](benchmarks/README.md).
 
-Stark combines a Rust and Metal inference engine with an independent streaming converter for Hugging Face models. Prepare dense and existing MLX 4/8-bit checkpoints locally, then use direct probability scoring for decision models such as JevK5 or the standalone text generation worker.
+## Components
 
-Stark is an experimental fork of [Uzu](https://github.com/trymirai/uzu), starting at Uzu 0.6.1, commit `8d01581474760bd1fc7f4a547ff1d02f7dada437`. Upstream Git history, copyright and MIT licensing are preserved.
+```text
+apps/menu-bar/            SwiftUI menu bar app (swiftc build, no SwiftPM)
+  |  JSON lines over the app's private pipe
+tools/converter/stark_convert/
+  desktop.py              app backend: model library, worker lifecycle, loopback API
+  local_api.py            HTTP server for /v1/chat/completions
+  api_request.py          request validation and normalisation
+  chat.py                 terminal chat client and the Worker pipe wrapper
+  decision.py             Decision-mode scoring client
+  cli.py, adapters/, ...  the converter
+  |  JSON lines over stdin/stdout
+crates/stark-generate/    text generation worker
+crates/stark-score/       next-token scoring worker (+ stark-score-digest probe)
+crates/stark-engine/      Rust/Metal inference engine
+crates/stark-engine-macros/
+crates/legacy/            inherited Uzu crates, not shipped
+```
 
-The [comparison evidence inventory](INFERENCE_COMPARISON_EVIDENCE.md) collects recorded engine, reference, conversion and predecessor-Uzu results, their limits, and candidate engines for a future benchmark.
+Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scripts/stark`), or a worker binary. The app and the launcher both start `desktop.py` or `chat.py` from a private Python 3.13 runtime bundled with the installation, and those start the worker binaries from `libexec/`.
 
-The [short benchmark write-up](STARK_BENCHMARK_BRIEF_2026_10_21.md) presents Stark's local Qwen3.5-2B result, developer interfaces and evidence limits as an engineering preview.
+## Engine
 
-The [2026-10-19 stock engine pilot](STOCK_ENGINE_BENCHMARK_2026_10_19.md) records current Qwen3.5-2B generation, JevK5 scoring and vLLM Metal concurrency results, including support failures and excluded timings.
+`crates/stark-engine` is the Uzu 0.6.1 engine, renamed, with Stark's scoring API and optimizations added. Its module layout:
 
-The [2026-10-20 MLX-informed optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) records two decode changes, bounded bitwise validation and modest Qwen3.5-2B throughput gains, with its original timing exclusions retained.
-
-The [quiet-window Qwen3.5-2B follow-up](QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md) attributes interfering processes and records Stark's 7.36% throughput advantage over pinned MLX-LM across four clean paired loads, with rejected pairs and quality limits explicit.
-
-The [DeepInfer adoption study](DEEPINFER_ADOPTION_2026_10_21.md) records two independently implemented resource-reuse experiments, exact-output checks and isolated measurements. Neither demonstrated a useful gain; both runtime changes were reverted, with patches and evidence retained.
-
-## Why Stark
-
-- **Conversion up to 3.5× as fast as Lalamo in recorded benchmarks.** LFM2-350M MLX 4-bit took 0.532 s versus 1.853 s, a 71.3% lower complete-command median. [Measured comparison](MODEL_CONVERSION_MILESTONE_4_MLX.md).
-- **92–95% less sampled conversion memory across Qwen3.5 and LFM2 MLX tests.** LFM2 4-bit used 113.0 MiB versus 1,411.4 MiB; Qwen3.5 8-bit used 203.5 MiB versus 4,155.3 MiB. These are sampled process-tree RSS measurements. [Memory evidence](MODEL_CONVERSION_MILESTONE_4_MLX.md).
-- **85 of 110 pinned Lalamo profiles implemented, plus five Stark extensions.** Coverage includes 40 MLX profiles, hybrid/state-space models and ModernBERT sequence classifiers. Future compatible checkpoints can reuse architecture adapters.
-- **Lightweight conversion tooling.** The installed converter needs no Lalamo, JAX or PyTorch. Transformations default to a bounded 8 MiB workspace, with full initial and final source verification.
-- **Reference-checked exports.** Validated conversion tuples match pinned Lalamo tensor payloads, specifications, logical config and tokenizer metadata. Immutable source revisions and content hashes make each result traceable.
-- **Exact probability readouts.** The scoring worker exposes raw candidate logits, log probabilities normalized over the full vocabulary, and temperature-calibrated probabilities over requested candidates.
-
-## Recorded conversion benchmarks
-
-All rows below target BF16 output and compare complete conversion commands against pinned Lalamo. Speed ratio is Lalamo median divided by Stark median; values above 1 favor Stark. Ratios are rounded from the displayed medians. Each row links to its source-bound checkpoint, converter revision, full ranges and independent review.
-
-### Existing MLX 4/8-bit checkpoints
-
-| Checkpoint / input | Stark median | Lalamo median | Speed ratio | Lower sampled RSS |
-| --- | ---: | ---: | ---: | ---: |
-| [LFM2-350M 4-bit](MODEL_CONVERSION_MILESTONE_4_MLX.md) | 0.532 s | 1.853 s | 3.48× | 92.0% |
-| [LFM2-350M 8-bit](MODEL_CONVERSION_MILESTONE_4_MLX.md) | 0.623 s | 1.581 s | 2.54× | 92.6% |
-| [Qwen3.5-0.8B text 4-bit](MODEL_CONVERSION_MILESTONE_4_MLX.md) | 0.997 s | 2.059 s | 2.07× | 94.9% |
-| [Qwen3.5-0.8B text 8-bit](MODEL_CONVERSION_MILESTONE_4_MLX.md) | 1.393 s | 1.940 s | 1.39× | 95.1% |
-| [Qwen3-0.6B 4-bit](MODEL_CONVERSION_MILESTONE_3.md) | 1.011 s | 1.796 s | 1.78× | 93.0% |
-| [Qwen3-0.6B 8-bit](MODEL_CONVERSION_MILESTONE_3.md) | 1.506 s | 1.818 s | 1.21× | 93.3% |
-| [Llama3.2-1B 4-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 1.256 s | 2.397 s | 1.91× | 94.2% |
-| [Llama3.2-1B 8-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 2.202 s | 2.604 s | 1.18× | 96.6% |
-| [SmolLM3-3B 4-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 2.779 s | 3.377 s | 1.22× | 95.4% |
-| [SmolLM3-3B 8-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 5.083 s | 4.233 s | **0.83× (slower)** | 96.2% |
-| [Gemma3-1B 4-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 1.551 s | 2.580 s | 1.66× | 90.7% |
-| [Gemma3-1B 8-bit](MODEL_CONVERSION_MILESTONE_3_LATENCY.md) | 2.464 s | 2.537 s | 1.03× | 90.8% |
-| [LLaMBA-1B 4-bit](MODEL_CONVERSION_MILESTONE_5.md) | 2.142 s | 2.225 s | 1.04× | 96.4% |
-
-The sequential coefficient writer also reduced conversion medians by **16–38% against the previous Stark implementation** across the six Llama, SmolLM3 and Gemma tuples, while preserving exact output bytes and the same workspace bound. [Writer improvement](MODEL_CONVERSION_MILESTONE_3_LATENCY.md). MLX conversion repacks an already quantized checkpoint; it does not compute new quantization.
-
-### Dense models and classifier fixtures
-
-| Checkpoint / input | Stark median | Lalamo median | Speed ratio | Lower sampled RSS |
-| --- | ---: | ---: | ---: | ---: |
-| [LFM2-350M dense](MODEL_CONVERSION_MILESTONE_4.md) | 1.233 s | 1.688 s | 1.37× | 90.2% |
-| [Qwen3.5-0.8B text dense](MODEL_CONVERSION_MILESTONE_4.md) | 3.525 s | 2.707 s | **0.77× (slower)** | 91.4% |
-| [LLaMBA-1B dense F32 source](MODEL_CONVERSION_MILESTONE_5.md) | 5.791 s | 2.105 s | **0.36× (slower)** | 97.1% |
-| [ModernBERT BF16-source fixture](MODEL_CONVERSION_MILESTONE_6.md) | 0.562 s | 1.137 s | 2.02× | 84.9% |
-| [ModernBERT F32-source fixture](MODEL_CONVERSION_MILESTONE_6.md) | 0.861 s | 1.312 s | 1.52× | 89.6% |
-
-The two ModernBERT rows use unchanged public classifier weights with explicitly recorded synthetic chat-template overlays. All twenty classifier benchmark outputs passed full parity. These fixtures are separately identified from the two inaccessible Mirai catalog models. [Classifier fixture provenance](MODEL_CONVERSION_MILESTONE_6.md).
-
-**The remaining slow cases are visible:** SmolLM3 MLX 8-bit is 20.1% slower than Lalamo, dense Qwen3.5 is 30.2% slower, and dense LLaMBA takes 2.75× as long. Dense LLaMBA still reduces sampled RSS by 97.1%, from 5,817.6 MiB to 167.0 MiB. Smaller passing differences for Llama 8-bit, Gemma 8-bit and LLaMBA MLX have overlapping ranges, as do the ModernBERT F32 and dense LFM2 comparisons.
-
-These are recorded warm-file measurements from successive independently reviewed converter revisions on one Apple-silicon host per packet. The initial Qwen3 packet uses three repeats per backend/tuple; the other displayed packets use five. Setup, downloads, warming, parity comparisons and native loading are outside command timing. Stark includes full source verification, output hashing and receipts; the Lalamo reference command has weaker source/receipt verification.
-
-RSS sampling can miss peaks or double-count shared pages. The benchmarked 8 MiB bound applies to transformation buffers; headers, tokenizer processing, hashing and interpreter memory are additional. **These measurements establish conversion performance; inference latency and general generation quality require separate evaluation.** Earlier dense results and previous-writer measurements remain in the [evidence archive](MODEL_CONVERSION_PLAN.md).
-
-## Experimental Qwen3 GGUF import
-
-The [Qwen3 GGUF experiment](QWEN3_GGUF_IMPORT_EXPERIMENT.md) imports official Qwen3-0.6B Q8_0 weights into the existing native compressed format. The [prefill investigation](QWEN3_GGUF_PREFILL_OPTIMIZATION.md) improves the imported model's prefill throughput by about 15% at 512 and 1,024 tokens on one M5 Max, with unchanged compressed weights and exact outputs on the tested cases. General GGUF support and generation quality remain unqualified.
-
-## Conversion coverage and future models
-
-| Supported area | Current implementation |
+| Path | Contents |
 | --- | --- |
-| Dense language models | 43 built-in profiles: Qwen2/Qwen3/Qwen3.5 text, Llama, Mistral, Gemma text, Phi-4-mini, Granite, SmolLM, LFM2 and LLaMBA/Mamba2; five separately counted extensions include Gemma2 and Empero Qwen3.8-4B-Distill |
-| Affine MLX 4/8-bit | 40 built-in profiles across Qwen3, Qwen3.5 text, Llama, SmolLM3, Gemma text, LFM2 and LLaMBA; supported bit widths and layouts remain profile-specific |
-| Sequence classifiers | Two ModernBERT profiles, plus self-contained generic ModernBERT checkpoints using mean pooling and the supported GELU layout |
-| Future checkpoints | `hf-generic` dispatches by architecture and input format, validates complete config/layout/metadata, and supports private offline source replay |
+| `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (legacy consumers only) |
+| `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
+| `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |
+| `src/backends/cpu/` | CPU reference kernels used by the unit tests (`cpu` feature); not used by the workers |
+| `src/backends/common/` | Backend traits shared by both |
+| `src/config/` | Model configuration types read from `config.json`, with validation |
+| `src/parameters/` | Safetensors header parsing and bounded tensor loading |
+| `build/` | The build script: scans GPU type definitions, generates Rust bindings for each kernel, and compiles `.metal` sources with Xcode's Metal toolchain into `.metallib` files embedded in the binary (`build/metal/`), or compiles CPU kernels (`build/cpu/`) |
+| `unit/` | The engine unit and benchmark suite; see [Contributing](../CONTRIBUTING.md#engine-tests) |
 
-Compatible fine-tunes can use an existing adapter without a new catalog entry:
+A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No state outlives a request in either worker.
 
-```sh
-uv run --project tools/converter --locked stark-convert my-org/future-model \
-  --metadata-profile hf-generic \
-  --write-source-manifest runtime/converter-sources/future-model.json \
-  --output models/future-model-stark
-```
+### Engine feature flags
 
-A generic checkpoint needs self-contained config/tokenizer metadata and a supported chat template. ModernBERT additionally requires `--model-kind classifier`; optional `--architecture` asserts the expected architecture. Known catalog identities retain their authoritative metadata and packing rules. See [supported families, formats and examples](../tools/converter/README.md#future-checkpoints-and-architecture-tracking).
+| Feature | Default | Used by | Effect |
+| --- | --- | --- | --- |
+| `metal` | on | both workers | Metal backend and kernel compilation |
+| `cpu` | on | unit tests only | CPU reference kernels; required by the unit harness |
+| `grammar` | on | nothing shipped | Grammar-constrained sampling via `xgrammar-rs` (needs `vendor/cxx`); the workers do not enable it and the API offers no structured output |
+| `deferred-state-init` | off | `stark-score` (`optimized`) | Encodes the zeroing of DeltaNet state into the first command buffer instead of a synchronous fill per layer at state creation. The flag that records "fills encoded" is cleared at encode time, so a state whose first encoding fails before submission must be discarded; the scorer does this by dropping its state on every error. Not enabled for generation |
+| `scoring-last-layer-pruning` | off | `stark-score` (`optimized`) | Skips the query path of the final attention layer for prompt chunks whose logits are not read. Requires the per-state opt-in that only `score_next_token` sets; ordinary generation is unaffected even when the feature is compiled in |
+| `attention-kv-only` | off | `stark-score` (`optimized`) | With the pruning above, uses a KV-only preparation kernel for the pruned final layer. Only fires for non-final chunks of prompts longer than 1,024 tokens whose final layer is owned, non-ring full attention |
+| `direct-delta-conv` | off | `stark-score` (`optimized`) | Removes padded DeltaNet convolution tokens with exact arithmetic |
+| `compact-delta-conv` | off | `stark-score` (`optimized`) | Compact convolved QKV on top of `direct-delta-conv`; the original gate and control projection is still computed for beta, alpha and gate reads |
+| `rope-cache` | off | `stark-score` (`optimized`) | Caches CPU-side RoPE tables for up to 8,192 positions (8 MiB); GPU arithmetic is unchanged |
 
-For trained `Qwen3-4B-Instruct-2507` and `empero-ai/Qwen3.8-4B-Distill` checkpoints, see the [conversion and testing guide](QWEN_TRAINED_CHECKPOINTS.md). Full or merged checkpoints use their own metadata through the generic route; adapter-only training outputs require merging first.
+`stark-score --features optimized` enables the six scoring features. `stark-generate` enables only `metal`. The distribution builder compiles the two workers in separate Cargo invocations so feature unification cannot enable the scoring features in the generator. The six features were validated for bit-exact scoring parity ([scoring parity](validation/SCORING_PARITY.md)); their effect on ordinary generation has not been validated, which is why the generator is built without them.
 
-The catalog tracks **implementation**, while qualification tracks exact source/config/dtype/output/build tuples. **27 exact BF16 catalog tuples have named-build load-only qualifications; 63 implemented identities remain unqualified.** Generic outputs start native-unverified, and `--require-native-support` requires an exact stored catalog match. Classifier fixtures have separate private load-only proofs; both Mirai catalog repositories remain inaccessible to the current account and unqualified.
+## Workers
 
-Twenty-five pinned built-ins remain planned, including specialized/MoE/multimodal and later-generation variants. Unsupported combinations fail explicitly. Complete Lalamo replacement remains an open goal. [Coverage and replacement plan](MODEL_CONVERSION_PLAN.md).
+`crates/stark-generate` and `crates/stark-score` are small: argument parsing, protocol parsing with strict field validation, a backend trait with one native implementation, and the request loop. Each redirects its own stdout and stderr to `/dev/null` before loading the model and writes replies through a duplicated descriptor, so no library output can enter the protocol stream. Error codes are fixed strings and never carry request content. The generator reads a cancellation pipe when `STARK_CANCEL_FD` is set. Contracts: [generation](GENERATION.md), [scoring](SCORING.md).
 
-The proposed [Pi-assisted adapter builder](PI_ADAPTER_BUILDER_PLAN.md) would generate missing conversion adapters through an optional developer tool, with host-owned verification and reviewable source patches. The plan covers architecture preflight, process confinement, resource budgets, independent parity checks and staged acceptance. Implementation and new model qualifications remain pending.
+## Python package
 
-## Quickstart
+`tools/converter/stark_convert` is one package with three roles:
 
-For the prebuilt CLI and private Python runtime, follow the [installation guide](INSTALLATION.md). The commands below are for development in a source checkout.
+| Role | Modules |
+| --- | --- |
+| Converter | `cli.py`, `sources.py` (source resolution, hashing, manifests), `streaming.py` (safetensors planning and bounded tensor streaming), `compressed.py` (MLX repacking), `metadata.py`, `profiles.py`, `registry.py`, `qualifications.py`, `provenance.py`, `classifier_metadata.py`, `adapters/` (one planner per architecture), `gguf_import.py`, `benchmark.py`, `progress.py` |
+| Chat and workers | `chat.py` (terminal chat and the `Worker` class that owns a worker process), `decision.py` (`ScoreWorker` for Decision mode) |
+| App backend | `desktop.py` (`Desktop`: model library, install and conversion jobs, worker lifecycle, request queue), `local_api.py` (`LocalAPI`: the HTTP server), `api_request.py` (chat request validation) |
 
-Run these commands from the repository root.
+Two Python projects exist: `tools/converter/pyproject.toml` is the product package (Python 3.13.13, locked in `tools/converter/uv.lock`). `tools/pyproject.toml` is an inherited developer environment for the unused `data_exporter`, `gpu_trace` and `model_compare` tools and is not part of the product. Repository policy scripts under `scripts/ci/` run on Python 3.12.13 with their own script lockfile.
 
-### Set up the converter
+## App control protocol
 
-Install `uv`. It manages the converter's Python 3.13.13 environment:
+`Stark.app` launches `desktop.py` with the paths of the two worker binaries and its data directory, and exchanges JSON lines over the process's stdin and stdout. Each line is capped at 1 MiB. Commands from the app:
 
-```sh
-uv sync --project tools/converter --locked
-```
+| Command | Fields | Effect |
+| --- | --- | --- |
+| `list` | | Re-emit the model library |
+| `install` | `source`, `kind` | Register a converted folder, convert a local checkpoint, or download and convert a repository; progress is reported while it runs |
+| `run` | `model_id` | Load the model into a worker for the current mode |
+| `stop`, `quit` | | Unload the worker; `quit` also stops the API and exits |
+| `generate` | `text` | One chat turn against the loaded conversation |
+| `decide` | context, question, choices | Score the choices with the scoring worker |
+| `reset` | | Clear the conversation while keeping the model loaded |
+| `configure` | `context_tokens`, `max_new_tokens`, `system_prompt`, `thinking` | Apply chat settings and start a new conversation |
 
-### Convert from Hugging Face
+Events to the app: `models` (the library), `status` (`state` and `message`), `progress` (download and conversion bytes), `installed`, `ready` (worker limits after `run`), `configured`, `reply`, `decision`, `connection` (the API base URL and key), and `error` with a fixed message. The backend fences every command and request with an epoch that changes when a model is stopped or replaced, so a late reply from a previous worker is discarded. Chat and API requests share one FIFO queue in front of the single worker.
 
-Pass the model's repository name. The converter downloads it and saves the result:
+## Where validation lives
 
-```sh
-uv run --project tools/converter --locked stark-convert Qwen/Qwen3-0.6B \
-  --output models/qwen3
-```
-
-### Convert a downloaded folder
-
-Pass the path to the full model folder. This uses local files and needs no Hugging Face account:
-
-```sh
-uv run --project tools/converter --locked stark-convert /path/to/downloaded-model \
-  --metadata-profile hf-generic --offline --output models/local-model
-```
-
-Use a new output folder each time. Your local folder must include the model config, tokenizer metadata and all safetensors weights. See [required files](../tools/converter/README.md#convert-a-downloaded-folder) and [optional settings](../tools/converter/README.md#optional-settings). Generic conversions remain native-unverified.
-
-### Run the scoring worker
-
-Use an Apple silicon Mac with Xcode's Metal tools and Rust 1.98.1. Build and start the worker with your converted model:
-
-```sh
-cargo build --release --locked -p stark-score --features optimized
-cargo test --release --locked -p stark-score --features optimized -- --test-threads=1
-./target/release/stark-score --score-model-path /absolute/path/to/model
-```
-
-The worker uses a private JSON-lines stdin/stdout protocol for tokenization and scoring. Host application integration belongs in separate repositories. [Scoring protocol](SCORING.md).
-
-### Run the generation worker
-
-Build the default Metal worker with Rust 1.98.1 and Xcode's Metal tools:
-
-```sh
-cargo build --release --locked -p stark-generate
-./target/release/stark-generate --model-path /absolute/path/to/converted-model
-```
-
-`stark-generate` exposes `tokenize`, `decode` and `generate` over private JSON-lines pipes. Each generation request uses fresh native state and returns generated token IDs, decoded text and a finish reason. The caller renders the model's exact chat template and owns tool execution. [Generation protocol and ColGrep setup](GENERATION.md).
-
-The `lightonai/colgrep-agent-2B` checkpoint at revision `f798a61129c6decb5166864e0a3c98373e62c764` has controlled functional acceptance on the named build, including a three-turn generated search/read/finish fixture. Three of four greedy reference cases match exactly; the remaining finish case returns the same valid locations with a documented token divergence. [Acceptance and limits](GENERATION.md#validation-status-and-replay). Live ColGrep search and application integration require separate validation.
-
-## Scoring engine and validation
-
-Stark adds direct scoring topology, deferred state initialization, fewer Metal submissions, final-layer pruning, compact delta convolution, reusable RoPE values and KV-only attention preparation. The `optimized` feature selects six accepted optional engine optimizations.
-
-An opt-in `--consecutive-cache` reuses one completed internal vocabulary-logit entry for immediately consecutive identical token sequences with the same context size. Candidate selection and temperature can change because normalization and calibration are recomputed. Errors, reset and restart clear the cache; it defaults off and is never persisted.
-
-Recorded JevK5 BF16 validation passed **243 evaluation cases / 486 cold-and-cache-hit replies**, with exact raw logits, log probabilities, calibrated candidate probabilities and tokenizations against frozen accepted Uzu scorer references. Calibration boundaries, full-vocabulary digests and process ownership have separate checks. This is source-bound scoring correctness evidence; precise engine latency benchmarking remains open. [Validation and build receipts](VALIDATION.md).
-
-The preserved milestone 6 converter packet passed **3,672 tests**, with 60 private-reference checks skipped, plus formatting, locked dependency and repository-policy checks. Architecture packets have independent technical reviews and exact tensor/spec/config/tokenizer comparisons. Real model weights and operational artifacts remain ignored/private. Completed benchmark model files are removed after review; small receipts, observations, manifests, recipes and hashes are retained. [Classifier validation and cleanup](MODEL_CONVERSION_MILESTONE_6.md). Current Qwen trained-checkpoint checks are recorded in the [checkpoint guide](QWEN_TRAINED_CHECKPOINTS.md#validation-boundaries).
-
-## Scope, security and attribution
-
-Native loading checks prove construction/readiness and EOF on the named build. Scoring, general generation and classifier execution have their own acceptance requirements. Inherited Python, TypeScript, Swift, CLI and playground binary distributions remain unqualified; no Stark packages or Swift XCFramework are published. Inherited cloud release and benchmark infrastructure stays disabled.
-
-Native diagnostics and capture variables are suppressed. Protocol requests/responses belong in private pipes or files. Models, credentials, private evaluation data and runtime artifacts remain outside Git.
-
-See [private security reporting](../SECURITY.md), [CI and contribution checks](CI.md), [rename compatibility](RENAMING.md), [upstream provenance](../provenance/UPSTREAM.md) and [LICENSE](../LICENSE). Uzu and Mirai attribution is preserved.
+- Scoring parity and generation acceptance records: [docs/validation](validation/).
+- Benchmark studies and the current comparison: [docs/benchmarks](benchmarks/README.md).
+- Aggregate receipts with hashes: [provenance](../provenance/).
+- Historical milestone and run records: [docs/archive](archive/).

@@ -15,20 +15,30 @@ workspace = true
 [features]
 default = ["cpu", "metal", "grammar"]
 
-# Experimental scoring optimization. An encoded state must be discarded if its
-# command buffer is abandoned or fails; initialization is ordered on first encode.
+# Scoring-only features. All six are enabled by stark-score's `optimized`
+# feature set and validated for bit-exact scoring parity; stark-generate is
+# built without them. See docs/TECHNICAL_OVERVIEW.md#engine-feature-flags.
+
+# Encode the zeroing of DeltaNet state into the first command buffer instead of
+# one synchronous fill per layer at state creation. The flag recording the fill
+# is cleared when it is encoded, so a state whose first encoding fails before
+# submission must be discarded by the caller.
 deferred-state-init = []
 
-# Experimental exact-scoring-only pruning. Ordinary generation never enables
-# the per-state flag, even when this feature is built into the engine.
+# Skip the query path of the final attention layer for prompt chunks whose
+# logits are not read. Requires the per-state opt-in that only
+# `score_next_token` sets; generation is unaffected even when compiled in.
 scoring-last-layer-pruning = []
 
-# Experimental packed-layout KV-only work in eligible cache-only final layers.
+# With the pruning above, use a KV-only preparation kernel for the pruned final
+# layer. Fires only for non-final chunks of prompts longer than one batch whose
+# final layer is owned, non-ring full attention.
 attention-kv-only = ["scoring-last-layer-pruning"]
 
 cpu = [] # TODO: move libm here
 
-# Experimental compact convolved QKV; original gate/control projection is retained.
+# Compact convolved QKV on top of direct-delta-conv. The original gate/control
+# projection is still computed because beta, alpha and gate are read from it.
 compact-delta-conv = ["direct-delta-conv"]
 
 metal = [
@@ -46,10 +56,11 @@ metal = [
 
 grammar = ["dep:xgrammar", "dep:schemars"]
 
-# Experimental exact-arithmetic removal of padded DeltaNet convolution tokens.
+# Remove padded DeltaNet convolution tokens with exact arithmetic.
 direct-delta-conv = []
 
-# Experimental bounded immutable CPU RoPE reuse; GPU arithmetic is unchanged.
+# Cache CPU-side RoPE tables (up to 8192 positions, 8 MiB); GPU arithmetic is
+# unchanged.
 rope-cache = []
 
 [build-dependencies]

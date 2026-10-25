@@ -40,4 +40,4 @@ cargo +1.98.1 check -p stark-engine --no-default-features --features cpu,grammar
 cargo +1.98.1 test -p stark-engine --test cxx_string --no-default-features --features cpu,grammar --locked
 ```
 
-These checks require no models or private evaluation data. New validation results belong in [the dependency security migration](../../docs/DEPENDENCY_SECURITY_MIGRATION.md); existing source-bound model validation remains separate.
+These checks require no models or private evaluation data. The original migration record is [the dependency security migration](../../docs/archive/runs/DEPENDENCY_SECURITY_MIGRATION.md); new validation results go in the pull request that changes this patch.

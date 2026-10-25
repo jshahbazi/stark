@@ -1,86 +1,99 @@
 # Stark local API
 
-Stark exposes a private, loopback-only HTTP API from the menu-bar application. The API is intended for local OpenAI-style clients and is bounded by the loaded model and the native generation worker. It is not a hosted service and does not enable inherited cloud, release, or signing infrastructure.
-
-## Client compatibility
-
-Clients must send authenticated HTTP requests from native or backend code on the same Mac and use the supported text-only `/v1/chat/completions` subset. Ordinary browser or webview requests are unsupported: GET/POST requests carrying an `Origin` header receive HTTP 403, and `OPTIONS` preflight receives HTTP 501 because there is no CORS handler. An Electron or Tauri app may use a native HTTP path; its framework alone does not establish compatibility. Remote devices and container deployments are unsupported.
-
-| Setting or constraint | Current behavior |
-| --- | --- |
-| Default output | `min(512, loaded worker limit)` tokens; reaching the output or context limit reports `finish_reason: "length"` |
-| Default sampling | Temperature `0`, greedy; positive temperatures enable stochastic sampling |
-| Maximum output | Model-specific, capped at 4096; see `max_output_tokens` in `/v1/models`; an oversized request returns HTTP 400 rather than being clamped |
-| Unsupported settings | Nonzero presence/frequency penalties, requested log probabilities and non-text response formats return HTTP 400; neutral compatibility values are accepted |
-| Unsupported features | Tools/functions, embeddings, images, structured output, Responses and batching |
-| Connection lifecycle | New in-memory key on each launch; port 8000 preferred, available-port fallback; update the key and check the URL after reopening Stark |
-| Queue | One active completion, eight waiting; queued requests expire after 30 seconds with HTTP 429 |
-
-The scoped client check on 2026-10-23 covered the unmodified published Stark 0.3.0 desktop bridge and native worker, launched through its private control protocol with isolated data. The bridge source revision was `4798f6e98239e0a2afd393f1a8ce8cde14dfa613`; the three API modules matched main at `6c96520d81af2990b5761a62cc116742d5fc87c3`. This was a bridge and worker check, not full menu-bar GUI qualification. The detailed aggregate report is [Client validation 2026-10-23](LOCAL_API_CLIENT_VALIDATION_2026_10_23.md).
-
-| Client or probe | Configuration | Result | Boundary |
-| --- | --- | --- | --- |
-| `llm` 0.36 | Custom OpenAI model, API key from environment, buffered and streaming | Passed; three concurrent requests completed | Follow-up after cancellation passed in a later short request; no restart or model reload was part of that check |
-| `aichat` 0.30.0 | Custom OpenAI endpoint, buffered and streaming | Passed | The tested commands used the supported single-turn text surface |
-| Cherry Studio 2.1.7 | macOS arm64, custom OpenAI provider, Chat mode, streaming initially enabled, temperature and max-token overrides disabled | Discovery, provider verification, fresh streaming and fresh buffered chat passed | Follow-up after either reply returned HTTP 400 for unsupported message fields; Work, tools and RAG were not tested |
-| Codex in-app browser | Cross-origin JSON request with bearer authentication | Blocked by browser CORS policy, as expected | One browser probe; no browser compatibility claim |
-
-These results qualify the listed configurations and operations. A client appearing in this table does not imply that its agents, tool calls or other workflows are supported.
+The menu bar application serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It covers text chat completions, buffered or streamed, through one loaded model. It is not a hosted service: it binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
 
 ## Connection and authentication
 
-The application emits a connection record containing a base URL, such as `http://127.0.0.1:<port>/v1`, and an ephemeral bearer key. The key is held in memory and must be sent as:
+Open **Connection Details** in Stark to see the base URL (for example `http://127.0.0.1:8000/v1`), the API key and the Model ID. Send the key on every request, including health checks:
 
 ```text
 Authorization: Bearer <key>
 ```
 
-Stark prefers port `8000` and selects an available loopback port when it is occupied. The bearer key is regenerated on each app launch and is not persisted. Keep Stark open while the model is running; after reopening the app, copy the new key and use the newly displayed URL if the port changed. Changing the loaded model requires updating the Model ID in the client.
+The key is a random 256-bit value generated when Stark launches, held in memory only, and never written to disk by Stark. **Copy** places it on the system pasteboard. Stark prefers port 8000 and falls back to a free loopback port, so always use the URL shown. After reopening Stark, copy the new key and check the URL again.
 
-The server accepts loopback hosts only (`127.0.0.1`, `localhost`, and `::1`) and rejects requests carrying an `Origin` header. Duplicate `Host` or `Authorization` headers are rejected. Responses include an `X-Request-Id` value and `Cache-Control: no-store`. Authentication failures use an authentication error type; malformed requests use an invalid-request type; server failures use a server-error type.
+Request rules enforced before any endpoint runs:
 
-The API accepts JSON request bodies up to 1 MiB. Chunked requests are rejected. When `Content-Type` is supplied, it must be `application/json`. Duplicate JSON keys and JSON `NaN` or infinity values are rejected.
+- The `Host` header must name `127.0.0.1`, `localhost` or `::1`.
+- Requests carrying an `Origin` header are rejected, so browser pages and webviews cannot use the API. `OPTIONS` preflight returns 501 because there is no CORS handler.
+- Duplicate `Host` or `Authorization` headers are rejected.
+- Bodies are limited to 1 MiB, must carry exactly one `Content-Length`, and must not use `Transfer-Encoding`. When `Content-Type` is present it must be `application/json`. JSON with duplicate keys, `NaN` or infinities is rejected.
+
+Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except the connection-limit response described under [limits](#limits-queueing-and-cancellation). Stark writes no access log and never logs prompts, replies or keys.
 
 ## Endpoints
 
-The following endpoints are available under the emitted `/v1` base path:
-
-| Endpoint | Behavior |
+| Endpoint | Behaviour |
 | --- | --- |
-| `GET /v1/health` and `GET /health` | Returns the current safe application status. |
-| `GET /v1/capabilities` | Returns safe application status and capability metadata, including queue state and whether a model is loaded. |
-| `GET /v1/models` | Lists the active model, or an empty list when no model is running. |
-| `GET /v1/models/{id}` | Returns metadata for the matching running model, or 404. |
-| `POST /v1/chat/completions` | Runs one text completion, buffered or streamed. |
+| `GET /v1/health`, `GET /health` | Application status: whether a model is loaded, whether a request is running, queue depth and limits, the model list, and capability flags |
+| `GET /v1/capabilities` | The same status document |
+| `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running in Chat mode |
+| `GET /v1/models/{id}` | The matching running model, or 404 |
+| `POST /v1/chat/completions` | One text completion, buffered or streamed |
 
-The API does not expose embeddings, the Responses API, image input, structured output, tool calls, function calls, or batching. It runs one completion at a time through one loaded model. Unsupported semantic fields are rejected; neutral compatibility fields such as `logprobs: false`, `top_logprobs: 0`, and zero penalties are accepted as documented below.
+Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length` and `max_output_tokens`. Embeddings, the Responses API, image input, structured output, tool and function calls, and batching are not available.
 
 ## Chat completions
 
-Requests accept `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, and `metadata`.
+Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user` and `metadata`. Unknown fields are rejected.
 
-`model` may be omitted when the application selects the active model. The active model ID and its installed name are accepted. `messages` must be non-empty. Message roles `system`, `developer`, `user`, and `assistant` are accepted; `developer` is normalized to `system`. Content may be a string or an array containing only `{ "type": "text", "text": "..." }` parts. Text parts are concatenated. An optional ASCII identifier `name` up to 64 characters is validated and ignored because the native templates do not consume message names. Tool and function-call fields are rejected.
+**Model and messages.** `model` may be omitted, or may be the running model's ID or installed name; any other value returns 404 `model_not_found`. `messages` must be non-empty. Roles `system`, `developer` (normalised to `system`), `user` and `assistant` are accepted. Content is a string or an array of `{"type":"text","text":"..."}` parts, which are concatenated. An optional `name` of up to 64 ASCII characters is validated and ignored. Assistant messages may carry `reasoning_content` as a string, which is passed to the chat template; Stark 0.4.0 and earlier reject that field. Tool and function-call fields are rejected. The model's chat template renders the conversation; a template that rejects the messages returns 400 `invalid_messages`.
 
-Unreleased compatibility change: assistant history may also include `reasoning_content` as a valid Unicode string, including an empty string. Stark 0.3.0 rejects this field. The candidate preserves it for the loaded model's chat template; templates decide whether to include prior assistant reasoning. Message `content` is still required. This compatibility field does not enable tool calls, structured reasoning objects, reasoning controls, or a separate reasoning response channel. Other unrecognized message fields are rejected. See the separate [candidate multi-turn validation](LOCAL_API_MULTITURN_VALIDATION_2026_10_23.md).
+**Output limit.** `max_tokens` and `max_completion_tokens` are aliases; supply at most one. The default is the smaller of 512 and the model's limit. Requests may go up to the model's limit, which is capped at 4,096 and shown as `max_output_tokens` in `/v1/models`; a larger value returns 400 rather than being clamped. `n` must be 1. A completion that reaches the output or context limit reports `finish_reason: "length"`.
 
-The default output limit is the smaller of 512 and the worker limit. The API can request up to the loaded worker limit, capped at 4096; `/v1/models` exposes that limit as `max_output_tokens`. A request above it returns HTTP 400, code `invalid_request`, with the message `Output token limit is outside the loaded model limit.` Values are not silently clamped. `max_tokens` and `max_completion_tokens` are aliases and cannot both be supplied with values. The requested limit must be at least one and must fit the loaded worker. `n` must be 1. Generation that reaches the output or context limit reports `finish_reason: "length"`.
+**Sampling.** `temperature` defaults to 0, which selects greedy decoding. A positive finite temperature up to 2 selects stochastic sampling with `top_p` (greater than 0, at most 1), `top_k` (1 through the vocabulary size), `min_p` (0 through 1) and `seed` (unsigned 64-bit, default 0). These values are accepted without effect at temperature 0. Non-zero `presence_penalty` or `frequency_penalty`, `logprobs: true`, `top_logprobs` above 0, and any `response_format` other than `{"type":"text"}` return 400 `unsupported_parameter`; the neutral values are accepted. `user` and `metadata` are accepted within their size bounds and discarded.
 
-Temperature defaults to 0 and selects greedy sampling. A positive finite temperature up to 2 selects stochastic sampling. `top_p` may be supplied as a finite value greater than 0 and up to 1; it is passed to stochastic sampling and accepted without effect for greedy sampling. `top_k` accepts a positive integer within the model vocabulary and `min_p` accepts a finite value from 0 through 1. These filters apply to stochastic sampling; the temperature-0 path accepts them without effect. `seed` defaults to 0 and is an unsigned 64-bit value. Nonzero presence and frequency penalties, requested log probabilities, and response formats other than `{ "type": "text" }` are rejected. Neutral compatibility values such as `logprobs: false`, `top_logprobs: 0`, and zero penalties are accepted. `user` and `metadata` are accepted within their bounds and are not logged or retained as conversation state.
+**Stop sequences.** `stop` is one string or up to four non-empty strings of at most 1,024 characters. The worker matches them against decoded text, including across chunks, and withholds the match and everything after it. Usage counts still include the token that completed the match.
 
-`stop` may be one string or a list of up to four non-empty strings, each at most 1024 Unicode characters. Stop sequences are applied by the native worker to decoded text and can span generation chunks. Matching stop text and later generated text are withheld. The completion usage count includes the sampled token that completed a stop sequence, while the returned text excludes the stop sequence.
+**Streaming.** With `stream: true` the response is Server-Sent Events of `chat.completion.chunk` objects followed by `data: [DONE]`. The first chunk carries the assistant role. `stream_options: {"include_usage": true}` adds a final usage-only chunk. Validation errors keep their HTTP status because they occur before streaming starts; a failure during streaming emits an error object in the stream and closes without `[DONE]`.
 
-For `stream: true`, the response is Server-Sent Events using OpenAI-style completion chunks, followed by `[DONE]` on successful completion. The first chunk carries the assistant role. `stream_options: { "include_usage": true }` adds a final usage-only chunk. Streaming responses disable proxy buffering with `X-Accel-Buffering: no`.
+## Limits, queueing and cancellation
 
-## Limits, queueing, and cancellation
+- The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
+- One completion runs at a time. Up to eight more wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
+- Each request has a 300-second deadline from the time its body is read; reaching it returns 504 `request_timeout`.
+- The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
+- Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
+- The body limit and the worker's own 1 MiB request line are separate. A request whose rendered prompt (system prompt, template framing and all messages) exceeds the worker line limit currently fails with 503 `generation_failed` and unloads the model, which then needs **Run** again. Keep conversations well below 1 MiB of rendered text.
 
-The HTTP server admits at most 16 connections. Excess connections receive HTTP 429 with `Retry-After: 1`. At the application layer, up to eight completion requests wait in FIFO order behind the active generation. A queued request waits at most 30 seconds and then receives HTTP 429. Model epochs fence queued and running requests when the model is stopped or changed.
+Each request is tokenized and prefilled from scratch by the worker; there is no prompt or prefix cache between requests.
 
-For cancellable application requests, the HTTP handler monitors the client every 0.05 seconds after the body is read. A peer close or the 300-second request deadline sets the cancellation event. Native generation checks cancellation at safe GPU generation boundaries. A deadline is reported as a gateway-timeout response; a client cancellation is reported as a client-closed request when a response can still be written. The loaded worker is preserved after a normal request cancellation. Older workers without the cancellation channel are fenced and may need Run to reload; reinstall the app for cancellation with model reuse.
+## Error codes
 
-The Python worker uses a private inherited pipe for cancellation. Each generate request receives a monotonically increasing unsigned 64-bit request ID. Cancellation frames are exactly eight little-endian bytes containing that ID. The native worker polls the pipe, handles partial frames, scopes cancellation to the matching request, and treats owner EOF as cancellation. The pipe and request state are private and are not persisted.
+Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is `authentication_error` for 401, `rate_limit_error` for 429, `server_error` for 5xx and `invalid_request_error` otherwise.
+
+| Status | Code | Cause |
+| --- | --- | --- |
+| 400 | `invalid_request` | Duplicate headers, missing or invalid `Content-Length`, incomplete or non-object body, invalid field values |
+| 400 | `length_required` | `Content-Length` missing (411 with the same code when `Transfer-Encoding` is present) |
+| 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN` or infinity |
+| 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
+| 400 | `invalid_messages` | The chat template rejected the messages |
+| 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
+| 401 | `invalid_api_key` | Missing or wrong bearer key |
+| 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
+| 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |
+| 413 | `body_too_large` | Body above 1 MiB |
+| 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
+| 429 | `server_busy`, `queue_full`, `queue_timeout` | Connection limit, queue limit, or queue wait expired |
+| 499 | `request_cancelled` | Client disconnected |
+| 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
+| 504 | `request_timeout` | 300-second deadline reached |
+| 500 | `internal_error`, `http_error` | Unexpected failure |
+
+## Client compatibility
+
+Clients must send authenticated requests from native or backend code on the same Mac and use the text-only subset above. The following were checked against the published 0.3.0 bridge and worker on 2026-10-23 ([record](archive/runs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md)):
+
+| Client | Configuration | Result |
+| --- | --- | --- |
+| `llm` 0.36 | Custom OpenAI model, key from environment, buffered and streaming | Passed, including three concurrent requests |
+| `aichat` 0.30.0 | Custom OpenAI endpoint, buffered and streaming | Passed for single-turn text |
+| Cherry Studio 2.1.7 | Custom OpenAI provider, Chat mode, streaming on, overrides off | Discovery and fresh chats passed; follow-up turns returned 400 because the client sent `reasoning_content`, which 0.3.0 rejects and current source accepts |
+| Browser page | Cross-origin JSON request with bearer key | Blocked, as designed |
+
+A client appearing here does not mean its agents, tools or other workflows are supported.
 
 ## Compatibility boundary
 
-The surface follows the common `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio's OpenAI compatibility layer](https://lmstudio.ai/docs/developer/openai-compat), while retaining Stark's text-template, single-model, bounded-worker constraints. Client libraries that require tools, multimodal content, JSON-schema output, embeddings, Responses, batching, or vendor-specific sampling fields must use a client configuration that targets the supported text-only subset.
-
-Model-free tests and a local real-worker smoke cover native stop filtering, seeded sampling on one Qwen3 checkpoint, cancellation before prefill and during streaming, worker reuse, stale cancellation fencing, and capability discovery. These results do not establish broader model quality or performance equivalence. Model state is serialized against the single loaded model. This API does not introduce persistent prompt caching or a prefix cache; conversation content, generated text, token vectors, decision probabilities, credentials, and exception payloads are not logged.
+The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to text templates, a single model and a bounded worker. Client libraries that require tools, multimodal content, JSON-schema output, embeddings, the Responses API, batching or vendor-specific sampling fields need a configuration that stays within the text-only subset.

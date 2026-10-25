@@ -55,7 +55,12 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
-    /// Only the fresh next-token scorer opts into this experimental path.
+    /// Allow the final attention layer to skip its query path for prompt
+    /// chunks whose logits are not read. Only `score_next_token` opts a state
+    /// in; the pruning additionally requires a flat batch, no requested output
+    /// range or hidden features, and an owned, non-ring full-attention final
+    /// layer (see `scoring_cache_only_requested` and
+    /// `TransformerLayer::supports_scoring_cache_only`).
     #[cfg(feature = "scoring-last-layer-pruning")]
     pub(crate) fn enable_scoring_last_layer_pruning(&mut self) {
         self.scoring_last_layer_pruning = true;

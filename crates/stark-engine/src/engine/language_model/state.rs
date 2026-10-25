@@ -47,6 +47,14 @@ pub enum LanguageModelCreateEmptyStateError<B: Backend> {
 }
 
 impl<B: Backend> LanguageModel<B> {
+    /// Allocate an empty per-request state.
+    ///
+    /// `max_context_length` bounds prompt plus generated tokens and sizes the
+    /// KV cache; `None` means the model's own maximum, which is only valid for
+    /// models whose attention layers have one (full-attention layers require a
+    /// finite capacity and models with a speculator always require `Some`).
+    /// `sampling_seed` seeds the per-state random generator used by stochastic
+    /// sampling; greedy decoding ignores it.
     pub fn create_empty_state(
         &self,
         max_context_length: Option<u32>,

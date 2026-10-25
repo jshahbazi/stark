@@ -1,7 +1,7 @@
 # Stock benchmark runtimes
 
 The `mlx` project preserves its exact dependency lock from the
-[2026-10-19 stock-engine pilot](../../docs/STOCK_ENGINE_BENCHMARK_2026_10_19.md).
+[2026-10-19 stock-engine pilot](../../docs/benchmarks/STOCK_ENGINE_BENCHMARK_2026_10_19.md).
 The `vllm` project contains the separately identified 2026-10-21 dependency
 refresh below. The pilot's original vLLM 0.31.0 recipe and lock remain available
 at packet commit
@@ -88,7 +88,7 @@ their original vLLM 0.31.0 identity and acceptance limits. Historical replay
 requires the original source and a separately scoped environment; its archived
 dependency versions have known advisories.
 
-The [quiet-window Qwen follow-up](../../docs/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md)
+The [quiet-window Qwen follow-up](../../docs/benchmarks/QWEN35_MLX_QUIET_COMPARISON_2026_10_20.md)
 uses `scripts/benchmark_clean_qwen.py` with the same workers and pinned artifacts.
 It attributes external CPU activity by phase and requires fresh quiet admission
 after full warmup. Its stricter measurement guards, per-attempt receipts and

@@ -11,3 +11,4 @@
 - Use Conventional Commits, `git ai-commit codex`, and author `Codex <noreply@github.com>`.
 - Push authorized work to its branch. Do not open a PR unless explicitly requested.
 - Do not enable inherited upstream cloud/signing/release infrastructure. New distribution infrastructure requires a separate scoped implementation.
+- Toolchains, local checks and test layout are in `CONTRIBUTING.md`; the documentation index is `docs/README.md`. Reference pages under `docs/` describe current behaviour and change with the code; dated validation records go in the pull request or under `docs/archive/runs/`, benchmarks under `docs/benchmarks/`.

@@ -103,6 +103,22 @@ def converter_progress(value):
 
 
 class Desktop:
+    """Backend for the menu bar app: model library, worker lifecycle and the loopback API.
+
+    The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
+    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``) and receives
+    one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
+    ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
+    ``error``). One worker is loaded at a time, under ``self.lock``. ``self.epoch``
+    increases whenever the model is stopped or replaced; commands, queued API
+    requests and in-flight replies carry the epoch they started under and are
+    discarded when it no longer matches, so a late reply from a previous worker
+    can never reach the app or a client. App chat turns and API completions share
+    one FIFO queue (``api_queue``) in front of the single worker. See
+    docs/TECHNICAL_OVERVIEW.md for the control protocol and docs/LOCAL_API.md for
+    the HTTP contract.
+    """
+
     def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None):
         self.executable = executable
         self.score_executable = score_executable or Path(executable).with_name("stark-score")
@@ -729,6 +745,19 @@ class Desktop:
             }
 
     def api_complete(self, payload, on_delta=None, cancelled=None):
+        """Run one chat completion for the HTTP API and return the response body.
+
+        ``payload`` is the raw request object; it is validated under the lock, then
+        the request takes a FIFO ticket and waits (at most ``api_queue_timeout``
+        seconds) for the worker. ``on_delta`` receives streamed text when the client
+        asked for streaming. ``cancelled`` is the handler's event: it is set when
+        the client disconnects or the request deadline passes, and its optional
+        ``reason`` attribute (``"deadline"``) selects the 504 response. While the
+        completion runs, ``self.job`` is the serving thread, which ``stop`` uses to
+        fence it. Failures map to ``APIError``: a cancelled request, a context
+        overflow (400) or a worker fault (503, after which the worker is closed
+        and the app shows the model as stopped).
+        """
         cancelled = cancelled or threading.Event()
         with self.lock:
             request = parse_chat_request(payload, self.api_maximum, self.api_vocab)
