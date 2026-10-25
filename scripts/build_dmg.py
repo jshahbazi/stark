@@ -24,10 +24,64 @@ RECIPE_FILES = (
     "scripts/update_app.py",
     "scripts/install_app.py",
     "apps/installer/Sources/InstallerApp.swift",
+    "apps/installer/Resources/RenderIcon.swift",
+    "apps/menu-bar/Resources/Stark.jpg",
     "apps/menu-bar/Sources/AppUpdate.swift",
 )
 INSTALLER_NAME = "Install Stark.app"
 INSTALLER_ID = "com.starkengine.installer"
+
+
+def build_installer_icon(resources: Path, env: dict[str, str]) -> None:
+    """Render the package artwork with the existing cat logo before signing."""
+    with tempfile.TemporaryDirectory(prefix="stark-installer-icon-") as temporary:
+        work = Path(temporary)
+        artwork = work / "InstallStark.png"
+        signing.run(
+            [
+                "/usr/bin/xcrun",
+                "swift",
+                ROOT / "apps/installer/Resources/RenderIcon.swift",
+                ROOT / "apps/menu-bar/Resources/Stark.jpg",
+                artwork,
+            ],
+            "dmg_installer_icon_render_failed",
+            env,
+            timeout=300,
+        )
+        iconset = work / "InstallStark.iconset"
+        iconset.mkdir()
+        for size in (16, 32, 128, 256, 512):
+            for scale in (1, 2):
+                filename = (
+                    f"icon_{size}x{size}" + ("@2x" if scale == 2 else "") + ".png"
+                )
+                pixels = str(size * scale)
+                signing.run(
+                    [
+                        "/usr/bin/sips",
+                        "-z",
+                        pixels,
+                        pixels,
+                        artwork,
+                        "--out",
+                        iconset / filename,
+                    ],
+                    "dmg_installer_icon_resize_failed",
+                    env,
+                )
+        signing.run(
+            [
+                "/usr/bin/iconutil",
+                "-c",
+                "icns",
+                iconset,
+                "-o",
+                resources / "InstallStark.icns",
+            ],
+            "dmg_installer_icon_package_failed",
+            env,
+        )
 
 
 def build_installer(
@@ -56,11 +110,9 @@ def build_installer(
         "LSMinimumSystemVersion": signing.distribution.MIN_MACOS,
         "LSMultipleInstancesProhibited": True,
         "NSHighResolutionCapable": True,
+        "CFBundleIconFile": "InstallStark",
     }
-    icon = staging / "Stark.app/Contents/Resources/Stark.icns"
-    if icon.is_file():
-        shutil.copyfile(icon, resources / "Stark.icns")
-        info["CFBundleIconFile"] = "Stark"
+    build_installer_icon(resources, env)
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     for name in ("update_app.py", "install_app.py"):
         shutil.copyfile(ROOT / "scripts" / name, resources / name)

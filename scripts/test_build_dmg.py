@@ -109,6 +109,8 @@ class DMGTests(unittest.TestCase):
         stdout, stderr = b"", b""
         if stage == "dmg_recipe_revision":
             stdout = (SOURCE + "\n").encode()
+        elif stage == "dmg_installer_icon_package_failed":
+            Path(arguments[-1]).write_bytes(b"synthetic package icon")
         elif stage == "dmg_installer_compilation_failed":
             Path(arguments[arguments.index("-o") + 1]).write_bytes(
                 b"synthetic installer"
@@ -174,6 +176,13 @@ class DMGTests(unittest.TestCase):
             (self.installer_snapshot / "Contents/Info.plist").read_bytes()
         )
         self.assertNotEqual(metadata["CFBundleIdentifier"], dmg.signing.APPLICATION_ID)
+        self.assertEqual(metadata["CFBundleIconFile"], "InstallStark")
+        self.assertEqual(
+            (
+                self.installer_snapshot / "Contents/Resources/InstallStark.icns"
+            ).read_bytes(),
+            b"synthetic package icon",
+        )
         for name in ("install_app.py", "update_app.py"):
             self.assertEqual(
                 (self.installer_snapshot / "Contents/Resources" / name).read_bytes(),
@@ -188,6 +197,10 @@ class DMGTests(unittest.TestCase):
         self.assertLess(
             stages.index("application_ticket_invalid"),
             stages.index("dmg_creation_failed"),
+        )
+        self.assertLess(
+            stages.index("dmg_installer_icon_package_failed"),
+            stages.index("dmg_installer_signing_failed"),
         )
         self.assertLess(
             stages.index("dmg_installer_signing_failed"),
@@ -286,6 +299,9 @@ class DMGTests(unittest.TestCase):
 
     def test_installer_compilation_and_signing_failure_publish_nothing(self):
         for stage in (
+            "dmg_installer_icon_render_failed",
+            "dmg_installer_icon_resize_failed",
+            "dmg_installer_icon_package_failed",
             "dmg_installer_compilation_failed",
             "dmg_installer_signing_failed",
         ):
