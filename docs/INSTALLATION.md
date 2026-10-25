@@ -6,7 +6,11 @@ There are three ways to install, each verifying something different; see [what e
 
 ## Install the menu bar app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest), open it, drag `Stark.app` to Applications, eject the image and open the app. Click the cat icon, choose **Install Model**, select a supported folder or Hugging Face repository, then **Run**. See the [menu bar guide](../apps/menu-bar/README.md).
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest). For DMGs containing **Install Stark**, open the image and choose that launcher. It verifies and stages the new app before quitting the running copy, replaces it, launches the replacement, and reports completion or an explicit failure. It uses the running copy's location, including `~/Applications`. With no running copy, it prefers an existing `/Applications/Stark.app`, then `~/Applications/Stark.app`, then a writable Applications folder. Models remain in place; active chats stop.
+
+Older DMGs use drag-and-drop. Copy `Stark.app` to Applications, eject the image, quit the running old app, then open the installed app. Drag-copying alone cannot stop an older running copy.
+
+After installation, click the cat icon, choose **Install Model**, select a supported folder or Hugging Face repository, then **Run**. See the [menu bar guide](../apps/menu-bar/README.md).
 
 ## Install the app and terminal tools
 
@@ -31,7 +35,8 @@ sh stark-install.sh --version VERSION
 
 | Route | Verification |
 | --- | --- |
-| DMG drag-and-drop | The browser download carries a quarantine attribute, so macOS Gatekeeper checks the Developer ID signature and the stapled notarization ticket before the app first opens. |
+| DMG with **Install Stark** | macOS checks the signed, notarized launcher. The launcher verifies the embedded candidate against Stark's Developer ID team, checks the release metadata, and requires Gatekeeper approval before replacement. |
+| Older DMG drag-and-drop | The browser download carries a quarantine attribute, so macOS Gatekeeper checks the Developer ID signature and the stapled notarization ticket before the app first opens. |
 | `install.sh` | Downloads the archive and its `.sha256` from the same GitHub release over TLS and refuses a mismatch. This detects corruption and a wrong file; it does not detect substitution by someone able to publish release assets, because the checksum and archive share an origin. Files written by `curl` carry no quarantine attribute and the script does not check code signatures. Pass `--sha256 HASH` to check against a hash you obtained elsewhere. |
 | **Check for Updates** in the app | Requires the exact GitHub asset digest, a Developer ID signature from Stark's team, a passing Gatekeeper assessment and a bundle version equal to the release tag, re-checked immediately before the swap. See [app updates](../apps/menu-bar/README.md#app-updates). |
 
