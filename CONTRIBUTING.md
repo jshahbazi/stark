@@ -50,10 +50,17 @@ cargo +1.98.1 build --release --locked -p stark-score --features optimized
 
 ## Engine tests
 
-The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. CI runs it in the `engine-unit` job on the Apple silicon runner. To run it locally with the same pinned nightly:
+The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. CI runs on the hosted `macos-26` runner: it compiles the default CPU/Metal target and executes the CPU/grammar configuration. Hosted macOS 26 runners currently report `CannotCreateResidencySet` while creating Metal contexts. On a physical Apple silicon Mac with working Metal residency, run the full native Metal suite locally with the same pinned nightly:
 
 ```sh
 cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal -- --test-threads=1
+```
+
+For a hosted macOS 26 check where Metal residency cannot be created, compile the default CPU/Metal target and run the CPU and grammar test configuration:
+
+```sh
+cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal --no-run
+cargo +nightly-2026-10-01 test --locked -p stark-engine --no-default-features --features cpu,grammar -- --test-threads=1
 ```
 
 Nothing in this run needs a model or the network. The ignored `test_metadata_loading` test and the model-loading benchmark read a converted model from `STARK_TEST_MODEL_PATH`; point it at a directory such as the one the smoke test below produces and add `--include-ignored` (or `--bench`, see `crates/stark-engine/unit/BENCHMARKS.md`). Kernel changes should be accompanied by a run of this suite and, where a kernel feeds the scorer, by the [scoring parity](docs/validation/SCORING_PARITY.md) replay.

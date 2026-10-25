@@ -38,7 +38,7 @@ sh stark-install.sh --version VERSION
 | DMG with **Install Stark** | macOS checks the signed, notarized launcher. The launcher verifies the embedded candidate against Stark's Developer ID team, checks the release metadata, and requires Gatekeeper approval before replacement. |
 | Older DMG drag-and-drop | The browser download carries a quarantine attribute, so macOS Gatekeeper checks the Developer ID signature and the stapled notarization ticket before the app first opens. |
 | `install.sh` | Downloads the archive and its `.sha256` from the same GitHub release over TLS and refuses a mismatch. This detects corruption and a wrong file; it does not detect substitution by someone able to publish release assets, because the checksum and archive share an origin. Files written by `curl` carry no quarantine attribute and the script does not check code signatures. Pass `--sha256 HASH` to check against a hash you obtained elsewhere. |
-| **Check for Updates** in the app | Requires the exact GitHub asset digest, a Developer ID signature from Stark's team, a passing Gatekeeper assessment and a bundle version equal to the release tag, re-checked immediately before the swap. See [app updates](../apps/menu-bar/README.md#app-updates). |
+| Integrated app updater | Requires the exact GitHub asset digest, a Developer ID signature from Stark's team, a passing Gatekeeper assessment and a bundle version equal to the release tag, re-checked immediately before the swap. Release metadata is checked automatically at launch and about hourly; opening the menu refreshes it when the last check is older than 15 minutes. See [app updates](../apps/menu-bar/README.md#app-updates). |
 
 Release archives are signed with Developer ID, hardened runtime and secure timestamps for every native image, and the app's notarization ticket is stapled; `install.sh` just does not check them. The script never removes quarantine attributes or changes Gatekeeper settings.
 
@@ -96,7 +96,7 @@ stark score --score-model-path /absolute/path/to/converted-model
 
 ## Update
 
-Apps with the integrated updater offer **Check for Updates** in the menu. Choosing the offered version downloads, verifies and stages the new app, then **Install and Relaunch** swaps it in. This updates only the app and preserves models and preferences; the CLI keeps its version.
+Apps with the integrated updater check stable release metadata at launch and about hourly, with a menu-opening refresh after 15 minutes. When a newer release is available, choose **Upgrade to VERSION** once; it downloads, verifies and stages the new app, quits the old process, swaps the bundles and relaunches Stark. Network failures during background checks stay quiet. Errors from a requested upgrade appear in the menu with a retry action. No release DMG is downloaded before the upgrade button is chosen. This updates only the app and preserves models and preferences; the active chat ends, the next launch creates a new API key, and the CLI keeps its version.
 
 To update the CLI and app together, quit Stark and run the installer again with the same prefix and app directory. The installer verifies the checksum, extracts to a temporary directory, runs `doctor` and validates the app before activating anything. A failed combined installation rolls back the app, command links and active CLI version. Version directories are immutable: installing different bytes under an existing version is refused, and reinstalling the same archive is allowed. A running app or an unrelated application at the destination stops the installation.
 

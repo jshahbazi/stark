@@ -62,6 +62,7 @@ class UpdateTransactionTests(unittest.TestCase):
         ).start()
         self.wait_for_exit = updater.wait_for_exit
         patch.object(updater, "wait_for_exit").start()
+        patch.object(updater, "wait_for_launch").start()
         self.command = patch.object(installer, "command", return_value=b"").start()
 
     def managed(self, schema=2, default=False):
@@ -135,18 +136,91 @@ class UpdateTransactionTests(unittest.TestCase):
     def test_relaunch_failure_rolls_back_app_and_both_records(self):
         state, owner = self.managed()
         previous = state.read_bytes()
-        self.command.side_effect = [installer.AppError("launch failed"), b""]
+
+        def command(arguments, _message):
+            if arguments[0] == "/usr/bin/open":
+                raise installer.AppError("launch failed")
+            return b""
+
+        self.command.side_effect = command
         with self.assertRaisesRegex(installer.AppError, "launch failed"):
             self.apply()
         self.assertEqual(installer.validate(self.target), self.old_digest)
         self.assertEqual(state.read_bytes(), previous)
         self.assertEqual(owner.read_bytes(), previous)
-        self.assertEqual(self.command.call_count, 1)
+        self.assertEqual(
+            len(
+                [
+                    call
+                    for call in self.command.call_args_list
+                    if call.args[0][0] == "/usr/bin/open"
+                ]
+            ),
+            1,
+        )
+
+    def test_pid_update_foreign_session_is_rejected_before_quitting(self):
+        self.command.return_value = (
+            f"{os.getuid() + 1} {self.target}/Contents/MacOS/Stark\n".encode()
+        )
+        with self.assertRaisesRegex(installer.AppError, "another user session"):
+            self.apply()
+        self.assertFalse((self.workspace / "ready").exists())
+        updater.wait_for_exit.assert_not_called()
+        self.assertEqual(installer.validate(self.target), self.old_digest)
+
+    def test_pid_update_startup_timeout_is_recorded_and_previous_app_reopened(self):
+        state, owner = self.managed()
+        previous = state.read_bytes()
+        launches = []
+
+        def command(arguments, _message):
+            if arguments[0] == "/usr/bin/open":
+                launches.append(arguments)
+                if len(launches) == 2:
+                    result = json.loads((self.workspace / "result.json").read_text())
+                    self.assertEqual(result["error"], "new app did not start")
+                    self.assertEqual(installer.validate(self.target), self.old_digest)
+                    self.assertEqual(state.read_bytes(), previous)
+                    self.assertEqual(owner.read_bytes(), previous)
+            return b""
+
+        self.command.side_effect = command
+        with (
+            patch.object(
+                updater,
+                "wait_for_launch",
+                side_effect=installer.AppError("new app did not start"),
+            ),
+            patch.object(installer, "running", return_value=False),
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "update_app.py",
+                    "--candidate",
+                    str(self.candidate),
+                    "--target",
+                    str(self.target),
+                    "--version",
+                    "0.4.0",
+                    "--pid",
+                    str(os.getpid()),
+                    "--workspace",
+                    str(self.workspace),
+                ],
+            ),
+        ):
+            self.assertEqual(updater.main(), 1)
+        self.assertEqual(len(launches), 2)
+        self.assertEqual(installer.validate(self.target), self.old_digest)
 
     def test_failure_is_recorded_before_reopening_previous_app(self):
         launches = []
 
         def command(arguments, _message):
+            if arguments[0] != "/usr/bin/open":
+                return b""
             launches.append(arguments)
             if len(launches) == 1:
                 raise installer.AppError("updated app could not launch")
@@ -776,8 +850,220 @@ print("Swift updater checks passed")
 """
 
 
+CONTROLLER_DRIVER = r"""
+import Foundation
+
+@MainActor
+final class Scenario {
+    var date = Date(timeIntervalSince1970: 0)
+    var events: [String] = []
+    var fetchCount = 0
+    var latest: AppUpdateDownload? = AppUpdateDownload(
+        version: "0.4.0", url: URL(string: "https://example.invalid/update.dmg")!,
+        sha256: String(repeating: "a", count: 64), size: 100)
+    var fetchFailure: AppUpdateError?
+    var prepareFailure: AppUpdateError?
+    var installFailure: AppUpdateError?
+    var blockFetch = false
+    var blockPrepare = false
+    var blockInstall = false
+    var fetchGate: CheckedContinuation<Void, Never>?
+    var prepareGate: CheckedContinuation<Void, Never>?
+    var installGate: CheckedContinuation<Void, Never>?
+    var assertBusy: (() -> Void)?
+    var workspaces: [URL] = []
+
+    func controller(interval: TimeInterval = 3600) -> AppUpdateController {
+        let effects = AppUpdateOperations(fetch: { [self] installed in
+            precondition(installed == "0.3.0")
+            fetchCount += 1
+            events.append("fetch")
+            if blockFetch { await withCheckedContinuation { fetchGate = $0 } }
+            if let fetchFailure { throw fetchFailure }
+            return latest
+        }, prepare: { [self] _, status in
+            assertBusy?()
+            events.append("download")
+            if blockPrepare { await withCheckedContinuation { prepareGate = $0 } }
+            status("Verifying update")
+            events.append("verify")
+            if let prepareFailure { throw prepareFailure }
+            let workspace = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
+                .appendingPathComponent("stark-controller-test-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: false)
+            workspaces.append(workspace)
+            return PreparedAppUpdate(workspace: workspace, app: workspace.appendingPathComponent("Stark.app"))
+        }, install: { [self] _, _ in
+            assertBusy?()
+            events.append("install")
+            if blockInstall { await withCheckedContinuation { installGate = $0 } }
+            if let installFailure { throw installFailure }
+            events.append("quit")
+        })
+        return AppUpdateController(installed: "0.3.0", operations: effects, now: { self.date },
+                                   automaticCheckInterval: interval, restorePreviousFailure: false)
+    }
+
+    func cleanup() {
+        for workspace in workspaces { try? FileManager.default.removeItem(at: workspace) }
+    }
+}
+
+@MainActor
+func waitFor(_ condition: () -> Bool) async {
+    for _ in 0..<2000 {
+        if condition() { return }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    preconditionFailure("controller transition timed out")
+}
+
+@main
+struct ControllerChecks {
+    @MainActor
+    static func main() async {
+        // Automatic discovery is immediate, idempotent and never downloads.
+        let discovery = Scenario()
+        discovery.blockFetch = true
+        let first = discovery.controller()
+        first.startAutomaticChecks()
+        first.startAutomaticChecks()
+        first.checkIfNeeded()
+        first.check()
+        await waitFor { discovery.fetchGate != nil }
+        precondition(discovery.fetchCount == 1 && first.busy && first.message.isEmpty)
+        first.stopAutomaticChecks()
+        discovery.fetchGate?.resume()
+        await waitFor { !first.busy }
+        precondition(first.available?.version == "0.4.0")
+        precondition(first.actionTitle == "Upgrade to 0.4.0")
+        precondition(discovery.events == ["fetch"])
+
+        // One click stays busy across download, verification and helper staging.
+        discovery.blockPrepare = true
+        discovery.blockInstall = true
+        discovery.assertBusy = { precondition(first.busy) }
+        first.performAction()
+        first.performAction()
+        first.check()
+        await waitFor { discovery.prepareGate != nil }
+        precondition(first.busy && discovery.events == ["fetch", "download"])
+        discovery.prepareGate?.resume()
+        await waitFor { discovery.installGate != nil }
+        first.performAction()
+        first.checkIfNeeded()
+        first.stopAutomaticChecks()
+        precondition(first.busy && discovery.events == ["fetch", "download", "verify", "install"])
+        discovery.installGate?.resume()
+        await waitFor { discovery.events.last == "quit" }
+        precondition(first.busy && discovery.fetchCount == 1)
+        discovery.cleanup()
+
+        // Menu checks are throttled; manual checks can force a retry.
+        let throttle = Scenario()
+        let second = throttle.controller()
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        throttle.date += 899
+        second.checkIfNeeded()
+        precondition(!second.busy && throttle.fetchCount == 1)
+        throttle.date += 1
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(throttle.fetchCount == 2)
+        second.check()
+        await waitFor { !second.busy }
+        precondition(throttle.fetchCount == 3)
+
+        // Background failures retain availability and installation diagnostics.
+        throttle.prepareFailure = .checksum
+        second.performAction()
+        await waitFor { !second.busy }
+        precondition(throttle.events.suffix(2) == ["download", "verify"])
+        precondition(!throttle.events.contains("install"))
+        precondition(second.message == AppUpdateError.checksum.localizedDescription)
+        let failure = second.message
+        throttle.fetchFailure = .download
+        throttle.date += 900
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(second.available?.version == "0.4.0" && second.message == failure)
+        throttle.fetchFailure = nil
+        throttle.latest = nil
+        throttle.date += 900
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(second.available == nil && second.message == failure)
+        throttle.latest = discovery.latest
+        throttle.date += 900
+        second.checkIfNeeded()
+        await waitFor { !second.busy }
+        precondition(second.actionTitle == "Upgrade to 0.4.0" && second.message == failure)
+
+        // Retrying after preparation failure starts fresh and reaches installation.
+        throttle.prepareFailure = nil
+        throttle.installFailure = .helper
+        second.performAction()
+        await waitFor { !second.busy }
+        precondition(second.message == AppUpdateError.helper.localizedDescription)
+        precondition(second.available?.version == "0.4.0")
+        throttle.installFailure = nil
+        second.performAction()
+        await waitFor { throttle.events.last == "quit" }
+        precondition(second.busy && throttle.events.filter { $0 == "install" }.count == 2)
+        throttle.cleanup()
+
+        let quiet = Scenario()
+        quiet.fetchFailure = .download
+        let third = quiet.controller(interval: 0.01)
+        third.startAutomaticChecks()
+        third.startAutomaticChecks()
+        await waitFor { !third.busy }
+        precondition(third.message.isEmpty && third.available == nil)
+        quiet.fetchFailure = nil
+        quiet.date += 3600
+        await waitFor { quiet.fetchCount == 2 && !third.busy }
+        precondition(third.available?.version == "0.4.0" && quiet.events == ["fetch", "fetch"])
+        third.stopAutomaticChecks()
+        quiet.date += 3600
+        try? await Task.sleep(for: .milliseconds(30))
+        precondition(quiet.fetchCount == 2)
+        print("Swift updater controller checks passed")
+    }
+}
+"""
+
+
 @unittest.skipUnless(sys.platform == "darwin", "AppKit required")
 class SwiftUpdateTests(unittest.TestCase):
+    def test_production_controller_discovery_and_one_click_upgrade(self):
+        with tempfile.TemporaryDirectory(
+            prefix="stark update controller "
+        ) as temporary:
+            root = Path(temporary)
+            driver = root / "ControllerChecks.swift"
+            driver.write_text(CONTROLLER_DRIVER)
+            result = subprocess.run(
+                [
+                    "xcrun",
+                    "swiftc",
+                    "-target",
+                    "arm64-apple-macos26.4",
+                    str(ROOT / "apps/menu-bar/Sources/AppUpdate.swift"),
+                    str(driver),
+                    "-o",
+                    str(root / "checks"),
+                ],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+            result = subprocess.run(
+                [str(root / "checks")], capture_output=True, timeout=30, check=False
+            )
+            self.assertEqual(result.returncode, 0, result.stderr.decode())
+
     def test_production_release_selection_and_full_app_compilation(self):
         with tempfile.TemporaryDirectory(prefix="stark swift updater ") as temporary:
             root = Path(temporary)

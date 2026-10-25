@@ -1,10 +1,10 @@
 # Continuous integration and security checks
 
-CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
+CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and manual dispatches; Security and CodeQL also run weekly. To check a branch before opening a pull request, choose the branch under **Actions > CI > Run workflow**. The pull-request `CI completed` gate requires the `engine-unit` job as well as the other required CI jobs. All CI inputs are synthetic: no workflow downloads a model, and private validation artifacts never enter hosted runners.
 
 | Workflow | Coverage |
 | --- | --- |
-| CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both workers in the default and `optimized` configurations, the engine unit and kernel suite on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
+| CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
 | Build | Builds an unsigned development bundle on pushes to `main` or `codex/**` that touch source or build inputs, verifies it, and uploads it as a seven-day artifact. |
 | Security | cargo-deny advisories, soundness, licenses and sources across all Cargo features; OSV scans of the seven tracked lockfiles; dependency review on pull requests. |
 | CodeQL | Rust, C/C++, Python, JavaScript/TypeScript and GitHub Actions in build mode `none`. Metal kernels and Swift are not analyzed. |
@@ -23,7 +23,7 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 
 **Product code.** Both workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the generation worker's process isolation is checked by a Python harness. The converter runs its full model-free pytest suite with Hugging Face offline mode. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
 
-**Engine unit tests.** The `engine-unit` job runs the engine's own unit suite under `crates/stark-engine/unit` on the Apple silicon runner with `nightly-2026-10-01` (the suite needs `custom_test_frameworks`) and the `cpu` and `metal` features. This includes the kernel tests that compare each Metal kernel with the CPU reference backend in `src/backends/cpu`. The ignored tests that read a converted model from `STARK_TEST_MODEL_PATH` do not run in CI; run them locally as described in [Contributing](../CONTRIBUTING.md#engine-tests).
+**Engine unit tests.** The `engine-unit` job compiles the default `cpu,metal` target with `nightly-2026-10-01`, then runs the suite under `crates/stark-engine/unit` with `--no-default-features --features cpu,grammar` (the suite needs `custom_test_frameworks`). The compile check preserves coverage of the default native target; the hosted test command avoids requiring a Metal context because macOS 26 hosted runners currently fail with `CannotCreateResidencySet`. On a physical Apple silicon Mac with working Metal residency, run the full native command from [Contributing](../CONTRIBUTING.md#engine-tests) to exercise the kernel comparisons between Metal and the CPU reference backend in `src/backends/cpu`. The ignored tests that read a converted model from `STARK_TEST_MODEL_PATH` do not run in CI; run them locally as described in [Contributing](../CONTRIBUTING.md#engine-tests). See the [failed hosted run](https://github.com/jshahbazi/stark/actions/runs/40227058178/job/121270551189) for the current runner limitation.
 
 **Grammar support.** The `cxx` job runs the vendored cxx panic-safety test with the `grammar` feature, which keeps the XGrammar bridge building although neither worker enables structured output.
 
@@ -89,7 +89,8 @@ cargo test --release --locked -p stark-score --features optimized -- --test-thre
 cargo build --release --locked -p stark-generate
 cargo clippy --release --locked -p stark-generate --all-targets -- -D warnings
 cargo test --release --locked -p stark-generate -- --test-threads=1
-cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal -- --test-threads=1
+cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal --no-run
+cargo +nightly-2026-10-01 test --locked -p stark-engine --no-default-features --features cpu,grammar -- --test-threads=1
 mkdir -p runtime
 cc -std=c11 -O2 -Wall -Wextra -Werror scripts/stark-validation-reap.c -o runtime/ci-stark-validation-reap
 uv run --python 3.12.13 python scripts/test_scoring_process.py --reaper runtime/ci-stark-validation-reap
