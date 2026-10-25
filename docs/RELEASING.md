@@ -1,6 +1,6 @@
 # Publishing a standalone Mac release
 
-The `Signed release` workflow builds, signs and notarizes a combined CLI and menu bar application distribution from protected `main`. The separate `Prebuilt release` workflow constructs unsigned combined archives. Both create drafts for receiving-Mac verification before publication. Neither runs the inherited Uzu release, cloud or signing workflows.
+The `Signed release` workflow builds, signs and notarizes a combined CLI and menu bar application distribution from protected `main`, then publishes it as the latest stable release after automated verification. The separate `Prebuilt release` workflow constructs unsigned combined archives and creates drafts for receiving-Mac verification before publication. Neither runs the inherited Uzu release, cloud or signing workflows.
 
 ## Release the combined CLI and application distribution
 
@@ -14,7 +14,7 @@ gh workflow run signed-release.yml --ref main -f bump=patch
 
 The workflow selects the highest stable `vMAJOR.MINOR.PATCH` Git tag or Cargo workspace version, then applies the selected bump. For example, a baseline of `0.1.2` produces `1.0.0`, `0.2.0` or `0.1.3`. Prerelease tags are excluded. All stable tags count, including tags belonging to drafts, so reserved versions are never reused. The selected version appears in the action log.
 
-The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from the exact dispatched `main` commit, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. After signing and verification succeed, the separate publishing job creates `vVERSION` at that same commit and uploads a draft. No manual tag is required. An existing tag or release causes publication to fail; tags and assets are never overwritten. A failure after tag creation leaves that version reserved; a fresh dispatch selects the next version. Never move a published tag or replace published archive bytes.
+The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from the exact dispatched `main` commit, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. After signing and verification succeed, the separate publishing job creates `vVERSION` at that same commit, uploads the verified assets and publishes the release with `--latest`. No manual tag or publication step is required. An existing tag or release causes publication to fail; tags and assets are never overwritten. A failure after tag creation leaves that version reserved; a fresh dispatch selects the next version. Never move a published tag or replace published archive bytes.
 
 The `macos-release` environment is restricted to protected branches. It contains these six secrets:
 
@@ -31,7 +31,7 @@ Before importing credentials, the action verifies the combined archive, applicat
 
 After signing, the finalizer refreshes the file manifest, submits the application package for notarization, staples and validates the app ticket, then creates the final TAR and ZIP hashes. It requires notarization status `Accepted`, a valid stapled app ticket and online ticket checks for standalone executables. Signing or notarization failure publishes no release outputs. A source-bound aggregate receipt records the source and signing-recipe revisions and hashes, signer certificate and Team ID, native image count, Apple submission identifier and exact archive hashes. It contains no credentials or runtime payloads.
 
-The signed draft includes the signed TAR archive and checksum, notarized ZIP and checksum, signed/notarized versioned DMG and checksum, stable `Stark.dmg` and `Stark.dmg.sha256` aliases, aggregate notarization receipts, installation and DMG verification JSON, and `install.sh`. The stable aliases are byte-for-byte copies of that release's verified versioned DMG; the stable checksum names `Stark.dmg`, and the publishing job checks both the checksum and exact byte equality before creating the draft. Existing versioned assets remain in the release. The DMG contains the unchanged, signed and stapled `Stark.app` plus an `Applications` shortcut. Users drag the application to Applications; the script installs both the application and CLI tools.
+The signed release includes the signed TAR archive and checksum, notarized ZIP and checksum, signed/notarized versioned DMG and checksum, stable `Stark.dmg` and `Stark.dmg.sha256` aliases, aggregate notarization receipts, installation and DMG verification JSON, and `install.sh`. The stable aliases are byte-for-byte copies of that release's verified versioned DMG; the stable checksum names `Stark.dmg`, and the publishing job checks both the checksum and exact byte equality before publishing the release. Existing versioned assets remain in the release. The DMG contains the unchanged, signed and stapled `Stark.app` plus an `Applications` shortcut. Users drag the application to Applications; the script installs both the application and CLI tools.
 
 The website can therefore use the stable download URL without a site update:
 
@@ -41,7 +41,7 @@ https://github.com/jshahbazi/stark/releases/latest/download/Stark.dmg
 
 The signing job creates the DMG from the final signed TAR, signs the container with Developer ID, submits the DMG to Apple, staples its own ticket, and checks Gatekeeper acceptance. It mounts the image read-only to verify that the application file inventory, source revision, signature, and app ticket are preserved, then detaches it. A separate verification pass runs after credentials are removed. No application is opened or installed during DMG verification. This follows [Apple's distribution packaging guidance](https://developer.apple.com/documentation/xcode/packaging-mac-software-for-distribution).
 
-Download the assets and verify the actual archive on a receiving Mac:
+After publication, download the assets and record an additional verification of the actual archive on a receiving Mac:
 
 ```sh
 gh release download v0.1.2 --dir artifacts/release-0.1.2
@@ -53,15 +53,11 @@ uv run --project tools/converter --locked --python 3.13.13 python scripts/verify
   --output artifacts/release-0.1.2/receiving-mac-verification.json
 ```
 
-Replace `TAGGED_SOURCE_COMMIT` and `SIGNING_RECIPE_COMMIT` with the full tagged commit. This adds checks of all native signatures, the installed app's seal and stapled ticket, and standalone executable notarization tickets to the normal installation, conversion, hashes, relocation and uninstall checks. After the actual draft passes:
-
-```sh
-gh release edit v0.1.2 --draft=false --latest
-```
+Replace `TAGGED_SOURCE_COMMIT` and `SIGNING_RECIPE_COMMIT` with the full tagged commit. This adds checks of all native signatures, the installed app's seal and stapled ticket, and standalone executable notarization tickets to the normal installation, conversion, hashes, relocation and uninstall checks. Receiving-Mac checks supplement the automated checks that gate publication; they do not require a separate draft-promotion step.
 
 Test the public installer download, `stark doctor`, `stark --version` and `open "$HOME/Applications/Stark.app"` route from outside a checkout after publication. Preserve the earlier validation packets; record this run separately.
 
-Verify the actual DMG separately before publishing the draft:
+Verify the actual published DMG separately:
 
 ```sh
 uv run --no-project --python 3.13.13 python scripts/build_dmg.py \

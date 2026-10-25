@@ -165,7 +165,7 @@ The builder uses separate Cargo invocations for the optimized scorer and default
 
 Independent builds are not promised to produce identical archive bytes. uv embeds its managed installation path in Python's dynamic-library identity, and installed package metadata can vary. Each fresh build needs its own version. The archive hash and complete manifest identify the exact artifact that was checked; a published version must retain those exact bytes.
 
-The builder creates combined local archives by default; `--cli-only` creates a development bundle without the app. The [release workflows](RELEASING.md) build from the tagged source on a GitHub-hosted Mac, sign and notarize the combined distribution, staple the app ticket, and create a draft for verification before publication. The signing action retains the engine's original source identity and records its signing recipe separately. The inherited Uzu release, cloud and signing workflows remain disabled.
+The builder creates combined local archives by default; `--cli-only` creates a development bundle without the app. The [signed release workflow](RELEASING.md) builds from the dispatched protected `main` commit on a GitHub-hosted Mac, signs and notarizes the combined distribution, staples the app ticket, verifies the installation and DMG, then tags the source and publishes the latest stable release. The signing action retains the engine's original source identity and records its signing recipe separately. The inherited Uzu release, cloud and signing workflows remain disabled.
 
 ## What other engines do
 

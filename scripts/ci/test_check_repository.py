@@ -1,9 +1,14 @@
-"""Credential-scope checks for the dedicated Stark signing workflow."""
+"""Credential-scope and publication checks for the Stark signing workflow."""
 
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -58,7 +63,7 @@ def signing_workflow() -> dict:
                 "steps": [
                     {
                         "env": {"GH_TOKEN": "${{ github.token }}"},
-                        "run": 'gh release create "$STARK_RELEASE_VERSION" --draft',
+                        "run": 'gh release create "$STARK_RELEASE_VERSION" --latest',
                     }
                 ],
             },
@@ -164,6 +169,108 @@ class SigningWorkflowPolicyTests(unittest.TestCase):
         self.assertTrue(
             any("inherited workflow job is not disabled" in error for error in errors)
         )
+
+
+class SignedReleasePublicationTests(unittest.TestCase):
+    def run_publish(
+        self, *, corrupt_checksum: bool = False, existing_version: str = ""
+    ) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+        workflow_path = (
+            Path(__file__).resolve().parents[2] / ".github/workflows/signed-release.yml"
+        )
+        workflow = yaml.safe_load(workflow_path.read_text())
+        publish = workflow["jobs"]["publish"]["steps"][-1]["run"]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            assets = root / "artifacts/signed-release"
+            assets.mkdir(parents=True)
+            stem = "stark-1.2.3-aarch64-apple-darwin"
+            for suffix in ("tar.gz", "zip", "dmg"):
+                name = f"{stem}.{suffix}"
+                content = f"synthetic {suffix}\n".encode()
+                (assets / name).write_bytes(content)
+                digest = hashlib.sha256(content).hexdigest()
+                (assets / f"{name}.sha256").write_text(f"{digest}  {name}\n")
+            dmg = (assets / f"{stem}.dmg").read_bytes()
+            (assets / "Stark.dmg").write_bytes(dmg)
+            (assets / "Stark.dmg.sha256").write_text(
+                f"{hashlib.sha256(dmg).hexdigest()}  Stark.dmg\n"
+            )
+            for name in (
+                f"{stem}.dmg.notarization.json",
+                f"{stem}.dmg.verification.json",
+                f"{stem}.notarization.json",
+                "verification.json",
+                "install.sh",
+            ):
+                (assets / name).write_text("synthetic receipt or installer\n")
+            if corrupt_checksum:
+                (assets / f"{stem}.tar.gz").write_bytes(b"modified after signing\n")
+
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            gh_log = root / "gh.jsonl"
+            gh = bin_dir / "gh"
+            gh.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, sys\n"
+                "with open(os.environ['GH_TEST_LOG'], 'a') as log:\n"
+                "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                "sys.exit(1 if sys.argv[1:3] == ['release', 'view'] else 0)\n"
+            )
+            gh.chmod(0o755)
+            result = subprocess.run(
+                ["bash", "-c", publish],
+                cwd=root,
+                env={
+                    **os.environ,
+                    "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+                    "GH_TEST_LOG": str(gh_log),
+                    "GH_REPO": "test/stark",
+                    "GITHUB_SHA": "a" * 40,
+                    "STARK_RELEASE_VERSION": "1.2.3",
+                    "EXISTING_VERSION": existing_version,
+                    "RUNNER_TEMP": str(root),
+                },
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            calls = (
+                [json.loads(line) for line in gh_log.read_text().splitlines()]
+                if gh_log.exists()
+                else []
+            )
+            return result, calls
+
+    def test_verified_release_is_published_as_latest_after_creating_immutable_tag(self):
+        result, calls = self.run_publish()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            [call[:2] for call in calls],
+            [["release", "view"], ["api", "--method"], ["release", "create"]],
+        )
+        tag, release = calls[1:]
+        self.assertIn("ref=refs/tags/v1.2.3", tag)
+        self.assertIn("sha=" + "a" * 40, tag)
+        self.assertIn("POST", tag)
+        self.assertEqual(release[2], "v1.2.3")
+        self.assertIn("--verify-tag", release)
+        self.assertIn("--latest", release)
+        self.assertNotIn("--draft", release)
+        self.assertNotIn("--prerelease", release)
+        self.assertIn("Stark.dmg", release)
+        self.assertIn("Stark.dmg.sha256", release)
+
+    def test_checksum_failure_cannot_create_a_tag_or_release(self):
+        result, calls = self.run_publish(corrupt_checksum=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual([call[:2] for call in calls], [["release", "view"]])
+
+    def test_existing_version_remains_artifact_only(self):
+        result, calls = self.run_publish(existing_version="1.2.3")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":

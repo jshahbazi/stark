@@ -185,7 +185,7 @@ jobs:
           retention-days: 30
 
   publish:
-    name: Create a draft from the verified signed assets
+    name: Publish the verified signed release
     needs: sign
     if: github.repository == 'jshahbazi/stark' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -201,7 +201,7 @@ jobs:
         with:
           name: stark-signed-${{ github.sha }}
           path: artifacts/signed-release
-      - name: Create a new draft without replacing existing release assets
+      - name: Publish a new latest release without replacing existing assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -253,5 +253,5 @@ jobs:
             "$stem.dmg" "$stem.dmg.sha256" "$stem.dmg.notarization.json" "$stem.dmg.verification.json" \
             Stark.dmg Stark.dmg.sha256 \
             "$stem.notarization.json" verification.json install.sh \
-            --repo "$GH_REPO" --verify-tag --draft --title "Stark $STARK_RELEASE_VERSION" \
+            --repo "$GH_REPO" --verify-tag --latest --title "Stark $STARK_RELEASE_VERSION" \
             --notes-file "$RUNNER_TEMP/signed-release-notes.md"
