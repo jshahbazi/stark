@@ -45,6 +45,8 @@ pub enum LanguageModelStreamError<B: Backend> {
     InvalidSampling,
     #[error("State belongs to a different model")]
     ForeignState,
+    #[error("Invalid multimodal input or request state")]
+    InvalidMultimodal,
 }
 
 impl<B: Backend> LanguageModel<B> {
@@ -63,5 +65,16 @@ impl<B: Backend> LanguageModel<B> {
         options: LanguageModelStreamOptions,
     ) -> Result<LanguageModelStream<'a, B>, LanguageModelStreamError<B>> {
         LanguageModelStream::new(self, input, state, options)
+    }
+
+    /// Internal projected-feature path. Serving remains disabled until the
+    /// processor, vision tower and exact artifact are qualified together.
+    pub(crate) fn stream_multimodal<'a>(
+        &'a self,
+        input: &super::multimodal::MultimodalPrefill,
+        state: &'a mut LanguageModelState<B>,
+        options: LanguageModelStreamOptions,
+    ) -> Result<LanguageModelStream<'a, B>, LanguageModelStreamError<B>> {
+        LanguageModelStream::new_multimodal(self, input, state, options)
     }
 }

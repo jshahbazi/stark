@@ -2,10 +2,11 @@
 
 The first target is one static image with the official BF16 `Qwen/Qwen3.5-0.8B`
 checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
-follows the native Rust/Metal tower and decoder route. The converter now has an
-experimental full-vision artifact mode. Native image execution, image transport,
-preprocessing, and app attachments remain unimplemented. The Local API continues
-to report `images:false`.
+follows the native Rust/Metal tower and decoder route. The converter has an
+experimental full-vision artifact mode. The engine now has a private BF16
+projected-feature fusion and Qwen3.5 M-RoPE core, exercised on CPU and Metal.
+Image decoding, preprocessing, tower execution, transport, and app attachments
+remain unimplemented. The Local API continues to report `images:false`.
 
 ## Implemented conversion boundary
 
@@ -78,25 +79,50 @@ and no native qualification. Artifact modalities describe stored weights and
 metadata; they cannot enable service capabilities. The normalised tokenizer and
 complete model configuration remain bound by the receipt's output hashes.
 
+## Native fusion and positions
+
+The native fusion and position core accepts one already projected image through
+crate-private, owned input types. It binds the features to the loaded model's
+identity, BF16 dtype, model width, processed grid, and exact contiguous placeholder
+span. Host validation checks finite features, vocabulary and reserved tokens,
+wrapper placement, context capacity, shape, and checked offset arithmetic before
+device allocation. Public clients cannot submit embedding tensors.
+
+The decoder looks up text embeddings and copies the projected rows into precisely
+the image span using command-buffer-owned storage. Generated-token lookup keeps
+the existing path. `Qwen35MRoPEConfig` implements the pinned interleaved
+temporal/height/width frequency mapping, including a rotary prefix smaller than
+the attention head. Explicit per-token positions survive chunked prefill; a
+signed continuation delta lives in the request state. Physical causal and KV
+indices continue to count tokens independently of spatial positions. Spatial
+tables are computed per submission and are not retained in the scalar RoPE cache.
+
+Image prefill requires a fresh state and disables speculation. Tensor capture is
+suppressed for the image request and its continuation. Failed image execution
+fences the state; pending submissions drain before their owned storage is
+released. A fresh state is required after a failure. Scoring remains text-only.
+
+Synthetic native fixtures check feature replacement, M-RoPE coefficients, partial
+head rotation, whole/chunked prefill, a span crossing the 1,024-token boundary, and
+decode continuation. The [native core validation record](archive/runs/2026-10-26-qwen35-native-fusion-mrope.md)
+records the checks, tolerances, and source/build identity. These checks do not
+establish patch ordering, projector numerics, or execution of the official vision
+artifact; those require the remaining preprocessing and tower implementation.
+
 ## Remaining dependencies and acceptance
 
-1. **Native fusion and positions:** introduce typed image spans and projected
-   feature inputs; separate token lookup from decoder execution; preserve causal
-   cache indices separately from three-axis positions. Match whole/chunked
-   prefill and continuation offsets against pinned references. Keep scoring
-   text-only and speculative image prefill disabled.
-2. **Decode, preprocessing, and tower:** select the shared JPEG/PNG decoder;
+1. **Decode, preprocessing, and tower:** select the shared JPEG/PNG decoder;
    specify orientation, color, alpha, and resizing; prove patch ordering and
    intermediate numerics. Implement the native vision blocks and merger before
    adding the model tag to the native loader.
-3. **Transport and lifecycle:** support inline image data URLs through bounded
+2. **Transport and lifecycle:** support inline image data URLs through bounded
    HTTP bodies and private staging references. Preserve the 1 MiB worker frame
    limit, authentication, serialization, epoch fencing, cancellation, and cleanup.
    Choose resource budgets using measurements before advertising them.
-4. **Exact-tuple qualification:** run reference/native parity with the official
+3. **Exact-tuple qualification:** run reference/native parity with the official
    converted artifact. Measure peak memory and encode/prefill
    latency, test failure recovery, and publish aggregate evidence only.
-5. **Swift and distribution:** add attachment input and progress through the
+4. **Swift and distribution:** add attachment input and progress through the
    common media pipeline, then qualify a packaged installation. Enable image
    capabilities only for the intersection of the qualified artifact, worker,
    and service policy.
@@ -106,7 +132,8 @@ native inference, numeric parity, output quality, or supported hardware budgets.
 The official-weight end-to-end conversion and offline manifest replay now pass.
 All 153 emitted vision tensor payloads match their source shapes, dtypes, and
 byte hashes. The normalised special-token IDs and six M-RoPE layer descriptions
-also pass inspection. Native execution remains unverified.
+also pass inspection. Native execution of the official vision artifact remains
+unverified.
 No model weights or native image outputs are checked into the repository.
 The [follow-up review record](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
 binds the real conversion and regression checks to the converter and artifact
@@ -121,7 +148,14 @@ The tensor name/shape inventory follows the public architecture declarations in
 [Transformers Qwen3.5](https://github.com/huggingface/transformers/blob/2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397/src/transformers/models/qwen3_5/modeling_qwen3_5.py),
 revision `2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397`, copyright 2025 The Qwen Team
 and The HuggingFace Inc. team, Apache-2.0. The converter implements an independent
-shape inventory and direct tensor copies; no Transformers runtime or model code
-is imported. Existing Uzu and Lalamo provenance remains in
+shape inventory and direct tensor copies. The Rust fusion/position core
+independently implements the reference's `get_rope_index` and text rotary
+`recomposition_frequencies` equations. The explicit feature/position/delta boundary
+also follows the design inspected in
+[MLX-VLM Qwen3.5](https://github.com/Blaizzy/mlx-vlm/blob/e9af376626b04ba0cdad23b1476fd7a4a583d721/mlx_vlm/models/qwen3_5/qwen3_5.py),
+revision `e9af376626b04ba0cdad23b1476fd7a4a583d721`, copyright 2025 Prince Canuma,
+[MIT license](https://github.com/Blaizzy/mlx-vlm/blob/e9af376626b04ba0cdad23b1476fd7a4a583d721/LICENSE).
+No Transformers or MLX runtime dependency or model code is imported. Existing Uzu
+and Lalamo provenance remains in
 [upstream provenance](../provenance/UPSTREAM.md) and the
 [converter guide](../tools/converter/README.md#provenance-and-policy).

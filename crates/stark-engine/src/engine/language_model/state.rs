@@ -30,6 +30,7 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) transformer_state: TransformerState<B>,
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
+    pub(super) multimodal_failed: bool,
 }
 
 impl<B: Backend> LanguageModelState<B> {
@@ -92,6 +93,7 @@ impl<B: Backend> LanguageModel<B> {
             transformer_state,
             speculator_state,
             max_context_length,
+            multimodal_failed: false,
         })
     }
 }

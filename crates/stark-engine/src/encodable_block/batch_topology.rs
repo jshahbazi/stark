@@ -5,6 +5,7 @@ pub struct BatchTopology<'a> {
     parents: Box<[i32]>,
     is_flat: bool,
     full_accept: bool,
+    rotary_positions: Option<&'a [[u32; 3]]>,
 }
 
 impl<'a> BatchTopology<'a> {
@@ -33,7 +34,31 @@ impl<'a> BatchTopology<'a> {
             parents,
             is_flat,
             full_accept,
+            rotary_positions: None,
         }
+    }
+
+    /// Spatial rotary coordinates never replace trie heights or cache offsets.
+    pub(crate) fn with_rotary_positions(
+        nodes: &'a [TrieNode],
+        full_accept: bool,
+        positions: &'a [[u32; 3]],
+    ) -> Result<Self, crate::backends::common::InvalidInput> {
+        if nodes.len() != positions.len()
+            || !full_accept
+            || nodes.iter().enumerate().any(|(i, node)| node.height as usize != i)
+        {
+            return Err(crate::backends::common::InvalidInput(
+                "multimodal positions require an equally sized flat accepted batch",
+            ));
+        }
+        let mut batch = Self::new(nodes, full_accept);
+        batch.rotary_positions = Some(positions);
+        Ok(batch)
+    }
+
+    pub(crate) fn rotary_positions(&self) -> Option<&[[u32; 3]]> {
+        self.rotary_positions
     }
 
     pub fn nodes(&self) -> &'a [TrieNode] {

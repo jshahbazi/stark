@@ -20,6 +20,9 @@ use crate::{
     speculators::dflash_tfm::{DFlashSpeculatorLoadError, DFlashTfmSpeculator},
 };
 
+pub(crate) mod multimodal;
+#[cfg(test)]
+mod multimodal_tests;
 pub mod scoring;
 pub mod state;
 pub mod stream;

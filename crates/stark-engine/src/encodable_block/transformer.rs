@@ -7,7 +7,8 @@ use thiserror::Error;
 use crate::encodable_block::mixer::attention::rope::PrecalculatedRoPE;
 use crate::{
     backends::common::{
-        Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, Kernels, kernel::TensorAddScaleKernel,
+        Backend, Buffer, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
+        kernel::TensorAddScaleKernel,
     },
     config::{rope::AnyRoPEConfig, transformer::TransformerConfig},
     data_type::DataType,
@@ -29,6 +30,9 @@ enum TransformerLayerStateType<B: Backend> {
 pub struct TransformerState<B: Backend> {
     layer_states: Box<[TransformerLayerStateType<B>]>,
     context_length: u32,
+    // Request-owned rotary continuation offset. Physical cache indices remain
+    // context_length + trie height, including after spatial image positions.
+    rotary_position_delta: Option<i64>,
     #[cfg(feature = "scoring-last-layer-pruning")]
     scoring_last_layer_pruning: bool,
 }
@@ -36,6 +40,19 @@ pub struct TransformerState<B: Backend> {
 pub struct TransformerEncodeOutput<B: Backend> {
     pub output: Option<B::ScratchBuffer>,
     pub hidden_features: Option<Box<[B::ScratchBuffer]>>,
+}
+
+/// Shift rotary positions after image prefill without changing physical KV indices.
+pub(crate) fn scalar_continuation_position(
+    cache_start: u32,
+    relative_height: u32,
+    delta: i64,
+) -> Result<u32, InvalidInput> {
+    let physical = cache_start.checked_add(relative_height).ok_or(InvalidInput("rotary cache position overflow"))?;
+    i64::from(physical)
+        .checked_add(delta)
+        .and_then(|position| u32::try_from(position).ok())
+        .ok_or(InvalidInput("rotary continuation position overflow"))
 }
 
 #[cfg(feature = "scoring-last-layer-pruning")]
@@ -68,6 +85,17 @@ impl<B: Backend> TransformerState<B> {
 
     pub fn context_length(&self) -> u32 {
         self.context_length
+    }
+
+    pub(crate) fn set_rotary_position_delta(
+        &mut self,
+        delta: Option<i64>,
+    ) {
+        self.rotary_position_delta = delta;
+    }
+
+    pub(crate) fn rotary_position_delta(&self) -> Option<i64> {
+        self.rotary_position_delta
     }
 
     pub fn prepare(
@@ -129,6 +157,7 @@ pub struct Transformer<B: Backend> {
     layers: Box<[(TransformerLayer<B>, Option<usize>)]>,
     output_norm: Normalization<B>,
     model_dim: u32,
+    multimodal_positions_supported: bool,
     residual_add: <B::Kernels as Kernels>::TensorAddScaleKernel,
 }
 
@@ -188,6 +217,8 @@ impl<B: Backend> Transformer<B> {
             .map_err(TransformerNewError::Backend)?;
 
         Ok(Self {
+            multimodal_positions_supported: !ropes.is_empty()
+                && ropes.iter().all(|rope| matches!(rope, AnyRoPEConfig::Qwen35MRoPEConfig(_))),
             #[cfg(feature = "rope-cache")]
             rope_tables: ropes.iter().map(super::mixer::attention::rope::RoPETableCache::new).collect(),
             #[cfg(not(feature = "rope-cache"))]
@@ -213,7 +244,12 @@ impl<B: Backend> Transformer<B> {
     }
 
     pub fn speculation_supported(&self) -> bool {
-        self.layers.iter().all(|(layer, _rope)| layer.mixer.speculation_supported())
+        !self.multimodal_positions_supported
+            && self.layers.iter().all(|(layer, _rope)| layer.mixer.speculation_supported())
+    }
+
+    pub(crate) fn multimodal_positions_supported(&self) -> bool {
+        self.multimodal_positions_supported
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -262,6 +298,7 @@ impl<B: Backend> Transformer<B> {
         Ok(TransformerState {
             layer_states,
             context_length,
+            rotary_position_delta: None,
             #[cfg(feature = "scoring-last-layer-pruning")]
             scoring_last_layer_pruning: false,
         })
@@ -277,6 +314,31 @@ impl<B: Backend> Transformer<B> {
         mut state: Option<&mut TransformerState<B>>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<TransformerEncodeOutput<B>, B::Error> {
+        let context_length = state.as_ref().map(|state| state.context_length).unwrap_or(0);
+        let delta = state.as_ref().and_then(|state| state.rotary_position_delta);
+        let explicit_positions = batch_dim.rotary_positions();
+        if (explicit_positions.is_some() || delta.is_some())
+            && (!self.multimodal_positions_supported || !batch_dim.is_flat() || !batch_dim.full_accept())
+        {
+            return Err(crate::backends::common::InvalidInput(
+                "multimodal execution requires supported flat non-speculative positions",
+            )
+            .into());
+        }
+        let token_positions = batch_dim
+            .heights()
+            .map(|relative| {
+                scalar_continuation_position(
+                    context_length,
+                    relative,
+                    if explicit_positions.is_some() {
+                        0
+                    } else {
+                        delta.unwrap_or(0)
+                    },
+                )
+            })
+            .collect::<Result<Box<[_]>, _>>()?;
         let mut hidden = input;
         let layer_count = if output_range.is_none() && hidden_feature_layer_indices.is_none() {
             self.prefill_cache_layer_count()
@@ -288,21 +350,24 @@ impl<B: Backend> Transformer<B> {
         let mut hidden_features =
             hidden_feature_layer_indices.map(|indices| (0..indices.len()).map(|_| None).collect::<Vec<_>>());
 
-        let context_length = state.as_ref().map(|state| state.context_length).unwrap_or(0);
-        let token_positions = batch_dim.heights().map(|rel_pos| context_length + rel_pos).collect::<Box<[u32]>>();
-
         #[cfg(not(feature = "rope-cache"))]
         let precalculated_ropes = self
             .ropes
             .iter()
-            .map(|rope_config| PrecalculatedRoPE::precalculate(rope_config, &token_positions, command_buffer))
+            .map(|rope_config| match explicit_positions {
+                Some(positions) => PrecalculatedRoPE::precalculate_multimodal(rope_config, positions, command_buffer),
+                None => PrecalculatedRoPE::precalculate(rope_config, &token_positions, command_buffer),
+            })
             .collect::<Result<Box<[_]>, B::Error>>()?;
 
         #[cfg(feature = "rope-cache")]
         let precalculated_ropes = self
             .rope_tables
             .iter()
-            .map(|cache| cache.precalculate::<B>(&token_positions, command_buffer))
+            .map(|cache| match explicit_positions {
+                Some(positions) => cache.precalculate_multimodal::<B>(positions, command_buffer),
+                None => cache.precalculate::<B>(&token_positions, command_buffer),
+            })
             .collect::<Result<Box<[_]>, B::Error>>()?;
 
         for (layer, layer_rope_index) in self.layers.iter().take(layer_count) {
@@ -408,6 +473,29 @@ impl<B: Backend> Transformer<B> {
             output: Some(output_normalized),
             hidden_features,
         })
+    }
+}
+
+#[cfg(test)]
+mod rotary_position_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::scalar_continuation_position;
+
+    #[stark_test]
+    fn continuation_checks_signed_positions_without_changing_cache_coordinates() {
+        let positions = [0, 2, 1].map(|height| scalar_continuation_position(12, height, -4).unwrap());
+        assert_eq!(positions, [8, 10, 9]);
+        let positions = [0, 1].map(|height| scalar_continuation_position(0, height, 3).unwrap());
+        assert_eq!(positions, [3, 4]);
+        assert_eq!(scalar_continuation_position(0, 0, 0).unwrap(), 0);
+        assert_eq!(scalar_continuation_position(1, 0, -1).unwrap(), 0);
+        assert_eq!(scalar_continuation_position(u32::MAX, 0, 0).unwrap(), u32::MAX);
+        assert!(scalar_continuation_position(2, 0, -3).is_err());
+        assert!(scalar_continuation_position(u32::MAX, 1, -1).is_err());
+        assert!(scalar_continuation_position(u32::MAX, 0, 1).is_err());
+        assert!(scalar_continuation_position(1, 0, i64::MAX).is_err());
+        assert!(scalar_continuation_position(0, 0, i64::MIN).is_err());
     }
 }
 

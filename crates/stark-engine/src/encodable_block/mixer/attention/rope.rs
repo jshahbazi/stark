@@ -1,5 +1,5 @@
 use crate::{
-    backends::common::{Backend, CommandBuffer, CommandBufferEncoding},
+    backends::common::{Backend, CommandBuffer, CommandBufferEncoding, InvalidInput},
     config::rope::AnyRoPEConfig,
 };
 
@@ -45,6 +45,15 @@ impl RoPETableCache {
                 dim: *self.config.head_dim(),
             })
         })
+    }
+
+    /// Request-specific spatial rows must never enter the model-owned scalar cache.
+    pub fn precalculate_multimodal<B: Backend>(
+        &self,
+        positions: &[[u32; 3]],
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<PrecalculatedRoPE<B>, B::Error> {
+        PrecalculatedRoPE::<B>::precalculate_multimodal(&self.config, positions, command_buffer)
     }
 
     fn with_tables<R>(
@@ -105,6 +114,20 @@ impl RoPETableCache {
 }
 
 impl<B: Backend> PrecalculatedRoPE<B> {
+    /// Explicit image/text positions are request-owned and bypass the scalar table cache.
+    pub fn precalculate_multimodal(
+        rope_config: &AnyRoPEConfig,
+        positions: &[[u32; 3]],
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<Self, B::Error> {
+        let (cosines, sines) = precalculate_multimodal_cpu_tables(rope_config, positions)?;
+        Ok(Self {
+            cosines: command_buffer.allocate_constant_from_slice(&cosines)?,
+            sines: command_buffer.allocate_constant_from_slice(&sines)?,
+            dim: *rope_config.head_dim(),
+        })
+    }
+
     pub fn precalculate(
         rope_config: &AnyRoPEConfig,
         token_positions: &[u32],
@@ -144,7 +167,7 @@ fn precalculate_cpu_tables(
         let channel_index = pair_index * 2;
         let inverse_frequency = 1.0 / rope_config.base().powf(channel_index as f32 / head_dim as f32);
         let inverse_frequency = match rope_config {
-            AnyRoPEConfig::UnscaledRoPEConfig(_) => inverse_frequency,
+            AnyRoPEConfig::UnscaledRoPEConfig(_) | AnyRoPEConfig::Qwen35MRoPEConfig(_) => inverse_frequency,
             AnyRoPEConfig::LinearScalingRoPEConfig(config) => inverse_frequency / config.scaling_factor,
             AnyRoPEConfig::LlamaRoPEConfig(config) => {
                 let low_frequency_wavelength = config.original_context_length as f32 / config.low_frequency_factor;
@@ -213,6 +236,226 @@ fn precalculate_cpu_tables(
     (cosines, sines)
 }
 
+/// Independently implemented from the Qwen3.5 rotary contract in Transformers
+/// revision 2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397, modeling_qwen3_5.py,
+/// Qwen3_5TextRotaryEmbedding (Qwen/Hugging Face, Apache-2.0).
+/// Each axis selects coefficients before duplicating the complete half row.
+pub(crate) fn precalculate_multimodal_cpu_tables(
+    rope_config: &AnyRoPEConfig,
+    positions: &[[u32; 3]],
+) -> Result<(Vec<f32>, Vec<f32>), InvalidInput> {
+    rope_config.validate()?;
+    let AnyRoPEConfig::Qwen35MRoPEConfig(config) = rope_config else {
+        return Err(InvalidInput("three-axis positions require Qwen3.5 M-RoPE"));
+    };
+    let width = config.head_dim as usize;
+    let half_width = width / 2;
+    let element_count = positions.len().checked_mul(width).ok_or(InvalidInput("M-RoPE table size overflow"))?;
+    let mut cosines = vec![0.0; element_count];
+    let mut sines = vec![0.0; element_count];
+    for channel in 0..half_width {
+        // The H/W streams replace stride-three slots of the temporal stream.
+        let candidate_axis = channel % 3;
+        let axis = if candidate_axis != 0 && channel / 3 < config.mrope_section[candidate_axis] as usize {
+            candidate_axis
+        } else {
+            0
+        };
+        let inverse_frequency = 1.0 / config.base.powf((channel * 2) as f32 / config.head_dim as f32);
+        for (row, position) in positions.iter().enumerate() {
+            let embedding = position[axis] as f32 * inverse_frequency;
+            let offset = row * width + channel;
+            let cosine = embedding.cos();
+            let sine = embedding.sin();
+            cosines[offset] = cosine;
+            cosines[offset + half_width] = cosine;
+            sines[offset] = sine;
+            sines[offset + half_width] = sine;
+        }
+    }
+    Ok((cosines, sines))
+}
+
+#[cfg(test)]
+mod multimodal_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    fn config() -> AnyRoPEConfig {
+        serde_json::from_value(serde_json::json!({
+            "type":"Qwen35MRoPEConfig", "base":10000000.0, "max_sequence_length":262144,
+            "head_dim":64, "mrope_section":[11,11,10], "interleaved":true
+        }))
+        .unwrap()
+    }
+
+    fn bits(values: &[f32]) -> Vec<u32> {
+        values.iter().map(|value| value.to_bits()).collect()
+    }
+
+    #[stark_test]
+    fn qwen35_mrope_matches_independent_real_layout_with_distinct_axes() {
+        // Explicit axis oracle for the production [11,11,10]/64 layout.
+        // This catches contiguous sections and a too-short final H section.
+        let axes = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1];
+        let positions = [[2, 5, 11], [7, 13, 3], [0, 4, 9]];
+        let (cosines, sines) = precalculate_multimodal_cpu_tables(&config(), &positions).unwrap();
+        assert_eq!(cosines.len(), positions.len() * 64);
+        assert_eq!(sines.len(), cosines.len());
+        for (row, position) in positions.iter().enumerate() {
+            for (channel, axis) in axes.iter().enumerate() {
+                // Compute in f64 with an independent exponent expression.
+                let angle = f64::from(position[*axis]) * 10_000_000f64.powf(-(channel as f64) / 32.0);
+                let offset = row * 64 + channel;
+                assert!((f64::from(cosines[offset]) - angle.cos()).abs() < 2e-6);
+                assert!((f64::from(sines[offset]) - angle.sin()).abs() < 2e-6);
+                assert_eq!(cosines[offset].to_bits(), cosines[offset + 32].to_bits());
+                assert_eq!(sines[offset].to_bits(), sines[offset + 32].to_bits());
+            }
+        }
+    }
+
+    #[stark_test]
+    fn qwen35_mrope_scalar_positions_preserve_unscaled_bits() {
+        let mrope = config();
+        let scalar: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+            "type":"UnscaledRoPEConfig", "base":10000000.0, "max_sequence_length":262144, "head_dim":64
+        }))
+        .unwrap();
+        let positions = [0, 1, 67, 1023, 16_777_217, u32::MAX];
+        let diagonal = positions.map(|position| [position; 3]);
+        let (reference_cosines, reference_sines) = precalculate_cpu_tables(&scalar, &positions);
+        let (scalar_cosines, scalar_sines) = precalculate_cpu_tables(&mrope, &positions);
+        let (multimodal_cosines, multimodal_sines) = precalculate_multimodal_cpu_tables(&mrope, &diagonal).unwrap();
+        assert_eq!(bits(&reference_cosines), bits(&scalar_cosines));
+        assert_eq!(bits(&reference_sines), bits(&scalar_sines));
+        assert_eq!(bits(&reference_cosines), bits(&multimodal_cosines));
+        assert_eq!(bits(&reference_sines), bits(&multimodal_sines));
+    }
+
+    #[stark_test]
+    fn qwen35_mrope_chunk_slices_preserve_rows_and_axis_order() {
+        // Unequal H/W ranges represent a rectangular image grid.
+        let positions = (0..1031).map(|row| [2, 7 + row / 17, 5 + row % 17]).collect::<Vec<_>>();
+        let config = config();
+        let (whole_cosines, whole_sines) = precalculate_multimodal_cpu_tables(&config, &positions).unwrap();
+        let mut chunk_cosines = Vec::new();
+        let mut chunk_sines = Vec::new();
+        for chunk in positions.chunks(1024) {
+            let (cosines, sines) = precalculate_multimodal_cpu_tables(&config, chunk).unwrap();
+            chunk_cosines.extend(cosines);
+            chunk_sines.extend(sines);
+        }
+        assert_eq!(bits(&whole_cosines), bits(&chunk_cosines));
+        assert_eq!(bits(&whole_sines), bits(&chunk_sines));
+        let reordered = [positions[1030], positions[0], positions[1024], positions[1030]];
+        let (cosines, sines) = precalculate_multimodal_cpu_tables(&config, &reordered).unwrap();
+        for (row, source) in [1030, 0, 1024, 1030].into_iter().enumerate() {
+            assert_eq!(bits(&cosines[row * 64..(row + 1) * 64]), bits(&whole_cosines[source * 64..(source + 1) * 64]));
+            assert_eq!(bits(&sines[row * 64..(row + 1) * 64]), bits(&whole_sines[source * 64..(source + 1) * 64]));
+        }
+    }
+
+    #[stark_test]
+    fn qwen35_mrope_explicit_tables_reject_scalar_configs_and_invalid_layouts() {
+        let scalar: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+            "type":"UnscaledRoPEConfig", "base":10000.0, "max_sequence_length":1024, "head_dim":64
+        }))
+        .unwrap();
+        assert!(precalculate_multimodal_cpu_tables(&scalar, &[[0, 1, 2]]).is_err());
+        assert!(precalculate_multimodal_cpu_tables(&scalar, &[]).is_err());
+        let mut invalid = config();
+        let AnyRoPEConfig::Qwen35MRoPEConfig(inner) = &mut invalid else {
+            unreachable!()
+        };
+        inner.mrope_section = [10, 12, 10];
+        assert!(precalculate_multimodal_cpu_tables(&invalid, &[[0, 1, 2]]).is_err());
+        let empty = precalculate_multimodal_cpu_tables(&config(), &[]).unwrap();
+        assert!(empty.0.is_empty() && empty.1.is_empty());
+    }
+
+    #[cfg(feature = "cpu")]
+    fn run_partial_rotation<B: Backend>() {
+        use half::bf16;
+
+        use crate::{
+            backends::common::{
+                CommandBufferExecutable, CommandBufferPending, Context, Kernels, kernel::AttentionPrepareKernel,
+            },
+            data_type::DataType,
+            tests::helpers::{buffer_to_vec, create_buffer, create_buffer_with_data},
+        };
+
+        let context = B::Context::new().unwrap();
+        let kernel =
+            <B::Kernels as Kernels>::AttentionPrepareKernel::new(&context, DataType::BF16, DataType::F32, true, true)
+                .unwrap();
+        let input = (0..3 * 256).map(|index| bf16::from_f32((index % 31) as f32 / 32.0 - 0.5)).collect::<Vec<_>>();
+        let packed = create_buffer_with_data::<B, bf16>(&context, &input);
+        let mut queries = create_buffer::<B, bf16>(&context, 256);
+        let mut keys = create_buffer::<B, bf16>(&context, 256);
+        let mut values = create_buffer::<B, bf16>(&context, 256);
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let coefficients =
+            PrecalculatedRoPE::<B>::precalculate_multimodal(&config(), &[[2, 5, 11]], &mut command).unwrap();
+        assert_eq!(coefficients.dim, 64);
+        kernel.encode(
+            &packed,
+            &mut queries,
+            Some(&mut keys),
+            Some(&mut values),
+            Some(&coefficients.cosines),
+            Some(&coefficients.sines),
+            1,
+            Some(1),
+            256,
+            Some(coefficients.dim),
+            Some(0),
+            3 * 256,
+            1,
+            &mut command,
+        );
+        drop(coefficients);
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        let actual_queries = buffer_to_vec::<B, bf16>(&queries);
+        let actual_keys = buffer_to_vec::<B, bf16>(&keys);
+        let actual_values = buffer_to_vec::<B, bf16>(&values);
+        let axes = [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1];
+        for (head_index, actual) in [&actual_queries, &actual_keys].into_iter().enumerate() {
+            let original = &input[head_index * 256..(head_index + 1) * 256];
+            for channel in 0..64 {
+                let pair = channel % 32;
+                let angle = [2f64, 5.0, 11.0][axes[pair]] * 10_000_000f64.powf(-(pair as f64) / 32.0);
+                let paired = if channel < 32 {
+                    channel + 32
+                } else {
+                    channel - 32
+                };
+                let sign = if channel < 32 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let expected = f64::from(original[channel].to_f32()) * angle.cos()
+                    + sign * f64::from(original[paired].to_f32()) * angle.sin();
+                assert!((f64::from(actual[channel].to_f32()) - expected).abs() < 0.004);
+            }
+            assert_eq!(&actual[64..], &original[64..], "partial rotation changed the unrotated head suffix");
+        }
+        assert_eq!(&actual_values, &input[512..], "rotary coefficients changed value vectors");
+    }
+
+    #[cfg(feature = "cpu")]
+    #[stark_test]
+    fn qwen35_mrope_native_prepare_rotates_only_the_declared_prefix() {
+        use crate::{backends::cpu::Cpu, tests::helpers::for_each_non_cpu_backend};
+
+        run_partial_rotation::<Cpu>();
+        for_each_non_cpu_backend!(|B| run_partial_rotation::<B>());
+    }
+}
+
 #[cfg(all(test, feature = "rope-cache"))]
 mod tests {
     use serde_json::json;
@@ -223,6 +466,7 @@ mod tests {
     fn configs() -> Vec<AnyRoPEConfig> {
         let variants = [
             json!({"type": "UnscaledRoPEConfig"}),
+            json!({"type": "Qwen35MRoPEConfig", "mrope_section": [2,1,1], "interleaved": true}),
             json!({"type": "LinearScalingRoPEConfig", "scaling_factor": 4.0}),
             json!({"type": "LlamaRoPEConfig", "scaling_factor": 8.0, "original_context_length": 2048,
                 "low_frequency_factor": 1.0, "high_frequency_factor": 4.0}),

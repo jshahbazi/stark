@@ -122,6 +122,7 @@ pub(crate) fn validate_attention(
 ) -> Result<(), InvalidInput> {
     validate_heads(config.num_heads, config.num_groups, config.head_dim)?;
     if let Some(rope) = rope {
+        rope.validate()?;
         let width = *rope.head_dim();
         if width == 0 || !width.is_multiple_of(2) || width > config.head_dim || *rope.max_sequence_length() == 0 {
             return Err(InvalidInput("rotary width must be positive, even and fit the attention head"));
@@ -143,6 +144,11 @@ pub(crate) fn validate_transformer(config: &TransformerConfig) -> Result<(), Inv
     checked_product(&[config.model_dim, config.hidden_dim])?;
     for (index, layer) in config.layer_configs.iter().enumerate() {
         use super::token_mixer::AnyTokenMixerConfig;
+        // Transformer table collection includes every declared RoPE config,
+        // including metadata attached to a non-attention mixer.
+        if let Some(rope) = &layer.rope_config {
+            rope.validate()?;
+        }
         if let AnyTokenMixerConfig::AttentionConfig(attention) = &layer.mixer_config {
             validate_attention(attention, layer.rope_config.as_ref())?;
             if attention.is_kv_sharing != layer.kv_source_layer_index.is_some() {
@@ -305,6 +311,57 @@ mod tests {
             assert!(validate_attention(&attention(), Some(&rope(width))).is_ok());
         }
         assert!(validate_attention(&attention(), None).is_ok());
+    }
+
+    #[stark_test]
+    fn qwen35_partial_rotary_width_validates_sections_before_native_projection() {
+        let mut config = attention();
+        config.head_dim = 256;
+        let mut rope: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+            "type":"Qwen35MRoPEConfig", "base":10000000.0, "max_sequence_length":262144,
+            "head_dim":64, "mrope_section":[11,11,10], "interleaved":true
+        }))
+        .unwrap();
+        assert!(validate_attention(&config, Some(&rope)).is_ok());
+        let AnyRoPEConfig::Qwen35MRoPEConfig(mrope) = &mut rope else {
+            unreachable!()
+        };
+        mrope.mrope_section = [10, 12, 10];
+        assert!(validate_attention(&config, Some(&rope)).is_err());
+        let AnyRoPEConfig::Qwen35MRoPEConfig(mrope) = &mut rope else {
+            unreachable!()
+        };
+        mrope.mrope_section = [11, 11, 10];
+        config.head_dim = 32;
+        assert!(validate_attention(&config, Some(&rope)).is_err());
+    }
+
+    #[stark_test]
+    fn qwen35_non_attention_rotary_metadata_is_validated_before_table_collection() {
+        let mut config = transformer();
+        config.layer_configs[0].mixer_config = serde_json::from_value(serde_json::json!({
+            "type":"DeltaNetConfig", "in_proj_config":{}, "conv_config":{"has_biases":false},
+            "out_proj_config":{}, "norm_config":normalization(), "num_heads":4,
+            "num_groups":2, "head_dim":64, "value_head_dim":64, "kernel_size":4
+        }))
+        .unwrap();
+        let valid = serde_json::json!({
+            "type":"Qwen35MRoPEConfig", "base":10000000.0, "max_sequence_length":262144,
+            "head_dim":64, "mrope_section":[11,11,10], "interleaved":true
+        });
+        config.layer_configs[0].rope_config = Some(serde_json::from_value(valid.clone()).unwrap());
+        assert!(validate_transformer(&config).is_ok());
+        for (field, value) in [
+            ("head_dim", serde_json::json!(0)),
+            ("base", serde_json::json!(0.0)),
+            ("interleaved", serde_json::json!(false)),
+            ("mrope_section", serde_json::json!([10, 12, 10])),
+        ] {
+            let mut malformed = valid.clone();
+            malformed[field] = value;
+            config.layer_configs[0].rope_config = Some(serde_json::from_value(malformed).unwrap());
+            assert!(validate_transformer(&config).is_err(), "non-attention RoPE accepted malformed {field}");
+        }
     }
 
     #[stark_test]

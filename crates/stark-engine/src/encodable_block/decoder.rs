@@ -4,7 +4,7 @@ use derive_more::Debug;
 use thiserror::Error;
 
 use crate::{
-    backends::common::{Backend, BufferRef, CommandBuffer, CommandBufferEncoding},
+    backends::common::{Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput},
     config::decoder::DecoderConfig,
     data_type::DataType,
     encodable_block::{
@@ -38,6 +38,13 @@ pub struct Decoder<B: Backend> {
     embedding_norm: Option<Normalization<B>>,
     per_layer_embedding: Option<PerLayerEmbedding<B>>,
     transformer: Transformer<B>,
+    data_type: DataType,
+}
+
+/// A validated chunk of projected image rows. No public transport accepts this.
+pub(crate) struct EmbeddingReplacement<'a> {
+    pub(crate) token_start: u32,
+    pub(crate) features: &'a [half::bf16],
 }
 
 pub struct DecoderEncodeOutput<B: Backend> {
@@ -117,11 +124,19 @@ impl<B: Backend> Decoder<B> {
             embedding_norm,
             per_layer_embedding,
             transformer,
+            data_type,
         })
     }
 
     pub fn speculation_supported(&self) -> bool {
         self.transformer.speculation_supported()
+    }
+
+    pub(crate) fn multimodal_supported(&self) -> bool {
+        self.data_type == DataType::BF16
+            && self.embedding_norm.is_none()
+            && self.per_layer_embedding.is_none()
+            && self.transformer.multimodal_positions_supported()
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -149,9 +164,72 @@ impl<B: Backend> Decoder<B> {
         state: &mut TransformerState<B>,
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<DecoderEncodeOutput<B>, DecoderError<B>> {
+        self.encode_with_features(
+            token_ids,
+            None,
+            batch_dim,
+            output_range,
+            hidden_feature_layer_indices,
+            state,
+            command_buffer,
+        )
+    }
+
+    pub(crate) fn encode_with_features(
+        &self,
+        token_ids: impl BufferRef<Backend = B>,
+        replacement: Option<EmbeddingReplacement<'_>>,
+        batch_dim: &BatchTopology,
+        output_range: Option<Range<u32>>,
+        hidden_feature_layer_indices: Option<&[u32]>,
+        state: &mut TransformerState<B>,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<DecoderEncodeOutput<B>, DecoderError<B>> {
+        // Validate byte spans before lookup, upload or transformer dispatch.
+        let replacement = replacement
+            .map(|replacement| {
+                let width = self.embedding.model_dim() as usize;
+                if !self.multimodal_supported()
+                    || replacement.features.is_empty()
+                    || !replacement.features.len().is_multiple_of(width)
+                    || replacement.features.iter().any(|value| !value.is_finite())
+                    || batch_dim.rotary_positions().is_none()
+                    || !batch_dim.full_accept()
+                    || !batch_dim.is_flat()
+                {
+                    return Err(InvalidInput("invalid multimodal embedding replacement"));
+                }
+                let row_bytes = width
+                    .checked_mul(self.data_type.size_in_bytes())
+                    .ok_or(InvalidInput("embedding row size overflow"))?;
+                let start = (replacement.token_start as usize)
+                    .checked_mul(row_bytes)
+                    .ok_or(InvalidInput("embedding span offset overflow"))?;
+                let bytes = replacement
+                    .features
+                    .len()
+                    .checked_mul(self.data_type.size_in_bytes())
+                    .ok_or(InvalidInput("embedding span size overflow"))?;
+                let end = start.checked_add(bytes).ok_or(InvalidInput("embedding span end overflow"))?;
+                let total = (batch_dim.size() as usize)
+                    .checked_mul(row_bytes)
+                    .ok_or(InvalidInput("embedding batch size overflow"))?;
+                if end > total {
+                    return Err(InvalidInput("embedding replacement exceeds batch"));
+                }
+                Ok((replacement, start..end))
+            })
+            .transpose()?;
         command_buffer.push_debug_group("decoder");
 
-        let embedded = self.embedding.encode_lookup(token_ids, batch_dim.size(), command_buffer)?;
+        let mut embedded = self.embedding.encode_lookup(token_ids, batch_dim.size(), command_buffer)?;
+        if let Some((replacement, range)) = replacement {
+            // Owned command-buffer constants remain alive until the submitted
+            // GPU work completes; no borrowed/no-copy image storage is retained.
+            let features =
+                command_buffer.allocate_constant_from_slice(replacement.features).map_err(DecoderError::Backend)?;
+            command_buffer.encode_copy(&features, (&mut embedded).subrange_mut(range));
+        }
         let embedded = if let Some(embedding_norm) = &self.embedding_norm {
             embedding_norm
                 .encode(&embedded, 0, batch_dim.size(), None::<&mut B::ScratchBuffer>, command_buffer)
