@@ -117,6 +117,13 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     assert desktop.api_models()[0]["id"] == model.name
     assert desktop.job is None
     assert all(e["event"] != "reply" for e in events(desktop))
+    metrics_events = [e for e in events(desktop) if e["event"] == "metrics"]
+    assert len(metrics_events) == 1
+    assert metrics_events[0]["input_tokens"] == 20
+    assert metrics_events[0]["output_tokens"] == 4
+    assert metrics_events[0]["input_tokens_per_second"] == 100.0
+    assert metrics_events[0]["output_tokens_per_second"] == 50.0
+    assert "text" not in metrics_events[0]
     desktop.dispatch({"command": "generate", "text": "synthetic desktop request"})
     finish(desktop)
     assert len(desktop.messages) == 3
@@ -305,6 +312,7 @@ def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
     assert failed.value.status == 503
     assert desktop.job is None
     assert desktop.worker is None
+    assert not any(e["event"] == "metrics" for e in events(desktop))
     desktop.dispatch({"command": "run", "model_id": identifier})
     finish(desktop)
     assert desktop.active_model == identifier
@@ -320,6 +328,12 @@ def test_api_streams_native_deltas_and_retains_worker(desktop, model):
     )
     assert chunks == ["synthetic ", "answer"]
     assert "".join(chunks) == response["choices"][0]["message"]["content"]
+    metrics_events = [e for e in events(desktop) if e["event"] == "metrics"]
+    assert len(metrics_events) == 1
+    assert metrics_events[0]["output_tokens"] == 4
+    assert metrics_events[0]["input_tokens_per_second"] == 100.0
+    assert metrics_events[0]["output_tokens_per_second"] == 50.0
+    assert "text" not in metrics_events[0]
     assert desktop.worker.process is process
     assert desktop.job is None
 
@@ -342,6 +356,7 @@ def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
     assert desktop.worker is None
     assert desktop.job is None
     assert process.poll() is not None
+    assert not any(e["event"] == "metrics" for e in events(desktop))
 
 
 def test_old_worker_streaming_is_explicitly_rejected(desktop, model):
@@ -879,6 +894,10 @@ def test_generation_metrics_history_reset_and_stop(desktop, model):
     assert reply["text"] == "synthetic answer"
     assert reply["input_tokens_per_second"] == 100.0
     assert reply["output_tokens_per_second"] == 50.0
+    metrics_event = next(e for e in events(desktop) if e["event"] == "metrics")
+    assert metrics_event["input_tokens"] == 20
+    assert metrics_event["output_tokens"] == 4
+    assert "text" not in metrics_event
     assert len(desktop.messages) == 3
     assert "synthetic request" not in desktop.registry.read_text()
     desktop.dispatch({"command": "reset"})
@@ -898,6 +917,7 @@ def test_stop_interrupts_generation_then_restart_uses_a_new_worker(desktop, mode
     assert time.monotonic() - started < 5
     assert process.poll() is not None
     assert not any(e["event"] == "reply" for e in events(desktop))
+    assert not any(e["event"] == "metrics" for e in events(desktop))
     desktop.dispatch({"command": "run", "model_id": identifier})
     finish(desktop)
     assert desktop.worker.process.pid != process.pid

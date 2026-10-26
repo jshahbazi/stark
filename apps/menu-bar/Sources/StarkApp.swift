@@ -239,10 +239,9 @@ final class EngineController: ObservableObject {
             messages.append(ChatMessage(text: text, isUser: false))
             pendingMessageID = nil
             finishReason = event["finish_reason"] as? String ?? ""
-            inputTokens = event["input_tokens"] as? Int ?? 0
-            outputTokens = event["output_tokens"] as? Int ?? 0
-            inputSpeed = rate(event["input_tokens_per_second"])
-            outputSpeed = rate(event["output_tokens_per_second"])
+            applyMetrics(event)
+        case "metrics":
+            applyMetrics(event)
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
@@ -280,6 +279,13 @@ final class EngineController: ObservableObject {
             if phase == "download" { downloadProgress = progress } else { conversionProgress = progress }
         default: break
         }
+    }
+
+    private func applyMetrics(_ event: [String: Any]) {
+        inputTokens = event["input_tokens"] as? Int ?? 0
+        outputTokens = event["output_tokens"] as? Int ?? 0
+        inputSpeed = rate(event["input_tokens_per_second"])
+        outputSpeed = rate(event["output_tokens_per_second"])
     }
 
     private func rate(_ value: Any?) -> Double? {

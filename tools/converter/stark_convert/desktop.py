@@ -81,6 +81,21 @@ def metric(reply, key):
     return value if valid else None
 
 
+def metrics(reply):
+    return {
+        key: metric(reply, key)
+        for key in (
+            "input_tokens",
+            "output_tokens",
+            "input_tokens_per_second",
+            "output_tokens_per_second",
+            "prefill_seconds",
+            "decode_seconds",
+            "generation_seconds",
+        )
+    }
+
+
 def converter_progress(value):
     """Accept only the content-free converter pipe contract."""
     if not isinstance(value, dict) or set(value) != {"phase", "state", "completed_bytes", "total_bytes"}:
@@ -610,24 +625,9 @@ class Desktop:
             if epoch != self.epoch:
                 return
             self.messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
-            self.emit(
-                "reply",
-                epoch,
-                text=reply["text"],
-                input_tokens=metric(reply, "input_tokens"),
-                output_tokens=metric(reply, "output_tokens"),
-                finish_reason=reply.get("finish_reason"),
-                **{
-                    key: metric(reply, key)
-                    for key in (
-                        "input_tokens_per_second",
-                        "output_tokens_per_second",
-                        "prefill_seconds",
-                        "decode_seconds",
-                        "generation_seconds",
-                    )
-                },
-            )
+            fields = metrics(reply)
+            self.emit("metrics", epoch, **fields)
+            self.emit("reply", epoch, text=reply["text"], finish_reason=reply.get("finish_reason"), **fields)
             self.status("ready", "Ready", epoch)
 
     def infer(
@@ -826,6 +826,7 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
+                self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
             completion_tokens = metric(reply, "output_tokens") or 0
             return {
