@@ -20,7 +20,7 @@ from pathlib import Path
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .chat import ChatCancelled, ChatError, Worker, load_template
+from .chat import ChatCancelled, ChatError, ChatRequestTooLarge, Worker, load_template
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .local_api import APIError, LocalAPI
 from .registry import get_model
@@ -322,7 +322,7 @@ class Desktop:
             def execute():
                 try:
                     function(epoch, *args)
-                except DesktopError as error:
+                except (DesktopError, ChatRequestTooLarge) as error:
                     if epoch == self.epoch:
                         if installing:
                             self.fail_install_progress(epoch)
@@ -764,7 +764,7 @@ class Desktop:
         ``reason`` attribute (``"deadline"``) selects the 504 response. While the
         completion runs, ``self.job`` is the serving thread, which ``stop`` uses to
         fence it. Failures map to ``APIError``: a cancelled request, a context
-        overflow (400) or a worker fault (503, after which the worker is closed
+        overflow or oversized worker request (400), or a worker fault (503, after which the worker is closed
         and the app shows the model as stopped).
         """
         cancelled = cancelled or threading.Event()
@@ -849,6 +849,12 @@ class Desktop:
             }
         except ChatCancelled:
             raise cancellation_error(cancelled) from None
+        except ChatRequestTooLarge:
+            raise APIError(
+                400,
+                "Rendered request exceeds the worker size limit. Shorten the conversation.",
+                "request_too_large",
+            ) from None
         except DesktopError:
             raise APIError(
                 400,

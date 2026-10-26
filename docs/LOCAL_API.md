@@ -56,7 +56,7 @@ Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_t
 - Each request has a 300-second deadline from the time its body is read; reaching it returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
 - Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
-- The body limit and the worker's own 1 MiB request line are separate. A request whose rendered prompt (system prompt, template framing and all messages) exceeds the worker line limit currently fails with 503 `generation_failed` and unloads the model, which then needs **Run** again. Keep conversations well below 1 MiB of rendered text.
+- The body limit and the worker's own 1 MiB request line are separate. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds this encoded line limit returns 400 `request_too_large` before writing that request to the worker. The model stays loaded, and a shorter conversation can be retried.
 
 Each request is tokenized and prefilled from scratch by the worker; there is no prompt or prefix cache between requests.
 
@@ -72,6 +72,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
 | 400 | `invalid_messages` | The chat template rejected the messages |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
+| 400 | `request_too_large` | Rendered worker request exceeds the 1 MiB encoded line limit |
 | 401 | `invalid_api_key` | Missing or wrong bearer key |
 | 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
 | 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |

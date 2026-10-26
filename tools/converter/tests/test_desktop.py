@@ -387,6 +387,79 @@ def test_api_context_rejection_keeps_loaded_worker(desktop, model):
     assert desktop.worker.process is process
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("overflow", ["ascii", "utf8", "template"])
+def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, model, stream, overflow):
+    from urllib.error import HTTPError
+    from urllib.request import Request, urlopen
+
+    from stark_convert.local_api import LocalAPI
+
+    if overflow == "template":
+        config_path = model / "config.json"
+        config = json.loads(config_path.read_text())
+        config["token_codec_config"]["prompt_template"] = (
+            "{% for m in messages %}{{ m.content * 2 }}{% endfor %}assistant:"
+        )
+        config_path.write_text(json.dumps(config))
+    running(desktop, model)
+    worker = desktop.worker
+    history = list(desktop.messages)
+    payload = {"stream": stream, "messages": [{"role": "user", "content": ""}]}
+    limit = 1024 * 1024
+    if overflow == "template":
+        content = "x" * (limit // 2)
+    else:
+        budget = limit - len(json.dumps(payload, ensure_ascii=False).encode())
+        unit = "界" if overflow == "utf8" else "x"
+        count, padding = divmod(budget, len(unit.encode()))
+        content = unit * count + "x" * padding
+    payload["messages"][0]["content"] = content
+    body = json.dumps(payload, ensure_ascii=False).encode()
+    assert len(body) <= limit
+    if overflow != "template":
+        assert len(body) == limit
+    api = LocalAPI(desktop.api_models, desktop.api_complete, port=0, cancellable=True)
+    details = api.start()
+    headers = {"Authorization": "Bearer " + details["api_key"], "Content-Type": "application/json"}
+    try:
+        with pytest.raises(HTTPError) as error:
+            urlopen(Request(details["base_url"] + "/chat/completions", data=body, headers=headers), timeout=5)
+        assert error.value.code == 400
+        assert json.loads(error.value.read())["error"]["code"] == "request_too_large"
+        assert desktop.worker is worker and worker.process.poll() is None
+        assert desktop.messages == history
+        assert desktop.job is None and desktop.api_queue == []
+
+        payload["messages"][0]["content"] = "small fixture"
+        retry = Request(details["base_url"] + "/chat/completions", data=json.dumps(payload).encode(), headers=headers)
+        with urlopen(retry, timeout=5) as response:
+            result = response.read()
+            assert response.status == 200
+        if stream:
+            assert b"data: [DONE]" in result
+        else:
+            assert json.loads(result)["choices"][0]["message"]["content"] == "synthetic answer"
+        assert desktop.worker is worker and worker.process.poll() is None
+    finally:
+        api.close()
+
+
+def test_oversized_desktop_turn_preserves_model_and_allows_retry(desktop, model):
+    running(desktop, model)
+    worker = desktop.worker
+    history = list(desktop.messages)
+    desktop.dispatch({"command": "generate", "text": "x" * 1024 * 1024})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert desktop.messages == history and desktop.job is None
+    assert any(e["event"] == "error" and "request limit" in e["message"] for e in events(desktop))
+    desktop.dispatch({"command": "generate", "text": "small fixture"})
+    finish(desktop)
+    assert desktop.worker is worker and worker.process.poll() is None
+    assert len(desktop.messages) == len(history) + 2
+
+
 def test_api_sampling_limits_aliases_and_message_parts(desktop, model):
     running(desktop, model)
     seen = []
