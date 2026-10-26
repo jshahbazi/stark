@@ -7,6 +7,7 @@ pub mod kv_cache_update;
 pub mod qkv_norm;
 pub mod sigmoid_gate;
 pub mod vision_eager;
+pub mod vision_prepare;
 
 mod mask;
 

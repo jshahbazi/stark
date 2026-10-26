@@ -34,6 +34,8 @@ use crate::{
     parameters::{ParameterLoader, ParameterLoaderError},
 };
 
+#[cfg(test)]
+mod parity_tests;
 pub(crate) mod preprocess;
 #[cfg(test)]
 mod reference_tests;

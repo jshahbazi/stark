@@ -1,0 +1,12 @@
+The pinned PyTorch ARM NEON header identifies its single-precision vector
+exponential implementation as copied from Arm Optimized Routines:
+
+https://github.com/ARM-software/optimized-routines/blob/c154f238b01fd62b84172680126d70dd919b221a/math/aarch64/advsimd/expf.c
+
+The source adaptation is the vector range-reduction and polynomial schedule;
+PyTorch's pinned header adjusts special-case bounds and handles its finite
+GELU input range. The cited upstream file carries this copyright:
+
+Copyright (c) 2019-2024, Arm Limited.
+
+The full upstream license is preserved in arm-optimized-routines-LICENSE.txt.

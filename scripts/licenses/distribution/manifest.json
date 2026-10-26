@@ -1,6 +1,136 @@
 {
   "apache_2_0_reference_url": "https://raw.githubusercontent.com/madsmtm/objc2/ee9a7ada2131f5944b8750428e265c15632f2a19/LICENSE-APACHE.txt",
   "historical_overview_sha256": "7f976f7e9cb2d87df7230606feb932c3f21ac0e664045a775b600046ff850c54",
+  "source_adaptations": {
+    "pytorch-bf16-vision-layernorm-moments": {
+      "license": "BSD-3-Clause",
+      "license_file": "pytorch-LICENSE",
+      "license_sha256": "bd018feef8825e88181c84eb7e3aa4eafb8f08a20d9fd6ef948569610c4a3e43",
+      "repository": "https://github.com/pytorch/pytorch",
+      "source_files": [
+        {
+          "path": "aten/src/ATen/native/cpu/moments_utils.h",
+          "sha256": "ddc188f6752d2b7c04f443a476461d507f041ab6a2a141aa459a8cfa10ce3170"
+        },
+        {
+          "path": "aten/src/ATen/native/cpu/BlasKernel.cpp",
+          "sha256": "5f55b3a7c17c724e1b5e963f37f248fff1857867faff36d58d3b24da9cdc8363"
+        },
+        {
+          "path": "aten/src/ATen/native/cpu/ReducedPrecisionFloatGemvFastPathKernel.cpp",
+          "sha256": "e510addadc6115358ac16a2f983f5a764ef62d023873b88a9a1e3083c2f58705"
+        },
+        {
+          "path": "aten/src/ATen/cpu/vec/functional_base.h",
+          "sha256": "94e5875c338b5ac9471587e2b82535e13d5beed8a6483c0f503d782d71000d8c"
+        },
+        {
+          "path": "aten/src/ATen/cpu/vec/vec128/vec128_float_neon.h",
+          "sha256": "25f93cfc8d8bf6e2cbde45915fa3c920a954c07b2a1c3017433e8490a2ddc63d"
+        },
+        {
+          "path": "aten/src/ATen/native/Gelu.h",
+          "sha256": "5fbc9b67e5b711f56a961342ee3398502bbf718de0747fc3f92eea011989142a"
+        },
+        {
+          "path": "aten/src/ATen/native/cpu/Activation.cpp",
+          "sha256": "66cca1278103413ab9c566585004f58213a5f870a4daa07c0bc75bd2f30b19b1"
+        }
+      ],
+      "additional_notices": [
+        {
+          "license": "MIT",
+          "license_file": "ggml-LICENSE",
+          "license_sha256": "e562a2ddfaf8280537795ac5ecd34e3012b6582a147ef69ba6a6a5c08c84757d",
+          "notice_source_file": "aten/src/ATen/native/cpu/ReducedPrecisionFloatGemvFastPathKernel.cpp",
+          "notice_source_sha256": "e510addadc6115358ac16a2f983f5a764ef62d023873b88a9a1e3083c2f58705"
+        },
+        {
+          "license": "BSL-1.0",
+          "license_file": "sleef-LICENSE.txt",
+          "license_sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+          "notice_source_file": "third_party/sleef/LICENSE.txt",
+          "notice_source_revision": "5a1d179df9cf652951b59010a2d2075372d67f68",
+          "notice_source_sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+          "repository": "https://github.com/shibatch/sleef"
+        },
+        {
+          "license": "Copyright attribution",
+          "license_file": "sleef-ATTRIBUTION.txt",
+          "license_sha256": "3acf0d6a7e3518460982b79e8d4e0ba2429b9929fab3dd15dd19776e66d5ea71",
+          "notice_source_file": "third_party/sleef/src/libm/sleefsimdsp.c and src/arch/helperadvsimd.h",
+          "notice_source_revision": "5a1d179df9cf652951b59010a2d2075372d67f68",
+          "repository": "https://github.com/shibatch/sleef"
+        },
+        {
+          "license": "MIT OR Apache-2.0 WITH LLVM-exception",
+          "license_file": "arm-optimized-routines-LICENSE.txt",
+          "license_sha256": "650afbf29f214451e02241adc42534e82c9d6ae2b38e2444b92b5a1ffcaf9346",
+          "notice_source_file": "math/aarch64/advsimd/expf.c",
+          "notice_source_sha256": "b02abbd6a210850eb69492fb53c7cbf1ea0aa78b004232c739f4208be99a2529",
+          "notice_source_revision": "c154f238b01fd62b84172680126d70dd919b221a",
+          "repository": "https://github.com/ARM-software/optimized-routines"
+        },
+        {
+          "license": "Copyright attribution",
+          "license_file": "arm-optimized-routines-ATTRIBUTION.txt",
+          "license_sha256": "f4e08a935a2aaded29bd5ca620c6a14ce188390d23a6a9193708bad221358b53",
+          "notice_source_file": "math/aarch64/advsimd/expf.c",
+          "notice_source_sha256": "b02abbd6a210850eb69492fb53c7cbf1ea0aa78b004232c739f4208be99a2529",
+          "notice_source_revision": "c154f238b01fd62b84172680126d70dd919b221a",
+          "repository": "https://github.com/ARM-software/optimized-routines"
+        }
+      ],
+      "source_file": "aten/src/ATen/native/cpu/moments_utils.h",
+      "source_revision": "5c4886908584029761b579af026dcfb627c84070",
+      "source_sha256": "ddc188f6752d2b7c04f443a476461d507f041ab6a2a141aa459a8cfa10ce3170",
+      "source_tag": "v2.14.1",
+      "source_url": "https://github.com/pytorch/pytorch/blob/v2.14.1/aten/src/ATen/native/cpu/moments_utils.h",
+      "nested_sources": [
+        {
+          "repository": "https://github.com/shibatch/sleef",
+          "source_revision": "5a1d179df9cf652951b59010a2d2075372d67f68",
+          "pinned_by": "pytorch/pytorch@5c4886908584029761b579af026dcfb627c84070 third_party/sleef gitlink",
+          "source_files": [
+            {
+              "path": "src/libm/sleefsimdsp.c",
+              "sha256": "726d962aaa9cfb0b1696122f4d26765495491c0cbc26c084c899704de46b2f5c"
+            },
+            {
+              "path": "src/libm/rempitab.c",
+              "sha256": "105201cc9c80126a3f18ea96e52540c0d13fda7c91a664599ba4078639f961ad"
+            },
+            {
+              "path": "src/libm/rename.h",
+              "sha256": "358200ef8dee58eaf68a63eea3b905251d138b6ddfcaf2dd93dde16b8ffc7dc4"
+            },
+            {
+              "path": "src/arch/helperadvsimd.h",
+              "sha256": "8db49cb2881771dde2ac6b7fcf5031b3fecf302b92220ff4cf0ed04f169bb610"
+            },
+            {
+              "path": "src/common/df.h",
+              "sha256": "cd3c7de0e47f3751a15dd62878effabdec9e47a892a03fefd75981c26fdaf097"
+            },
+            {
+              "path": "src/common/misc.h",
+              "sha256": "516ddeb5cc9501039b104967f1830b92e94cc6053c401fbb6773873dfb1b6178"
+            },
+            {
+              "path": "src/common/quaddef.h",
+              "sha256": "7dd06a0161c384d6823f4554312765cd5af61eb913fd997c5f835c10bf5cf309"
+            }
+          ],
+          "license": "BSL-1.0",
+          "license_file": "LICENSE.txt",
+          "license_sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566",
+          "license_url": "https://github.com/shibatch/sleef/blob/5a1d179df9cf652951b59010a2d2075372d67f68/LICENSE.txt",
+          "source_url": "https://github.com/shibatch/sleef/tree/5a1d179df9cf652951b59010a2d2075372d67f68"
+        }
+      ],
+      "adaptation": "Vision-only logical BF16 Welford moments cascade and scalar final contraction for LayerNorm variance; BF16 dot arithmetic using 32 float accumulators with pairwise reduction and scalar tail, and a four-part sequential FP32 accumulation schedule for BF16 inputs with FP32 output, plus NEON lane reduction order. Applied to vision projection/QK and patch-convolution/attention products. RoPE trigonometric schedule is adapted from PyTorch's pinned ARM NEON dispatch to SLEEF u10 functions and pinned SLEEF submodule source. Vision GELU preserves PyTorch's pinned forward formulas and NEON erf polynomial; its exponential range-reduction and polynomial are adapted from Arm Optimized Routines through PyTorch's NEON exp_u20 implementation. Vision softmax uses the pinned SLEEF single-precision exp u10 schedule and double-float helpers. No global text normalization change or PyTorch runtime dependency. The embedded GGML MIT notice is retained because the referenced PyTorch fast-path source identifies the reduction helpers as adapted from llama.cpp."
+    }
+  },
   "packages": {
     "block2@0.6.2": {
       "files": {

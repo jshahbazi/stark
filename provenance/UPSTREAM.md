@@ -10,6 +10,28 @@ The import contains the scoring API, topology and state changes, Rust/Metal opti
 
 The pinned upstream ancestry, root license, original upstream README, dependency lock, and JevK5 fixture licenses are preserved. Earlier fork commits were rewritten to keep only standalone engine source and neutral optimization names. Source-bound receipts from the previous history are replaced by fresh build and correctness validation records for the rewritten source.
 
+## Third-party algorithm adaptations
+
+The vision-only BF16 LayerNorm variance implementation adapts the logical
+Welford moments cascade and scalar final contraction from PyTorch's
+`aten/src/ATen/native/cpu/moments_utils.h`, tag `v2.14.1`, resolved commit
+`5c4886908584029761b579af026dcfb627c84070`. The inspected source SHA-256 is
+`ddc188f6752d2b7c04f443a476461d507f041ab6a2a141aa459a8cfa10ce3170`. Stark's
+implementation is a Rust/Metal adaptation of the logical BF16 NEON schedules
+for vision LayerNorm and vision matrix products, including affine sequencing,
+32-stream dot accumulation, and four-part FP32 output accumulation; it does not
+add a PyTorch runtime dependency or change the text normalization path. The
+PyTorch BSD license, the GGML MIT notice embedded in the pinned PyTorch
+fast-path source, and the Boost Software License 1.0 notice for the SLEEF
+submodule pinned by that PyTorch revision are preserved in
+`scripts/licenses/distribution/` and included with packaged distribution
+notices. Pinned source paths, hashes, licenses and the adaptation scope are
+recorded in the supplemental distribution license manifest. The vision GELU
+uses PyTorch's pinned forward formulas and ARM NEON erf polynomial, including
+the Arm-derived `exp_u20` routine; its Arm Optimized Routines MIT/Apache notice
+and attribution are also preserved. The vision softmax exponential adapts the
+pinned SLEEF u10 routine and double-float helpers.
+
 Model weights, private fixtures, runtime executables, and host application archives are excluded. The original pinned upstream README is stored verbatim as [UPSTREAM_README.md](UPSTREAM_README.md); its relative links refer to the upstream tree and are not expected to resolve here. The current build and validation receipts identify the complete standalone source and executable hashes.
 
 ## Naming and compatibility

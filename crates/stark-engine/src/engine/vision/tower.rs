@@ -7,18 +7,17 @@
 //! spatial merge block; the Conv3d kernel/stride equal its full patch extent.
 
 use half::bf16;
-use parking_lot::Mutex;
 use thiserror::Error;
 
 use crate::{
     backends::common::{
         Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
-        gpu_types::ActivationType,
         kernel::{
-            ActivationKernel, AttentionPrepareKernel, NormalizationKernel, TensorAddScaleKernel,
-            VisionBiasCastBF16Kernel, VisionCastBF16Kernel, VisionHeadCopyBF16Kernel, VisionSoftmaxBF16Kernel,
-            matmul::{MatmulA, MatmulArguments, MatmulB, MatmulDOps, MatmulKernel},
+            TensorAddScaleKernel, VisionBiasCastBF16Kernel, VisionCastBF16Kernel, VisionGeluBF16Kernel,
+            VisionHeadCopyBF16Kernel, VisionLayerNormBF16Kernel, VisionMatmulBF16Kernel, VisionPrepareBF16Kernel,
+            VisionSoftmaxBF16Kernel,
         },
+        vision_math::vision_sin_cos,
     },
     data_type::DataType,
     parameters::{ParameterLoaderError, ParameterTree},
@@ -125,6 +124,24 @@ pub(crate) enum VisionBlockStage {
     Output,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VisionMergerStage {
+    Norm,
+    Fc1,
+    Gelu,
+    Output,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum VisionAttentionStage {
+    FullPrecisionScores,
+    Scores,
+    ScaledScores,
+    Probabilities,
+    FullPrecisionHead,
+    Head,
+}
+
 fn checked_elements(
     rows: u32,
     width: u32,
@@ -179,22 +196,26 @@ fn rotary_tables(
         return Err(InvalidInput("vision rotary head width must be divisible by four"));
     }
     let count = positions.len().checked_mul(head_dim as usize).ok_or(InvalidInput("vision rotary table overflow"))?;
-    let mut cosines = vec![0.0f32; count];
-    let mut sines = vec![0.0f32; count];
+    let mut angles = Vec::with_capacity(count / 2);
     let quarter = head_dim / 4;
     let half = head_dim / 2;
-    for (row, position) in positions.iter().enumerate() {
+    for position in positions {
         for axis in 0..2 {
             for pair in 0..quarter {
                 let inverse_frequency = 1.0 / 10000f32.powf((2 * pair) as f32 / half as f32);
-                let angle = position[axis] as f32 * inverse_frequency;
-                let index = row * head_dim as usize + axis * quarter as usize + pair as usize;
-                cosines[index] = angle.cos();
-                cosines[index + half as usize] = cosines[index];
-                sines[index] = angle.sin();
-                sines[index + half as usize] = sines[index];
+                angles.push(position[axis] as f32 * inverse_frequency);
             }
         }
+    }
+    let (cos_half, sin_half) = vision_sin_cos(&angles);
+    let mut cosines = Vec::with_capacity(count);
+    let mut sines = Vec::with_capacity(count);
+    for row in 0..positions.len() {
+        let range = row * half as usize..(row + 1) * half as usize;
+        cosines.extend_from_slice(&cos_half[range.clone()]);
+        cosines.extend_from_slice(&cos_half[range.clone()]);
+        sines.extend_from_slice(&sin_half[range.clone()]);
+        sines.extend_from_slice(&sin_half[range]);
     }
     Ok((cosines, sines))
 }
@@ -273,12 +294,13 @@ fn validate_parameters<B: Backend>(
 }
 
 struct RawLinear<B: Backend> {
-    kernel: Mutex<<B::Kernels as Kernels>::MatmulKernel>,
+    kernel: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast_bias: <B::Kernels as Kernels>::VisionBiasCastBF16Kernel,
     weights: B::GlobalBuffer,
     biases: B::GlobalBuffer,
     input_width: u32,
     output_width: u32,
+    streams: u32,
 }
 
 impl<B: Backend> RawLinear<B> {
@@ -290,16 +312,18 @@ impl<B: Backend> RawLinear<B> {
         weight_shape: &[u32],
     ) -> Result<Self, VisionTowerError<B>> {
         Ok(Self {
-            kernel: Mutex::new(
-                <B::Kernels as Kernels>::MatmulKernel::new(context, DataType::BF16, DataType::BF16, DataType::F32)
-                    .map_err(VisionTowerError::Backend)?,
-            ),
+            kernel: <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(context).map_err(VisionTowerError::Backend)?,
             cast_bias: <B::Kernels as Kernels>::VisionBiasCastBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
             weights: tree.leaf("weight")?.validate(weight_shape, DataType::BF16)?.read_buffer()?,
             biases: tree.leaf("bias")?.validate(&[output_width], DataType::BF16)?.read_buffer()?,
             input_width,
             output_width,
+            streams: if weight_shape.len() == 5 {
+                4
+            } else {
+                32
+            },
         })
     }
 
@@ -309,29 +333,22 @@ impl<B: Backend> RawLinear<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
-        // Split-K partial sums use D's dtype. Preserve every partition in FP32,
-        // then add the BF16 source bias before the operation's sole BF16 cast.
+        // Preserve the pinned BF16 operation's FP32 reduction, then add its
+        // source bias before the sole BF16 cast. Conv3d uses four partial sums;
+        // dense transposed GEMM uses an eight-register (32-stream) dot schedule.
         let mut full_precision = commands.allocate_scratch_for_shape(&[rows, self.output_width], DataType::F32)?;
-        self.kernel.lock().encode(
-            MatmulArguments {
-                a: MatmulA::FullPrecision {
-                    values: input,
-                    offset: 0,
-                },
-                b: MatmulB::FullPrecision {
-                    b: &self.weights,
-                },
-                b_leading_dimension: None,
-                b_transpose: true,
-                d: &mut full_precision,
-                d_transform: MatmulDOps::none(),
-                gather_indices: None::<&B::ConstantBuffer>,
-                m: rows,
-                n: self.output_width,
-                k: self.input_width,
-            },
+        self.kernel.encode(
+            input,
+            &self.weights,
+            &mut full_precision,
+            rows,
+            self.output_width,
+            self.input_width,
+            self.input_width,
+            1,
+            self.streams,
             commands,
-        )?;
+        );
         let mut output = commands.allocate_scratch_for_shape(&[rows, self.output_width], DataType::BF16)?;
         self.cast_bias.encode(
             &full_precision,
@@ -346,8 +363,7 @@ impl<B: Backend> RawLinear<B> {
 }
 
 struct LayerNorm<B: Backend> {
-    kernel: <B::Kernels as Kernels>::NormalizationKernel,
-    cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
+    kernel: <B::Kernels as Kernels>::VisionLayerNormBF16Kernel,
     weight: B::GlobalBuffer,
     bias: B::GlobalBuffer,
     width: u32,
@@ -362,25 +378,8 @@ impl<B: Backend> LayerNorm<B> {
         epsilon: f32,
     ) -> Result<Self, VisionTowerError<B>> {
         Ok(Self {
-            kernel: <B::Kernels as Kernels>::NormalizationKernel::new(
-                context,
-                DataType::BF16,
-                DataType::BF16,
-                DataType::F32,
-                DataType::F32,
-                false,
-                true,
-                true,
-                false,
-                false,
-                false,
-                false,
-                false,
-                true,
-                true,
-            )
-            .map_err(VisionTowerError::Backend)?,
-            cast: <B::Kernels as Kernels>::VisionCastBF16Kernel::new(context).map_err(VisionTowerError::Backend)?,
+            kernel: <B::Kernels as Kernels>::VisionLayerNormBF16Kernel::new(context)
+                .map_err(VisionTowerError::Backend)?,
             weight: tree.leaf("weight")?.validate(&[width], DataType::BF16)?.read_buffer()?,
             bias: tree.leaf("bias")?.validate(&[width], DataType::BF16)?.read_buffer()?,
             width,
@@ -394,23 +393,8 @@ impl<B: Backend> LayerNorm<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
-        let mut full_precision = commands.allocate_scratch_for_shape(&[rows, self.width], DataType::F32)?;
-        self.kernel.encode(
-            Some(input),
-            Some(&self.weight),
-            Some(&self.bias),
-            &mut full_precision,
-            None::<&mut B::ScratchBuffer>,
-            None::<&B::GlobalBuffer>,
-            rows,
-            self.width,
-            self.epsilon,
-            0.0,
-            1.0,
-            commands,
-        );
         let mut output = commands.allocate_scratch_for_shape(&[rows, self.width], DataType::BF16)?;
-        self.cast.encode(&full_precision, &mut output, rows * self.width, commands);
+        self.kernel.encode(input, &self.weight, &self.bias, &mut output, rows, self.width, self.epsilon, commands);
         Ok(output)
     }
 }
@@ -419,7 +403,7 @@ impl<B: Backend> LayerNorm<B> {
 /// fused language attention path deliberately retains more intermediate FP32
 /// precision and is not numerically interchangeable over this vision stack.
 struct VisionEagerAttention<B: Backend> {
-    matmul: Mutex<<B::Kernels as Kernels>::MatmulKernel>,
+    matmul: <B::Kernels as Kernels>::VisionMatmulBF16Kernel,
     cast: <B::Kernels as Kernels>::VisionCastBF16Kernel,
     softmax: <B::Kernels as Kernels>::VisionSoftmaxBF16Kernel,
     head_copy: <B::Kernels as Kernels>::VisionHeadCopyBF16Kernel,
@@ -436,12 +420,7 @@ impl<B: Backend> VisionEagerAttention<B> {
         num_heads: u32,
     ) -> Result<Self, B::Error> {
         Ok(Self {
-            matmul: Mutex::new(<B::Kernels as Kernels>::MatmulKernel::new(
-                context,
-                DataType::BF16,
-                DataType::BF16,
-                DataType::F32,
-            )?),
+            matmul: <B::Kernels as Kernels>::VisionMatmulBF16Kernel::new(context)?,
             cast: <B::Kernels as Kernels>::VisionCastBF16Kernel::new(context)?,
             softmax: <B::Kernels as Kernels>::VisionSoftmaxBF16Kernel::new(context)?,
             head_copy: <B::Kernels as Kernels>::VisionHeadCopyBF16Kernel::new(context)?,
@@ -460,6 +439,26 @@ impl<B: Backend> VisionEagerAttention<B> {
         rows: u32,
         commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<B::ScratchBuffer, B::Error> {
+        self.encode_with_observer(queries, keys, values, rows, commands, &mut |_, _, _, _| Ok(()))
+    }
+
+    fn encode_with_observer<F>(
+        &self,
+        queries: &B::ScratchBuffer,
+        keys: &B::ScratchBuffer,
+        values: &B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, B::Error>
+    where
+        F: FnMut(
+            u32,
+            VisionAttentionStage,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
         let mut output = commands.allocate_scratch_for_shape(&[rows, self.model_dim], DataType::BF16)?;
         let zero = commands.allocate_constant_from_slice(&[bf16::ZERO])?;
         let head_elements = rows * self.head_dim;
@@ -470,28 +469,24 @@ impl<B: Backend> VisionEagerAttention<B> {
             let mut full_precision_scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::F32)?;
             // Q is [head,row,channel]. K/V are [row,head,channel], so B's
             // physical row stride remains the complete model width.
-            self.matmul.lock().encode(
-                MatmulArguments {
-                    a: MatmulA::FullPrecision {
-                        values: queries.subrange(query_offset..query_offset + head_bytes),
-                        offset: 0,
-                    },
-                    b: MatmulB::FullPrecision {
-                        b: keys.subrange(kv_offset..),
-                    },
-                    b_leading_dimension: Some(self.model_dim),
-                    b_transpose: true,
-                    d: &mut full_precision_scores,
-                    d_transform: MatmulDOps::none(),
-                    gather_indices: None::<&B::ConstantBuffer>,
-                    m: rows,
-                    n: rows,
-                    k: self.head_dim,
-                },
+            // The pinned BF16 BMM uses 32 accumulation streams for QK and
+            // four streams for AV. Their reduction orders affect BF16 ties.
+            self.matmul.encode(
+                queries.subrange(query_offset..query_offset + head_bytes),
+                keys.subrange(kv_offset..),
+                &mut full_precision_scores,
+                rows,
+                rows,
+                self.head_dim,
+                self.model_dim,
+                1,
+                32,
                 commands,
-            )?;
+            );
+            observer(head, VisionAttentionStage::FullPrecisionScores, &full_precision_scores, commands)?;
             let mut scores = commands.allocate_scratch_for_shape(&[rows, rows], DataType::BF16)?;
             self.cast.encode(&full_precision_scores, &mut scores, rows * rows, commands);
+            observer(head, VisionAttentionStage::Scores, &scores, commands)?;
             // Keep the QK BF16 rounding before scaling, even when the exact
             // official head64 scale (1/8) could commute in the normal range.
             self.scale_scores.encode(
@@ -503,30 +498,26 @@ impl<B: Backend> VisionEagerAttention<B> {
                 1.0 / (self.head_dim as f32).sqrt(),
                 commands,
             );
+            observer(head, VisionAttentionStage::ScaledScores, &scores, commands)?;
             self.softmax.encode(&mut scores, rows, rows, commands);
+            observer(head, VisionAttentionStage::Probabilities, &scores, commands)?;
             let mut full_precision_head = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::F32)?;
-            self.matmul.lock().encode(
-                MatmulArguments {
-                    a: MatmulA::FullPrecision {
-                        values: &scores,
-                        offset: 0,
-                    },
-                    b: MatmulB::FullPrecision {
-                        b: values.subrange(kv_offset..),
-                    },
-                    b_leading_dimension: Some(self.model_dim),
-                    b_transpose: false,
-                    d: &mut full_precision_head,
-                    d_transform: MatmulDOps::none(),
-                    gather_indices: None::<&B::ConstantBuffer>,
-                    m: rows,
-                    n: self.head_dim,
-                    k: rows,
-                },
+            self.matmul.encode(
+                &scores,
+                values.subrange(kv_offset..),
+                &mut full_precision_head,
+                rows,
+                self.head_dim,
+                rows,
+                self.model_dim,
+                0,
+                4,
                 commands,
-            )?;
+            );
+            observer(head, VisionAttentionStage::FullPrecisionHead, &full_precision_head, commands)?;
             let mut head_output = commands.allocate_scratch_for_shape(&[rows, self.head_dim], DataType::BF16)?;
             self.cast.encode(&full_precision_head, &mut head_output, head_elements, commands);
+            observer(head, VisionAttentionStage::Head, &head_output, commands)?;
             self.head_copy.encode(
                 &head_output,
                 &mut output,
@@ -548,7 +539,7 @@ struct VisionBlock<B: Backend> {
     projection: RawLinear<B>,
     fc1: RawLinear<B>,
     fc2: RawLinear<B>,
-    prepare: <B::Kernels as Kernels>::AttentionPrepareKernel,
+    prepare: <B::Kernels as Kernels>::VisionPrepareBF16Kernel,
     attention: VisionEagerAttention<B>,
 }
 
@@ -561,7 +552,7 @@ pub(crate) struct VisionTower<B: Backend> {
     merger_fc1: RawLinear<B>,
     merger_fc2: RawLinear<B>,
     add: <B::Kernels as Kernels>::TensorAddScaleKernel,
-    activation: <B::Kernels as Kernels>::ActivationKernel,
+    activation: <B::Kernels as Kernels>::VisionGeluBF16Kernel,
 }
 
 impl<B: Backend> VisionTower<B> {
@@ -595,14 +586,8 @@ impl<B: Backend> VisionTower<B> {
                 projection: linear(&format!("blocks.{index}.attn.proj"), width, width)?,
                 fc1: linear(&format!("blocks.{index}.mlp.linear_fc1"), width, config.intermediate_size)?,
                 fc2: linear(&format!("blocks.{index}.mlp.linear_fc2"), config.intermediate_size, width)?,
-                prepare: <B::Kernels as Kernels>::AttentionPrepareKernel::new(
-                    context,
-                    DataType::BF16,
-                    DataType::F32,
-                    true,
-                    true,
-                )
-                .map_err(VisionTowerError::Backend)?,
+                prepare: <B::Kernels as Kernels>::VisionPrepareBF16Kernel::new(context)
+                    .map_err(VisionTowerError::Backend)?,
                 attention: VisionEagerAttention::new(context, width, config.num_heads)
                     .map_err(VisionTowerError::Backend)?,
             });
@@ -631,7 +616,7 @@ impl<B: Backend> VisionTower<B> {
             merger_fc2: linear("merger.linear_fc2", merged, config.out_hidden_size)?,
             add: <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, DataType::BF16, false)
                 .map_err(VisionTowerError::Backend)?,
-            activation: <B::Kernels as Kernels>::ActivationKernel::new(context, DataType::BF16, true)
+            activation: <B::Kernels as Kernels>::VisionGeluBF16Kernel::new(context)
                 .map_err(VisionTowerError::Backend)?,
         })
     }
@@ -661,26 +646,12 @@ impl<B: Backend> VisionTower<B> {
             &mut <B::CommandBuffer as CommandBuffer>::Encoding,
         ) -> Result<(), B::Error>,
     {
-        let config = &self.config;
         let (rows, mut hidden, cosines, sines) = self.prepare_hidden(patches, grid, commands, &mut observer)?;
         for index in 0..self.blocks.len() {
             hidden = self.encode_block(index, hidden, rows, &cosines, &sines, commands, &mut |_, _, _| Ok(()))?;
             observer(VisionStage::Block(index), &hidden, commands).map_err(VisionTowerError::Backend)?;
         }
-        // Patch rows within each merge block are consecutive. Reshaping them is
-        // a view over the exact same BF16 bytes, after per-patch LayerNorm.
-        let normalized = self.merger_norm.encode(&hidden, rows, commands).map_err(VisionTowerError::Backend)?;
-        let merged_rows = rows / config.spatial_merge_size / config.spatial_merge_size;
-        let mut merged =
-            self.merger_fc1.encode(&normalized, merged_rows, commands).map_err(VisionTowerError::Backend)?;
-        self.activation.encode(
-            None::<&B::ScratchBuffer>,
-            &mut merged,
-            checked_elements(merged_rows, config.merged_width()?)?,
-            ActivationType::GELUExact,
-            commands,
-        );
-        let output = self.merger_fc2.encode(&merged, merged_rows, commands).map_err(VisionTowerError::Backend)?;
+        let output = self.encode_merger(&hidden, rows, commands, &mut |_, _, _| Ok(()))?;
         observer(VisionStage::Merger, &output, commands).map_err(VisionTowerError::Backend)?;
         Ok(output)
     }
@@ -702,6 +673,137 @@ impl<B: Backend> VisionTower<B> {
     {
         let (rows, hidden, cosines, sines) = self.prepare_hidden(patches, grid, commands, &mut |_, _, _| Ok(()))?;
         self.encode_block(0, hidden, rows, &cosines, &sines, commands, &mut observer)
+    }
+
+    /// Feed exact reference hidden rows to one production block. This isolates
+    /// a local primitive discrepancy from errors accumulated in earlier blocks.
+    #[cfg(test)]
+    pub(crate) fn encode_isolated_block_with_observer<F>(
+        &self,
+        index: usize,
+        hidden: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        mut observer: F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(
+            VisionBlockStage,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
+        if index >= self.blocks.len() {
+            return Err(InvalidInput("invalid isolated vision block").into());
+        }
+        let rows = checked_rows(grid, self.config.spatial_merge_size)?;
+        let hidden = self.upload_hidden(hidden, rows, commands)?;
+        let positions = spatial_positions(grid, self.config.spatial_merge_size)?;
+        let (cosines, sines) = rotary_tables(&positions, self.config.hidden_size / self.config.num_heads)?;
+        let cosines = commands.allocate_constant_from_slice(&cosines).map_err(VisionTowerError::Backend)?;
+        let sines = commands.allocate_constant_from_slice(&sines).map_err(VisionTowerError::Backend)?;
+        self.encode_block(index, hidden, rows, &cosines, &sines, commands, &mut observer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn encode_isolated_merger_with_observer<F>(
+        &self,
+        hidden: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        mut observer: F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(
+            VisionMergerStage,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
+        let rows = checked_rows(grid, self.config.spatial_merge_size)?;
+        let hidden = self.upload_hidden(hidden, rows, commands)?;
+        self.encode_merger(&hidden, rows, commands, &mut observer)
+    }
+
+    /// Observe exact score/probability boundaries from captured BF16 inputs.
+    #[cfg(test)]
+    pub(crate) fn encode_isolated_attention_with_observer<F>(
+        &self,
+        index: usize,
+        queries: &[bf16],
+        keys: &[bf16],
+        values: &[bf16],
+        grid: [u32; 3],
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        mut observer: F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(
+            u32,
+            VisionAttentionStage,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
+        let block = self.blocks.get(index).ok_or(InvalidInput("invalid isolated vision attention block"))?;
+        let rows = checked_rows(grid, self.config.spatial_merge_size)?;
+        let queries = self.upload_hidden(queries, rows, commands)?;
+        let keys = self.upload_hidden(keys, rows, commands)?;
+        let values = self.upload_hidden(values, rows, commands)?;
+        block
+            .attention
+            .encode_with_observer(&queries, &keys, &values, rows, commands, &mut observer)
+            .map_err(VisionTowerError::Backend)
+    }
+
+    #[cfg(test)]
+    fn upload_hidden(
+        &self,
+        hidden: &[bf16],
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>> {
+        if hidden.len() != checked_elements(rows, self.config.hidden_size)? as usize
+            || hidden.iter().any(|value| !value.is_finite())
+        {
+            return Err(InvalidInput("invalid isolated vision hidden rows").into());
+        }
+        let source = commands.allocate_constant_from_slice(hidden).map_err(VisionTowerError::Backend)?;
+        let mut output = commands
+            .allocate_scratch_for_shape(&[rows, self.config.hidden_size], DataType::BF16)
+            .map_err(VisionTowerError::Backend)?;
+        commands.encode_copy(&source, &mut output);
+        Ok(output)
+    }
+
+    fn encode_merger<F>(
+        &self,
+        hidden: &B::ScratchBuffer,
+        rows: u32,
+        commands: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        observer: &mut F,
+    ) -> Result<B::ScratchBuffer, VisionTowerError<B>>
+    where
+        F: FnMut(
+            VisionMergerStage,
+            &B::ScratchBuffer,
+            &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+        ) -> Result<(), B::Error>,
+    {
+        let config = &self.config;
+        // Each merge block's patch rows are consecutive. Normalize individual
+        // patches before viewing their same bytes as one wider merger row.
+        let normalized = self.merger_norm.encode(hidden, rows, commands).map_err(VisionTowerError::Backend)?;
+        observer(VisionMergerStage::Norm, &normalized, commands).map_err(VisionTowerError::Backend)?;
+        let merged_rows = rows / config.spatial_merge_size / config.spatial_merge_size;
+        let mut merged =
+            self.merger_fc1.encode(&normalized, merged_rows, commands).map_err(VisionTowerError::Backend)?;
+        observer(VisionMergerStage::Fc1, &merged, commands).map_err(VisionTowerError::Backend)?;
+        self.activation.encode(&mut merged, checked_elements(merged_rows, config.merged_width()?)?, 0, commands);
+        observer(VisionMergerStage::Gelu, &merged, commands).map_err(VisionTowerError::Backend)?;
+        let output = self.merger_fc2.encode(&merged, merged_rows, commands).map_err(VisionTowerError::Backend)?;
+        observer(VisionMergerStage::Output, &output, commands).map_err(VisionTowerError::Backend)?;
+        Ok(output)
     }
 
     fn prepare_hidden<F>(
@@ -775,17 +877,13 @@ impl<B: Backend> VisionTower<B> {
         block.prepare.encode(
             &projected,
             &mut queries,
-            Some(&mut keys),
-            Some(&mut values),
-            Some(cosines),
-            Some(sines),
-            config.num_heads,
-            Some(config.num_heads),
-            head_dim,
-            Some(head_dim),
-            Some(0),
-            3 * config.hidden_size,
+            &mut keys,
+            &mut values,
+            cosines,
+            sines,
             rows,
+            config.num_heads,
+            head_dim,
             commands,
         );
         observer(VisionBlockStage::Queries, &queries, commands).map_err(VisionTowerError::Backend)?;
@@ -802,13 +900,7 @@ impl<B: Backend> VisionTower<B> {
         observer(VisionBlockStage::Norm2, &normalized, commands).map_err(VisionTowerError::Backend)?;
         let mut up = block.fc1.encode(&normalized, rows, commands).map_err(VisionTowerError::Backend)?;
         observer(VisionBlockStage::Fc1, &up, commands).map_err(VisionTowerError::Backend)?;
-        self.activation.encode(
-            None::<&B::ScratchBuffer>,
-            &mut up,
-            checked_elements(rows, config.intermediate_size)?,
-            ActivationType::GELUApprox,
-            commands,
-        );
+        self.activation.encode(&mut up, checked_elements(rows, config.intermediate_size)?, 1, commands);
         observer(VisionBlockStage::Gelu, &up, commands).map_err(VisionTowerError::Backend)?;
         let down = block.fc2.encode(&up, rows, commands).map_err(VisionTowerError::Backend)?;
         observer(VisionBlockStage::Fc2, &down, commands).map_err(VisionTowerError::Backend)?;
@@ -952,6 +1044,77 @@ mod tests {
 
         native_cast_rounding::<Cpu>();
         for_each_non_cpu_backend!(|B| native_cast_rounding::<B>());
+    }
+
+    #[cfg(feature = "cpu")]
+    fn native_layer_norm_moments<B: Backend>() {
+        use crate::{
+            backends::common::{CommandBufferExecutable, CommandBufferPending, Context},
+            tests::helpers::{buffer_to_vec, create_buffer, create_buffer_with_data},
+        };
+
+        let context = B::Context::new().unwrap();
+        let kernel = <B::Kernels as Kernels>::VisionLayerNormBF16Kernel::new(&context).unwrap();
+        // Exercise scalar tails, full BF16 vector pairs, multiple Welford chunks
+        // and the official width. Large offsets with small variance expose the
+        // cancellation in E[x^2]-E[x]^2; the oracle computes centered FP64 sums.
+        for width in [4usize, 8, 20, 64, 768] {
+            let rows = 4usize;
+            let inputs = (0..rows * width)
+                .map(|index| {
+                    let column = index % width;
+                    let pattern = (column % 3) as f32 - 1.0;
+                    bf16::from_f32(match index / width {
+                        0 => 12800.0,
+                        1 => 12800.0 + pattern * 64.0,
+                        2 => ((column * 13 % 31) as f32 - 15.0) / 16.0,
+                        _ => -12800.0 + pattern * 64.0,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let weights = (0..width).map(|index| bf16::from_f32(0.5 + (index % 7) as f32 / 8.0)).collect::<Vec<_>>();
+            let biases = (0..width).map(|index| bf16::from_f32((index % 9) as f32 / 32.0)).collect::<Vec<_>>();
+            let source = create_buffer_with_data::<B, bf16>(&context, &inputs);
+            let scales = create_buffer_with_data::<B, bf16>(&context, &weights);
+            let offsets = create_buffer_with_data::<B, bf16>(&context, &biases);
+            let mut output = create_buffer::<B, bf16>(&context, inputs.len());
+            let mut commands = context.create_command_buffer(None, None).unwrap();
+            kernel.encode(&source, &scales, &offsets, &mut output, rows as u32, width as u32, 1e-6, &mut commands);
+            commands.end_encoding().submit().wait_until_completed().unwrap();
+            let actual = buffer_to_vec::<B, bf16>(&output);
+            let mut squared_error = 0.0;
+            let mut squared_reference = 0.0;
+            for row in 0..rows {
+                let values = &inputs[row * width..(row + 1) * width];
+                let mean = values.iter().map(|value| f64::from(value.to_f32())).sum::<f64>() / width as f64;
+                let variance =
+                    values.iter().map(|value| (f64::from(value.to_f32()) - mean).powi(2)).sum::<f64>() / width as f64;
+                let inverse_std = (variance + 1e-6).sqrt().recip();
+                for column in 0..width {
+                    let normalized = (f64::from(values[column].to_f32()) - mean) * inverse_std;
+                    let expected = bf16::from_f32(
+                        (normalized * f64::from(weights[column].to_f32()) + f64::from(biases[column].to_f32())) as f32,
+                    );
+                    let result = actual[row * width + column].to_f32();
+                    assert!(result.is_finite(), "vision normalization produced a non-finite value");
+                    squared_error += (f64::from(result) - f64::from(expected.to_f32())).powi(2);
+                    squared_reference += f64::from(expected.to_f32()).powi(2);
+                }
+            }
+            assert!(
+                (squared_error / squared_reference).sqrt() < 0.0015,
+                "vision normalization differs from centered FP64 moments"
+            );
+        }
+    }
+
+    #[cfg(feature = "cpu")]
+    #[stark_test]
+    fn vision_native_layer_norm_preserves_small_variance_with_large_offsets() {
+        use crate::{backends::cpu::Cpu, tests::helpers::for_each_non_cpu_backend};
+
+        native_layer_norm_moments::<Cpu>();
+        for_each_non_cpu_backend!(|B| native_layer_norm_moments::<B>());
     }
 
     #[cfg(feature = "cpu")]
