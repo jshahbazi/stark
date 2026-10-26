@@ -60,6 +60,7 @@ stark-convert [SOURCE] [options]
 | `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Experimental full-vision artifacts for the exact pinned Qwen3.5-0.8B BF16 checkpoint. Native image loading is blocked; see the [image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md) |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
@@ -106,6 +107,12 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 ```
 
 ## Future checkpoints and architecture tracking
+
+The experimental `vision-language` artifact mode is tracked separately in the
+[native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
+It validates and retains the full vision tower, processor and template for one
+pinned checkpoint. It does not enable image input or native inference. Default
+Qwen3.5 conversions remain text-only.
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
 

@@ -25,6 +25,7 @@ from ..streaming import (
     tensor_sha256,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
+from .qwen35_vision import build_qwen35_vision_plan
 
 _KEYS = _COMMON_KEYS | {
     "text_config",
@@ -86,7 +87,7 @@ def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int
     return _row_range(info, start, count)
 
 
-def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: bool = False) -> ConversionPlan:
     """Plan dense or existing affine MLX text weights from checkpoint dimensions.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
@@ -102,6 +103,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         raise UnsupportedConversion("Qwen3.5 dense adapter requires model_type qwen3_5")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
+    if include_vision and dtype != "bfloat16":
+        raise UnsupportedConversion("Qwen3.5 vision exports require BF16 output")
     target = _DTYPES[dtype]
     # The pinned Qwen importer uses this specific field to select baked norms.
     # An alias-only description cannot safely establish that interpretation.
@@ -424,8 +427,18 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     # The pinned decoder root dispatch also accepts MLX-VL's language_model.model.
     # Its declared visual tower has a separate exact namespace; do not permit
     # another wrapper's visual alias to hide an otherwise unconsumed tensor.
-    vision_prefix = "vision_tower." if prefix == "language_model.model" else "model.visual."
-    ignored = {name for name in tensors if name.startswith(vision_prefix)} if text and vision else set()
+    ignored = set()
+    if include_vision:
+        if not (vision and prefix == "model.language_model"):
+            raise UnsupportedConversion(
+                "Qwen3.5 vision requires the official model.language_model/model.visual wrapper"
+            )
+        vision_ops, vision_expected = build_qwen35_vision_plan(vision, tensors, dim)
+        operations.extend(vision_ops)
+        expected.update(vision_expected)
+    else:
+        vision_prefix = "vision_tower." if prefix == "language_model.model" else "model.visual."
+        ignored = {name for name in tensors if name.startswith(vision_prefix)} if text and vision else set()
     # The reference text loader also omits the declared auxiliary MTP decoder.
     # Untrusted prefixes alone never authorize dropping source tensors.
     if config.get("mtp_num_hidden_layers", 0) > 0:
