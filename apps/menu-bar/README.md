@@ -50,7 +50,7 @@ Select **Connection Details…** in the menu or playground window. Choose an Ope
 
 The modal's model picker chooses which model ID to inspect and include in the JSON. Choose **Chat** mode and use **Run** in Stark to serve that model. The JSON includes the selected model, the running model, whether they match, running-model limits, endpoints, supported capabilities and usage notes. It includes the API key even when the key is hidden in the modal. **Copy curl Example** copies an authenticated streaming request for the running model with curl buffering disabled; that example is also included in the JSON when a model is running.
 
-The server starts with Stark, binds only to `127.0.0.1`, prefers port 8000 and otherwise picks a free port; always use the URL shown. Each launch generates a new random key, held in memory and delivered to the UI over the backend's private pipe. The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copying the key puts it on the system pasteboard, where clipboard managers and Universal Clipboard can read it.
+The server starts with Stark, binds only to `127.0.0.1`, prefers port 8000 and otherwise picks a free port; always use the URL shown. Each launch generates a new random key, held in memory and delivered to the UI over the backend's private pipe. The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copies of the API key, connection JSON and curl example carry concealed and transient pasteboard markers so clipboard software that honors them can avoid retaining or syncing credentials. These markers are advisory; receiving applications and clipboard software that ignores them can still read the copied data. Use the explicit **Copy** button for the key; **Show** reveals it without enabling text selection.
 
 The API offers authenticated health, capability, model listing and text chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Output defaults to the smaller of 512 tokens and the model limit (at most 4,096); context is model-bounded and capped at 16,384 tokens. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
 
@@ -83,4 +83,11 @@ Check connection JSON serialization and curl escaping without loading a model:
 ```sh
 xcrun swiftc apps/menu-bar/Sources/ConnectionInfo.swift apps/menu-bar/Tests/ConnectionInfoTests.swift -o /tmp/stark-connection-info-tests
 /tmp/stark-connection-info-tests
+```
+
+Check connection clipboard content and privacy markers using a unique private pasteboard:
+
+```sh
+xcrun swiftc apps/menu-bar/Sources/ConnectionInfo.swift apps/menu-bar/Sources/ConnectionClipboard.swift apps/menu-bar/Tests/ConnectionClipboardTests.swift -o /tmp/stark-connection-clipboard-tests
+/tmp/stark-connection-clipboard-tests
 ```

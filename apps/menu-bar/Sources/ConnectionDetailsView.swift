@@ -65,10 +65,10 @@ struct ConnectionDetailsView: View {
                 Text("API key").font(.caption).foregroundStyle(.secondary)
                 HStack {
                     Text(canConnect ? (revealKey ? engine.apiKey : String(repeating: "•", count: 24)) : "Unavailable")
-                        .font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                        .font(.system(.callout, design: .monospaced)).textSelection(.disabled)
                     Spacer()
                     Button(revealKey ? "Hide" : "Show") { revealKey.toggle() }.disabled(!canConnect)
-                    Button("Copy") { copy(engine.apiKey, label: "API key") }.disabled(!canConnect)
+                    Button("Copy") { copy(engine.apiKey, label: "API key", sensitive: true) }.disabled(!canConnect)
                         .accessibilityLabel("Copy API key")
                 }
             }
@@ -88,11 +88,11 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Copy All as JSON") {
-                    if let json = connectionInfo.json { copy(json, label: "connection JSON (includes API key)") }
+                    if let json = connectionInfo.json { copy(json, label: "connection JSON (includes API key)", sensitive: true) }
                 }
                 .disabled(!canConnect || displayedModelID.isEmpty)
                 .help("Copy connection settings, API key, model IDs, capabilities and usage notes as JSON.")
-                Button("Copy curl Example") { copy(connectionInfo.curl, label: "curl example (includes API key)") }
+                Button("Copy curl Example") { copy(connectionInfo.curl, label: "curl example (includes API key)", sensitive: true) }
                     .disabled(!canConnect || modelID.isEmpty)
                 Spacer()
             }
@@ -113,9 +113,7 @@ struct ConnectionDetailsView: View {
         }
     }
 
-    private func copy(_ value: String, label: String) {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(value, forType: .string)
-        copied = label
+    private func copy(_ value: String, label: String, sensitive: Bool = false) {
+        copied = ConnectionClipboard.write(value, sensitive: sensitive) ? label : ""
     }
 }
