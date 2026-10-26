@@ -552,7 +552,10 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        if not args.source_manifest:
+        # Replay infers catalog/profile identity from its manifest, but native
+        # vision execution is unsupported regardless of that identity. Reject
+        # it before replay hashes any checkpoint files.
+        if not args.source_manifest or request.artifact_mode == "vision-language" and request.require_native_support:
             _validate_request(request)
         logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"

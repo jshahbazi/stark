@@ -93,8 +93,8 @@ complete model configuration remain bound by the receipt's output hashes.
    HTTP bodies and private staging references. Preserve the 1 MiB worker frame
    limit, authentication, serialization, epoch fencing, cancellation, and cleanup.
    Choose resource budgets using measurements before advertising them.
-4. **Exact-tuple qualification:** run complete conversion and reference/native
-   parity with the official weights. Measure peak memory and encode/prefill
+4. **Exact-tuple qualification:** run reference/native parity with the official
+   converted artifact. Measure peak memory and encode/prefill
    latency, test failure recovery, and publish aggregate evidence only.
 5. **Swift and distribution:** add attachment input and progress through the
    common media pipeline, then qualify a packaged installation. Enable image
@@ -103,11 +103,15 @@ complete model configuration remain bound by the receipt's output hashes.
 
 Synthetic converter tests and header inspection do not establish preprocessing,
 native inference, numeric parity, output quality, or supported hardware budgets.
-The official-weight end-to-end conversion has not yet been run; current evidence
-is synthetic conversion tests plus official metadata and tensor-header inspection.
+The official-weight end-to-end conversion and offline manifest replay now pass.
+All 153 emitted vision tensor payloads match their source shapes, dtypes, and
+byte hashes. The normalised special-token IDs and six M-RoPE layer descriptions
+also pass inspection. Native execution remains unverified.
 No model weights or native image outputs are checked into the repository.
-The [converter validation record](archive/runs/2026-10-26-qwen35-vision-artifact-contract.md)
-binds these checks to the converter source and dependency-lock hashes.
+The [follow-up review record](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
+binds the real conversion and regression checks to the converter and artifact
+hashes. The [earlier converter record](archive/runs/2026-10-26-qwen35-vision-artifact-contract.md)
+preserves the initial synthetic and header-only evidence.
 
 ## Primary references and provenance
 

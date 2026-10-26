@@ -206,6 +206,57 @@ def test_probe_separates_conversion_from_runtime_support():
     assert cap.reason == "native_vision_unimplemented"
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_cli_native_vision_fails_before_source_resolution(tmp_path, monkeypatch, capsys, replay):
+    args = [
+        "stark-convert",
+        REPO,
+        "--artifact-mode",
+        "vision-language",
+        "--require-native-support",
+        "--output",
+        str(tmp_path / "output"),
+    ]
+    if replay:
+        args += ["--source-manifest", str(tmp_path / "manifest.json")]
+    monkeypatch.setattr("sys.argv", args)
+    monkeypatch.setattr(cli, "resolve_source", lambda *a, **kw: pytest.fail("resolved a native vision request"))
+    assert cli.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {"status": "error", "error_category": "UnsupportedConversion"}
+    assert not (tmp_path / "output").exists()
+
+
+def test_cli_vision_manifest_infers_repository_from_local_source(vision_source, tmp_path, monkeypatch, capsys):
+    snapshot = resolve_source(vision_source, repo=REPO, artifact_mode="vision-language")
+    manifest = tmp_path / "manifest.json"
+    snapshot.write_manifest(manifest)
+    output = tmp_path / "output"
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "stark-convert",
+            str(vision_source),
+            "--artifact-mode",
+            "vision-language",
+            "--source-manifest",
+            str(manifest),
+            "--offline",
+            "--output",
+            str(output),
+        ],
+    )
+    assert cli.main() == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    receipt = json.loads(captured.out)
+    assert receipt["status"] == "ok"
+    assert receipt["sources"] == [{"repo": REPO, "revision": REVISION}]
+    assert receipt["artifact_mode"] == "vision-language"
+    assert (output / "conversion.json").is_file()
+
+
 @pytest.mark.parametrize(
     "filename",
     [
