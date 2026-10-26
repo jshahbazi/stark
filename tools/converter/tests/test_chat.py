@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from jinja2.exceptions import SecurityError
 
-from stark_convert.chat import ChatError, Worker, load_template, main, run_chat, terminal_text
+from stark_convert.chat import ChatError, ChatRequestTooLarge, Worker, load_template, main, run_chat, terminal_text
 
 
 @pytest.fixture
@@ -154,10 +154,32 @@ def test_worker_rejects_invalid_reply_or_exit(tmp_path, reply):
 def test_request_limit_is_checked_before_write(tmp_path):
     worker = Worker(sys.executable, tmp_path, 2)
     try:
-        with pytest.raises(ChatError, match="request limit"):
+        with pytest.raises(ChatRequestTooLarge, match="request limit"):
             worker.request({"text": "x" * 1024 * 1024})
     finally:
         worker.close()
+
+
+@pytest.mark.parametrize("unit", ["x", "界", "\n"])
+@pytest.mark.parametrize("over_limit", [False, True])
+def test_worker_request_limit_counts_encoded_bytes_and_newline(unit, over_limit):
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"accepted": True}
+    limit = 1024 * 1024
+    overhead = len(json.dumps({"text": ""}).encode()) + 1
+    unit_bytes = len(json.dumps(unit, ensure_ascii=False).encode()) - 2
+    count, padding = divmod(limit - overhead + int(over_limit), unit_bytes)
+    payload = {"text": unit * count + "x" * padding}
+    if over_limit:
+        with pytest.raises(ChatRequestTooLarge):
+            worker.request(payload)
+        assert worker.process.stdin.tell() == 0
+    else:
+        assert worker.request(payload) == {"accepted": True}
+        assert worker.process.stdin.tell() == limit
 
 
 def test_startup_failure_does_not_echo_worker_diagnostics(model, capsys):

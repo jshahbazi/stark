@@ -21,6 +21,10 @@ class ChatCancelled(ChatError):
     """A cancelled request whose terminal response has been consumed."""
 
 
+class ChatRequestTooLarge(ChatError):
+    """An oversized request rejected before writing any bytes to the worker."""
+
+
 def terminal_text(text):
     # Model output must not execute terminal control sequences.
     return "".join(c for c in text if c in "\n\t" or (c.isprintable() and c != "\x1b"))
@@ -120,7 +124,7 @@ class Worker:
             payload = {**payload, "request_id": request_id}
         data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
         if len(data) > 1024 * 1024:
-            raise ChatError("Conversation exceeds the worker request limit; use /reset.")
+            raise ChatRequestTooLarge("Conversation exceeds the worker request limit; use /reset.")
         # FileIO writes can be partial for large prompts.
         view = memoryview(data)
         while view:
