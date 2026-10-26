@@ -1,6 +1,6 @@
 # Chat terminator and desktop metrics validation
 
-Validated on 2026-10-25 with Apple M5 Max, arm64 macOS 26.7.1 and Rust 1.98.1. This run covers the changes accompanying this document on base revision `7f56e28b88fe4baec6998728a6447944696dadd2`. Earlier qualification remains bound to its original source and tooling.
+Validated on 2026-10-25 with Apple M5 Max, arm64 macOS 26.7.1 and Rust 1.98.1. The original native run and hashes below cover the implementation on base revision `7f56e28b88fe4baec6998728a6447944696dadd2`, committed as `8f38b3d1`. Earlier qualification remains bound to its original source and tooling.
 
 ## Cause and changes
 
@@ -37,3 +37,7 @@ The native check consumed request and response content only in memory and privat
 ## Limits
 
 This is a bounded functional check, not broader model or performance qualification. The native checks exercised the new worker directly; desktop rate forwarding used synthetic worker fixtures. Swift typechecking verifies compilation, not live visual rendering. The installed application was not rebuilt or replaced during this validation and needs a build containing the worker, Python bridge and Swift changes to expose both fixes.
+
+## Integration check on current main
+
+Before opening the PR, the fix was rebased onto main revision `4ce6c2fd` on the same date. Conflict resolution preserved the existing decision UI, converter progress handling and current generation documentation. The rebased implementation passed all 107 desktop tests, all 26 Rust worker tests without Metal, Swift typechecking across all app sources, Ruff for the changed Python files and `git diff --check`. The original native run was not repeated on the rebased source; its hashes remain bound to the original snapshot above.
