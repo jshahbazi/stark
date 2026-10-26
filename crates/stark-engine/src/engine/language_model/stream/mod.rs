@@ -50,6 +50,41 @@ pub enum LanguageModelStreamError<B: Backend> {
 }
 
 impl<B: Backend> LanguageModel<B> {
+    /// Check request ownership and cheap bounds before image decoding or tower
+    /// allocation. The projected-feature stream repeats these checks at entry.
+    pub(crate) fn preflight_multimodal_stream(
+        &self,
+        input: &[u64],
+        state: &LanguageModelState<B>,
+        options: &LanguageModelStreamOptions,
+    ) -> Result<(), LanguageModelStreamError<B>> {
+        if !std::sync::Arc::ptr_eq(&self.model_identity, &state.model_identity) {
+            return Err(LanguageModelStreamError::ForeignState);
+        }
+        if !self.decoder.multimodal_supported()
+            || self.speculator.is_some()
+            || state.multimodal_failed
+            || !state.tokens.is_empty()
+            || state.transformer_state.context_length() != 0
+            || state.last_output_token.is_some()
+            || state.transformer_state.rotary_position_delta().is_some()
+        {
+            return Err(LanguageModelStreamError::InvalidMultimodal);
+        }
+        if input.is_empty() {
+            return Err(LanguageModelStreamError::NoSeedToken);
+        }
+        let vocabulary = self.sampling.vocab_size();
+        if input.iter().any(|&token| token >= u64::from(vocabulary)) {
+            return Err(LanguageModelStreamError::InvalidToken);
+        }
+        options.sampling_method.validate(vocabulary).map_err(|_| LanguageModelStreamError::InvalidSampling)?;
+        if state.max_context_length.is_some_and(|capacity| input.len() >= capacity as usize) {
+            return Err(LanguageModelStreamError::ContextOverflow);
+        }
+        Ok(())
+    }
+
     pub fn default_stream_options(&self) -> LanguageModelStreamOptions {
         LanguageModelStreamOptions {
             sampling_method: self.default_sampling_method(),

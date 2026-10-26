@@ -11,6 +11,11 @@ use crate::{
 
 pub mod classifier_model;
 pub mod language_model;
+#[allow(
+    dead_code,
+    reason = "Native vision remains private until transport and exact-tuple qualification are implemented"
+)]
+pub(crate) mod vision;
 
 mod capture;
 

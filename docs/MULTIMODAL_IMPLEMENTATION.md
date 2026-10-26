@@ -4,9 +4,13 @@ The first target is one static image with the official BF16 `Qwen/Qwen3.5-0.8B`
 checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
 follows the native Rust/Metal tower and decoder route. The converter has an
 experimental full-vision artifact mode. The engine now has a private BF16
-projected-feature fusion and Qwen3.5 M-RoPE core, exercised on CPU and Metal.
-Image decoding, preprocessing, tower execution, transport, and app attachments
-remain unimplemented. The Local API continues to report `images:false`.
+projected-feature fusion and Qwen3.5 M-RoPE core, plus experimental native image
+decoding, preprocessing, and vision-tower execution. The private loader admits
+one exact BF16 artifact. Worker transport and app attachments remain
+unimplemented. Exact-tuple product qualification is pending, and the Local API
+continues to report `images:false`. The official-weight projector currently
+misses the 2% numeric gate; the [native vision validation record](archive/runs/2026-10-26-qwen35-native-vision-preprocessing.md)
+records that failure alongside passing component and regression checks.
 
 ## Implemented conversion boundary
 
@@ -56,9 +60,13 @@ rejects this mode before source resolution.
 
 ## Versioned artifact contract
 
-The root model tag is `Qwen35VisionLanguageModelConfig`. The current native
-engine rejects this unknown tag. It must not be renamed to `LanguageModelConfig`
-to bypass the implementation boundary.
+The root model tag is `Qwen35VisionLanguageModelConfig`. Public model resolution
+and the text worker loader reject it. The crate-private experimental vision
+loader verifies the exact configuration, weights, tokenizer, processor, and
+template byte hashes before tensor allocation, keeps their opened descriptors,
+and rechecks them before publishing the loaded instance. The original artifact
+tag is retained. This loader does not establish worker capability or converter
+qualification.
 
 The root and receipt embed `artifact_contract` with:
 
@@ -106,23 +114,68 @@ Synthetic native fixtures check feature replacement, M-RoPE coefficients, partia
 head rotation, whole/chunked prefill, a span crossing the 1,024-token boundary, and
 decode continuation. The [native core validation record](archive/runs/2026-10-26-qwen35-native-fusion-mrope.md)
 records the checks, tolerances, and source/build identity. These checks do not
-establish patch ordering, projector numerics, or execution of the official vision
-artifact; those require the remaining preprocessing and tower implementation.
+establish preprocessing or projector numerics. Those have separate reference
+replays for the native preprocessing and tower work below.
+
+## Native preprocessing and vision tower
+
+`engine::vision` provides a private native path from compressed image bytes to
+projected features and the existing multimodal stream. The stream's exclusive
+model borrow covers preprocessing, tower execution, language prefill, and decode.
+State/model ownership, sampling, context agreement, and output headroom are
+checked before image decoding. Context exhaustion cannot return the decoder's
+lookahead token. Recoverable image validation errors leave native state untouched.
+A tower failure fences the loaded instance before language-state mutation;
+decoder execution failures fence the loaded instance and request state.
+
+The shared decoder accepts one static 8-bit PNG or baseline/progressive JPEG.
+PNG decoding uses exact-locked `image 0.25.10`; JPEG uses exact-locked
+`jpeg-decoder 0.3.2` with default features disabled. Both are native Rust, with no
+Python or system codec dependency. JPEG support on `image` is enabled only for
+test-fixture encoding. Header validation precedes codec construction and checks
+dimensions, frame/scan structure, arithmetic, and encoded length. Animated,
+multiple, 16-bit, CMYK, and unsupported JPEG encodings fail. Compressed PNG
+profile/text metadata is rejected before decompression.
+
+EXIF orientation is applied. Grayscale expands to RGB and transparency composites
+over white; ICC color conversion is not performed. Smart-resize dimensions follow
+the pinned processor, with ties-to-even rounding. Antialiased bicubic uint8
+resizing, fused rescale/normalization, static-frame temporal repetition, and
+merge-group patch ordering feed owned BF16 patch rows to the tower. The official
+processor's 65,536–16,777,216 pixel recipe remains unchanged. Internal admission
+rejects a recipe result beyond 1,048,576 pixels or 4,096 encoder patches instead
+of changing that resize result. Other internal bounds are 20 MiB compressed,
+32 million source pixels, dimension 16,384, aspect ratio 200, and 64 JPEG scans.
+These are implementation admission guards; they are not measured hardware or
+public service capabilities, and do not claim a strict global allocator ceiling.
+
+The tower consumes all 153 preserved `vision.*` tensors. It implements the Conv3d
+patch projection as an equivalent flattened matrix operation, bilinear learned
+position interpolation with `align_corners=True`, axial spatial RoPE, twelve
+noncausal attention/LayerNorm/MLP blocks, and the pre-shuffle-normalized patch
+merger/projector. Vision LayerNorm keeps FP32 affine/bias precision until one
+final BF16 cast. The explicit eager attention path preserves the pinned
+reference's BF16 score and probability boundaries. Vision matrix operations keep
+split-K partial sums in FP32 and add source BF16 biases before the final cast.
+These vision-specific kernels
+do not change existing text normalization or attention behavior.
+
+Independent private replays cover decoded pixels, complete patch tensors, and
+all fifteen tower checkpoints against pinned reference code and official BF16
+weights. Numeric limits and results belong to the dated validation record;
+functional image execution alone does not establish numeric parity or output
+quality. Public serving remains disabled until the complete tuple is qualified.
 
 ## Remaining dependencies and acceptance
 
-1. **Decode, preprocessing, and tower:** select the shared JPEG/PNG decoder;
-   specify orientation, color, alpha, and resizing; prove patch ordering and
-   intermediate numerics. Implement the native vision blocks and merger before
-   adding the model tag to the native loader.
-2. **Transport and lifecycle:** support inline image data URLs through bounded
+1. **Transport and lifecycle:** support inline image data URLs through bounded
    HTTP bodies and private staging references. Preserve the 1 MiB worker frame
    limit, authentication, serialization, epoch fencing, cancellation, and cleanup.
    Choose resource budgets using measurements before advertising them.
-3. **Exact-tuple qualification:** run reference/native parity with the official
+2. **Exact-tuple qualification:** complete reference/native parity with the official
    converted artifact. Measure peak memory and encode/prefill
    latency, test failure recovery, and publish aggregate evidence only.
-4. **Swift and distribution:** add attachment input and progress through the
+3. **Swift and distribution:** add attachment input and progress through the
    common media pipeline, then qualify a packaged installation. Enable image
    capabilities only for the intersection of the qualified artifact, worker,
    and service policy.
@@ -132,8 +185,9 @@ native inference, numeric parity, output quality, or supported hardware budgets.
 The official-weight end-to-end conversion and offline manifest replay now pass.
 All 153 emitted vision tensor payloads match their source shapes, dtypes, and
 byte hashes. The normalised special-token IDs and six M-RoPE layer descriptions
-also pass inspection. Native execution of the official vision artifact remains
-unverified.
+also pass inspection. Experimental native tower execution is recorded separately
+from these earlier converter-only results; it does not qualify public image
+inference.
 No model weights or native image outputs are checked into the repository.
 The [follow-up review record](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
 binds the real conversion and regression checks to the converter and artifact
@@ -159,3 +213,9 @@ No Transformers or MLX runtime dependency or model code is imported. Existing Uz
 and Lalamo provenance remains in
 [upstream provenance](../provenance/UPSTREAM.md) and the
 [converter guide](../tools/converter/README.md#provenance-and-policy).
+Native resize coefficient arithmetic also follows the independently implemented
+[PyTorch CPU antialias equations](https://github.com/pytorch/pytorch/blob/v2.11.0/aten/src/ATen/native/cpu/UpSampleKernel.cpp),
+version `v2.11.0`, under its
+[BSD-style license](https://github.com/pytorch/pytorch/blob/v2.11.0/LICENSE).
+The dated native vision record pins the additional processor, vision-helper and
+Torchvision reference revisions, licenses, and validation harness identities.

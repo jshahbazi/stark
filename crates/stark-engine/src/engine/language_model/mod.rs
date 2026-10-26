@@ -75,11 +75,28 @@ impl<B: Backend> Engine<B> {
         let weights_file = File::open(model_path.join("model.safetensors"))?;
         let weight_loader = ParameterLoader::new(&weights_file, &*self.context)?;
 
+        let model = self.language_model_from_config(model_path, config, &weight_loader, None)?;
+        weight_loader.tree().assert_all_tensors_validated()?;
+        Ok(model)
+    }
+
+    /// Shared construction for the private vision loader. Its caller validates
+    /// the complete decoder and vision tensor tree before publishing the model.
+    pub(crate) fn language_model_from_config(
+        self: &Arc<Self>,
+        model_path: &Path,
+        config: LanguageModelConfig,
+        weight_loader: &ParameterLoader<B>,
+        tokenizer: Option<Arc<Tokenizer>>,
+    ) -> Result<LanguageModel<B>, EngineLoadLanguageModelError<B>> {
         // TODO
         let speculator_path = model_path.join("speculator");
         let speculator_path = speculator_path.exists().then_some(speculator_path);
 
-        let tokenizer = Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?);
+        let tokenizer = match tokenizer {
+            Some(tokenizer) => tokenizer,
+            None => Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?),
+        };
         if config.decoder_config.vocab_size == 0
             || tokenizer.get_vocab(true).values().any(|&id| id >= config.decoder_config.vocab_size)
         {
@@ -110,8 +127,6 @@ impl<B: Backend> Engine<B> {
 
         let context_ring_update = <B::Kernels as Kernels>::ContextRingUpdateKernel::new(&self.context)
             .map_err(EngineLoadLanguageModelError::Backend)?;
-
-        weight_loader.tree().assert_all_tensors_validated()?;
 
         let generation_config = config.generation_config;
         let end_of_thinking_tag = match &config.token_codec_config {

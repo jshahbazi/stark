@@ -621,6 +621,48 @@ fn native_image_preflight_rejects_mixed_scalar_and_multimodal_rope() {
 
 #[cfg(backend = "cpu")]
 #[stark_test]
+fn native_image_stream_reserves_output_headroom_and_stops_at_context_capacity() {
+    use super::stream::LanguageModelStreamError;
+    use crate::backends::cpu::Cpu;
+
+    let fixture = TinyModel::new(128);
+    let engine = Engine::<Cpu>::new().unwrap();
+    let model = engine.load_language_model(&fixture.directory).unwrap();
+    let input = fixture.prefill(&model, 1);
+    assert_eq!(input.tokens.len(), 9);
+
+    // A prompt filling the complete budget has no legal output slot. Reject
+    // before mutating or fencing the request, rather than sampling past it.
+    let mut full = model.create_empty_state(Some(9), 0).unwrap();
+    assert!(matches!(
+        model.stream_multimodal(&input, &mut full, greedy_options(&model)),
+        Err(LanguageModelStreamError::ContextOverflow)
+    ));
+    assert!(full.tokens().is_empty());
+    assert_eq!(full.transformer_state.context_length(), 0);
+    assert_eq!(full.transformer_state.rotary_position_delta(), None);
+    assert_eq!(full.last_output_token, None);
+    assert!(!full.multimodal_failed);
+
+    // The native stream encodes one lookahead step. Its extra sampled token
+    // must stay unreturned and be discarded once prompt + output reaches ten.
+    let mut bounded = model.create_empty_state(Some(10), 0).unwrap();
+    {
+        let mut stream = model.stream_multimodal(&input, &mut bounded, greedy_options(&model)).unwrap();
+        assert!(stream.next().unwrap().unwrap() < u64::from(VOCAB));
+        assert!(stream.next().is_none());
+        assert!(stream.next().is_none());
+        assert_eq!(stream.metrics().num_tokens_returned, 1);
+    }
+    assert_eq!(bounded.tokens().len(), 10);
+    assert_eq!(bounded.transformer_state.context_length(), 10);
+    assert_eq!(bounded.transformer_state.rotary_position_delta(), Some(-2));
+    assert_eq!(bounded.last_output_token, None);
+    assert!(!bounded.multimodal_failed);
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
 fn native_image_setup_failure_fences_state_and_fresh_request_recovers() {
     use super::stream::LanguageModelStreamError;
     use crate::{backends::cpu::Cpu, encodable_block::decoder::DecoderError};

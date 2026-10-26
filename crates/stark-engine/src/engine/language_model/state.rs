@@ -37,6 +37,15 @@ impl<B: Backend> LanguageModelState<B> {
     pub fn tokens(&self) -> &[u64] {
         &self.tokens
     }
+
+    pub(crate) fn context_capacity(&self) -> Option<u32> {
+        self.max_context_length
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vision_validation_state(&self) -> (u32, Option<i64>) {
+        (self.transformer_state.context_length(), self.transformer_state.rotary_position_delta())
+    }
 }
 
 #[derive(Debug, Error)]

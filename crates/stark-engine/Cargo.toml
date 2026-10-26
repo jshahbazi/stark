@@ -91,6 +91,7 @@ derive_more = { workspace = true, features = ["debug"] }
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "=0.10.9"
 monostate.workspace = true
 thiserror.workspace = true
 tokenizers.workspace = true
@@ -100,6 +101,8 @@ num-traits.workspace = true
 libm.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+jpeg-decoder = { version = "=0.3.2", default-features = false }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos", target_os = "visionos"))'.dependencies]
 objc2 = { workspace = true, optional = true }
@@ -112,6 +115,7 @@ xgrammar = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 
 [dev-dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["jpeg", "png"] }
 cxx.workspace = true
 proptest.workspace = true
 criterion.workspace = true

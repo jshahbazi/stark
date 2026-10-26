@@ -228,6 +228,7 @@ pub struct LanguageModelStream<'a, B: Backend> {
     context_ring: Option<B::GlobalBuffer>,
     decoding_state: DecodingState<B>,
     metrics: TokenStreamMetrics,
+    failure_fence: Option<&'a mut bool>,
 }
 
 impl<'a, B: Backend> LanguageModelStream<'a, B> {
@@ -263,6 +264,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             return Err(LanguageModelStreamError::InvalidMultimodal);
         }
         if let Some(multimodal) = multimodal {
+            model.preflight_multimodal_stream(input, model_state, &options)?;
             if !model.decoder.multimodal_supported()
                 || model.speculator.is_some()
                 || !model_state.tokens.is_empty()
@@ -578,7 +580,18 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
             context_ring,
             decoding_state,
             metrics,
+            failure_fence: None,
         })
+    }
+
+    /// Tie a private vision stream's native failures to its loaded instance.
+    /// The exclusive borrow remains held until Drop drains pending GPU work.
+    pub(crate) fn with_failure_fence(
+        mut self,
+        fence: &'a mut bool,
+    ) -> Self {
+        self.failure_fence = Some(fence);
+        self
     }
 
     fn generate(&mut self) -> Result<Option<u64>, LanguageModelStreamError<B>> {
@@ -1039,9 +1052,28 @@ impl<'a, B: Backend> Iterator for LanguageModelStream<'a, B> {
         // A failed image request is terminal. Keep any submitted work owned by
         // decoding_state until Drop drains it, without entering Invalid again.
         if self.model_state.multimodal_failed {
+            if let Some(fence) = &mut self.failure_fence {
+                **fence = true;
+            }
+            return None;
+        }
+        // The ordinary stream's lookahead may already hold a sampled next
+        // token. Image requests must not return it after their context budget
+        // is consumed; Drop still drains the owned submission safely.
+        if self.model_state.transformer_state.rotary_position_delta().is_some()
+            && self
+                .model_state
+                .max_context_length
+                .is_some_and(|capacity| self.model_state.tokens.len() >= capacity as usize)
+        {
             return None;
         }
         let result = self.generate();
+        if result.is_err()
+            && let Some(fence) = &mut self.failure_fence
+        {
+            **fence = true;
+        }
         if result.is_err() && self.model_state.transformer_state.rotary_position_delta().is_some() {
             fence_multimodal_state(self.model_state);
         }
@@ -1062,10 +1094,16 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                         || self.model_state.transformer_state.rotary_position_delta().is_some())
                 {
                     fence_multimodal_state(self.model_state);
+                    if let Some(fence) = &mut self.failure_fence {
+                        **fence = true;
+                    }
                     return;
                 }
                 completion.unwrap();
                 if self.model_state.multimodal_failed {
+                    if let Some(fence) = &mut self.failure_fence {
+                        **fence = true;
+                    }
                     self.model_state.last_output_token = None;
                     return;
                 }
@@ -1137,6 +1175,16 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
         };
 
         self.model_state.last_output_token = if self.model_state.multimodal_failed {
+            if let Some(fence) = &mut self.failure_fence {
+                **fence = true;
+            }
+            None
+        } else if self.model_state.transformer_state.rotary_position_delta().is_some()
+            && self
+                .model_state
+                .max_context_length
+                .is_some_and(|capacity| self.model_state.tokens.len() >= capacity as usize)
+        {
             None
         } else {
             last_output_token
