@@ -1,8 +1,8 @@
 # Model-family support and installation preflight
 
 Stark uses one family registry for conversion coverage, intended application
-modes and early installation checks. The converter CLI and the menu bar app's
-**Supported model families…** view consume that registry. A family entry describes
+modes and early installation checks. The converter CLI and **Model families**
+tab in the menu bar app's **Models…** view consume that registry. A family entry describes
 implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
@@ -10,6 +10,21 @@ Neither result establishes that a complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
+
+The app presents a name-only family catalogue. Conversion-only families are
+omitted from that list. **On this Mac** groups saved versions by their bound,
+unambiguous source repository; local or incomplete metadata falls back to a
+standalone entry with its stored name. Cards show matrix quantization, stored
+weight-file size and source revision when available. Matrix representation is
+read from bounded native Safetensors header metadata; normal floating-point
+convolution/control exceptions do not change the quantized matrix label. Receipt
+identity is used only when its source-manifest schema/digest, current
+configuration hash and declared output size match. No tensor payloads are read
+for this display. Family labels must also agree with the bound generic profile
+or source catalog adapter. The actually loaded
+model is marked as running. Browsing does not select or load models or grant
+runtime capabilities. The full registry and its operation constraints remain
+available through the CLI; the app does not label families as decision models.
 
 ## Modes and support states
 

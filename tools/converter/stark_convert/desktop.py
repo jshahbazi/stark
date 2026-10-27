@@ -35,6 +35,7 @@ from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
+from .model_inventory import model_display
 from .model_support import support_matrix
 from .registry import get_model
 from .sources import huggingface_repository
@@ -265,7 +266,10 @@ class Desktop:
     def library(self):
         self.emit(
             "models",
-            models=[{**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models],
+            models=[
+                {**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m), "display": model_display(m)}
+                for m in self.models
+            ],
         )
 
     def families(self):

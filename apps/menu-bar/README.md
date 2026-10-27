@@ -36,8 +36,13 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 **Install Model** accepts a local folder or a Hugging Face repository name or URL such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model is registered in place; a supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted. Supported models are governed by the [converter](../../tools/converter/README.md). The install dialog shows Download and Conversion progress; **Stop** cancels; **Installation Progress** in the menu and Command-I reopen the dialog.
 
-**Supported model families…** shows the shared Text, Decision and Image matrix
-with format constraints. Raw-checkpoint installation first checks bounded
+**Models…** opens a model browser. **On this Mac** groups your saved models and
+their downloaded versions, showing their quantization, disk size and source
+version when that information is available. The model currently running is
+marked **Running**. **Model families** is a simple catalogue of family names.
+Stark checks each model's compatibility when you install it.
+
+Raw-checkpoint installation first checks bounded
 metadata for the selected use before weight download. A conditional path
 continues automatically; unsupported or inconclusive results stop inline with a
 specific explanation and available alternatives. The actual download uses the

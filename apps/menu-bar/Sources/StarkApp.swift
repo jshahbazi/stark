@@ -145,11 +145,54 @@ final class AttachmentStaging {
     }
 }
 
+struct InstalledModelDisplay: Equatable {
+    let groupID: String
+    let groupName: String
+    let familyID: String?
+    let quantization: String?
+    let weightBytes: Int64?
+    let sourceRevision: String?
+
+    init?(_ value: Any?) {
+        guard let value = value as? [String: Any], SupportMetadata.schemaOne(value),
+              let groupID = Self.text(value["group_id"], maximum: 512),
+              let groupName = Self.text(value["group_name"], maximum: 256) else { return nil }
+        for key in ["family_id", "quantization", "source_revision"] {
+            guard value[key] == nil || value[key] is NSNull || value[key] is String else { return nil }
+        }
+        let familyID = value["family_id"] as? String
+        if let familyID = familyID, ModelFamily.displayName(for: familyID) == nil { return nil }
+        let quantization = value["quantization"] as? String
+        if let quantization = quantization, Self.text(quantization, maximum: 64) == nil { return nil }
+        let revision = value["source_revision"] as? String
+        if let revision = revision, revision.utf8.count != 40 || !revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) { return nil }
+        var bytes: Int64?
+        if let raw = value["weight_bytes"], !(raw is NSNull) {
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  number.int64Value >= 0, number.compare(NSNumber(value: number.int64Value)) == .orderedSame else { return nil }
+            bytes = number.int64Value
+        }
+        self.groupID = groupID; self.groupName = groupName; self.familyID = familyID
+        self.quantization = quantization; weightBytes = bytes; sourceRevision = revision
+    }
+
+    private static func text(_ value: Any?, maximum: Int) -> String? {
+        guard let value = SupportMetadata.string(value, maximum: maximum),
+              value.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) else { return nil }
+        return value
+    }
+}
+
 struct InstalledModel: Identifiable, Equatable {
     let id: String
     let name: String
     let path: String
     let apiID: String
+    let display: InstalledModelDisplay?
+
+    init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil) {
+        self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
+    }
 }
 
 struct ChatMessage: Identifiable {
@@ -217,12 +260,11 @@ enum ModelSupportMode: String, CaseIterable {
         case .visionLanguage: return "Image"
         }
     }
+
 }
 
 enum ModelModeSupport: String {
     case conditional, unsupported
-
-    var title: String { self == .conditional ? "Checks required" : "Unavailable" }
 }
 
 private enum SupportMetadata {
@@ -299,27 +341,28 @@ struct ModelFamily: Identifiable {
     let outputDtypes: [String]
     let modes: [ModelSupportMode: ModelFamilyMode]
 
-    var sourceFormatLabels: [String] {
-        sourceFormats.map {
-            switch $0 {
-            case "safetensors-float": return "Safetensors floating-point"
-            case "mlx-affine-4bit": return "MLX 4-bit (affine)"
-            case "mlx-affine-8bit": return "MLX 8-bit (affine)"
-            default: return $0
-            }
+    var displayName: String { Self.displayName(for: id) ?? name }
+
+    static func displayName(for id: String) -> String? {
+        switch id {
+        case "qwen3": return "Qwen3"
+        case "qwen2": return "Qwen2"
+        case "qwen3_5": return "Qwen3.5"
+        case "llama": return "Llama"
+        case "mistral": return "Mistral"
+        case "gemma2": return "Gemma 2"
+        case "gemma3_text": return "Gemma 3"
+        case "phi3": return "Phi-3"
+        case "granite": return "Granite"
+        case "smollm3": return "SmolLM3"
+        case "lfm2": return "LFM2"
+        case "llamba": return "LLaMBA"
+        case "modernbert": return "ModernBERT"
+        default: return nil
         }
     }
 
-    var outputDtypeLabels: [String] {
-        outputDtypes.map {
-            switch $0 {
-            case "bfloat16": return "BF16"
-            case "float16": return "F16"
-            case "float32": return "F32"
-            default: return $0
-            }
-        }
-    }
+    func hasAppMode(_ mode: ModelSupportMode) -> Bool { modes[mode]?.status == .conditional }
 
     init?(_ value: [String: Any]) {
         guard let id = SupportMetadata.string(value["family_id"], maximum: 128),
@@ -357,6 +400,94 @@ struct ModelFamilyRegistry {
         let families = raw.compactMap(ModelFamily.init)
         guard families.count == raw.count, Set(families.map(\.id)).count == families.count else { return nil }
         self.families = families
+    }
+}
+
+enum ModelsSheetTab: String, CaseIterable {
+    case onThisMac, availableFamilies
+    static let initial = Self.onThisMac
+
+    func title(modelCount: Int) -> String {
+        self == .onThisMac ? "On this Mac (\(modelCount))" : "Model families"
+    }
+
+    var emptyTitle: String { self == .onThisMac ? "No models yet" : "No families available" }
+    var emptyMessage: String {
+        self == .onThisMac ? "Install a model to add it here." : "No model families are available in this version of Stark."
+    }
+}
+
+struct ModelsInventory {
+    struct Model: Identifiable {
+        let id: String
+        let name: String
+        let isRunning: Bool
+        let quantization: String?
+        let weightBytes: Int64?
+        let sourceRevision: String?
+
+        var detailLabels: [String] {
+            [quantization,
+             weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
+             sourceRevision.map { "Version " + $0.prefix(7) }].compactMap { $0 }
+        }
+    }
+    struct Group: Identifiable {
+        let id: String
+        let name: String
+        let family: String?
+        let models: [Model]
+    }
+    struct Family: Identifiable {
+        let id: String
+        let name: String
+    }
+    let models: [Model]
+    let groups: [Group]
+    let families: [Family]?
+
+    init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?) {
+        func row(_ model: InstalledModel) -> Model {
+            Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
+                  quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
+                  sourceRevision: model.display?.sourceRevision)
+        }
+        self.models = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
+        let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
+        groups = candidates.flatMap { key, entries -> [Group] in
+            let first = entries[0]
+            let consistent = entries.allSatisfy { $0.display?.groupName == first.display?.groupName && $0.display?.familyID == first.display?.familyID }
+            if !consistent {
+                return entries.map { Group(id: "model:" + $0.id, name: $0.name, family: nil, models: [row($0)]) }
+            }
+            let rows = entries.map(row).sorted(by: Self.variantOrder)
+            return [Group(id: key, name: first.display?.groupName ?? first.name,
+                          family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
+        }.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }
+        families = registry?.families.filter { family in ModelSupportMode.allCases.contains(where: family.hasAppMode) }
+            .sorted { Self.ordered($0.displayName, $1.displayName, $0.id, $1.id) }
+            .map { Family(id: $0.id, name: $0.displayName) }
+    }
+
+    private static func ordered(_ first: String, _ second: String, _ firstID: String, _ secondID: String) -> Bool {
+        let comparison = first.localizedStandardCompare(second)
+        return comparison == .orderedSame ? firstID < secondID : comparison == .orderedAscending
+    }
+
+    private static func variantOrder(_ first: Model, _ second: Model) -> Bool {
+        if first.quantization != second.quantization {
+            guard let firstLabel = first.quantization else { return false }
+            guard let secondLabel = second.quantization else { return true }
+            let comparison = firstLabel.localizedStandardCompare(secondLabel)
+            return comparison == .orderedSame ? firstLabel < secondLabel : comparison == .orderedAscending
+        }
+        if first.weightBytes != second.weightBytes {
+            guard let firstBytes = first.weightBytes else { return false }
+            guard let secondBytes = second.weightBytes else { return true }
+            return firstBytes < secondBytes
+        }
+        if first.sourceRevision != second.sourceRevision { return (first.sourceRevision ?? "~") < (second.sourceRevision ?? "~") }
+        return ordered(first.name, second.name, first.id, second.id)
     }
 }
 
@@ -564,7 +695,8 @@ final class EngineController: ObservableObject {
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
                       let path = $0["path"] as? String else { return nil }
-                return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name)
+                return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
+                                      display: InstalledModelDisplay($0["display"]))
             }
             if !models.contains(where: { $0.id == selectedID }) { selectedID = models.first?.id ?? "" }
         case "model_families":
@@ -1124,84 +1256,108 @@ struct InstallStageView: View {
     }
 }
 
-struct ModelFamiliesView: View {
+struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @Environment(\.dismiss) private var dismiss
-    @State private var expandedFamilies = Set<String>()
+    @State private var tab = ModelsSheetTab.initial
+
+    private var inventory: ModelsInventory {
+        ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: engine.modelFamilies)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Supported model families").font(.title2.weight(.semibold))
-            Text("Checks required means the checkpoint must pass installation and runtime checks. Image availability comes from checks of the installed model on this Mac.")
-                .font(.callout).foregroundStyle(.secondary)
-            Text("Decision scores require calibration for your workload.")
-                .font(.caption).foregroundStyle(.secondary)
-            Text("App modes use BF16 output. F16 and F32 exports are for conversion only.")
-                .font(.caption).foregroundStyle(.secondary)
-            Text("Select a family to see formats and required checks.")
-                .font(.caption).foregroundStyle(.secondary)
+            Text("Models").font(.title2.weight(.semibold))
+            Picker("Models", selection: $tab) {
+                ForEach(ModelsSheetTab.allCases, id: \.self) { choice in
+                    Text(choice.title(modelCount: inventory.models.count)).tag(choice)
+                }
+            }.pickerStyle(.segmented).labelsHidden()
             ScrollView {
-                if let registry = engine.modelFamilies {
-                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
-                        GridRow {
-                            Text("Family").frame(width: 210, alignment: .leading)
-                            ForEach(ModelSupportMode.allCases, id: \.rawValue) { mode in
-                                Text(mode.title).frame(width: 110, alignment: .leading)
-                            }
-                        }.font(.caption.weight(.semibold))
-                        ForEach(registry.families) { family in
-                            GridRow {
-                                Button {
-                                    if expandedFamilies.contains(family.id) { expandedFamilies.remove(family.id) }
-                                    else { expandedFamilies.insert(family.id) }
-                                } label: {
-                                    HStack(alignment: .top, spacing: 6) {
-                                        Image(systemName: expandedFamilies.contains(family.id) ? "chevron.down" : "chevron.right")
-                                            .font(.caption2).frame(width: 8).padding(.top, 3)
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(family.name).font(.callout.weight(.medium))
-                                            Text(family.architectureAliases.joined(separator: ", "))
-                                                .font(.caption2).foregroundStyle(.secondary)
-                                        }
-                                    }.frame(width: 210, alignment: .leading)
-                                }
-                                .buttonStyle(.plain)
-                                .help("Show formats and required checks")
-                                .accessibilityLabel(family.name)
-                                .accessibilityValue(expandedFamilies.contains(family.id) ? "Expanded" : "Collapsed")
-                                ForEach(ModelSupportMode.allCases, id: \.rawValue) { mode in
-                                    Text(family.modes[mode]!.status.title)
-                                        .font(.caption).frame(width: 110, alignment: .leading)
-                                        .help(family.modes[mode]!.message)
-                                }
-                            }
-                            if expandedFamilies.contains(family.id) { GridRow {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    if family.modes.values.allSatisfy({ $0.status == .unsupported }) {
-                                        Text("Conversion only; no runtime mode is available.")
-                                    }
-                                    ForEach(caveats(family), id: \.self) { Text($0) }
-                                    Text("Source: \(family.sourceFormatLabels.joined(separator: ", ")). Output: \(family.outputDtypeLabels.joined(separator: ", ")).")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .font(.caption).fixedSize(horizontal: false, vertical: true)
-                                .gridCellColumns(4).padding(.bottom, 8)
-                            } }
+                if tab == .onThisMac {
+                    if inventory.models.isEmpty { emptyState(tab) }
+                    else {
+                        LazyVStack(spacing: 12) {
+                            ForEach(inventory.groups) { group in modelGroup(group) }
                         }
                     }
+                } else if let families = inventory.families {
+                    if families.isEmpty { emptyState(tab) }
+                    else { LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                        ForEach(families) { family in
+                            Text(family.name).font(.headline)
+                                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
+                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
+                        }
+                    } }
                 } else {
-                    Text("The family registry is unavailable. Reopen this view after the runtime starts.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    Text("Available families will appear when Stark is ready.")
+                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
                 }
-            }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 650, height: 540)
+        }.padding(24).frame(width: 560, height: 520)
+            .onAppear { tab = .initial }
     }
 
-    private func caveats(_ family: ModelFamily) -> [String] {
-        var seen = Set<String>()
-        return ModelSupportMode.allCases.flatMap { family.modes[$0]!.caveats }
-            .map(SupportMetadata.displayCheck).filter { seen.insert($0).inserted }
+    private func emptyState(_ selection: ModelsSheetTab) -> some View {
+        VStack(spacing: 7) {
+            Text(selection.emptyTitle).font(.headline)
+            Text(selection.emptyMessage).font(.callout).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, minHeight: 300)
+    }
+
+    private func modelGroup(_ group: ModelsInventory.Group) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(group.name).font(.headline).fixedSize(horizontal: false, vertical: true)
+                    if let family = group.family { Text(family).font(.caption).foregroundStyle(.secondary) }
+                }
+                Spacer(minLength: 0)
+                if group.models.count == 1, group.models[0].isRunning { runningBadge }
+            }
+            ForEach(group.models) { model in
+                if model.name != group.name || !model.detailLabels.isEmpty || group.models.count > 1 {
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 7) {
+                            if model.name != group.name || (group.models.count > 1 && model.detailLabels.isEmpty) {
+                                Text(model.name).font(.callout).fixedSize(horizontal: false, vertical: true)
+                            }
+                            ViewThatFits(in: .horizontal) {
+                                HStack(spacing: 6) {
+                                    ForEach(model.detailLabels, id: \.self) { variantBadge($0, model: model).fixedSize() }
+                                }
+                                VStack(alignment: .leading, spacing: 6) {
+                                    ForEach(model.detailLabels, id: \.self) { variantBadge($0, model: model) }
+                                }
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        if group.models.count > 1, model.isRunning { runningBadge }
+                    }
+                    if group.models.count > 1, model.id != group.models.last?.id { Divider() }
+                }
+            }
+        }
+        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
+    }
+
+    private var runningBadge: some View {
+        Text("Running").font(.caption.weight(.medium))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Color.accentColor.opacity(0.1), in: Capsule())
+    }
+
+    private func variantBadge(_ label: String, model: ModelsInventory.Model) -> some View {
+        Text(label).font(.caption).foregroundStyle(.secondary)
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Color.primary.opacity(0.055), in: Capsule())
+            .help(label.hasPrefix("Version ") ? model.sourceRevision ?? label : label)
     }
 }
 
@@ -1227,14 +1383,14 @@ struct InstallView: View {
     @State private var kind = "local"
     @State private var source = ""
     @State private var visionConversion = false
-    @State private var showingFamilies = false
+    @State private var showingModels = false
     var body: some View {
         ScrollView { form }
             .frame(width: 470, height: 650)
             .onAppear { engine.resetInstallProgress(kind: kind) }
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
             .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
-            .sheet(isPresented: $showingFamilies) { ModelFamiliesView(engine: engine) }
+            .sheet(isPresented: $showingModels) { ModelsView(engine: engine) }
     }
 
     private var form: some View {
@@ -1242,9 +1398,9 @@ struct InstallView: View {
             HStack {
                 Text("Install a model").font(.title2.weight(.semibold))
                 Spacer()
-                Button("Supported model families…") {
+                Button("Models…") {
                     engine.requestModelFamilies()
-                    showingFamilies = true
+                    showingModels = true
                 }.buttonStyle(.link).font(.caption)
             }
             Picker("Source", selection: $kind) {

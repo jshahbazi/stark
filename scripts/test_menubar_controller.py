@@ -87,6 +87,14 @@ extension EngineController {
                                   "conversion": ["status": "implemented", "containers": ["safetensors"],
                                                  "source_formats": ["BF16"], "output_dtypes": ["BF16"]], "modes": modes]]]
         }
+        func modelDisplay(_ groupID: String = "example/base", name: String = "Base") -> [String: Any] {
+            ["schema_version": 1, "group_id": groupID, "group_name": name, "family_id": "qwen3",
+             "quantization": "BF16", "weight_bytes": Int64(1_190_000_000), "source_revision": String(repeating: "a", count: 40)]
+        }
+        func variant(_ id: String, name: String, display: [String: Any]?) -> InstalledModel {
+            InstalledModel(id: id, name: name, path: "/private/" + id, apiID: "private-" + id,
+                           display: display.flatMap(InstalledModelDisplay.init))
+        }
         switch scenario {
         case "vision-install-opt-in":
             engine.install(source: "Qwen/Qwen3.5-0.8B", kind: "huggingface", artifactMode: "vision-language")
@@ -110,8 +118,8 @@ extension EngineController {
             engine.apply(["event": "model_families", "report": familyRegistry()])
             guard let registry = engine.modelFamilies, registry.families.count == 1,
                   registry.families[0].name == "Fixture family",
-                  registry.families[0].modes[.text]?.status.title == "Checks required",
-                  registry.families[0].modes[.visionLanguage]?.status.title == "Unavailable" else { return false }
+                  registry.families[0].modes[.text]?.status == .conditional,
+                  registry.families[0].modes[.visionLanguage]?.status == .unsupported else { return false }
             var future = familyRegistry()
             future["schema_version"] = 2
             engine.apply(["event": "model_families", "report": future])
@@ -125,14 +133,134 @@ extension EngineController {
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
-                  qwen3.sourceFormatLabels == ["Safetensors floating-point", "MLX 4-bit (affine)", "MLX 8-bit (affine)"],
-                  qwen3.outputDtypeLabels == ["BF16", "F16", "F32"],
+                  qwen3.sourceFormats == ["safetensors-float", "mlx-affine-4bit", "mlx-affine-8bit"],
+                  qwen3.outputDtypes == ["bfloat16", "float16", "float32"],
                   families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
             engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
             engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
             return engine.installSupportReport?.status == .inconclusive &&
                 engine.installSupportReport?.modes.values.allSatisfy({ $0 == .inconclusive }) == true
+        case "models-downloaded-sort":
+            let models = [
+                InstalledModel(id: "third", name: "Model 10", path: "/private/third", apiID: "private-third"),
+                InstalledModel(id: "second", name: "Model 2", path: "/private/second", apiID: "private-second"),
+                InstalledModel(id: "first", name: "Model 1", path: "/private/first", apiID: "private-first")
+            ]
+            let inventory = ModelsInventory(models: models, loadedID: "", registry: nil)
+            guard inventory.models.map(\.name) == ["Model 1", "Model 2", "Model 10"],
+                  inventory.models.allSatisfy({ !$0.isRunning }) else { return false }
+            let duplicates = [
+                InstalledModel(id: "b", name: "Exact model name", path: "/private/b", apiID: "private-b"),
+                InstalledModel(id: "a", name: "Exact model name", path: "/private/a", apiID: "private-a")
+            ]
+            return ModelsInventory(models: duplicates, loadedID: "b", registry: nil).models.map(\.id) == ["a", "b"]
+        case "models-running-identity":
+            engine.models = [
+                InstalledModel(id: "loaded", name: "Same model name", path: "/private/loaded", apiID: "same-alias"),
+                InstalledModel(id: "selected", name: "Same model name", path: "/private/selected", apiID: "same-alias")
+            ]
+            engine.selectedID = "selected"
+            engine.loadedID = "loaded"
+            let rows = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil).models
+            guard rows.filter(\.isRunning).map(\.id) == ["loaded"], engine.selectedID == "selected" else { return false }
+            return ModelsInventory(models: engine.models, loadedID: "missing", registry: nil).models.allSatisfy({ !$0.isRunning })
+        case "models-empty-state":
+            let inventory = ModelsInventory(models: [], loadedID: "missing", registry: nil)
+            guard inventory.models.isEmpty, inventory.families == nil,
+                  ModelsSheetTab.initial == .onThisMac,
+                  ModelsSheetTab.onThisMac.title(modelCount: 0) == "On this Mac (0)",
+                  ModelsSheetTab.onThisMac.emptyTitle == "No models yet",
+                  ModelsSheetTab.onThisMac.emptyMessage == "Install a model to add it here." else { return false }
+            var registry = familyRegistry()
+            registry["families"] = [[String: Any]]()
+            guard let parsed = ModelFamilyRegistry(registry) else { return false }
+            return ModelsInventory(models: [], loadedID: "", registry: parsed).families?.isEmpty == true
+        case "models-family-inventory":
+            guard var raw = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
+                  let families = raw["families"] as? [[String: Any]] else { return false }
+            raw["families"] = Array(families.reversed())
+            guard let registry = ModelFamilyRegistry(raw),
+                  let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
+            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "Granite", "LFM2", "Llama", "LLaMBA",
+                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "SmolLM3"] &&
+                !rows.contains(where: { $0.id == "modernbert" })
+        case "models-display-event":
+            engine.apply(["event": "models", "models": [
+                ["id": "fixture-model", "name": "Exact saved model name", "path": "/private/model", "display": modelDisplay()]
+            ]])
+            guard let model = engine.models.first, model.name == "Exact saved model name",
+                  model.display?.groupID == "example/base", model.display?.familyID == "qwen3",
+                  model.display?.quantization == "BF16", model.display?.weightBytes == 1_190_000_000,
+                  engine.loadedID == "fixture-model", !engine.supportsImages else { return false }
+            let inventory = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil)
+            guard inventory.groups.count == 1, inventory.groups[0].name == "Base", inventory.groups[0].family == "Qwen3",
+                  inventory.groups[0].models[0].isRunning, inventory.models[0].detailLabels.count == 3,
+                  inventory.models[0].detailLabels.first == "BF16",
+                  inventory.models[0].detailLabels.last == "Version aaaaaaa" else { return false }
+            var unknown = modelDisplay()
+            for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
+            guard let descriptor = InstalledModelDisplay(unknown) else { return false }
+            return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-display-malformed":
+            let mutations: [(String, Any)] = [
+                ("schema_version", 2), ("schema_version", true), ("group_id", ""),
+                ("group_id", String(repeating: "a", count: 513)), ("group_name", String(repeating: "a", count: 257)),
+                ("group_name", "Two\nlines"), ("group_name", "Control\tname"), ("group_name", "Control\u{7f}name"),
+                ("family_id", "unrecognized"), ("quantization", 4),
+                ("weight_bytes", true), ("weight_bytes", -1), ("weight_bytes", 1.5),
+                ("weight_bytes", Double.infinity), ("source_revision", String(repeating: "A", count: 40)),
+                ("source_revision", "aaaaaaa")
+            ]
+            for (key, value) in mutations {
+                var raw = modelDisplay()
+                raw[key] = value
+                engine.apply(["event": "models", "models": [
+                    ["id": "fixture-model", "name": "Saved name 4-bit", "path": "/private/model", "display": raw]
+                ]])
+                guard let model = engine.models.first, model.display == nil else { return false }
+                let inventory = ModelsInventory(models: engine.models, loadedID: "", registry: nil)
+                guard inventory.groups.count == 1, inventory.groups[0].name == "Saved name 4-bit",
+                      inventory.groups[0].family == nil, inventory.models[0].detailLabels.isEmpty else { return false }
+            }
+            return true
+        case "models-grouped-variants":
+            var compact = modelDisplay()
+            compact["quantization"] = "4-bit"; compact["weight_bytes"] = Int64(300_000_000)
+            compact["source_revision"] = String(repeating: "b", count: 40)
+            let models = [
+                variant("bf16", name: "Saved 8-bit name", display: modelDisplay()),
+                variant("compact", name: "Compact saved name", display: compact),
+                variant("fine-tune", name: "Fine-tune saved name", display: modelDisplay("example/fine-tune", name: "Fine Tune"))
+            ]
+            let inventory = ModelsInventory(models: models, loadedID: "bf16", registry: nil)
+            guard inventory.models.count == 3, inventory.groups.map(\.name) == ["Base", "Fine Tune"],
+                  inventory.groups[0].models.map(\.id) == ["compact", "bf16"],
+                  inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["bf16"],
+                  inventory.groups[0].models[1].name == "Saved 8-bit name" else { return false }
+            return inventory.groups[0].models[1].quantization == "BF16" &&
+                inventory.groups[0].models[0].detailLabels.last == "Version bbbbbbb"
+        case "models-grouping-ambiguity":
+            let first = variant("a", name: "First exact name", display: modelDisplay())
+            let conflict = variant("b", name: "Second exact name", display: modelDisplay("example/base", name: "Conflicting base"))
+            let inventory = ModelsInventory(models: [conflict, first], loadedID: "", registry: nil)
+            guard inventory.groups.map(\.name) == ["First exact name", "Second exact name"],
+                  inventory.groups.allSatisfy({ $0.models.count == 1 && $0.family == nil }) else { return false }
+            let absent = [variant("a", name: "Same exact name", display: nil), variant("b", name: "Same exact name", display: nil)]
+            return ModelsInventory(models: absent, loadedID: "", registry: nil).groups.count == 2
+        case "models-variant-order":
+            var compact = modelDisplay(); compact["quantization"] = "4-bit"
+            var larger = modelDisplay(); larger["weight_bytes"] = Int64(8_410_000_000)
+            var unknown = modelDisplay(); unknown["quantization"] = NSNull(); unknown["weight_bytes"] = Int64(100)
+            let models = [
+                variant("unknown", name: "Unknown", display: unknown), variant("larger", name: "Larger", display: larger),
+                variant("bf16", name: "BF16", display: modelDisplay()), variant("compact", name: "Compact", display: compact),
+                variant("other10", name: "Other exact10", display: modelDisplay("other10", name: "Model 10")),
+                variant("other2", name: "Other exact2", display: modelDisplay("other2", name: "Model 2"))
+            ]
+            let inventory = ModelsInventory(models: models, loadedID: "", registry: nil)
+            return inventory.groups.map(\.name) == ["Base", "Model 2", "Model 10"] &&
+                inventory.groups[0].models.map(\.id) == ["compact", "bf16", "larger", "unknown"]
         case "support-registry-invalid":
             var raw = familyRegistry()
             raw["schema_version"] = true
@@ -693,7 +821,7 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_chat_install_forwards_text_purpose_before_download(self):
         self.exercise("text-install-purpose")
 
-    def test_family_registry_parses_mode_labels_and_ignores_future_schema(self):
+    def test_family_registry_parses_mode_statuses_and_ignores_future_schema(self):
         self.exercise("support-registry")
 
     def test_production_registry_and_inconclusive_report_match_swift_contract(self):
@@ -711,6 +839,35 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_family_registry_rejects_unknown_modes_and_self_qualified_status(self):
         self.exercise("support-registry-invalid")
+
+    def test_models_inventory_sorts_naturally_and_preserves_exact_names(self):
+        self.exercise("models-downloaded-sort")
+
+    def test_models_running_badge_uses_only_loaded_identity(self):
+        self.exercise("models-running-identity")
+
+    def test_models_default_tab_and_empty_inventory_copy(self):
+        self.exercise("models-empty-state")
+
+    def test_available_families_are_friendly_sorted_and_exclude_conversion_only(self):
+        from stark_convert.model_support import support_matrix
+
+        self.exercise("models-family-inventory", json.dumps(support_matrix()))
+
+    def test_model_display_metadata_cannot_change_runtime_capabilities(self):
+        self.exercise("models-display-event")
+
+    def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
+        self.exercise("models-display-malformed")
+
+    def test_variants_group_by_explicit_source_identity_and_preserve_saved_names(self):
+        self.exercise("models-grouped-variants")
+
+    def test_ambiguous_or_missing_group_metadata_keeps_models_separate(self):
+        self.exercise("models-grouping-ambiguity")
+
+    def test_groups_and_variants_have_deterministic_natural_order(self):
+        self.exercise("models-variant-order")
 
     def test_unsupported_preflight_preserves_loaded_model_and_image_evidence(self):
         self.exercise("image-support-warning-keeps-capability")

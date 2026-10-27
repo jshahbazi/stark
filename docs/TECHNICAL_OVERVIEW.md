@@ -91,6 +91,18 @@ Two Python projects exist: `tools/converter/pyproject.toml` is the product packa
 
 Events to the app: `models` (the library), `model_families` (shared structural registry in `report`), `model_support` (metadata verdict in `report` with the matching `request_id`), `status` (`state` and `message`), `progress` (download and conversion bytes), `installed`, `ready` (worker limits after `run`), `configured`, `reply`, `decision`, `connection` (the API base URL and key), and `error` with a fixed message. The backend fences every command and request with an epoch that changes when a model is stopped or replaced, so a late reply from a previous worker is discarded. Chat and API requests share one FIFO queue in front of the single worker.
 
+Library entries can include an optional `display` object with schema version 1:
+`group_id`, `group_name`, nullable `family_id`, `quantization`, `weight_bytes` and
+`source_revision`. It describes saved variants for the model browser. Grouping
+uses unambiguous source identity from a receipt with a consistent source-manifest
+schema/digest, current config hash and declared weight-file size; otherwise each
+installed ID stays separate.
+Header inspection is bounded at 1 MiB and config/receipt reads at 2 MiB each,
+with no tensor payload reads. Missing or invalid metadata yields partial display
+information and never blocks library startup or changes admission. The Swift
+client ignores malformed/unknown descriptors and retains the original name.
+This presentation object is not persisted into model registry or artifact files.
+
 The backend emits `model_families` at startup and for `support`. Its schema-1
 matrix records implemented paths and constraints. A raw install runs a bounded,
 cancellable `--preflight` child and emits `model_support` before any weight
