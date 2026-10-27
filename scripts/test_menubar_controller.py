@@ -56,6 +56,11 @@ extension EngineController {
             let bytes = pipe.fileHandleForReading.availableData
             return try! JSONSerialization.jsonObject(with: bytes) as! [String: Any]
         }
+        func commands() -> [[String: Any]] {
+            pipe.fileHandleForReading.availableData.split(separator: 10).map {
+                try! JSONSerialization.jsonObject(with: Data($0)) as! [String: Any]
+            }
+        }
         func staged() -> [String] {
             try! FileManager.default.contentsOfDirectory(atPath: engine.attachmentStaging!.root.path)
         }
@@ -94,6 +99,24 @@ extension EngineController {
         func variant(_ id: String, name: String, display: [String: Any]?) -> InstalledModel {
             InstalledModel(id: id, name: name, path: "/private/" + id, apiID: "private-" + id,
                            display: display.flatMap(InstalledModelDisplay.init))
+        }
+        func catalogItem(_ id: String = "entry") -> [String: Any] {
+            ["id": id, "repo": "example/model", "revision": String(repeating: "a", count: 40), "name": "Model 2",
+             "size_label": "0.6B", "parameter_count": Int64(600_000_000), "weight_bytes": Int64(1_200_000_000),
+             "quantization": "BF16", "artifact_modes": ["text", "vision-language"],
+             "default_artifact_mode": "vision-language", "downloadable": true, "installed_ids": [String]()]
+        }
+        func catalogReport(_ family: String, status: String = "ready", items: [[String: Any]]? = nil) -> [String: Any] {
+            ["schema_version": 1, "family_id": family, "status": status, "message": "Fixture catalog message",
+             "items": items ?? (status == "ready" ? [catalogItem()] : []), "has_more": false]
+        }
+        func catalogReply(_ request: [String: Any], status: String = "ready", items: [[String: Any]]? = nil) -> [String: Any] {
+            ["event": "model_catalog", "request_id": request["request_id"]!, "family_id": request["family_id"]!,
+             "report": catalogReport(request["family_id"] as! String, status: status, items: items)]
+        }
+        func removal(_ action: String = "trash") -> [String: Any] {
+            ["schema_version": 1, "action": action, "label": action == "trash" ? "Move to Trash" : "Remove from Stark",
+             "message": action == "trash" ? "Its files will move to Trash." : "Its folder will remain on this Mac."]
         }
         switch scenario {
         case "vision-install-opt-in":
@@ -261,6 +284,208 @@ extension EngineController {
             let inventory = ModelsInventory(models: models, loadedID: "", registry: nil)
             return inventory.groups.map(\.name) == ["Base", "Model 2", "Model 10"] &&
                 inventory.groups[0].models.map(\.id) == ["compact", "bf16", "larger", "unknown"]
+        case "models-artifact-mode-label":
+            let descriptor = InstalledModelDisplay(modelDisplay())
+            let models = [
+                InstalledModel(id: "images", name: "Same saved name", path: "/private/images", apiID: "images", display: descriptor, artifactMode: .visionLanguage),
+                InstalledModel(id: "text", name: "Same saved name", path: "/private/text", apiID: "text", display: descriptor, artifactMode: .text)
+            ]
+            let inventory = ModelsInventory(models: models, loadedID: "text", registry: nil)
+            guard inventory.groups.count == 1, inventory.groups[0].models.map(\.id) == ["text", "images"] else { return false }
+            return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
+                inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
+                inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "image-catalog-stale-family":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.requestModelCatalog(familyID: "qwen3_5")
+            let secondBatch = commands()
+            guard secondBatch.map({ $0["command"] as! String }) == ["catalog_cancel", "catalog"],
+                  let second = secondBatch.last, UUID(uuidString: second["request_id"] as? String ?? "") != nil else { return false }
+            engine.apply(catalogReply(first))
+            guard engine.catalog == nil, engine.catalogLoading, engine.catalogFamilyID == "qwen3_5" else { return false }
+            engine.apply(catalogReply(second))
+            guard engine.catalog?.familyID == "qwen3_5", engine.modelReady, engine.supportsImages,
+                  engine.loadedID == "fixture-model", engine.selectedID == "fixture-model" else { return false }
+            engine.cancelModelCatalog()
+            guard command()["command"] as? String == "catalog_cancel" else { return false }
+            engine.apply(catalogReply(second))
+            return engine.catalog == nil && !engine.catalogLoading && engine.modelReady && engine.supportsImages
+        case "catalog-offline-retry":
+            engine.errorMessage = "Fixture unrelated runtime warning"
+            engine.requestModelCatalog(familyID: "qwen3")
+            let first = command()
+            engine.apply(catalogReply(first, status: "offline"))
+            guard engine.catalog?.status == .offline, engine.catalogError == "Fixture catalog message",
+                  engine.errorMessage == "Fixture unrelated runtime warning", engine.modelReady else { return false }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let retry = commands().last!
+            engine.apply(catalogReply(first))
+            guard engine.catalogLoading, engine.catalog == nil else { return false }
+            engine.apply(catalogReply(retry))
+            return engine.catalog?.status == .ready && engine.catalogError == nil && engine.loadedID == "fixture-model"
+        case "catalog-schema-bounds":
+            var report = catalogReport("qwen3")
+            report["schema_version"] = 2
+            guard FamilyModelCatalog(report) == nil else { return false }
+            report = catalogReport("qwen3"); report["items"] = (0..<31).map { catalogItem("entry-\($0)") }
+            guard FamilyModelCatalog(report) == nil else { return false }
+            report = catalogReport("qwen3", items: [catalogItem(), catalogItem()])
+            guard FamilyModelCatalog(report) == nil else { return false }
+            for (key, value) in [("revision", "bad" as Any), ("weight_bytes", true as Any),
+                                 ("parameter_count", -1 as Any), ("default_artifact_mode", "unsupported" as Any),
+                                 ("downloadable", 1 as Any), ("artifact_modes", ["text", "unknown"] as Any)] {
+                var item = catalogItem(); item[key] = value
+                guard FamilyModelCatalog(catalogReport("qwen3", items: [item])) == nil else { return false }
+            }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let request = command()
+            var future = catalogReply(request)
+            var raw = future["report"] as! [String: Any]; raw["schema_version"] = 2; future["report"] = raw
+            engine.apply(future)
+            return engine.catalog == nil && engine.catalogLoading && !engine.supportsImages && engine.modelReady
+        case "catalog-provider-order":
+            var small4 = catalogItem("small4"); small4["parameter_count"] = NSNull(); small4["quantization"] = "4-bit"
+            var small8 = catalogItem("small8"); small8["parameter_count"] = NSNull(); small8["quantization"] = "8-bit"
+            var large = catalogItem("large"); large["parameter_count"] = Int64(1_700_000_000); large["size_label"] = "1.7B"
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: [catalogItem("small"), small4, small8, large])) else { return false }
+            return catalog.items.map(\.id) == ["small", "small4", "small8", "large"]
+        case "catalog-installed-mode":
+            var item = catalogItem(); item["installed_ids"] = ["fixture-model", "not-in-library"]
+            guard let parsed = FamilyModelCatalog.Item(item) else { return false }
+            engine.apply(["event": "models", "models": [["id": "fixture-model", "name": "Exact saved name", "path": "/private/model"]]])
+            guard engine.catalogItemIsDownloaded(parsed, artifactMode: .text),
+                  !engine.catalogItemIsDownloaded(parsed, artifactMode: .visionLanguage) else { return false }
+            engine.apply(["event": "models", "models": [["id": "fixture-model", "name": "Exact saved name", "path": "/private/model", "artifact_mode": "unknown"]]])
+            return !engine.catalogItemIsDownloaded(parsed, artifactMode: .text) && engine.loadedID == "fixture-model"
+        case "catalog-install-selection":
+            var callbacks = 0; engine.onInstalled = { callbacks += 1 }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            guard install["command"] as? String == "install_catalog", install["catalog_request_id"] as? String == browse["request_id"] as? String,
+                  install["artifact_mode"] as? String == "text", engine.busy, engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.busy, engine.catalogInstallation != nil else { return false }
+            engine.apply(["event": "models", "models": [
+                ["id": "fixture-model", "name": "Existing", "path": "/private/existing"],
+                ["id": "downloaded", "name": "New", "path": "/private/new", "artifact_mode": "text"]
+            ]])
+            engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "downloaded"]])
+            let refresh = commands().last!
+            guard refresh["command"] as? String == "catalog", engine.catalogInstallation == nil, callbacks == 0,
+                  engine.selectedID == "fixture-model", engine.loadedID == "fixture-model", engine.modelReady else { return false }
+            var item = catalogItem(); item["installed_ids"] = ["downloaded"]
+            engine.apply(catalogReply(refresh, items: [item]))
+            return engine.catalogItemIsDownloaded(engine.catalog!.items[0], artifactMode: .text)
+        case "catalog-install-stale-error":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.apply(["event": "error", "request_id": "stale-request", "message": "Stale catalog error"])
+            guard engine.catalogInstallation != nil, engine.errorMessage == nil, engine.busy else { return false }
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Fixture download failed"])
+            guard engine.catalogInstallation == nil, engine.catalogInstallFailed,
+                  engine.catalogInstallMessage == "Fixture download failed", engine.modelReady else { return false }
+            engine.resetInstallProgress(kind: "huggingface")
+            return engine.errorMessage == nil && engine.loadedID == "fixture-model"
+        case "image-catalog-install-admission-error":
+            engine.imageVerification = "locally_tested"
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            engine.apply(["event": "error", "request_id": "unrelated", "message": "Unrelated rejection"])
+            guard engine.state == "installing", engine.busy, engine.catalogInstallation != nil else { return false }
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Wait for the current operation."])
+            return engine.state == "ready" && !engine.busy && engine.modelReady && engine.supportsImages &&
+                engine.imageVerification == "locally_tested" &&
+                engine.loadedID == "fixture-model" && engine.selectedID == "fixture-model" &&
+                engine.catalogInstallation == nil && engine.catalogInstallFailed
+        case "catalog-first-download-selection":
+            engine.models = []; engine.selectedID = ""; engine.loadedID = ""; engine.loadedMode = nil; engine.state = "idle"
+            var callbacks = 0; engine.onInstalled = { callbacks += 1 }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            engine.apply(["event": "status", "state": "idle", "message": "Model installed"])
+            engine.apply(["event": "models", "models": [["id": "downloaded", "name": "First model", "path": "/private/first", "artifact_mode": "text"]]])
+            guard engine.selectedID.isEmpty, engine.loadedID.isEmpty, engine.busy else { return false }
+            engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "downloaded"]])
+            _ = commands()
+            return engine.models.count == 1 && engine.selectedID.isEmpty && engine.loadedID.isEmpty && !engine.busy && callbacks == 0
+        case "catalog-stop-fence":
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            engine.stop(); _ = command()
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            engine.selectedID = "replacement"
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "replacement"])
+            engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "stale-model"]])
+            engine.apply(["event": "error", "request_id": install["support_request_id"]!, "message": "Stale failure"])
+            engine.apply(catalogReply(browse))
+            return engine.selectedID == "replacement" && engine.loadedID == "replacement" && engine.modelReady &&
+                engine.catalog == nil && engine.errorMessage == nil
+        case "model-removal-confirmation":
+            let imported = InstalledModel(id: "imported", name: "Exact imported name", path: "/private/imported", apiID: "id",
+                                          removal: InstalledModelRemoval(removal("unregister")))
+            let owned = InstalledModel(id: "owned", name: "Exact owned name", path: "/private/owned", apiID: "id",
+                                       removal: InstalledModelRemoval(removal()))
+            guard let importedPrompt = ModelRemovalConfirmation(model: imported, details: ["BF16"], isRunning: false),
+                  let ownedPrompt = ModelRemovalConfirmation(model: owned, details: ["4-bit"], isRunning: true) else { return false }
+            guard importedPrompt.action.title == "Remove from Stark", importedPrompt.message.contains("folder will remain"),
+                  ownedPrompt.action.title == "Move to Trash", ownedPrompt.message.contains("will be stopped"),
+                  ownedPrompt.message.contains("4-bit") else { return false }
+            engine.models = [imported]; engine.removeModel(id: imported.id, expectedAction: .unregister)
+            let request = command()
+            return request["action"] as? String == "unregister" && request["model_id"] as? String == imported.id
+        case "image-model-removal-preserves-other":
+            engine.models = [InstalledModel(id: "fixture-model", name: "Running", path: "/private/running", apiID: "id"),
+                             InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other",
+                                            removal: InstalledModelRemoval(removal()))]
+            engine.removeModel(id: "other", expectedAction: .trash)
+            let request = command()
+            guard request["action"] as? String == "trash", engine.loadedID == "fixture-model", engine.supportsImages,
+                  engine.models.count == 2 else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.busy, !engine.modelReady else { return false }
+            engine.apply(["event": "model_removed", "request_id": request["request_id"]!, "model_id": "wrong", "action": "trash"])
+            guard engine.removingModelID == "other" else { return false }
+            engine.apply(["event": "model_removed", "request_id": request["request_id"]!, "model_id": "other", "action": "trash", "stopped_model_id": NSNull()])
+            return engine.modelReady && engine.loadedID == "fixture-model" && engine.supportsImages && engine.models.count == 2
+        case "model-removal-action-fence":
+            let saved = InstalledModel(id: "saved", name: "Saved", path: "/private/saved", apiID: "id", removal: InstalledModelRemoval(removal("unregister")))
+            engine.models = [saved]
+            engine.removeModel(id: "saved", expectedAction: .trash)
+            guard engine.removingModelID == nil, engine.removalError != nil, engine.state == "ready" else { return false }
+            var future = removal(); future["schema_version"] = 2
+            guard InstalledModelRemoval(future) == nil else { return false }
+            future = removal(); future["action"] = "delete"
+            return InstalledModelRemoval(future) == nil && ModelRemovalConfirmation(model: InstalledModel(id: "missing", name: "Saved", path: "/private/missing", apiID: "id"), details: [], isRunning: false) == nil
+        case "image-model-removal-error-fence":
+            engine.models = [InstalledModel(id: "fixture-model", name: "Running", path: "/private/running", apiID: "id",
+                                            removal: InstalledModelRemoval(removal("unregister")))]
+            engine.removeModel(id: "fixture-model", expectedAction: .unregister)
+            let request = command()
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.apply(["event": "model_remove_error", "request_id": "old", "model_id": "fixture-model", "message": "Stale error", "stopped_model_id": "fixture-model"])
+            guard engine.busy, engine.loadedID == "fixture-model", engine.supportsImages else { return false }
+            engine.apply(["event": "model_remove_error", "request_id": request["request_id"]!, "model_id": "fixture-model", "message": "Fixture rollback", "stopped_model_id": "fixture-model"])
+            return !engine.busy && engine.loadedID.isEmpty && !engine.supportsImages && engine.models.count == 1 && engine.removalError == "Fixture rollback"
+        case "image-model-removal-admission-error":
+            engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "id",
+                                            removal: InstalledModelRemoval(removal()))]
+            engine.removeModel(id: "other", expectedAction: .trash)
+            let request = command()
+            engine.apply(["event": "error", "request_id": request["request_id"]!, "message": "Wait for the current operation."])
+            return !engine.busy && engine.modelReady && engine.loadedID == "fixture-model" && engine.supportsImages &&
+                engine.models.count == 1 && engine.removalError == "Wait for the current operation."
         case "support-registry-invalid":
             var raw = familyRegistry()
             raw["schema_version"] = true
@@ -868,6 +1093,56 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_groups_and_variants_have_deterministic_natural_order(self):
         self.exercise("models-variant-order")
+
+    def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
+        self.exercise("models-artifact-mode-label")
+
+    def test_catalog_family_changes_and_close_fence_late_results(self):
+        self.exercise("image-catalog-stale-family")
+
+    def test_catalog_offline_retry_preserves_runtime_state(self):
+        self.exercise("catalog-offline-retry")
+
+    def test_catalog_schema_and_item_bounds_are_enforced(self):
+        self.exercise("catalog-schema-bounds")
+
+    def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
+        self.exercise("catalog-provider-order")
+
+    def test_downloaded_catalog_status_matches_live_ids_and_artifact_mode(self):
+        self.exercise("catalog-installed-mode")
+
+    def test_catalog_install_retains_selection_and_browser_after_terminal_status(self):
+        self.exercise("catalog-install-selection")
+
+    def test_catalog_install_errors_require_current_request_and_clear_on_reset(self):
+        self.exercise("catalog-install-stale-error")
+
+    def test_catalog_busy_rejection_preserves_loaded_model_and_releases_pending(self):
+        self.exercise("image-catalog-install-admission-error")
+
+    def test_first_catalog_download_does_not_select_or_load_a_model(self):
+        self.exercise("catalog-first-download-selection")
+
+    def test_stopped_catalog_install_cannot_apply_stale_success_or_error(self):
+        self.exercise("catalog-stop-fence")
+
+    def test_removal_confirmation_distinguishes_imports_from_owned_files(self):
+        self.exercise("model-removal-confirmation")
+
+    def test_removal_preserves_other_running_model_and_waits_for_matching_result(self):
+        self.exercise("image-model-removal-preserves-other")
+
+    def test_changed_removal_action_and_unknown_schema_cannot_request_deletion(self):
+        self.exercise("model-removal-action-fence")
+
+    def test_removal_error_only_clears_explicitly_stopped_matching_worker(self):
+        self.exercise("image-model-removal-error-fence")
+
+    def test_busy_removal_rejection_releases_pending_without_touching_loaded_model(
+        self,
+    ):
+        self.exercise("image-model-removal-admission-error")
 
     def test_unsupported_preflight_preserves_loaded_model_and_image_evidence(self):
         self.exercise("image-support-warning-keeps-capability")

@@ -756,9 +756,11 @@ def build(options: argparse.Namespace) -> Path:
         inspection = (
             "import inspect,json; import stark_convert.desktop,stark_convert.chat,stark_convert.decision,jinja2; "
             "import stark_convert.desktop_media,stark_convert.media,stark_convert.vision_runtime; "
-            "import stark_convert.image_checks,stark_convert.vision_family,stark_convert.model_support,stark_convert.model_inventory; "
+            "import stark_convert.image_checks,stark_convert.vision_family,stark_convert.model_support,stark_convert.model_inventory,stark_convert.model_catalog,stark_convert.model_removal; "
             "assert callable(stark_convert.model_support.support_matrix); "
             "assert callable(stark_convert.model_inventory.model_display); "
+            "assert callable(stark_convert.model_catalog.family_catalog); "
+            "assert callable(stark_convert.model_removal.prepare_removal); "
             "from stark_convert import cli,progress; "
             "from stark_convert.provenance import toolchain_provenance; "
             "assert 'progress' in inspect.signature(cli.convert).parameters; "

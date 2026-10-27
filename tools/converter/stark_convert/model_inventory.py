@@ -212,6 +212,7 @@ def model_display(model):
     """Describe saved versions; missing metadata never changes runtime admission."""
     if not _text(model.get("id"), 128) or not _text(model.get("name")):
         return None
+    mode = model.get("artifact_mode", "text")
     result = {
         "schema_version": 1,
         "group_id": "installed:" + model["id"],
@@ -220,6 +221,7 @@ def model_display(model):
         "quantization": None,
         "weight_bytes": None,
         "source_revision": None,
+        "artifact_mode": mode if isinstance(mode, str) and mode in {"text", "vision-language"} else "text",
     }
     root = Path(os.path.abspath(model["path"]))
     try:
@@ -229,6 +231,10 @@ def model_display(model):
     try:
         config = _small_file(root, "config.json")
         parsed = _json(config)
+        if isinstance(parsed, dict) and parsed.get("type") == "Qwen35VisionLanguageModelConfig":
+            result["artifact_mode"] = "vision-language"
+        elif isinstance(parsed, dict) and parsed.get("type") in {"LanguageModelConfig", "ClassifierModelConfig"}:
+            result["artifact_mode"] = "text"
         receipt = _json(_small_file(root, "conversion.json"))
         if (
             not isinstance(parsed, dict)

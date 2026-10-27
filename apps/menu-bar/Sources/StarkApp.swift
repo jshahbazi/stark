@@ -183,15 +183,49 @@ struct InstalledModelDisplay: Equatable {
     }
 }
 
+enum ModelArtifactMode: String, CaseIterable {
+    case text
+    case visionLanguage = "vision-language"
+    var title: String { self == .text ? "Text" : "Text and images" }
+}
+
+struct InstalledModelRemoval: Equatable {
+    enum Action: String {
+        case trash, unregister, unavailable
+        var title: String {
+            switch self {
+            case .trash: return "Move to Trash"
+            case .unregister: return "Remove from Stark"
+            case .unavailable: return "Removal unavailable"
+            }
+        }
+    }
+    let action: Action
+    let label: String
+    let message: String
+
+    init?(_ value: Any?) {
+        guard let raw = value as? [String: Any], SupportMetadata.schemaOne(raw),
+              let action = (raw["action"] as? String).flatMap(Action.init(rawValue:)),
+              let label = SupportMetadata.string(raw["label"], maximum: 64),
+              let message = SupportMetadata.string(raw["message"]) else { return nil }
+        self.action = action; self.label = label; self.message = message
+    }
+}
+
 struct InstalledModel: Identifiable, Equatable {
     let id: String
     let name: String
     let path: String
     let apiID: String
     let display: InstalledModelDisplay?
+    let artifactMode: ModelArtifactMode?
+    let removal: InstalledModelRemoval?
 
-    init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil) {
+    init(id: String, name: String, path: String, apiID: String, display: InstalledModelDisplay? = nil,
+         artifactMode: ModelArtifactMode? = .text, removal: InstalledModelRemoval? = nil) {
         self.id = id; self.name = name; self.path = path; self.apiID = apiID; self.display = display
+        self.artifactMode = artifactMode; self.removal = removal
     }
 }
 
@@ -322,6 +356,23 @@ private enum SupportMetadata {
         }
         return modes
     }
+
+    static func integer(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.int64Value >= 0, number.compare(NSNumber(value: number.int64Value)) == .orderedSame else { return nil }
+        return number.int64Value
+    }
+
+    static func boolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
+    static func revision(_ value: Any?) -> String? {
+        guard let value = value as? String, value.utf8.count == 40,
+              value.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { return nil }
+        return value
+    }
 }
 
 struct ModelFamilyMode {
@@ -403,6 +454,97 @@ struct ModelFamilyRegistry {
     }
 }
 
+struct FamilyModelCatalog {
+    enum Status: String { case ready, offline, error }
+    struct Item: Identifiable {
+        let id: String
+        let repo: String
+        let revision: String
+        let name: String
+        let sizeLabel: String?
+        let parameterCount: Int64?
+        let weightBytes: Int64?
+        let quantization: String
+        let artifactModes: [ModelArtifactMode]
+        let defaultArtifactMode: ModelArtifactMode
+        let downloadable: Bool
+        let installedIDs: [String]
+
+        init?(_ raw: [String: Any]) {
+            guard let id = SupportMetadata.string(raw["id"], maximum: 512),
+                  let repo = SupportMetadata.string(raw["repo"], maximum: 256),
+                  let revision = SupportMetadata.revision(raw["revision"]),
+                  let name = SupportMetadata.string(raw["name"], maximum: 256),
+                  let quantization = SupportMetadata.string(raw["quantization"], maximum: 64),
+                  let modes = raw["artifact_modes"] as? [String], !modes.isEmpty, modes.count <= 2,
+                  Set(modes).count == modes.count,
+                  let defaultMode = (raw["default_artifact_mode"] as? String).flatMap(ModelArtifactMode.init(rawValue:)),
+                  modes.contains(defaultMode.rawValue),
+                  let downloadable = SupportMetadata.boolean(raw["downloadable"]),
+                  let installedIDs = SupportMetadata.strings(raw["installed_ids"], maximumCount: 128),
+                  installedIDs.allSatisfy({ $0.utf8.count <= 128 }), Set(installedIDs).count == installedIDs.count else { return nil }
+            let artifactModes = modes.compactMap(ModelArtifactMode.init(rawValue:))
+            guard artifactModes.count == modes.count else { return nil }
+            if let size = raw["size_label"], !(size is NSNull), SupportMetadata.string(size, maximum: 64) == nil { return nil }
+            for key in ["parameter_count", "weight_bytes"] {
+                if let value = raw[key], !(value is NSNull), SupportMetadata.integer(value) == nil { return nil }
+            }
+            self.id = id; self.repo = repo; self.revision = revision; self.name = name
+            sizeLabel = raw["size_label"] as? String; parameterCount = SupportMetadata.integer(raw["parameter_count"])
+            weightBytes = SupportMetadata.integer(raw["weight_bytes"]); self.quantization = quantization
+            self.artifactModes = artifactModes; defaultArtifactMode = defaultMode
+            self.downloadable = downloadable; self.installedIDs = installedIDs
+        }
+
+        var detailLabels: [String] {
+            [sizeLabel, quantization, weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }]
+                .compactMap { $0 }
+        }
+    }
+    let familyID: String
+    let status: Status
+    let message: String
+    let items: [Item]
+    let hasMore: Bool
+
+    init?(_ raw: [String: Any]) {
+        guard SupportMetadata.schemaOne(raw),
+              let familyID = SupportMetadata.string(raw["family_id"], maximum: 128),
+              let status = (raw["status"] as? String).flatMap(Status.init(rawValue:)),
+              let message = raw["message"] as? String, message.isEmpty || SupportMetadata.string(message) != nil,
+              let rawItems = raw["items"] as? [[String: Any]], rawItems.count <= 30,
+              let hasMore = SupportMetadata.boolean(raw["has_more"]) else { return nil }
+        let items = rawItems.compactMap(Item.init)
+        guard items.count == rawItems.count, Set(items.map(\.id)).count == items.count else { return nil }
+        self.familyID = familyID; self.status = status; self.message = message; self.hasMore = hasMore
+        self.items = items
+    }
+}
+
+struct CatalogModelInstallation {
+    let requestID: String
+    let catalogRequestID: String
+    let entryID: String
+    let name: String
+    let artifactMode: ModelArtifactMode
+}
+
+struct ModelRemovalConfirmation: Identifiable {
+    let id: String
+    let action: InstalledModelRemoval.Action
+    let message: String
+
+    init?(model: InstalledModel, details: [String], isRunning: Bool) {
+        guard let removal = model.removal, removal.action != .unavailable else { return nil }
+        id = model.id; action = removal.action
+        var parts = ["“" + model.name + "”"]
+        if !details.isEmpty { parts.append(details.joined(separator: " · ")) }
+        parts.append(removal.message)
+        if isRunning { parts.append("This model is running and will be stopped.") }
+        message = parts.joined(separator: "\n\n")
+    }
+}
+
 enum ModelsSheetTab: String, CaseIterable {
     case onThisMac, availableFamilies
     static let initial = Self.onThisMac
@@ -425,10 +567,13 @@ struct ModelsInventory {
         let quantization: String?
         let weightBytes: Int64?
         let sourceRevision: String?
+        let removal: InstalledModelRemoval?
+        let artifactMode: ModelArtifactMode?
 
         var detailLabels: [String] {
             [quantization,
              weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) },
+             artifactMode == .visionLanguage ? "Text and images" : nil,
              sourceRevision.map { "Version " + $0.prefix(7) }].compactMap { $0 }
         }
     }
@@ -450,7 +595,7 @@ struct ModelsInventory {
         func row(_ model: InstalledModel) -> Model {
             Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
-                  sourceRevision: model.display?.sourceRevision)
+                  sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode)
         }
         self.models = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
@@ -487,6 +632,11 @@ struct ModelsInventory {
             return firstBytes < secondBytes
         }
         if first.sourceRevision != second.sourceRevision { return (first.sourceRevision ?? "~") < (second.sourceRevision ?? "~") }
+        if first.artifactMode != second.artifactMode {
+            guard let firstMode = first.artifactMode else { return false }
+            guard let secondMode = second.artifactMode else { return true }
+            return firstMode.rawValue < secondMode.rawValue
+        }
         return ordered(first.name, second.name, first.id, second.id)
     }
 }
@@ -561,6 +711,15 @@ final class EngineController: ObservableObject {
     @Published var conversionProgress = InstallProgress()
     @Published private(set) var modelFamilies: ModelFamilyRegistry?
     @Published private(set) var installSupportReport: ModelSupportReport?
+    @Published private(set) var catalog: FamilyModelCatalog?
+    @Published private(set) var catalogFamilyID: String?
+    @Published private(set) var catalogLoading = false
+    @Published private(set) var catalogError: String?
+    @Published private(set) var catalogInstallation: CatalogModelInstallation?
+    @Published private(set) var catalogInstallMessage: String?
+    @Published private(set) var catalogInstallFailed = false
+    @Published private(set) var removingModelID: String?
+    @Published private(set) var removalError: String?
     @Published var options = ChatOptions()
     @Published var contextLimit = 8192
     @Published var outputLimit = 512
@@ -578,9 +737,16 @@ final class EngineController: ObservableObject {
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
     private var installErrorMessage: String?
+    private var catalogRequestID: String?
+    private var activeInstallRequestID: String?
+    private var removalRequestID: String?
+    private var removalAction: InstalledModelRemoval.Action?
 
-    var busy: Bool { ["loading", "generating", "deciding", "installing", "stopping", "configuring"].contains(state) }
-    var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
+    var busy: Bool {
+        ["loading", "generating", "deciding", "installing", "stopping", "configuring", "removing"].contains(state) ||
+            catalogInstallation != nil || removingModelID != nil
+    }
+    var modelReady: Bool { state == "ready" && !busy && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
     var imageVerificationNote: String {
@@ -605,6 +771,7 @@ final class EngineController: ObservableObject {
         guard process == nil, let resources = resourceURL else { return }
         clearInstallSupport()
         modelFamilies = nil
+        clearBrowserRequests()
         let runtime = resources.appendingPathComponent("runtime")
         let python = runtime.appendingPathComponent("libexec/python/bin/python3.13")
         let data = dataDirectory ?? FileManager.default.homeDirectoryForCurrentUser
@@ -644,6 +811,7 @@ final class EngineController: ObservableObject {
                 self.pendingOptions = nil
                 self.clearInstallSupport()
                 self.modelFamilies = nil
+                self.clearBrowserRequests()
                 self.input = nil
                 self.discardPendingMessage()
                 self.clearConversation()
@@ -696,9 +864,13 @@ final class EngineController: ObservableObject {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
                       let path = $0["path"] as? String else { return nil }
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name,
-                                      display: InstalledModelDisplay($0["display"]))
+                                      display: InstalledModelDisplay($0["display"]),
+                                      artifactMode: $0["artifact_mode"] == nil ? .text : ModelArtifactMode(rawValue: $0["artifact_mode"] as? String ?? ""),
+                                      removal: InstalledModelRemoval($0["removal"]))
             }
-            if !models.contains(where: { $0.id == selectedID }) { selectedID = models.first?.id ?? "" }
+            if !models.contains(where: { $0.id == selectedID }) && !(catalogInstallation != nil && selectedID.isEmpty) {
+                selectedID = models.first?.id ?? ""
+            }
         case "model_families":
             guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
             modelFamilies = registry
@@ -708,6 +880,28 @@ final class EngineController: ObservableObject {
                   let raw = event["report"] as? [String: Any], let report = ModelSupportReport(raw) else { return }
             installSupportReport = report
             message = report.message
+        case "model_catalog":
+            guard let expected = catalogRequestID, event["request_id"] as? String == expected,
+                  event["family_id"] as? String == catalogFamilyID,
+                  let raw = event["report"] as? [String: Any], let result = FamilyModelCatalog(raw),
+                  result.familyID == catalogFamilyID else { return }
+            catalog = result; catalogLoading = false
+            catalogError = result.status == .ready ? nil : (result.message.isEmpty ? "Could not load these models. Try again." : result.message)
+        case "model_removed", "model_remove_error":
+            guard let expected = removalRequestID, event["request_id"] as? String == expected,
+                  event["model_id"] as? String == removingModelID else { return }
+            if event["event"] as? String == "model_remove_error" {
+                removalError = event["message"] as? String ?? "Could not remove this model. Try again."
+            } else {
+                guard event["action"] as? String == removalAction?.rawValue else { return }
+                removalError = nil
+            }
+            if let stopped = event["stopped_model_id"] as? String, stopped == loadedID {
+                loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
+                discardPendingMessage(); clearConversation(); clearDecision()
+            }
+            removalRequestID = nil; removingModelID = nil; removalAction = nil
+            if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
         case "status":
             state = event["state"] as? String ?? "idle"
             if state != "installing" { pendingSupportRequestID = nil }
@@ -744,7 +938,18 @@ final class EngineController: ObservableObject {
                 message = "Ready"
             }
         case "installed":
+            if let requestID = event["support_request_id"] as? String {
+                guard requestID == activeInstallRequestID else { return }
+            } else if catalogInstallation != nil { return }
             pendingSupportRequestID = nil
+            activeInstallRequestID = nil
+            if let completed = catalogInstallation {
+                catalogInstallation = nil
+                catalogInstallMessage = "Downloaded"; catalogInstallFailed = false
+                if let familyID = catalogFamilyID { requestModelCatalog(familyID: familyID) }
+                else { send(["command": "catalog_cancel", "request_id": completed.catalogRequestID]) }
+                return
+            }
             if let model = event["model"] as? [String: Any], let id = model["id"] as? String {
                 selectedID = id
                 UserDefaults.standard.set(id, forKey: "selectedModel")
@@ -790,14 +995,31 @@ final class EngineController: ObservableObject {
             decisionResult = DecisionResult(answers: answers, probabilities: probabilities, choiceIndex: index)
             pendingDecisionAnswers = nil
         case "error":
+            let requestID = event["request_id"] as? String
+            if let requestID = requestID, requestID == removalRequestID {
+                removalError = event["message"] as? String ?? "Could not remove this model. Try again."
+                removalRequestID = nil; removingModelID = nil; removalAction = nil
+                if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
+                return
+            }
+            if let requestID = requestID, requestID != activeInstallRequestID { return }
+            let matchingInstallError = requestID != nil && requestID == activeInstallRequestID
+            let installOwned = requestID != nil || state == "installing" || (activeInstallRequestID != nil && catalogInstallation == nil)
             pendingSupportRequestID = nil
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
-            if state == "installing" { installErrorMessage = errorMessage }
-            if state == "installing" { endInstallProgress("failed") }
+            if installOwned {
+                installErrorMessage = errorMessage
+                activeInstallRequestID = nil
+                endInstallProgress("failed")
+                if let failed = catalogInstallation {
+                    catalogInstallMessage = errorMessage; catalogInstallFailed = true; catalogInstallation = nil
+                    if catalogFamilyID == nil { send(["command": "catalog_cancel", "request_id": failed.catalogRequestID]) }
+                }
+            }
             discardPendingMessage()
             pendingOptions = nil
             clearDecision()
-            if state == "configuring" || state == "deciding" {
+            if state == "configuring" || state == "deciding" || (matchingInstallError && state == "installing") {
                 state = loadedID.isEmpty ? "idle" : "ready"
                 message = loadedID.isEmpty ? "Stopped" : "Ready"
             }
@@ -983,12 +1205,83 @@ final class EngineController: ObservableObject {
         resetInstallProgress(kind: kind)
         let requestID = UUID().uuidString.lowercased()
         pendingSupportRequestID = requestID
+        activeInstallRequestID = requestID
+        catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
         let purpose = artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text")
         state = "installing"; message = "Checking model support…"
         var payload: [String: Any] = ["command": "install", "source": source, "kind": kind,
                                       "support_mode": purpose, "support_request_id": requestID]
         if let artifactMode = artifactMode { payload["artifact_mode"] = artifactMode }
-        if !send(payload) { pendingSupportRequestID = nil; endInstallProgress("failed") }
+        if !send(payload) { pendingSupportRequestID = nil; activeInstallRequestID = nil; endInstallProgress("failed") }
+    }
+
+    func requestModelCatalog(familyID: String) {
+        guard SupportMetadata.string(familyID, maximum: 128) != nil else { return }
+        let changedFamily = catalogFamilyID != familyID
+        cancelModelCatalog()
+        if changedFamily && catalogInstallation == nil {
+            catalogInstallMessage = nil
+            catalogInstallFailed = false
+            if !busy { resetInstallProgress(kind: "huggingface") }
+        }
+        let requestID = UUID().uuidString.lowercased()
+        catalogRequestID = requestID; catalogFamilyID = familyID; catalogLoading = true
+        if !send(["command": "catalog", "family_id": familyID, "request_id": requestID]) {
+            catalogLoading = false; catalogError = "Could not reach Stark. Reopen the app and try again."
+        }
+    }
+
+    func cancelModelCatalog() {
+        if let requestID = catalogRequestID, catalogInstallation?.catalogRequestID != requestID {
+            send(["command": "catalog_cancel", "request_id": requestID])
+        }
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+    }
+
+    func catalogItemIsDownloaded(_ item: FamilyModelCatalog.Item, artifactMode: ModelArtifactMode) -> Bool {
+        models.contains { item.installedIDs.contains($0.id) && $0.artifactMode == artifactMode }
+    }
+
+    func installCatalogItem(id: String, artifactMode: ModelArtifactMode) {
+        guard !busy, let requestID = catalogRequestID, let catalog = catalog, catalog.status == .ready,
+              let item = catalog.items.first(where: { $0.id == id }), item.downloadable,
+              item.artifactModes.contains(artifactMode), !catalogItemIsDownloaded(item, artifactMode: artifactMode) else { return }
+        errorMessage = nil; resetInstallProgress(kind: "huggingface")
+        let supportID = UUID().uuidString.lowercased()
+        pendingSupportRequestID = supportID; activeInstallRequestID = supportID
+        catalogInstallation = CatalogModelInstallation(requestID: supportID, catalogRequestID: requestID,
+                                                       entryID: id, name: item.name, artifactMode: artifactMode)
+        catalogInstallMessage = nil; catalogInstallFailed = false
+        state = "installing"; message = "Checking model support…"
+        if !send(["command": "install_catalog", "catalog_request_id": requestID, "entry_id": id,
+                  "artifact_mode": artifactMode.rawValue, "support_request_id": supportID]) {
+            catalogInstallation = nil; activeInstallRequestID = nil; pendingSupportRequestID = nil
+            catalogInstallMessage = "Could not start the download. Reopen the app and try again."
+            catalogInstallFailed = true
+            endInstallProgress("failed")
+        }
+    }
+
+    func removeModel(id: String, expectedAction: InstalledModelRemoval.Action) {
+        guard !busy else { return }
+        guard let model = models.first(where: { $0.id == id }), let removal = model.removal,
+              removal.action == expectedAction, expectedAction != .unavailable else {
+            removalError = "This model changed. Reopen the list and try again."
+            return
+        }
+        let requestID = UUID().uuidString.lowercased()
+        removalRequestID = requestID; removingModelID = id; removalAction = expectedAction; removalError = nil
+        state = "removing"; message = "Removing model…"
+        if !send(["command": "remove_model", "model_id": id, "request_id": requestID, "action": expectedAction.rawValue]) {
+            removalRequestID = nil; removingModelID = nil; removalAction = nil
+            removalError = "Could not remove this model. Reopen the app and try again."
+        }
+    }
+
+    private func clearBrowserRequests() {
+        catalogRequestID = nil; catalogFamilyID = nil; catalog = nil; catalogLoading = false; catalogError = nil
+        activeInstallRequestID = nil; catalogInstallation = nil; catalogInstallMessage = nil; catalogInstallFailed = false
+        removalRequestID = nil; removingModelID = nil; removalAction = nil; removalError = nil
     }
 
     func generate() {
@@ -1065,6 +1358,7 @@ final class EngineController: ObservableObject {
         errorMessage = nil
         clearInstallSupport()
         if state == "installing" { endInstallProgress("cancelled") }
+        clearBrowserRequests()
         discardPendingMessage()
         clearConversation()
         clearDecision()
@@ -1117,6 +1411,7 @@ final class EngineController: ObservableObject {
     func shutdown() {
         shuttingDown = true
         clearInstallSupport()
+        clearBrowserRequests()
         modelFamilies = nil
         output?.readabilityHandler = nil
         send(["command": "quit"])
@@ -1260,6 +1555,9 @@ struct ModelsView: View {
     @ObservedObject var engine: EngineController
     @Environment(\.dismiss) private var dismiss
     @State private var tab = ModelsSheetTab.initial
+    @State private var selectedFamily: ModelsInventory.Family?
+    @State private var artifactChoices: [String: ModelArtifactMode] = [:]
+    @State private var removalConfirmation: ModelRemovalConfirmation?
 
     private var inventory: ModelsInventory {
         ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: engine.modelFamilies)
@@ -1267,14 +1565,21 @@ struct ModelsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Models").font(.title2.weight(.semibold))
-            Picker("Models", selection: $tab) {
+            HStack(spacing: 12) {
+                if let family = selectedFamily {
+                    Button { leaveFamily() } label: { Label("Back", systemImage: "chevron.left") }.buttonStyle(.link)
+                    Text(family.name).font(.title2.weight(.semibold))
+                } else { Text("Models").font(.title2.weight(.semibold)) }
+                Spacer(minLength: 0)
+            }
+            if selectedFamily == nil { Picker("Models", selection: $tab) {
                 ForEach(ModelsSheetTab.allCases, id: \.self) { choice in
                     Text(choice.title(modelCount: inventory.models.count)).tag(choice)
                 }
-            }.pickerStyle(.segmented).labelsHidden()
+            }.pickerStyle(.segmented).labelsHidden() }
             ScrollView {
-                if tab == .onThisMac {
+                if let family = selectedFamily { catalogContent(family) }
+                else if tab == .onThisMac {
                     if inventory.models.isEmpty { emptyState(tab) }
                     else {
                         LazyVStack(spacing: 12) {
@@ -1285,11 +1590,19 @@ struct ModelsView: View {
                     if families.isEmpty { emptyState(tab) }
                     else { LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         ForEach(families) { family in
-                            Text(family.name).font(.headline)
-                                .frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
+                            Button {
+                                selectedFamily = family; artifactChoices = [:]
+                                engine.requestModelCatalog(familyID: family.id)
+                            } label: {
+                                HStack {
+                                    Text(family.name).font(.headline)
+                                    Spacer(minLength: 0)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                }.frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
                                 .padding(.horizontal, 16)
                                 .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
                                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
+                            }.buttonStyle(.plain).accessibilityLabel("Browse \(family.name) models")
                         }
                     } }
                 } else {
@@ -1297,9 +1610,33 @@ struct ModelsView: View {
                         .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
                 }
             }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            if let installation = engine.catalogInstallation {
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack {
+                        Text(installation.name).font(.callout.weight(.medium))
+                        Spacer(minLength: 0)
+                        Button("Stop", action: engine.stop).controlSize(.small)
+                    }
+                    Text(engine.message).font(.caption).foregroundStyle(.secondary).lineLimit(3)
+                    InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
+                    InstallStageView(title: "Prepare model", phase: "conversion", progress: engine.conversionProgress)
+                }.padding(12).background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 10))
+            } else if let result = engine.catalogInstallMessage {
+                Text(result).font(.caption).foregroundStyle(engine.catalogInstallFailed ? Color.red : .secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 560, height: 520)
-            .onAppear { tab = .initial }
+            .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:] }
+            .onChange(of: tab) { leaveFamily() }
+            .onDisappear { engine.cancelModelCatalog() }
+            .alert(item: $removalConfirmation) { confirmation in
+                Alert(title: Text(confirmation.action.title + "?"), message: Text(confirmation.message),
+                      primaryButton: .destructive(Text(confirmation.action.title)) {
+                          engine.removeModel(id: confirmation.id, expectedAction: confirmation.action)
+                      }, secondaryButton: .cancel())
+            }
     }
 
     private func emptyState(_ selection: ModelsSheetTab) -> some View {
@@ -1318,6 +1655,7 @@ struct ModelsView: View {
                 }
                 Spacer(minLength: 0)
                 if group.models.count == 1, group.models[0].isRunning { runningBadge }
+                if group.models.count == 1 { removalButton(group.models[0]) }
             }
             ForEach(group.models) { model in
                 if model.name != group.name || !model.detailLabels.isEmpty || group.models.count > 1 {
@@ -1337,6 +1675,7 @@ struct ModelsView: View {
                         }
                         Spacer(minLength: 0)
                         if group.models.count > 1, model.isRunning { runningBadge }
+                        if group.models.count > 1 { removalButton(model) }
                     }
                     if group.models.count > 1, model.id != group.models.last?.id { Divider() }
                 }
@@ -1358,6 +1697,92 @@ struct ModelsView: View {
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(Color.primary.opacity(0.055), in: Capsule())
             .help(label.hasPrefix("Version ") ? model.sourceRevision ?? label : label)
+    }
+
+    private func removalButton(_ model: ModelsInventory.Model) -> some View {
+        Group {
+            if let removal = model.removal {
+                Button {
+                    if let saved = engine.models.first(where: { $0.id == model.id }) {
+                        removalConfirmation = ModelRemovalConfirmation(model: saved, details: model.detailLabels,
+                                                                       isRunning: model.id == engine.loadedID)
+                    }
+                } label: { Image(systemName: "trash").font(.callout).frame(width: 20, height: 22) }
+                    .buttonStyle(.borderless).foregroundStyle(.secondary)
+                    .disabled(engine.busy || removal.action == .unavailable)
+                    .help(removal.action == .unavailable ? removal.message : removal.label)
+                    .accessibilityLabel(removal.label + " " + model.name)
+            }
+        }
+    }
+
+    private func leaveFamily() {
+        selectedFamily = nil; artifactChoices = [:]
+        engine.cancelModelCatalog()
+    }
+
+    private func selectedMode(_ item: FamilyModelCatalog.Item) -> ModelArtifactMode {
+        if let choice = artifactChoices[item.id], item.artifactModes.contains(choice) { return choice }
+        return item.defaultArtifactMode
+    }
+
+    @ViewBuilder
+    private func catalogContent(_ family: ModelsInventory.Family) -> some View {
+        if engine.catalogLoading {
+            VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
+                .frame(maxWidth: .infinity, minHeight: 220)
+        } else if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
+            if catalog.items.isEmpty {
+                VStack(spacing: 10) {
+                    Text("No models listed yet").font(.headline)
+                    Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
+                }.frame(maxWidth: .infinity, minHeight: 220)
+            } else {
+                LazyVStack(spacing: 12) {
+                    ForEach(catalog.items) { item in catalogItem(item) }
+                    if catalog.hasMore { Text("More models may be available on Hugging Face.").font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+        } else {
+            VStack(spacing: 10) {
+                Text(engine.catalog?.status == .offline ? "You’re offline" : "Couldn’t load models").font(.headline)
+                if let message = engine.catalogError { Text(message).font(.callout).foregroundStyle(.secondary) }
+                Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
+            }.frame(maxWidth: .infinity, minHeight: 220)
+        }
+    }
+
+    private func catalogItem(_ item: FamilyModelCatalog.Item) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(item.name).font(.headline).fixedSize(horizontal: false, vertical: true)
+                    Text(item.repo).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)) {
+                    Text("Downloaded").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Button("Download") { engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item)) }
+                        .buttonStyle(.borderedProminent).controlSize(.small).disabled(engine.busy || !item.downloadable)
+                }
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { ForEach(item.detailLabels, id: \.self) { Text($0).fixedSize() } }
+                VStack(alignment: .leading, spacing: 5) { ForEach(item.detailLabels, id: \.self) { Text($0) } }
+            }.font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Text("Version " + item.revision.prefix(7)).font(.caption).foregroundStyle(.secondary).help(item.revision)
+                Spacer(minLength: 0)
+                if item.artifactModes.count > 1 {
+                    Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {
+                        ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden().frame(width: 155).controlSize(.small).disabled(engine.busy)
+                }
+            }
+        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
     }
 }
 

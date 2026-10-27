@@ -36,6 +36,7 @@ from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .model_inventory import model_display
+from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
 from .registry import get_model
 from .sources import huggingface_repository
@@ -44,6 +45,7 @@ from .vision_runtime import supported_image_family
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
 MAX_SUPPORT_BYTES = 65536
+MAX_CATALOG_BYTES = 256 * 1024
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
@@ -159,10 +161,12 @@ class Desktop:
     """Backend for the menu bar app: model library, worker lifecycle and the loopback API.
 
     The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
-    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``) and receives
+    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``,
+    ``catalog``, ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
     one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
     ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
-    ``error``, ``model_families``, ``model_support``). One worker is loaded at a
+    ``error``, ``model_families``, ``model_support``, ``model_catalog``,
+    ``model_removed``, ``model_remove_error``). One worker is loaded at a
     time, under ``self.lock``. ``self.epoch`` increases whenever the model is
     stopped or replaced; commands, queued API
     requests and in-flight replies carry the epoch they started under and are
@@ -187,6 +191,12 @@ class Desktop:
         self.job = None
         self.worker = None
         self.converter = None
+        self.catalog_process = None
+        self.catalog_generation = 0
+        self.catalog_request_id = None
+        self.catalog_family_id = None
+        self.catalog_entries = {}
+        self.catalog_termination_lock = threading.Lock()
         self.install_epoch = None
         self.install_progress = {}
         self.active_model = None
@@ -243,7 +253,7 @@ class Desktop:
                 return
             operation = getattr(self, "_completion_events", {}).get(threading.current_thread())
             if operation is not None and (
-                event in {"ready", "reply", "decision", "error", "installed"}
+                event in {"ready", "reply", "decision", "error", "installed", "model_removed", "model_remove_error"}
                 or (event == "status" and fields.get("state") in {"ready", "idle", "error"})
             ):
                 # The next command must be admissible when the UI sees Ready.
@@ -264,16 +274,305 @@ class Desktop:
         self.emit("status", epoch, state=state, message=message)
 
     def library(self):
-        self.emit(
-            "models",
-            models=[
-                {**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m), "display": model_display(m)}
-                for m in self.models
-            ],
-        )
+        with self.lock:
+            rows = []
+            for model in self.models:
+                display = model_display(model)
+                rows.append(
+                    {
+                        **{key: model[key] for key in ("id", "name", "path")},
+                        "api_id": api_model_id(model),
+                        "display": display,
+                        "artifact_mode": display.get("artifact_mode", "text") if display else "text",
+                        "removal": removal_info(model, self.model_dir, self.models),
+                    }
+                )
+            self.emit(
+                "models",
+                models=rows,
+            )
 
     def families(self):
         self.emit("model_families", report=support_matrix())
+
+    @staticmethod
+    def request_id(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
+
+    def cancel_catalog(self, request_id=None):
+        with self.lock:
+            if request_id is not None and request_id != getattr(self, "catalog_request_id", None):
+                return
+            self.catalog_generation = getattr(self, "catalog_generation", 0) + 1
+            process = getattr(self, "catalog_process", None)
+            self.catalog_process = None
+            self.catalog_request_id = None
+            self.catalog_family_id = None
+            self.catalog_entries = {}
+        self.terminate_catalog(process)
+
+    def terminate_catalog(self, process):
+        if process is None:
+            return
+        with self.catalog_termination_lock:
+            try:
+                terminate(process)
+            except PermissionError:
+                if process.poll() is None:
+                    raise
+
+    def start_catalog(self, family, request_id):
+        allowed = {item["family_id"] for item in support_matrix()["families"] if item["model_kind"] == "language"}
+        if family not in allowed or not self.request_id(request_id):
+            raise DesktopError("Choose a model family to browse.")
+        self.cancel_catalog()
+        with self.lock:
+            self.catalog_request_id, self.catalog_family_id = request_id, family
+            generation = self.catalog_generation
+        threading.Thread(
+            target=self.load_catalog, args=(family, request_id, generation), name="stark-model-catalog", daemon=True
+        ).start()
+
+    def run_catalog_check(self, command, environment, generation):
+        process = None
+        try:
+            with self.lock:
+                if generation != self.catalog_generation:
+                    return None
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                )
+                self.catalog_process = process
+            pending = bytearray()
+            deadline = time.monotonic() + 120
+            while True:
+                with self.lock:
+                    if generation != self.catalog_generation:
+                        return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError()
+                if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > MAX_CATALOG_BYTES:
+                    raise ValueError()
+            with self.lock:
+                if generation != self.catalog_generation:
+                    return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+                raise ValueError()
+            return json.loads(pending)
+        finally:
+            if process is not None:
+                self.terminate_catalog(process)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    if process.poll() is None:
+                        raise
+                if process.stdout is not None:
+                    process.stdout.close()
+                with self.lock:
+                    if self.catalog_process is process:
+                        self.catalog_process = None
+
+    def catalog_report(self, value, family):
+        if (
+            not isinstance(value, dict)
+            or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1
+            or value.get("family_id") != family
+            or value.get("status") not in {"ready", "offline", "error"}
+            or not isinstance(value.get("message"), str)
+            or not 0 < len(value["message"]) <= 2000
+            or not isinstance(value.get("items"), list)
+            or len(value["items"]) > 30
+            or type(value.get("has_more")) is not bool
+        ):
+            raise ValueError()
+        if value["status"] != "ready" and value["items"]:
+            raise ValueError()
+        ids = set()
+        for item in value["items"]:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{32}", item["id"]) is None
+                or item["id"] in ids
+                or not isinstance(item.get("repo"), str)
+                or huggingface_repository(item["repo"]) != item["repo"]
+                or not isinstance(item.get("revision"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", item["revision"]) is None
+                or not isinstance(item.get("name"), str)
+                or not 0 < len(item["name"].encode()) <= 256
+                or any(ord(char) < 32 or ord(char) == 127 for char in item["name"])
+                or not isinstance(item.get("quantization"), str)
+                or not 0 < len(item["quantization"]) <= 64
+                or item.get("downloadable") is not True
+                or not isinstance(item.get("artifact_modes"), list)
+                or not item["artifact_modes"]
+                or len(item["artifact_modes"]) != len(set(item["artifact_modes"]))
+                or not set(item["artifact_modes"]) <= {"text", "vision-language"}
+                or item.get("default_artifact_mode") not in item["artifact_modes"]
+            ):
+                raise ValueError()
+            for key in ("parameter_count", "weight_bytes"):
+                if item.get(key) is not None and (type(item[key]) is not int or not 0 < item[key] <= 2**63 - 1):
+                    raise ValueError()
+            if item.get("size_label") is not None and (
+                not isinstance(item["size_label"], str) or not 0 < len(item["size_label"]) <= 64
+            ):
+                raise ValueError()
+            ids.add(item["id"])
+        return value
+
+    def catalog_installed_ids(self, item, artifact_mode=None, descriptions=None):
+        identifiers = []
+        descriptions = (
+            descriptions
+            if descriptions is not None
+            else [(model["id"], model_display(model)) for model in self.models]
+        )
+        for identifier, display in descriptions:
+            if (
+                display
+                and display["group_id"] == "repo:" + item["repo"]
+                and display["source_revision"] == item["revision"]
+                and (artifact_mode is None or display["artifact_mode"] == artifact_mode)
+            ):
+                identifiers.append(identifier)
+        return identifiers
+
+    def load_catalog(self, family, request_id, generation):
+        command = [sys.executable, "-I", "-B", "-m", "stark_convert.cli", "--family-models", family]
+        environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+        try:
+            report = self.run_catalog_check(command, environment, generation)
+            if report is None:
+                return
+            report = self.catalog_report(report, family)
+        except Exception:
+            report = {
+                "schema_version": 1,
+                "family_id": family,
+                "status": "error",
+                "items": [],
+                "has_more": False,
+                "message": "Models could not be loaded. Check your connection and try again.",
+            }
+        with self.lock:
+            if generation != self.catalog_generation or request_id != self.catalog_request_id:
+                return
+            self.catalog_entries = {item["id"]: dict(item) for item in report["items"]}
+            descriptions = [(model["id"], model_display(model)) for model in self.models]
+            report = {
+                **report,
+                "items": [
+                    {**item, "installed_ids": self.catalog_installed_ids(item, descriptions=descriptions)}
+                    for item in report["items"]
+                ],
+            }
+            self.emit("model_catalog", request_id=request_id, family_id=family, report=report)
+
+    def install_catalog(self, payload):
+        with self.lock:
+            if self.job is not None and self.job.is_alive():
+                raise DesktopError("Wait for the current operation or choose Stop.")
+            if payload.get("catalog_request_id") != self.catalog_request_id:
+                raise DesktopError("Refresh this family before downloading a model.")
+            identifier = payload.get("entry_id")
+            item = self.catalog_entries.get(identifier) if isinstance(identifier, str) else None
+            request_id = payload.get("support_request_id")
+            if item is None or not self.request_id(request_id):
+                raise DesktopError("Choose an available model to download.")
+            mode = payload.get("artifact_mode", item["default_artifact_mode"])
+            if mode not in item["artifact_modes"]:
+                raise DesktopError("Choose an available model version.")
+            installed = self.catalog_installed_ids(item, mode)
+            previous = next((model for model in self.models if model["id"] in installed), None)
+            if previous is not None and model_valid(Path(previous["path"])):
+                self.library()
+                self.emit(
+                    "installed",
+                    model={key: previous[key] for key in ("id", "name", "path")},
+                    support_request_id=request_id,
+                )
+                self.status("ready" if self.worker else "idle", "Model already downloaded")
+                return
+            self.start(
+                self.install,
+                "installing",
+                "Checking model support…",
+                "huggingface",
+                item["repo"],
+                mode,
+                mode,
+                request_id,
+                item["revision"],
+                request_id=request_id,
+            )
+
+    def remove_saved_model(self, epoch, identifier, action, request_id):
+        stopped = False
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                model = next((entry for entry in self.models if entry["id"] == identifier), None)
+                if model is None:
+                    raise RemovalError("This model is no longer in your library.")
+                plan = prepare_removal(model, self.model_dir, self.models)
+                if plan.action != action:
+                    raise RemovalError("The model folder changed. Refresh your library before removing it.")
+                if self.active_model == identifier:
+                    self.close_worker()
+                    stopped = True
+                original = list(self.models)
+
+                def commit():
+                    self.models[:] = [entry for entry in original if entry["id"] != identifier]
+                    try:
+                        self.persist()
+                    except BaseException:
+                        self.models[:] = original
+                        raise
+
+                result = remove_model(plan, commit)
+                self.library()
+                self.emit(
+                    "model_removed",
+                    epoch,
+                    request_id=request_id,
+                    stopped_model_id=identifier if stopped else None,
+                    **result,
+                )
+                self.status("ready" if self.worker else "idle", "Model removed", epoch)
+        except Exception as error:
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                message = (
+                    str(error) if isinstance(error, RemovalError) else "The model could not be removed. Try again."
+                )
+                self.emit(
+                    "model_remove_error",
+                    epoch,
+                    request_id=request_id,
+                    model_id=identifier,
+                    message=message,
+                    stopped_model_id=identifier if stopped else None,
+                )
+                self.status("ready" if self.worker else "idle", "Ready" if self.worker else "Model stopped", epoch)
 
     def persist(self):
         temporary = self.data_dir / (".models-" + uuid.uuid4().hex)
@@ -339,6 +638,7 @@ class Desktop:
             self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
 
     def stop(self, quiet=False):
+        self.cancel_catalog()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
@@ -367,10 +667,14 @@ class Desktop:
             except MediaError:
                 raise DesktopError("Cannot clear private image storage. Quit and reopen Stark.") from None
 
-    def start(self, function, state, message, *args):
+    def start(self, function, state, message, *args, request_id=None):
         with self.lock:
             if self.job is not None and self.job.is_alive():
-                self.emit("error", message="Wait for the current operation or choose Stop.")
+                self.emit(
+                    "error",
+                    message="Wait for the current operation or choose Stop.",
+                    **({"request_id": request_id} if request_id else {}),
+                )
                 return
             epoch = self.epoch
             installing = state == "installing"
@@ -389,7 +693,9 @@ class Desktop:
                     if epoch == self.epoch:
                         if installing:
                             self.fail_install_progress(epoch)
-                        self.emit("error", epoch, message=str(error))
+                        self.emit(
+                            "error", epoch, message=str(error), **({"request_id": request_id} if request_id else {})
+                        )
                         self.status(
                             "ready" if self.worker else "error", "Ready" if self.worker else "Operation failed", epoch
                         )
@@ -399,7 +705,10 @@ class Desktop:
                             self.fail_install_progress(epoch)
                         self.close_worker()
                         self.emit(
-                            "error", epoch, message="Unable to complete the operation. Check the model and try again."
+                            "error",
+                            epoch,
+                            message="Unable to complete the operation. Check the model and try again.",
+                            **({"request_id": request_id} if request_id else {}),
                         )
                         self.status("error", "Operation failed", epoch)
                 finally:
@@ -554,7 +863,9 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
-    def check_install_support(self, epoch, kind, source, selected_mode, support_mode, request_id):
+    def check_install_support(
+        self, epoch, kind, source, selected_mode, support_mode, request_id, expected_revision=None
+    ):
         command = [
             sys.executable,
             "-I",
@@ -568,6 +879,8 @@ class Desktop:
             "--artifact-mode",
             selected_mode,
         ]
+        if expected_revision is not None:
+            command.extend(["--revision", expected_revision])
         if kind == "local" or get_model(source) is None:
             command.extend(["--metadata-profile", "hf-generic"])
         if kind == "local":
@@ -584,6 +897,8 @@ class Desktop:
                 raise DesktopError("The model support report does not match this installation. Retry.")
             identity = report["source"]
             revision = identity.get("revision")
+            if report["status"] == "conditional" and expected_revision is not None and revision != expected_revision:
+                raise DesktopError("The model version changed. Refresh this family and try again.")
             if kind == "huggingface" and (
                 identity.get("repo") != source
                 or not isinstance(revision, str)
@@ -596,7 +911,22 @@ class Desktop:
                 raise DesktopError(report["message"])
             return revision
 
-    def install(self, epoch, kind, source, artifact_mode=None, support_mode=None, support_request_id=None):
+    def install(
+        self,
+        epoch,
+        kind,
+        source,
+        artifact_mode=None,
+        support_mode=None,
+        support_request_id=None,
+        expected_revision=None,
+    ):
+        if expected_revision is not None and (
+            kind != "huggingface"
+            or not isinstance(expected_revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
+        ):
+            raise DesktopError("Choose a pinned model version to download.")
         if artifact_mode not in (None, "text", "vision-language"):
             raise DesktopError("Choose text or vision-language conversion.")
         selected_mode = artifact_mode or "text"
@@ -651,7 +981,12 @@ class Desktop:
                 (
                     m
                     for m in self.models
-                    if m["source"] == source_key and m.get("artifact_mode", "text") == selected_mode
+                    if m["source"] == source_key
+                    and m.get("artifact_mode", "text") == selected_mode
+                    and (
+                        expected_revision is None
+                        or (model_display(m) or {}).get("source_revision") == expected_revision
+                    )
                 ),
                 None,
             )
@@ -666,7 +1001,12 @@ class Desktop:
                     previous["image_verification"] = verification
                     self.persist()
                 self.finish_install_progress(epoch, skipped=True)
-                self.emit("installed", epoch, model={k: previous[k] for k in ("id", "name", "path")})
+                self.emit(
+                    "installed",
+                    epoch,
+                    model={k: previous[k] for k in ("id", "name", "path")},
+                    support_request_id=support_request_id,
+                )
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
                 return
         identifier = uuid.uuid4().hex
@@ -676,7 +1016,13 @@ class Desktop:
         try:
             if not converted:
                 source_revision = self.check_install_support(
-                    epoch, kind, str(path) if kind == "local" else source, selected_mode, purpose, support_request_id
+                    epoch,
+                    kind,
+                    str(path) if kind == "local" else source,
+                    selected_mode,
+                    purpose,
+                    support_request_id,
+                    **({"expected_revision": expected_revision} if expected_revision is not None else {}),
                 )
                 with self.lock:
                     if epoch != self.epoch:
@@ -736,7 +1082,12 @@ class Desktop:
                 managed = None  # The registry now owns the managed folder.
                 self.finish_install_progress(epoch, skipped=converted)
                 self.library()
-                self.emit("installed", epoch, model={k: model[k] for k in ("id", "name", "path")})
+                self.emit(
+                    "installed",
+                    epoch,
+                    model={k: model[k] for k in ("id", "name", "path")},
+                    support_request_id=support_request_id,
+                )
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
@@ -1287,6 +1638,34 @@ class Desktop:
             self.library()
         elif command == "support":
             self.families()
+        elif command == "catalog":
+            self.start_catalog(payload.get("family_id"), payload.get("request_id"))
+        elif command == "catalog_cancel":
+            if not self.request_id(payload.get("request_id")):
+                raise DesktopError("Invalid model catalogue request.")
+            self.cancel_catalog(payload["request_id"])
+        elif command == "install_catalog":
+            try:
+                self.install_catalog(payload)
+            except DesktopError as error:
+                self.emit("error", message=str(error), request_id=payload.get("support_request_id"))
+        elif command == "remove_model":
+            identifier, action, request_id = payload.get("model_id"), payload.get("action"), payload.get("request_id")
+            if (
+                not isinstance(identifier, str)
+                or action not in {"trash", "unregister"}
+                or not self.request_id(request_id)
+            ):
+                raise DesktopError("Choose a model and removal action.")
+            self.start(
+                self.remove_saved_model,
+                "removing",
+                "Removing model…",
+                identifier,
+                action,
+                request_id,
+                request_id=request_id,
+            )
         elif command in ("stop", "quit"):
             self.stop()
             return command != "quit"

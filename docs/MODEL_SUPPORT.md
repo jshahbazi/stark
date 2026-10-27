@@ -11,8 +11,35 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
-The app presents a name-only family catalogue. Conversion-only families are
-omitted from that list. **On this Mac** groups saved versions by their bound,
+## Browsing and removing models
+
+The app's **Models…** view lists application model families. Choose a family to
+browse compatible models, sizes and quantizations and download a choice directly.
+Conversion-only families are omitted. Cards offer text or image artifacts when
+both are available, with image output selected by default only when the full
+Qwen3.5 BF16 model's vision configuration and processing metadata pass inspection.
+An image choice still needs the normal installation and local runtime checks.
+The download and preparation progress remain in the browser. Completion adds
+the model to the library without selecting it for use.
+
+The download catalogue combines registered reference sources with a bounded live
+Hugging Face search. Parsed configuration identifies the family; repository
+names alone do not establish compatibility. At most 45 candidates are inspected
+and 30 choices are returned, preserving representative sizes and formats when
+available. Only supported floating Safetensors and implemented MLX 4-bit/8-bit
+paths are offered. Embedding/reranking tasks, known internal test models,
+quantized vision, MoE, adapter-only and unsupported packed formats are excluded.
+An uncatalogued compatible fine-tune can appear. This is
+a representative list, not an exhaustive inventory of Hugging Face.
+
+Discovery reads bounded metadata and repository file information, without
+requesting weight payloads or executing repository code. Parameter counts and
+download bytes appear only when usable metadata supplies them. Floating sources
+are shown as BF16, the native output format; packed tensor counts are not shown
+as logical parameter counts. Missing metadata can leave a size unknown or omit
+a candidate. Offline and failed discovery have fixed messages and can be retried.
+
+**On this Mac** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
 standalone entry with its stored name. Cards show matrix quantization, stored
 weight-file size and source revision when available. Matrix representation is
@@ -25,6 +52,14 @@ or source catalog adapter. The actually loaded
 model is marked as running. Browsing does not select or load models or grant
 runtime capabilities. The full registry and its operation constraints remain
 available through the CLI; the app does not label families as decision models.
+
+Each saved version has a removal action with a confirmation. An exclusively
+owned managed folder offers **Move to Trash**. Imported, shared or otherwise
+unowned paths offer **Remove from Stark**, leaving files untouched. The backend
+rechecks the offered action and directory identity before moving files. A failed
+registry update restores the library and attempts to restore the moved folder.
+Removing the loaded model stops its worker; removing another model preserves
+the active worker. Local qualification receipts retain their separate identity.
 
 ## Modes and support states
 
@@ -86,6 +121,14 @@ sources. Source, mode and operation identity fence late
 results so that a check for a previous selection cannot authorize the current
 download. Metadata inspection does not execute repository model code.
 
+A browser download also pins the catalogue card's immutable primary revision.
+The backend caches the offered repository, revision and artifact modes under
+the catalogue request and opaque entry ID. The app submits that ID and selected
+mode; it cannot supply a replacement source through this command. Installation
+repeats preflight at the cached revision and rejects a changed revision before
+weight download. A **Downloaded** marker requires a saved model with the same
+bound repository, revision and artifact mode.
+
 A successful metadata check remains provisional. Full conversion validates the
 actual tensor inventory, shapes, dtypes and payloads. Native admission validates
 the emitted artifact. Runtime checks then establish the capability appropriate
@@ -105,6 +148,20 @@ List the shared matrix without a checkpoint or weight download:
 ```sh
 uv run --project tools/converter --locked stark-convert --list-families
 ```
+
+Browse a family's representative download choices without fetching weights:
+
+```sh
+uv run --project tools/converter --locked stark-convert --family-models qwen3_5
+```
+
+This source-free command returns a schema-1 report with `family_id`, `status`
+(`ready`, `offline` or `error`), a fixed `message`, `items` and `has_more`. Each
+item binds an opaque `id` to `repo`, immutable `revision`, `name`, optional
+`size_label`, `parameter_count` and `weight_bytes`, `quantization`, offered
+`artifact_modes` and `default_artifact_mode`. A ready report may have no choices.
+It does not create converted output or grant runtime capabilities. `--offline`
+returns an offline discovery report without contacting Hugging Face.
 
 Inspect a checkpoint's intended text use:
 

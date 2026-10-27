@@ -54,6 +54,22 @@ Inspect it without downloading a checkpoint:
 uv run --project tools/converter --locked stark-convert --list-families
 ```
 
+Browse representative download choices for one family without fetching weights:
+
+```sh
+uv run --project tools/converter --locked stark-convert --family-models qwen3_5
+```
+
+This combines reference sources with bounded live Hugging Face discovery, using
+parsed configuration and recognized source formats. It inspects at most 45
+candidates and returns at most 30 choices, preserving available sizes and
+quantizations. It reads bounded metadata and repository file information only.
+The JSON report has `ready`, `offline` or `error` status; each choice includes an
+immutable primary revision, metadata-derived size when known, native output
+quantization and offered artifact modes. Missing size metadata remains unknown.
+The list is representative, and a compatible fine-tune can appear without a
+registered catalogue entry. `--offline` returns an offline report.
+
 Check source metadata before downloading weights:
 
 ```sh
@@ -69,7 +85,11 @@ alone does not establish complete-model support, execution or decision
 calibration. `--support-mode` can also require intended-mode eligibility during
 actual conversion before weights are requested. The app uses the same path and
 pins the checked primary source revision. External catalog metadata is resolved
-and checked again during conversion.
+and checked again during conversion. In the app's family browser, the backend
+caches each offered revision and mode, then repeats preflight at that revision
+before downloading. The browser keeps installation progress visible and adds
+the result to the library without selecting or running it. See the
+[model browser and removal workflow](../../apps/menu-bar/README.md#models-and-requests).
 
 ## Command reference
 
@@ -94,6 +114,7 @@ stark-convert [SOURCE] [options]
 | `--write-source-manifest PATH` | | Write a private manifest describing every selected source file |
 | `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
 | `--list-families` | | Print the shared family/mode/format matrix without a source or download |
+| `--family-models FAMILY` | family ID, such as `qwen3_5` | Print representative compatible download choices from bounded live metadata discovery; no source or output directory required |
 | `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
 | `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |
 | `--capabilities` | | Report catalog coverage for `SOURCE` without reading or downloading it |

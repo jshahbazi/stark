@@ -103,6 +103,32 @@ def test_revisions_and_quantizations_group_same_repo_but_fine_tunes_remain_disti
     assert first["quantization"] != second["quantization"]
 
 
+@pytest.mark.parametrize("mode", [[], {}, None, True, "unknown"])
+def test_malformed_optional_artifact_mode_falls_back_without_blocking(tmp_path, mode):
+    model = artifact(tmp_path / "model")
+    model["artifact_mode"] = mode
+    assert inventory.model_display(model)["artifact_mode"] == "text"
+    output = io.StringIO()
+    host = Desktop(tmp_path / "unused-worker", tmp_path / "data", output)
+    host.models = [model]
+    host.library()
+    event = json.loads(output.getvalue())
+    assert event["models"][0]["artifact_mode"] == "text"
+
+
+def test_native_config_determines_image_variant_despite_bad_registry_mode(tmp_path):
+    model = artifact(tmp_path / "model")
+    model["artifact_mode"] = []
+    (tmp_path / "model/config.json").write_text('{"type":"Qwen35VisionLanguageModelConfig"}')
+    assert inventory.model_display(model)["artifact_mode"] == "vision-language"
+
+
+def test_native_text_config_overrides_stale_image_registry_mode(tmp_path):
+    model = artifact(tmp_path / "model")
+    model["artifact_mode"] = "vision-language"
+    assert inventory.model_display(model)["artifact_mode"] == "text"
+
+
 def test_floating_convolutions_without_matrix_specs_do_not_hide_bf16(tmp_path):
     artifact(tmp_path)
     path = tmp_path / "model.safetensors"

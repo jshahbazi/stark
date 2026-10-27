@@ -39,8 +39,27 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 **Models…** opens a model browser. **On this Mac** groups your saved models and
 their downloaded versions, showing their quantization, disk size and source
 version when that information is available. The model currently running is
-marked **Running**. **Model families** is a simple catalogue of family names.
-Stark checks each model's compatibility when you install it.
+marked **Running**. In **Model families**, choose a family to browse available
+models, sizes and quantizations, then choose **Download**. When both text and
+image versions are offered, the card lets you choose which to install. Download
+and preparation progress stay in the browser. Completing a download adds the
+model to **On this Mac** without selecting it; choose it and **Run** when ready.
+Some image installations stop the running model for
+their required local checks.
+
+The family list combines reference models with a bounded live search on Hugging
+Face. It shows representative compatible choices rather than every repository.
+Model size and download bytes appear when source metadata provides them. Browsing
+reads metadata only. Stark checks the selected model again before downloading
+weights and uses the source version shown on its card. **Back** or **Done**
+leaves the browser; **Stop** cancels an active installation.
+
+Use a model's trash button in **On this Mac** to review its removal. **Move to
+Trash** removes an owned model folder from Stark and puts its files in macOS
+Trash. Imported folders and paths Stark cannot establish as exclusively owned
+offer **Remove from Stark**, which leaves their files in place. The confirmation
+identifies the model and warns when its running worker will stop. Removing
+another model keeps the current worker running.
 
 Raw-checkpoint installation first checks bounded
 metadata for the selected use before weight download. A conditional path

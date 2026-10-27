@@ -600,6 +600,7 @@ def main() -> int:
         action="store_true",
         help="List structural family coverage separately from checkpoint qualification",
     )
+    parser.add_argument("--family-models", help="Browse compatible model-family downloads without fetching weights")
     parser.add_argument(
         "--preflight", action="store_true", help="Check bounded model metadata without downloading weights"
     )
@@ -617,8 +618,15 @@ def main() -> int:
     progress_sink = None
     progress = None
     try:
-        if sum((args.capabilities, args.list_families, args.preflight)) > 1:
+        if sum((args.capabilities, args.list_families, args.preflight, args.family_models is not None)) > 1:
             raise ValueError("conflicting_inspection_actions")
+        if args.family_models is not None:
+            from .model_catalog import family_catalog
+
+            logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
+            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+            print(json.dumps(family_catalog(args.family_models, offline=args.offline), sort_keys=True))
+            return 0
         if args.list_families:
             print(json.dumps(support_matrix(), sort_keys=True))
             return 0
