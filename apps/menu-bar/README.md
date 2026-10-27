@@ -36,6 +36,9 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 **Install Model** accepts a local folder or a Hugging Face repository name or URL such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model is registered in place; a supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted. Supported models are governed by the [converter](../../tools/converter/README.md). The install dialog shows Download and Conversion progress; **Stop** cancels; **Installation Progress** in the menu and Command-I reopen the dialog.
 
+The source tabs start with **Hugging Face**, selected by default, followed by
+**Local Folder**.
+
 **Models…** opens a model browser. Search and sort settings are separate for
 **On this Mac**, the family overview and a family's detail view. Search filters
 the visible rows immediately; family search uses the current catalogue and does
@@ -44,7 +47,10 @@ current browsing session. Sort choices are remembered between app launches.
 
 **On this Mac** groups saved variants by model and shows quantization, disk size
 and source version when available. Sort by model name A–Z or Z–A, or total disk
-size ascending or descending. In **Model families**, model cards group size and
+size ascending or descending. Saved versions with a recorded source repository
+also have a **link** beside the file size; local imports can use their conversion
+receipt to identify that source. Models without a known repository omit the link.
+In **Model families**, model cards group size and
 quantization choices into compact rows. Choose a family, filter its model cards,
 then choose a row and **Download**.
 Inside a family, the tabs at the top switch between **All models** and each

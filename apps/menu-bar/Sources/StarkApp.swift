@@ -153,6 +153,14 @@ struct InstalledModelDisplay: Equatable {
     let weightBytes: Int64?
     let sourceRevision: String?
 
+    var repositoryURL: URL? {
+        guard groupID.hasPrefix("repo:") else { return nil }
+        let repository = String(groupID.dropFirst(5))
+        guard repository.range(of: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+                               options: .regularExpression) != nil else { return nil }
+        return URL(string: "https://huggingface.co/" + repository)
+    }
+
     init?(_ value: Any?) {
         guard let value = value as? [String: Any], SupportMetadata.schemaOne(value),
               let groupID = Self.text(value["group_id"], maximum: 512),
@@ -743,6 +751,7 @@ struct ModelsInventory {
         let removal: InstalledModelRemoval?
         let artifactMode: ModelArtifactMode?
         let sourceName: String
+        let repositoryURL: URL?
 
         var detailLabels: [String] {
             [quantization,
@@ -776,7 +785,7 @@ struct ModelsInventory {
             Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
                   sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
-                  sourceName: model.display?.groupID ?? model.apiID)
+                  sourceName: model.display?.groupID ?? model.apiID, repositoryURL: model.display?.repositoryURL)
         }
         let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
@@ -1948,7 +1957,7 @@ struct ModelsView: View {
                 if group.models.count == 1 { removalButton(group.models[0]) }
             }
             ForEach(group.models) { model in
-                if model.name != group.name || !model.detailLabels.isEmpty || group.models.count > 1 {
+                if model.name != group.name || !model.detailLabels.isEmpty || group.models.count > 1 || model.repositoryURL != nil {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 7) {
                             if model.name != group.name || (group.models.count > 1 && model.detailLabels.isEmpty) {
@@ -1956,12 +1965,13 @@ struct ModelsView: View {
                             }
                             ViewThatFits(in: .horizontal) {
                                 HStack(spacing: 6) {
-                                    ForEach(model.detailLabels, id: \.self) { variantBadge($0, model: model).fixedSize() }
+                                    ForEach(model.detailLabels, id: \.self) { variantDetail($0, model: model).fixedSize() }
                                 }
                                 VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(model.detailLabels, id: \.self) { variantBadge($0, model: model) }
+                                    ForEach(model.detailLabels, id: \.self) { variantDetail($0, model: model) }
                                 }
                             }
+                            if model.detailLabels.isEmpty { modelRepositoryLink(model) }
                         }
                         Spacer(minLength: 0)
                         if group.models.count > 1, model.isRunning { runningBadge }
@@ -1987,6 +1997,21 @@ struct ModelsView: View {
             .padding(.horizontal, 8).padding(.vertical, 4)
             .background(Color.primary.opacity(0.055), in: Capsule())
             .help(label.hasPrefix("Version ") ? model.sourceRevision ?? label : label)
+    }
+
+    private func variantDetail(_ label: String, model: ModelsInventory.Model) -> some View {
+        HStack(spacing: 6) {
+            variantBadge(label, model: model)
+            let anchor = model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? model.detailLabels.last
+            if label == anchor { modelRepositoryLink(model) }
+        }
+    }
+
+    @ViewBuilder
+    private func modelRepositoryLink(_ model: ModelsInventory.Model) -> some View {
+        if let repositoryURL = model.repositoryURL {
+            Link("link", destination: repositoryURL).font(.caption).fixedSize().help(repositoryURL.absoluteString)
+        }
     }
 
     private func removalButton(_ model: ModelsInventory.Model) -> some View {
@@ -2110,7 +2135,7 @@ struct InstallSupportView: View {
 
 struct InstallView: View {
     @ObservedObject var engine: EngineController
-    @State private var kind = "local"
+    @State private var kind = "huggingface"
     @State private var source = ""
     @State private var visionConversion = false
     @State private var showingModels = false
@@ -2134,8 +2159,8 @@ struct InstallView: View {
                 }.buttonStyle(.link).font(.caption)
             }
             Picker("Source", selection: $kind) {
-                Text("Local Folder").tag("local")
                 Text("Hugging Face").tag("huggingface")
+                Text("Local Folder").tag("local")
             }.pickerStyle(.segmented).onChange(of: kind) { source = ""; engine.resetInstallProgress(kind: kind) }.disabled(engine.busy)
             if kind == "local" {
                 Text("Choose a converted Stark model or a supported Safetensors checkpoint folder. Converted models stay in the selected folder; keep that folder available.")
