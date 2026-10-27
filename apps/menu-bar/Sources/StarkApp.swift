@@ -399,7 +399,9 @@ final class EngineController: ObservableObject {
     @Published var loadedID = ""
     @Published var state = "idle"
     @Published var message = "Starting Stark…"
-    @Published var errorMessage: String?
+    @Published var errorMessage: String? {
+        didSet { installErrorMessage = nil }
+    }
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
@@ -444,6 +446,7 @@ final class EngineController: ObservableObject {
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
     private var pendingSupportRequestID: String?
+    private var installErrorMessage: String?
 
     var busy: Bool { ["loading", "generating", "deciding", "installing", "stopping", "configuring"].contains(state) }
     var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
@@ -657,6 +660,7 @@ final class EngineController: ObservableObject {
         case "error":
             pendingSupportRequestID = nil
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+            if state == "installing" { installErrorMessage = errorMessage }
             if state == "installing" { endInstallProgress("failed") }
             discardPendingMessage()
             pendingOptions = nil
@@ -946,6 +950,8 @@ final class EngineController: ObservableObject {
     }
 
     private func clearInstallSupport() {
+        if let previous = installErrorMessage, errorMessage == previous { errorMessage = nil }
+        installErrorMessage = nil
         pendingSupportRequestID = nil
         installSupportReport = nil
     }

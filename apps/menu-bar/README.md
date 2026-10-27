@@ -41,7 +41,8 @@ with format constraints. Raw-checkpoint installation first checks bounded
 metadata for the selected use before weight download. A conditional path
 continues automatically; unsupported or inconclusive results stop inline with a
 specific explanation and available alternatives. The actual download uses the
-checked immutable primary source revision. External catalog metadata is resolved
+checked immutable primary source revision. Changing the source or requested image
+support clears the previous installation warning. External catalog metadata is resolved
 and checked again by conversion. Family coverage does not establish that a
 complete model has loaded, executed or produced calibrated decisions. See the
 [support states and preflight contract](../../docs/MODEL_SUPPORT.md).

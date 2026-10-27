@@ -237,6 +237,47 @@ extension EngineController {
             engine.state = "ready"
             engine.resetInstallProgress(kind: "huggingface")
             return engine.installSupportReport == nil
+        case "install-error-reset":
+            let failure = "This model architecture has no implemented converter."
+            engine.install(source: "fixture/unsupported", kind: "huggingface")
+            let requested = command()
+            var report = supportReport("unsupported")
+            report["message"] = failure
+            engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
+            engine.apply(["event": "error", "message": failure])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.errorMessage == failure, engine.installSupportReport != nil else { return false }
+            engine.resetInstallProgress(kind: "huggingface")
+            guard engine.errorMessage == nil, engine.installSupportReport == nil, engine.loadedID == "fixture-model",
+                  engine.downloadProgress.state == "waiting" else { return false }
+            engine.install(source: "fixture/metadata-unavailable", kind: "local")
+            _ = command()
+            engine.apply(["event": "error", "message": "Fixture support timeout without a report"])
+            engine.apply(["event": "status", "state": "error", "message": "Operation failed"])
+            engine.resetInstallProgress(kind: "local")
+            return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
+        case "install-error-runtime-retained":
+            let failure = "Fixture failure shared by install and runtime"
+            engine.install(source: "fixture/source", kind: "huggingface")
+            _ = command()
+            engine.apply(["event": "error", "message": failure])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            // Even identical text from a later runtime error has different ownership.
+            engine.apply(["event": "error", "message": failure])
+            engine.resetInstallProgress(kind: "local")
+            guard engine.errorMessage == failure else { return false }
+            engine.errorMessage = "Fixture attachment validation error"
+            engine.resetInstallProgress(kind: "huggingface")
+            return engine.errorMessage == "Fixture attachment validation error"
+        case "install-error-active-guard":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            _ = command()
+            engine.apply(["event": "error", "message": "Fixture install failure"])
+            engine.resetInstallProgress(kind: "local")
+            guard engine.errorMessage == "Fixture install failure", engine.downloadProgress.state == "failed" else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.resetInstallProgress(kind: "local")
+            return engine.errorMessage == nil && engine.downloadProgress.state == "skipped"
         case "support-shutdown-fence":
             engine.apply(["event": "model_families", "report": familyRegistry()])
             engine.install(source: "fixture/source", kind: "huggingface")
@@ -691,6 +732,15 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_failed_install_retains_current_report_and_fences_late_events(self):
         self.exercise("support-completion-fence")
+
+    def test_source_or_install_reset_clears_only_previous_install_error(self):
+        self.exercise("install-error-reset")
+
+    def test_install_reset_preserves_later_runtime_or_attachment_errors(self):
+        self.exercise("install-error-runtime-retained")
+
+    def test_install_error_cannot_clear_before_active_install_finishes(self):
+        self.exercise("install-error-active-guard")
 
     def test_shutdown_clears_registry_and_pending_support_events(self):
         self.exercise("support-shutdown-fence")
