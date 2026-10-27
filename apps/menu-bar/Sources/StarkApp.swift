@@ -1875,20 +1875,20 @@ struct ModelsView: View {
                 } else if let families = inventory.families {
                     if families.isEmpty { emptyState(tab) }
                     else if visibleFamilies(families).isEmpty { noSearchResults("No matching families") }
-                    else { LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    else { LazyVStack(spacing: 4) {
                         ForEach(visibleFamilies(families)) { family in
                             Button {
                                 selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
                                 engine.requestModelCatalog(familyID: family.id)
                             } label: {
                                 HStack {
-                                    Text(family.name).font(.headline)
+                                    Text(family.name).font(.callout.weight(.medium))
                                     Spacer(minLength: 0)
                                     Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                                }.frame(maxWidth: .infinity, minHeight: 62, alignment: .leading)
-                                .padding(.horizontal, 16)
-                                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
-                                .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
+                                }.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
                             }.buttonStyle(.plain).accessibilityLabel("Browse \(family.name) models")
                         }
                     } }

@@ -44,6 +44,7 @@ The source tabs start with **Hugging Face**, selected by default, followed by
 the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
+The family overview uses compact, full-width rows in a single column.
 
 **On this Mac** groups saved variants by model and shows quantization, disk size
 and source version when available. Sort by model name A–Z or Z–A, or total disk
