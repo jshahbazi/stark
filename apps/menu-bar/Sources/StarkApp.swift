@@ -2068,6 +2068,9 @@ struct ModelsView: View {
             Text(item.quantization).font(.callout).frame(width: 48, alignment: .leading)
             Text(item.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
+            if let repositoryURL = URL(string: "https://huggingface.co/" + item.repo) {
+                Link("link", destination: repositoryURL).font(.caption).fixedSize().help(repositoryURL.absoluteString)
+            }
             Spacer(minLength: 0)
             if item.artifactModes.count > 1 {
                 Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {

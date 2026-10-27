@@ -51,6 +51,8 @@ Inside a family, the tabs at the top switch between **All models** and each
 available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
 Search narrows the selected tab and sorting applies to its matching rows.
 Entering another family starts at **All models**.
+Each variant row has a **link** beside its download size that opens its exact
+Hugging Face repository, including the publisher of a quantized export.
 When text and image artifacts are both offered, choose which to install. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last
