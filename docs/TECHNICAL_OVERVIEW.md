@@ -101,6 +101,14 @@ the matching `request_id`. Removal completes with `model_removed` or
 `model_remove_error`, carrying the removal `request_id`, `model_id` and optional
 `stopped_model_id`. Clients accept these results only for the active request.
 
+Catalogue items may include `model_group: {id, name, publisher}` as optional
+presentation metadata. It groups visible model-size and quantization rows but
+does not replace the item's immutable source ID, repository or revision. Missing
+or malformed grouping metadata falls back to grouping by exact repository.
+Search queries are local and transient; sort preferences are persisted separately
+for the saved-model list, family overview and family detail. Typing in a search
+field does not issue another catalogue request.
+
 Library entries can include an optional `display` object with schema version 1:
 `group_id`, `group_name`, nullable `family_id`, `quantization`, `weight_bytes` and
 `source_revision` and `artifact_mode`. It describes saved variants for the model browser. Grouping

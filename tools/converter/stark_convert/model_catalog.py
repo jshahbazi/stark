@@ -30,6 +30,8 @@ MAX_INVENTORY = 16384
 MAX_CONFIG_BYTES = 1024 * 1024
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
 _SIZE = re.compile(r"[0-9]+(?:\.[0-9]+)?[KMBT]\Z", re.IGNORECASE)
+_LINE_SIZE = re.compile(r"(?i)(?<![a-z0-9])[0-9]+(?:\.[0-9]+)?[mbt](?![a-z0-9])")
+_SEPARATOR = re.compile(r"[-_. ]{2,}")
 _FLOAT_DTYPES = {"F16", "BF16", "F32", "F64"}
 _GENERATION_TASKS = {"text-generation", "image-text-to-text", "image-to-text", "conversational", "any-to-any"}
 _OTHER_TASK_TAGS = {
@@ -166,6 +168,75 @@ def _select_items(items, limit):
             chosen.append(item)
             ids.add(item["id"])
     return sorted(chosen, key=_size_order)
+
+
+def _variant_stem(name, quantization):
+    """Remove only a terminal export suffix that agrees with validated format."""
+    name = _without_quantization_suffix(name, quantization)
+    stem = _SEPARATOR.sub("-", _LINE_SIZE.sub("", name, count=1)).strip("-_. ")
+    return (stem or name).casefold()
+
+
+def _without_quantization_suffix(name, quantization):
+    suffixes = {
+        "4-bit": ("-mlx-4bit", "-4bit", "-4-bit"),
+        "8-bit": ("-mlx-8bit", "-8bit", "-8-bit"),
+        "BF16": ("-bf16", "-bfloat16"),
+        "F16": ("-f16", "-fp16", "-float16"),
+    }.get(quantization, ())
+    for suffix in suffixes:
+        if name.casefold().endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def _model_group(family, repo, name, quantization, entry):
+    owner, _basename = repo.split("/", 1)
+    group_owner = owner
+    stem = _variant_stem(name, quantization)
+    base_name = _without_quantization_suffix(name, quantization)
+    label = (
+        _SEPARATOR.sub("-", _LINE_SIZE.sub("", base_name, count=1)).strip("-_. ") or base_name.strip("-_. ") or name
+    )
+    if entry is not None:
+        tokenizer = entry.get("files", {}).get("tokenizer_config", {})
+        base_repo = tokenizer.get("repo") if isinstance(tokenizer, dict) else None
+        if isinstance(base_repo, str) and base_repo != repo:
+            base = next(
+                (
+                    candidate
+                    for candidate in models()
+                    if candidate.get("adapter") == family and candidate.get("repo") == base_repo
+                ),
+                None,
+            )
+            compressed = entry.get("compressed_format") if isinstance(entry, dict) else None
+            expected_bits = {"4-bit": 4, "8-bit": 8}.get(quantization)
+            if (
+                base is not None
+                and expected_bits is not None
+                and isinstance(compressed, dict)
+                and compressed.get("scheme") == "mlx_affine"
+                and compressed.get("bits") == expected_bits
+            ):
+                base_owner, base_name = base_repo.split("/", 1)
+                if (
+                    _without_quantization_suffix(name, quantization).casefold()
+                    == _without_quantization_suffix(base_name, "BF16").casefold()
+                ):
+                    group_owner = base_owner
+                    stem = _variant_stem(base_name, "BF16")
+                    base_label = _without_quantization_suffix(base_name, "BF16")
+                    label = (
+                        _SEPARATOR.sub("-", _LINE_SIZE.sub("", base_label, count=1)).strip("-_. ")
+                        or base_label.strip("-_. ")
+                        or base_name
+                    )
+    # The family and owner are part of the group identity; source revision remains
+    # on the downloadable row, where it pins the actual artifact.
+    identity = f"{family}/{group_owner}/{stem}"
+    group_id = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return {"id": group_id, "name": label[:256], "publisher": group_owner}
 
 
 def _weight_inventory(info):
@@ -440,6 +511,7 @@ def family_catalog(family_id, *, hub=None, limit=MAX_ITEMS, offline=False):
                     "artifact_modes": modes,
                     "default_artifact_mode": modes[-1],
                     "downloadable": True,
+                    "model_group": _model_group(family, repo, repo.split("/")[-1], quantization, entry),
                 }
             except _Unavailable:
                 raise

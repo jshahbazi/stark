@@ -106,6 +106,16 @@ extension EngineController {
              "quantization": "BF16", "artifact_modes": ["text", "vision-language"],
              "default_artifact_mode": "vision-language", "downloadable": true, "installed_ids": [String]()]
         }
+        func groupedCatalogItem(_ id: String, repo: String, name: String, group: String, groupName: String,
+                                publisher: String, size: String? = "0.6B", quantization: String = "BF16",
+                                parameters: Int64? = nil) -> [String: Any] {
+            var item = catalogItem(id)
+            item["repo"] = repo; item["name"] = name; item["quantization"] = quantization
+            item["size_label"] = size as Any? ?? NSNull()
+            item["parameter_count"] = parameters as Any? ?? NSNull()
+            item["model_group"] = ["id": String(repeating: group, count: 32), "name": groupName, "publisher": publisher]
+            return item
+        }
         func catalogReport(_ family: String, status: String = "ready", items: [[String: Any]]? = nil) -> [String: Any] {
             ["schema_version": 1, "family_id": family, "status": status, "message": "Fixture catalog message",
              "items": items ?? (status == "ready" ? [catalogItem()] : []), "has_more": false]
@@ -350,6 +360,164 @@ extension EngineController {
             var large = catalogItem("large"); large["parameter_count"] = Int64(1_700_000_000); large["size_label"] = "1.7B"
             guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: [catalogItem("small"), small4, small8, large])) else { return false }
             return catalog.items.map(\.id) == ["small", "small4", "small8", "large"]
+        case "catalog-grouped-size-quantization-rows":
+            let raw = [
+                groupedCatalogItem("large", repo: "Qwen/Qwen3-1.7B", name: "Qwen3-1.7B", group: "1", groupName: "Qwen3", publisher: "Qwen", size: "1.7B"),
+                groupedCatalogItem("compact", repo: "Qwen/Qwen3-0.6B-MLX-4bit", name: "Qwen3-0.6B-MLX-4bit", group: "1", groupName: "Qwen3", publisher: "Qwen", quantization: "4-bit"),
+                groupedCatalogItem("small", repo: "Qwen/Qwen3-0.6B", name: "Qwen3-0.6B", group: "1", groupName: "Qwen3", publisher: "Qwen")
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let inventory = CatalogBrowserInventory(items: catalog.items)
+            guard inventory.groups.count == 1, let group = inventory.groups.first,
+                  group.name == "Qwen3", group.publisher == "Qwen", group.items.count == 3,
+                  Set(group.items.map(\.id)) == Set(["large", "compact", "small"]),
+                  group.items.last?.id == "large" else { return false }
+            return group.items.first(where: { $0.id == "compact" })?.repo == "Qwen/Qwen3-0.6B-MLX-4bit" &&
+                group.items.first(where: { $0.id == "small" })?.revision == String(repeating: "a", count: 40)
+        case "catalog-group-publisher-instruction-distinction":
+            let raw = [
+                groupedCatalogItem("official", repo: "Qwen/Qwen3-0.6B", name: "Qwen3-0.6B", group: "1", groupName: "Qwen3", publisher: "Qwen"),
+                groupedCatalogItem("other", repo: "Other/Qwen3-0.6B", name: "Qwen3-0.6B", group: "2", groupName: "Qwen3", publisher: "Other"),
+                groupedCatalogItem("base", repo: "Qwen/Qwen3-0.6B-Base", name: "Qwen3-0.6B-Base", group: "3", groupName: "Qwen3 Base", publisher: "Qwen"),
+                groupedCatalogItem("instruct", repo: "Qwen/Qwen3-4B-Instruct-2507", name: "Qwen3-4B-Instruct-2507", group: "4", groupName: "Qwen3 Instruct-2507", publisher: "Qwen", size: "4B")
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let groups = CatalogBrowserInventory(items: catalog.items).groups
+            return groups.count == 4 && groups.allSatisfy({ $0.items.count == 1 }) &&
+                Set(groups.map(\.publisher)) == Set(["Qwen", "Other"]) &&
+                Set(groups.map(\.name)) == Set(["Qwen3", "Qwen3 Base", "Qwen3 Instruct-2507"])
+        case "catalog-group-malformed-conflicting-fallback":
+            var malformed = groupedCatalogItem("malformed", repo: "owner/Actual", name: "Actual", group: "1", groupName: "Untrusted", publisher: "owner")
+            malformed["model_group"] = ["id": "not-hex", "name": "Untrusted", "publisher": "owner"]
+            guard let parsed = FamilyModelCatalog.Item(malformed), parsed.modelGroup == nil else { return false }
+            let fallback = CatalogBrowserInventory(items: [parsed])
+            guard fallback.groups.first?.name == "Actual", fallback.groups.first?.publisher == "owner" else { return false }
+            var first = groupedCatalogItem("one", repo: "one/Actual1", name: "Actual1", group: "a", groupName: "Spoofed", publisher: "one")
+            let second = groupedCatalogItem("two", repo: "two/Actual2", name: "Actual2", group: "a", groupName: "Conflicting", publisher: "two")
+            first["size_label"] = "1B"
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: [first, second])) else { return false }
+            let conflicted = CatalogBrowserInventory(items: catalog.items)
+            return Set(conflicted.groups.map(\.name)) == Set(["Actual1", "Actual2"]) &&
+                conflicted.groups.allSatisfy({ $0.items.count == 1 }) &&
+                CatalogBrowserInventory(items: catalog.items, query: "Spoofed").groups.isEmpty
+        case "catalog-browser-live-search":
+            let raw = [
+                groupedCatalogItem("compact", repo: "owner/Cafe-0.6B-4bit", name: "Café-0.6B-4bit", group: "1", groupName: "Café Model", publisher: "owner", quantization: "4-bit"),
+                groupedCatalogItem("full", repo: "owner/Cafe-0.6B", name: "Café-0.6B", group: "1", groupName: "Café Model", publisher: "owner")
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let visible = CatalogBrowserInventory(items: catalog.items, query: " CAFE 4bit 0.6b ")
+            guard visible.groups.count == 1, visible.groups[0].items.map(\.id) == ["compact"] else { return false }
+            return CatalogBrowserInventory(items: catalog.items, query: "cafe 8-bit").groups.isEmpty &&
+                CatalogBrowserInventory(items: catalog.items, query: "aAaAaAa").groups.first?.items.count == 2 &&
+                CatalogBrowserInventory(items: catalog.items, query: "images").groups.first?.items.count == 2 &&
+                CatalogBrowserInventory(items: catalog.items, query: "").groups.first?.items.count == 2 &&
+                ModelBrowserSearch.matches("  - .  ", fields: []) &&
+                ModelBrowserSearch.matches("4 bit", fields: ["4-bit"]) &&
+                !ModelBrowserSearch.matches("4 bit", fields: ["14B", "8-bit"]) &&
+                !ModelBrowserSearch.matches("AB", fields: ["A", "B"])
+        case "catalog-browser-name-and-size-sort":
+            let raw = [
+                groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Unknown", publisher: "owner", size: nil),
+                groupedCatalogItem("large", repo: "owner/Ten", name: "Ten", group: "2", groupName: "Model 10", publisher: "owner", size: "10B"),
+                groupedCatalogItem("small", repo: "owner/Two", name: "Two", group: "3", groupName: "Model 2", publisher: "owner", size: "2B")
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let asc = CatalogBrowserInventory(items: catalog.items, sort: .nameAscending).groups
+            let desc = CatalogBrowserInventory(items: catalog.items, sort: .nameDescending).groups
+            let small = CatalogBrowserInventory(items: catalog.items, sort: .sizeAscending).groups
+            let large = CatalogBrowserInventory(items: catalog.items, sort: .sizeDescending).groups
+            guard asc.map(\.name) == ["Model 2", "Model 10", "Unknown"],
+                  desc.map(\.name) == ["Unknown", "Model 10", "Model 2"],
+                  small.map({ $0.items[0].id }) == ["small", "large", "unknown"],
+                  large.map({ $0.items[0].id }) == ["large", "small", "unknown"] else { return false }
+            return ModelBrowserSort.nameDescending.precedes("Same", id: "a", size: nil, "Same", id: "b", size: nil)
+        case "catalog-browser-row-size-and-numeric-fallback":
+            let raw = [
+                groupedCatalogItem("unknown", repo: "owner/Unknown", name: "Unknown", group: "1", groupName: "Model", publisher: "owner", size: nil),
+                groupedCatalogItem("small", repo: "owner/Small", name: "Small", group: "1", groupName: "Model", publisher: "owner", size: "600M"),
+                groupedCatalogItem("large", repo: "owner/Large", name: "Large", group: "1", groupName: "Model", publisher: "owner", size: "1.7B"),
+                groupedCatalogItem("count", repo: "owner/Count", name: "Count", group: "1", groupName: "Model", publisher: "owner", size: nil, parameters: 800_000_000)
+            ]
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: raw)) else { return false }
+            let ascending = CatalogBrowserInventory(items: catalog.items, sort: .sizeAscending).groups[0]
+            let descending = CatalogBrowserInventory(items: catalog.items, sort: .sizeDescending).groups[0]
+            var overflow = groupedCatalogItem("overflow", repo: "owner/Overflow", name: "Overflow", group: "2", groupName: "Overflow", publisher: "owner", size: "1e308T")
+            overflow["parameter_count"] = NSNull()
+            return ascending.items.map(\.id) == ["small", "count", "large", "unknown"] &&
+                descending.items.map(\.id) == ["large", "count", "small", "unknown"] &&
+                ascending.size(for: .sizeAscending) == 600_000_000 && descending.size(for: .sizeDescending) == 1_700_000_000 &&
+                FamilyModelCatalog.Item(overflow)?.numericSize == nil
+        case "catalog-filtered-download-retains-entry-id":
+            let raw = [
+                groupedCatalogItem("full", repo: "owner/Model-BF16", name: "Model", group: "1", groupName: "Model", publisher: "owner"),
+                groupedCatalogItem("compact", repo: "owner/Model-4bit", name: "Model-4bit", group: "1", groupName: "Model", publisher: "owner", quantization: "4-bit")
+            ]
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse, items: raw))
+            guard let catalog = engine.catalog,
+                  let selected = CatalogBrowserInventory(items: catalog.items, query: "4bit", sort: .nameDescending).groups.first?.items.first,
+                  selected.id == "compact", selected.repo == "owner/Model-4bit" else { return false }
+            engine.installCatalogItem(id: selected.id, artifactMode: .text)
+            let request = command()
+            return request["command"] as? String == "install_catalog" && request["entry_id"] as? String == "compact" &&
+                request["catalog_request_id"] as? String == browse["request_id"] as? String &&
+                request["artifact_mode"] as? String == "text" && request["repo"] == nil && request["revision"] == nil &&
+                engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model"
+        case "models-browser-search-and-sum-sort":
+            var small = modelDisplay(); small["quantization"] = "4-bit"; small["weight_bytes"] = Int64(100)
+            var full = modelDisplay(); full["weight_bytes"] = Int64(400)
+            var other = modelDisplay("owner/other", name: "Other"); other["weight_bytes"] = Int64(300)
+            var large = modelDisplay("owner/large", name: "Large"); large["weight_bytes"] = Int64(900)
+            var unknown = modelDisplay("owner/unknown", name: "Unknown"); unknown["weight_bytes"] = NSNull()
+            let models = [variant("small", name: "Compact saved version", display: small), variant("full", name: "Full saved version", display: full),
+                          variant("other", name: "Other", display: other), variant("large", name: "Large", display: large), variant("unknown", name: "Unknown", display: unknown)]
+            let ascending = ModelsInventory(models: models, loadedID: "full", registry: nil, sort: .sizeAscending)
+            let descending = ModelsInventory(models: models, loadedID: "full", registry: nil, sort: .sizeDescending)
+            guard ascending.groups.map(\.name) == ["Other", "Base", "Large", "Unknown"],
+                  descending.groups.map(\.name) == ["Large", "Base", "Other", "Unknown"] else { return false }
+            let filtered = ModelsInventory(models: models, loadedID: "full", registry: nil, query: "qwen 4bit", sort: .nameDescending)
+            return filtered.groups.count == 1 && filtered.groups[0].models.map(\.id) == ["small"] &&
+                filtered.models.map(\.id) == ["small"] && models.count == 5 &&
+                ModelsInventory(models: models, loadedID: "full", registry: nil, query: "compact").models.map(\.id) == ["small"] &&
+                ModelsInventory(models: models, loadedID: "full", registry: nil, query: "missing").groups.isEmpty
+        case "models-browser-ambiguous-filter-and-remove":
+            let first = variant("one", name: "First exact", display: modelDisplay())
+            let conflict = variant("two", name: "Second exact", display: modelDisplay("example/base", name: "Conflicting base"))
+            let visible = ModelsInventory(models: [first, conflict], loadedID: "", registry: nil, query: "Second")
+            guard visible.groups.count == 1, visible.groups[0].name == "Second exact", visible.groups[0].family == nil else { return false }
+            let saved = InstalledModel(id: "private-target", name: "Compact", path: "/private/target", apiID: "public-alias",
+                                       display: InstalledModelDisplay(modelDisplay()), removal: InstalledModelRemoval(removal("unregister")))
+            let other = InstalledModel(id: "private-other", name: "Other", path: "/private/other", apiID: "public-alias")
+            engine.models = [saved, other]
+            let rows = ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: nil, query: "compact", sort: .nameDescending).models
+            guard rows.map(\.id) == ["private-target"] else { return false }
+            engine.removeModel(id: rows[0].id, expectedAction: .unregister)
+            let request = command()
+            return request["command"] as? String == "remove_model" && request["model_id"] as? String == "private-target" &&
+                request["action"] as? String == "unregister" && engine.models.count == 2 && engine.loadedID == "fixture-model"
+        case "model-browser-sort-preferences":
+            let suite = "Stark.ModelBrowser.Tests." + UUID().uuidString
+            guard let preferences = UserDefaults(suiteName: suite) else { return false }
+            defer { preferences.removePersistentDomain(forName: suite) }
+            guard ModelBrowserPreferences.load(.saved, defaults: preferences) == .nameAscending,
+                  ModelBrowserPreferences.load(.families, defaults: preferences) == .nameAscending,
+                  ModelBrowserPreferences.load(.catalog, defaults: preferences) == .sizeAscending else { return false }
+            ModelBrowserPreferences.save(.sizeDescending, for: .saved, defaults: preferences)
+            ModelBrowserPreferences.save(.nameDescending, for: .families, defaults: preferences)
+            ModelBrowserPreferences.save(.nameAscending, for: .catalog, defaults: preferences)
+            guard let reopened = UserDefaults(suiteName: suite),
+                  ModelBrowserPreferences.load(.saved, defaults: reopened) == .sizeDescending,
+                  ModelBrowserPreferences.load(.families, defaults: reopened) == .nameDescending,
+                  ModelBrowserPreferences.load(.catalog, defaults: reopened) == .nameAscending else { return false }
+            ModelBrowserPreferences.save(.sizeAscending, for: .families, defaults: reopened)
+            guard ModelBrowserPreferences.load(.families, defaults: reopened) == .nameDescending else { return false }
+            reopened.set("future-sort", forKey: ModelBrowserScope.saved.preferenceKey)
+            reopened.set(ModelBrowserSort.sizeDescending.rawValue, forKey: ModelBrowserScope.families.preferenceKey)
+            reopened.set(42, forKey: ModelBrowserScope.catalog.preferenceKey)
+            return ModelBrowserPreferences.load(.saved, defaults: reopened) == .nameAscending &&
+                ModelBrowserPreferences.load(.families, defaults: reopened) == .nameAscending &&
+                ModelBrowserPreferences.load(.catalog, defaults: reopened) == .sizeAscending
         case "catalog-installed-mode":
             var item = catalogItem(); item["installed_ids"] = ["fixture-model", "not-in-library"]
             guard let parsed = FamilyModelCatalog.Item(item) else { return false }
@@ -1108,6 +1276,36 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
         self.exercise("catalog-provider-order")
+
+    def test_catalog_groups_sizes_and_quantizations_without_changing_entry_ids(self):
+        self.exercise("catalog-grouped-size-quantization-rows")
+
+    def test_catalog_groups_keep_publishers_base_and_instruct_models_distinct(self):
+        self.exercise("catalog-group-publisher-instruction-distinction")
+
+    def test_bad_or_conflicting_group_metadata_falls_back_to_original_model_names(self):
+        self.exercise("catalog-group-malformed-conflicting-fallback")
+
+    def test_catalog_search_matches_typed_terms_and_only_keeps_matching_versions(self):
+        self.exercise("catalog-browser-live-search")
+
+    def test_catalog_sort_uses_natural_names_and_keeps_unknown_sizes_last(self):
+        self.exercise("catalog-browser-name-and-size-sort")
+
+    def test_grouped_rows_sort_numeric_sizes_with_parameter_fallback_and_bounds(self):
+        self.exercise("catalog-browser-row-size-and-numeric-fallback")
+
+    def test_filtered_catalog_download_targets_the_original_cached_entry(self):
+        self.exercise("catalog-filtered-download-retains-entry-id")
+
+    def test_saved_search_filters_versions_and_size_sort_sums_visible_group_bytes(self):
+        self.exercise("models-browser-search-and-sum-sort")
+
+    def test_saved_filter_preserves_group_fallback_and_private_removal_target(self):
+        self.exercise("models-browser-ambiguous-filter-and-remove")
+
+    def test_sort_preferences_survive_reopening_and_are_independent_by_scope(self):
+        self.exercise("model-browser-sort-preferences")
 
     def test_downloaded_catalog_status_matches_live_ids_and_artifact_mode(self):
         self.exercise("catalog-installed-mode")

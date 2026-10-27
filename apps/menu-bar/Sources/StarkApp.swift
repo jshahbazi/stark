@@ -454,6 +454,88 @@ struct ModelFamilyRegistry {
     }
 }
 
+struct CatalogModelGroup: Equatable {
+    let id: String
+    let name: String
+    let publisher: String
+
+    init?(_ value: Any?) {
+        guard let raw = value as? [String: Any],
+              let id = SupportMetadata.string(raw["id"], maximum: 32), id.utf8.count == 32,
+              id.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+              let name = SupportMetadata.string(raw["name"], maximum: 256),
+              let publisher = SupportMetadata.string(raw["publisher"], maximum: 96),
+              !publisher.contains("/"),
+              [name, publisher].allSatisfy({ text in text.unicodeScalars.allSatisfy({ $0.value >= 32 && $0.value != 127 }) }) else { return nil }
+        self.id = id; self.name = name; self.publisher = publisher
+    }
+}
+
+enum ModelBrowserSort: String, CaseIterable {
+    case nameAscending, nameDescending, sizeAscending, sizeDescending
+
+    var title: String {
+        switch self {
+        case .nameAscending: return "Name (A–Z)"
+        case .nameDescending: return "Name (Z–A)"
+        case .sizeAscending: return "Size (smallest first)"
+        case .sizeDescending: return "Size (largest first)"
+        }
+    }
+
+    func precedes(_ firstName: String, id firstID: String, size firstSize: Double?,
+                  _ secondName: String, id secondID: String, size secondSize: Double?) -> Bool {
+        if self == .sizeAscending || self == .sizeDescending {
+            if firstSize != secondSize {
+                guard let first = firstSize else { return false }
+                guard let second = secondSize else { return true }
+                return self == .sizeAscending ? first < second : first > second
+            }
+        }
+        let comparison = firstName.localizedStandardCompare(secondName)
+        if comparison != .orderedSame {
+            return self == .nameDescending ? comparison == .orderedDescending : comparison == .orderedAscending
+        }
+        return firstID < secondID
+    }
+}
+
+enum ModelBrowserScope: String, CaseIterable {
+    case saved, families, catalog
+    var preferenceKey: String { "modelBrowser.sort." + rawValue }
+    var defaultSort: ModelBrowserSort { self == .catalog ? .sizeAscending : .nameAscending }
+    var sorts: [ModelBrowserSort] {
+        self == .families ? [.nameAscending, .nameDescending] : ModelBrowserSort.allCases
+    }
+}
+
+enum ModelBrowserPreferences {
+    static func load(_ scope: ModelBrowserScope, defaults: UserDefaults = .standard) -> ModelBrowserSort {
+        guard let raw = defaults.string(forKey: scope.preferenceKey), let sort = ModelBrowserSort(rawValue: raw),
+              scope.sorts.contains(sort) else { return scope.defaultSort }
+        return sort
+    }
+
+    static func save(_ sort: ModelBrowserSort, for scope: ModelBrowserScope, defaults: UserDefaults = .standard) {
+        guard scope.sorts.contains(sort) else { return }
+        defaults.set(sort.rawValue, forKey: scope.preferenceKey)
+    }
+}
+
+enum ModelBrowserSearch {
+    private static func normalized(_ value: String) -> String {
+        value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) }.map(String.init).joined()
+    }
+
+    static func matches(_ query: String, fields: [String]) -> Bool {
+        let query = query.replacingOccurrences(of: "(?i)\\b([48])[-_ ]*bits?\\b", with: "$1bit", options: .regularExpression)
+        let terms = query.split(whereSeparator: \.isWhitespace).map { normalized(String($0)) }.filter { !$0.isEmpty }
+        let text = fields.map(normalized).joined(separator: " ")
+        return terms.allSatisfy { text.contains($0) }
+    }
+}
+
 struct FamilyModelCatalog {
     enum Status: String { case ready, offline, error }
     struct Item: Identifiable {
@@ -469,6 +551,7 @@ struct FamilyModelCatalog {
         let defaultArtifactMode: ModelArtifactMode
         let downloadable: Bool
         let installedIDs: [String]
+        let modelGroup: CatalogModelGroup?
 
         init?(_ raw: [String: Any]) {
             guard let id = SupportMetadata.string(raw["id"], maximum: 512),
@@ -494,11 +577,25 @@ struct FamilyModelCatalog {
             weightBytes = SupportMetadata.integer(raw["weight_bytes"]); self.quantization = quantization
             self.artifactModes = artifactModes; defaultArtifactMode = defaultMode
             self.downloadable = downloadable; self.installedIDs = installedIDs
+            modelGroup = CatalogModelGroup(raw["model_group"])
         }
 
         var detailLabels: [String] {
             [sizeLabel, quantization, weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }]
                 .compactMap { $0 }
+        }
+
+        var numericSize: Double? {
+            if let label = sizeLabel?.uppercased(), !label.isEmpty {
+                let scale: [Character: Double] = ["K": 1e3, "M": 1e6, "B": 1e9, "T": 1e12]
+                let multiplier = label.last.flatMap { scale[$0] }
+                let value = multiplier == nil ? Double(label) : Double(label.dropLast())
+                if let value = value, value.isFinite, value > 0 {
+                    let amount = value * (multiplier ?? 1)
+                    if amount.isFinite { return amount }
+                }
+            }
+            return parameterCount.flatMap { $0 > 0 ? Double($0) : nil }
         }
     }
     let familyID: String
@@ -518,6 +615,56 @@ struct FamilyModelCatalog {
         guard items.count == rawItems.count, Set(items.map(\.id)).count == items.count else { return nil }
         self.familyID = familyID; self.status = status; self.message = message; self.hasMore = hasMore
         self.items = items
+    }
+}
+
+struct CatalogBrowserInventory {
+    struct Group: Identifiable {
+        let id: String
+        let name: String
+        let publisher: String
+        let items: [FamilyModelCatalog.Item]
+
+        func size(for sort: ModelBrowserSort) -> Double? {
+            let values = items.compactMap(\.numericSize)
+            return sort == .sizeDescending ? values.max() : values.min()
+        }
+    }
+    let groups: [Group]
+
+    init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending) {
+        func makeGroup(id: String, name: String, publisher: String, items: [FamilyModelCatalog.Item]) -> Group? {
+            let visible = items.filter {
+                ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
+                                                           $0.sizeLabel ?? "", $0.quantization] + $0.artifactModes.map(\.title))
+            }.sorted { first, second in
+                let rowSort: ModelBrowserSort = sort == .sizeDescending ? .sizeDescending : .sizeAscending
+                if first.numericSize != second.numericSize {
+                    return rowSort.precedes(first.name, id: first.id, size: first.numericSize,
+                                            second.name, id: second.id, size: second.numericSize)
+                }
+                let quantization = first.quantization.localizedStandardCompare(second.quantization)
+                if quantization != .orderedSame { return quantization == .orderedAscending }
+                return ModelBrowserSort.nameAscending.precedes(first.repo, id: first.id, size: nil,
+                                                               second.repo, id: second.id, size: nil)
+            }
+            return visible.isEmpty ? nil : Group(id: id, name: name, publisher: publisher, items: visible)
+        }
+        let candidates = Dictionary(grouping: items) { $0.modelGroup.map { "group:" + $0.id } ?? "repo:" + $0.repo }
+        groups = candidates.flatMap { id, entries -> [Group] in
+            let first = entries[0]
+            let name = first.modelGroup?.name ?? first.name
+            let publisher = first.modelGroup?.publisher ?? first.repo.components(separatedBy: "/")[0]
+            if !entries.allSatisfy({ $0.modelGroup == first.modelGroup && ($0.modelGroup != nil || $0.name == first.name) }) {
+                return entries.compactMap { item in
+                    makeGroup(id: "item:" + item.id, name: item.name, publisher: item.repo.components(separatedBy: "/")[0], items: [item])
+                }
+            }
+            return makeGroup(id: id, name: name, publisher: publisher, items: entries).map { [$0] } ?? []
+        }.sorted { first, second in
+            sort.precedes(first.name, id: first.id, size: first.size(for: sort),
+                          second.name, id: second.id, size: second.size(for: sort))
+        }
     }
 }
 
@@ -569,6 +716,7 @@ struct ModelsInventory {
         let sourceRevision: String?
         let removal: InstalledModelRemoval?
         let artifactMode: ModelArtifactMode?
+        let sourceName: String
 
         var detailLabels: [String] {
             [quantization,
@@ -582,6 +730,11 @@ struct ModelsInventory {
         let name: String
         let family: String?
         let models: [Model]
+
+        var totalBytes: Double? {
+            guard models.allSatisfy({ $0.weightBytes != nil }) else { return nil }
+            return models.reduce(0) { $0 + Double($1.weightBytes!) }
+        }
     }
     struct Family: Identifiable {
         let id: String
@@ -591,15 +744,17 @@ struct ModelsInventory {
     let groups: [Group]
     let families: [Family]?
 
-    init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?) {
+    init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
+         query: String = "", sort: ModelBrowserSort = .nameAscending) {
         func row(_ model: InstalledModel) -> Model {
             Model(id: model.id, name: model.name, isRunning: !loadedID.isEmpty && model.id == loadedID,
                   quantization: model.display?.quantization, weightBytes: model.display?.weightBytes,
-                  sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode)
+                  sourceRevision: model.display?.sourceRevision, removal: model.removal, artifactMode: model.artifactMode,
+                  sourceName: model.display?.groupID ?? model.apiID)
         }
-        self.models = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
+        let allModels = models.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }.map(row)
         let candidates = Dictionary(grouping: models) { model in model.display.map { "source:" + $0.groupID } ?? "model:" + model.id }
-        groups = candidates.flatMap { key, entries -> [Group] in
+        let allGroups = candidates.flatMap { key, entries -> [Group] in
             let first = entries[0]
             let consistent = entries.allSatisfy { $0.display?.groupName == first.display?.groupName && $0.display?.familyID == first.display?.familyID }
             if !consistent {
@@ -608,7 +763,26 @@ struct ModelsInventory {
             let rows = entries.map(row).sorted(by: Self.variantOrder)
             return [Group(id: key, name: first.display?.groupName ?? first.name,
                           family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
-        }.sorted { Self.ordered($0.name, $1.name, $0.id, $1.id) }
+        }
+        groups = allGroups.compactMap { group in
+            var visible = group.models.filter { model in
+                ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
+                                                           model.sourceRevision ?? "", model.artifactMode?.title ?? "",
+                                                           model.isRunning ? "Running" : ""] + model.detailLabels)
+            }
+            if sort == .sizeAscending || sort == .sizeDescending {
+                visible.sort { first, second in
+                    sort.precedes(first.name, id: first.id, size: first.weightBytes.map(Double.init),
+                                  second.name, id: second.id, size: second.weightBytes.map(Double.init))
+                }
+            }
+            return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
+        }.sorted { first, second in
+            sort.precedes(first.name, id: first.id, size: first.totalBytes,
+                          second.name, id: second.id, size: second.totalBytes)
+        }
+        let visibleIDs = Set(groups.flatMap { $0.models.map(\.id) })
+        self.models = allModels.filter { visibleIDs.contains($0.id) }
         families = registry?.families.filter { family in ModelSupportMode.allCases.contains(where: family.hasAppMode) }
             .sorted { Self.ordered($0.displayName, $1.displayName, $0.id, $1.id) }
             .map { Family(id: $0.id, name: $0.displayName) }
@@ -1558,9 +1732,53 @@ struct ModelsView: View {
     @State private var selectedFamily: ModelsInventory.Family?
     @State private var artifactChoices: [String: ModelArtifactMode] = [:]
     @State private var removalConfirmation: ModelRemovalConfirmation?
+    @State private var savedQuery = ""
+    @State private var familiesQuery = ""
+    @State private var catalogQuery = ""
+    @State private var savedSort = ModelBrowserPreferences.load(.saved)
+    @State private var familiesSort = ModelBrowserPreferences.load(.families)
+    @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
 
     private var inventory: ModelsInventory {
-        ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: engine.modelFamilies)
+        ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: engine.modelFamilies,
+                        query: savedQuery, sort: savedSort)
+    }
+
+    private var browserScope: ModelBrowserScope {
+        selectedFamily != nil ? .catalog : (tab == .onThisMac ? .saved : .families)
+    }
+
+    private var searchPrompt: String {
+        switch browserScope {
+        case .saved: return "Search downloaded models"
+        case .families: return "Search families"
+        case .catalog: return "Search models, sizes or quantizations"
+        }
+    }
+
+    private var queryBinding: Binding<String> {
+        let scope = browserScope
+        return Binding(get: {
+            switch scope { case .saved: return savedQuery; case .families: return familiesQuery; case .catalog: return catalogQuery }
+        }, set: { query in
+            switch scope { case .saved: savedQuery = query; case .families: familiesQuery = query; case .catalog: catalogQuery = query }
+        })
+    }
+
+    private var sortBinding: Binding<ModelBrowserSort> {
+        let scope = browserScope
+        return Binding(get: {
+            switch scope { case .saved: return savedSort; case .families: return familiesSort; case .catalog: return catalogSort }
+        }, set: { order in
+            switch scope { case .saved: savedSort = order; case .families: familiesSort = order; case .catalog: catalogSort = order }
+            ModelBrowserPreferences.save(order, for: scope)
+        })
+    }
+
+    private func visibleFamilies(_ families: [ModelsInventory.Family]) -> [ModelsInventory.Family] {
+        families.filter { ModelBrowserSearch.matches(familiesQuery, fields: [$0.name, $0.id]) }.sorted {
+            familiesSort.precedes($0.name, id: $0.id, size: nil, $1.name, id: $1.id, size: nil)
+        }
     }
 
     var body: some View {
@@ -1574,13 +1792,26 @@ struct ModelsView: View {
             }
             if selectedFamily == nil { Picker("Models", selection: $tab) {
                 ForEach(ModelsSheetTab.allCases, id: \.self) { choice in
-                    Text(choice.title(modelCount: inventory.models.count)).tag(choice)
+                    Text(choice.title(modelCount: engine.models.count)).tag(choice)
                 }
             }.pickerStyle(.segmented).labelsHidden() }
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                TextField(searchPrompt, text: queryBinding).textFieldStyle(.roundedBorder)
+                    .accessibilityLabel(searchPrompt)
+                if !queryBinding.wrappedValue.isEmpty {
+                    Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Clear search").accessibilityLabel("Clear search")
+                }
+                Picker("Sort", selection: sortBinding) {
+                    ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
+                }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
+            }
             ScrollView {
                 if let family = selectedFamily { catalogContent(family) }
                 else if tab == .onThisMac {
-                    if inventory.models.isEmpty { emptyState(tab) }
+                    if engine.models.isEmpty { emptyState(tab) }
+                    else if inventory.groups.isEmpty { noSearchResults("No matching models") }
                     else {
                         LazyVStack(spacing: 12) {
                             ForEach(inventory.groups) { group in modelGroup(group) }
@@ -1588,10 +1819,11 @@ struct ModelsView: View {
                     }
                 } else if let families = inventory.families {
                     if families.isEmpty { emptyState(tab) }
+                    else if visibleFamilies(families).isEmpty { noSearchResults("No matching families") }
                     else { LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                        ForEach(families) { family in
+                        ForEach(visibleFamilies(families)) { family in
                             Button {
-                                selectedFamily = family; artifactChoices = [:]
+                                selectedFamily = family; artifactChoices = [:]; catalogQuery = ""
                                 engine.requestModelCatalog(familyID: family.id)
                             } label: {
                                 HStack {
@@ -1627,7 +1859,7 @@ struct ModelsView: View {
             }
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
-        }.padding(24).frame(width: 560, height: 520)
+        }.padding(24).frame(width: 640, height: 580)
             .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:] }
             .onChange(of: tab) { leaveFamily() }
             .onDisappear { engine.cancelModelCatalog() }
@@ -1644,6 +1876,13 @@ struct ModelsView: View {
             Text(selection.emptyTitle).font(.headline)
             Text(selection.emptyMessage).font(.callout).foregroundStyle(.secondary)
         }.frame(maxWidth: .infinity, minHeight: 300)
+    }
+
+    private func noSearchResults(_ title: String) -> some View {
+        VStack(spacing: 10) {
+            Text(title).font(.headline)
+            Button("Clear search") { queryBinding.wrappedValue = "" }
+        }.frame(maxWidth: .infinity, minHeight: 220)
     }
 
     private func modelGroup(_ group: ModelsInventory.Group) -> some View {
@@ -1732,14 +1971,16 @@ struct ModelsView: View {
             VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
                 .frame(maxWidth: .infinity, minHeight: 220)
         } else if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
+            let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort).groups
             if catalog.items.isEmpty {
                 VStack(spacing: 10) {
                     Text("No models listed yet").font(.headline)
                     Button("Retry") { engine.requestModelCatalog(familyID: family.id) }
                 }.frame(maxWidth: .infinity, minHeight: 220)
-            } else {
+            } else if groups.isEmpty { noSearchResults("No matching models") }
+            else {
                 LazyVStack(spacing: 12) {
-                    ForEach(catalog.items) { item in catalogItem(item) }
+                    ForEach(groups) { group in catalogGroup(group) }
                     if catalog.hasMore { Text("More models may be available on Hugging Face.").font(.caption).foregroundStyle(.secondary) }
                 }
             }
@@ -1752,37 +1993,46 @@ struct ModelsView: View {
         }
     }
 
-    private func catalogItem(_ item: FamilyModelCatalog.Item) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(item.name).font(.headline).fixedSize(horizontal: false, vertical: true)
-                    Text(item.repo).font(.caption).foregroundStyle(.secondary)
-                }
+    private func catalogGroup(_ group: CatalogBrowserInventory.Group) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(group.name).font(.headline)
+                Text(group.publisher).font(.caption).foregroundStyle(.secondary)
                 Spacer(minLength: 0)
-                if engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)) {
-                    Text("Downloaded").font(.caption).foregroundStyle(.secondary)
-                } else {
-                    Button("Download") { engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item)) }
-                        .buttonStyle(.borderedProminent).controlSize(.small).disabled(engine.busy || !item.downloadable)
-                }
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: 8) { ForEach(item.detailLabels, id: \.self) { Text($0).fixedSize() } }
-                VStack(alignment: .leading, spacing: 5) { ForEach(item.detailLabels, id: \.self) { Text($0) } }
-            }.font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Text("Version " + item.revision.prefix(7)).font(.caption).foregroundStyle(.secondary).help(item.revision)
-                Spacer(minLength: 0)
-                if item.artifactModes.count > 1 {
-                    Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {
-                        ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
-                    }.labelsHidden().frame(width: 155).controlSize(.small).disabled(engine.busy)
-                }
+            }.padding(.bottom, 10)
+            ForEach(group.items) { item in
+                if item.id != group.items.first?.id { Divider() }
+                catalogRow(item)
             }
         }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
             .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
+    }
+
+    private func catalogRow(_ item: FamilyModelCatalog.Item) -> some View {
+        HStack(spacing: 12) {
+            Text(item.sizeLabel ?? "Unknown").font(.callout.weight(.medium))
+                .frame(width: 70, alignment: .leading)
+            Text(item.quantization).font(.callout).frame(width: 48, alignment: .leading)
+            Text(item.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
+                .font(.caption).foregroundStyle(.secondary).frame(width: 80, alignment: .leading)
+            Spacer(minLength: 0)
+            if item.artifactModes.count > 1 {
+                Picker("Install", selection: Binding(get: { selectedMode(item) }, set: { artifactChoices[item.id] = $0 })) {
+                    ForEach(item.artifactModes, id: \.self) { Text($0.title).tag($0) }
+                }.labelsHidden().frame(width: 145).controlSize(.small).disabled(engine.busy)
+                    .accessibilityLabel("Version for " + item.name)
+            }
+            if engine.catalogItemIsDownloaded(item, artifactMode: selectedMode(item)) {
+                Text("Downloaded").font(.caption).foregroundStyle(.secondary).frame(width: 88)
+            } else {
+                Button("Download") { engine.installCatalogItem(id: item.id, artifactMode: selectedMode(item)) }
+                    .controlSize(.small).frame(width: 88).disabled(engine.busy || !item.downloadable)
+                    .accessibilityLabel("Download " + item.name + " " + item.quantization)
+            }
+        }.padding(.vertical, 9).help(item.repo + "\nVersion " + item.revision)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel(item.name + ", version " + item.revision.prefix(7))
     }
 }
 

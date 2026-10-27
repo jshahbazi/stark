@@ -426,6 +426,19 @@ class Desktop:
                 or item.get("default_artifact_mode") not in item["artifact_modes"]
             ):
                 raise ValueError()
+            group = item.get("model_group")
+            if group is not None and (
+                not isinstance(group, dict)
+                or set(group) != {"id", "name", "publisher"}
+                or not isinstance(group.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{32}", group["id"]) is None
+                or not isinstance(group.get("name"), str)
+                or not 0 < len(group["name"].encode()) <= 256
+                or any(ord(char) < 32 or ord(char) == 127 for char in group["name"])
+                or not isinstance(group.get("publisher"), str)
+                or re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", group["publisher"]) is None
+            ):
+                raise ValueError()
             for key in ("parameter_count", "weight_bytes"):
                 if item.get(key) is not None and (type(item[key]) is not int or not 0 < item[key] <= 2**63 - 1):
                     raise ValueError()

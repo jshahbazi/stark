@@ -85,7 +85,20 @@ def test_catalogue_is_read_only_and_stale_family_results_cannot_publish(host, mo
 
 
 @pytest.mark.parametrize(
-    "kind", ["schema", "family", "revision", "repository", "mode", "boolean-size", "duplicate", "status"]
+    "kind",
+    [
+        "schema",
+        "family",
+        "revision",
+        "repository",
+        "mode",
+        "boolean-size",
+        "duplicate",
+        "status",
+        "group-id",
+        "group-owner",
+        "group-extra",
+    ],
 )
 def test_malformed_catalogue_is_a_local_error_without_stopping_loaded_worker(host, monkeypatch, kind):
     value = report()
@@ -103,6 +116,15 @@ def test_malformed_catalogue_is_a_local_error_without_stopping_loaded_worker(hos
         value["items"][0]["weight_bytes"] = True
     elif kind == "duplicate":
         value["items"].append(dict(value["items"][0]))
+    elif kind.startswith("group-"):
+        group = {"id": "c" * 32, "name": "Model", "publisher": "owner"}
+        if kind == "group-id":
+            group["id"] = "invalid"
+        elif kind == "group-owner":
+            group["publisher"] = "owner/name"
+        elif kind == "group-extra":
+            group["unexpected"] = "field"
+        value["items"][0]["model_group"] = group
     else:
         value["status"] = "offline"
     host.worker = Worker()
@@ -111,6 +133,12 @@ def test_malformed_catalogue_is_a_local_error_without_stopping_loaded_worker(hos
     host.load_catalog("qwen3", "request", host.catalog_generation)
     assert events(host)[-1]["report"]["status"] == "error"
     assert host.catalog_entries == {} and not host.worker.closed
+
+
+def test_catalogue_accepts_optional_model_group_descriptor(host):
+    value = report()
+    value["items"][0]["model_group"] = {"id": "c" * 32, "name": "Model", "publisher": "owner"}
+    assert host.catalog_report(value, "qwen3")["items"][0]["model_group"] == value["items"][0]["model_group"]
 
 
 def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(host, monkeypatch):

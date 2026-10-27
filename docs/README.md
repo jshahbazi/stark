@@ -57,3 +57,6 @@ coverage for other sizes.
 The [model browser actions run](archive/runs/2026-10-27-model-browser-actions.md)
 records catalogue downloads, recoverable model removal, packaged private-library
 checks and installed-app GUI verification.
+The [grouped browser run](archive/runs/2026-10-27-model-browser-groups-search-sort.md)
+records compact size/quantization rows, live filtering and independent sort
+preferences verified across a real app relaunch.

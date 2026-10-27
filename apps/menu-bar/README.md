@@ -36,23 +36,34 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 **Install Model** accepts a local folder or a Hugging Face repository name or URL such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model is registered in place; a supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted. Supported models are governed by the [converter](../../tools/converter/README.md). The install dialog shows Download and Conversion progress; **Stop** cancels; **Installation Progress** in the menu and Command-I reopen the dialog.
 
-**Models…** opens a model browser. **On this Mac** groups your saved models and
-their downloaded versions, showing their quantization, disk size and source
-version when that information is available. The model currently running is
-marked **Running**. In **Model families**, choose a family to browse available
-models, sizes and quantizations, then choose **Download**. When both text and
-image versions are offered, the card lets you choose which to install. Download
-and preparation progress stay in the browser. Completing a download adds the
-model to **On this Mac** without selecting it; choose it and **Run** when ready.
-Some image installations stop the running model for
-their required local checks.
+**Models…** opens a model browser. Search and sort settings are separate for
+**On this Mac**, the family overview and a family's detail view. Search filters
+the visible rows immediately; family search uses the current catalogue and does
+not fetch from Hugging Face again while you type. Search text stays within the
+current browsing session. Sort choices are remembered between app launches.
 
-The family list combines reference models with a bounded live search on Hugging
-Face. It shows representative compatible choices rather than every repository.
-Model size and download bytes appear when source metadata provides them. Browsing
-reads metadata only. Stark checks the selected model again before downloading
-weights and uses the source version shown on its card. **Back** or **Done**
-leaves the browser; **Stop** cancels an active installation.
+**On this Mac** groups saved variants by model and shows quantization, disk size
+and source version when available. Sort by model name A–Z or Z–A, or total disk
+size ascending or descending. In **Model families**, model cards group size and
+quantization choices into compact rows. Choose a family, filter its model cards,
+then choose a row and **Download**.
+When text and image artifacts are both offered, choose which to install. Sort
+the family overview by name A–Z or Z–A; family detail sorts by name in either
+direction or model size ascending or descending. Unknown numeric values stay last
+in either direction. Download and preparation progress
+stay in the browser. A completed download appears in **On this Mac** without
+selecting it; choose it and **Run** when ready. Some image installations stop
+the running model for their required local checks.
+
+The catalogue combines reference models with bounded live Hugging Face search
+and shows representative compatible choices rather than every repository.
+Compatible quantizations from one publisher can share a card across model sizes;
+Base, Instruct, Thinking, context-length variants and fine-tunes remain distinct.
+Selected registered quantized exports may join their registered base model
+across publishers. Size and download bytes appear when source metadata provides
+them. Browsing reads metadata only. Stark checks the selected model again before
+downloading weights and uses that row's exact source version. **Back** or
+**Done** leaves the browser; **Stop** cancels an active installation.
 
 Use a model's trash button in **On this Mac** to review its removal. **Move to
 Trash** removes an owned model folder from Stark and puts its files in macOS

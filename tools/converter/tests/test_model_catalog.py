@@ -100,7 +100,11 @@ def test_live_compatible_fine_tune_has_pinned_download_identity_and_real_sizes(t
         "artifact_modes": ["text"],
         "default_artifact_mode": "text",
         "downloadable": True,
+        "model_group": item["model_group"],
     }
+    assert item["model_group"]["name"] == "My-FineTune"
+    assert item["model_group"]["publisher"] == "someone"
+    assert len(item["model_group"]["id"]) == 32
     assert len(item["id"]) == 32
     assert [event[2] for event in hub.events if event[0] == "download"] == ["config.json"]
 
@@ -228,6 +232,82 @@ def test_model_sizes_sort_numerically_instead_of_lexical_repository_order(tmp_pa
         hub.add(tmp_path, "someone/" + name, {"model_type": "qwen3"}, parameters={"BF16": size})
     hub.discovered["qwen3"] = list(hub.repos)
     assert [item["size_label"] for item in catalog.family_catalog("qwen3", hub=hub)["items"]] == ["600M", "2B", "10B"]
+
+
+@pytest.mark.parametrize(
+    "name,quantization,expected",
+    [
+        ("Qwen3-0.6B", "BF16", "qwen3"),
+        ("Qwen3-1.7B-MLX-8bit", "8-bit", "qwen3"),
+        ("Qwen3-4B-Instruct-2507-4bit", "4-bit", "qwen3-instruct-2507"),
+        ("Qwen3-4B-Thinking-2507", "BF16", "qwen3-thinking-2507"),
+        ("Qwen3-4B-v2-MLX-4bit", "4-bit", "qwen3-v2"),
+        ("Qwen3-4B-MLX-4bit", "BF16", "qwen3-mlx-4bit"),
+        ("Model-4B-Instruct-128K", "BF16", "model-instruct-128k"),
+        ("Model-4B-Instruct-32K", "BF16", "model-instruct-32k"),
+    ],
+)
+def test_model_group_stem_strips_only_matching_format_and_size(name, quantization, expected):
+    assert catalog._variant_stem(name, quantization) == expected
+
+
+def test_model_groups_span_sizes_but_keep_publishers_and_finetunes_separate(monkeypatch):
+    monkeypatch.setattr(catalog, "models", lambda: ())
+    low = catalog._model_group("qwen3", "Qwen/Qwen3-0.6B", "Qwen3-0.6B", "BF16", None)
+    high = catalog._model_group("qwen3", "Qwen/Qwen3-1.7B-MLX-8bit", "Qwen3-1.7B-MLX-8bit", "8-bit", None)
+    replica = catalog._model_group("qwen3", "PrimeIntellect/Qwen3-0.6B", "Qwen3-0.6B", "BF16", None)
+    instruct = catalog._model_group("qwen3", "Qwen/Qwen3-4B-Instruct-2507", "Qwen3-4B-Instruct-2507", "BF16", None)
+    assert low["id"] == high["id"] and low["name"] == high["name"] == "Qwen3"
+    assert low["id"] != replica["id"] and replica["publisher"] == "PrimeIntellect"
+    assert low["id"] != instruct["id"] and instruct["name"] == "Qwen3-Instruct-2507"
+
+
+def test_registered_cross_publisher_quantization_joins_only_its_registered_base(monkeypatch):
+    base = {"repo": "Qwen/Qwen3.5-2B", "adapter": "qwen3_5"}
+    quant = {
+        "repo": "mlx-community/Qwen3.5-2B-MLX-4bit",
+        "adapter": "qwen3_5",
+        "compressed_format": {"scheme": "mlx_affine", "bits": 4},
+        "files": {"tokenizer_config": {"repo": "Qwen/Qwen3.5-2B"}},
+    }
+    stranger = {"repo": "other/Qwen3.5-2B", "adapter": "qwen3_5"}
+    monkeypatch.setattr(catalog, "models", lambda: (base, quant))
+    quant_group = catalog._model_group("qwen3_5", quant["repo"], "Qwen3.5-2B-MLX-4bit", "4-bit", quant)
+    base_group = catalog._model_group("qwen3_5", base["repo"], "Qwen3.5-2B", "BF16", base)
+    assert quant_group["id"] == base_group["id"]
+    assert (
+        catalog._model_group("qwen3_5", stranger["repo"], "Qwen3.5-2B", "BF16", None)["id"]
+        != catalog._model_group("qwen3_5", base["repo"], "Qwen3.5-2B", "BF16", base)["id"]
+    )
+
+
+def test_bf16_entry_cannot_bridge_publishers_with_a_borrowed_tokenizer():
+    base = {"repo": "Qwen/Qwen3.5-2B", "adapter": "qwen3_5"}
+    borrowed = {
+        "repo": "other/Qwen3.5-2B",
+        "adapter": "qwen3_5",
+        "files": {"tokenizer_config": {"repo": "Qwen/Qwen3.5-2B"}},
+    }
+    borrowed_group = catalog._model_group("qwen3_5", borrowed["repo"], "Qwen3.5-2B", "BF16", borrowed)
+    base_group = catalog._model_group("qwen3_5", base["repo"], "Qwen3.5-2B", "BF16", base)
+    assert borrowed_group["id"] != base_group["id"]
+
+
+def test_all_numeric_model_name_has_nonempty_group_descriptor():
+    group = catalog._model_group("qwen3", "owner/4B", "4B", "BF16", None)
+    assert group["name"] == "4B"
+    assert group["publisher"] == "owner"
+    assert len(group["id"]) == 32
+
+
+def test_group_normalization_strips_only_first_parameter_size_token(monkeypatch):
+    monkeypatch.setattr(catalog, "models", lambda: ())
+    four_b = catalog._model_group("llama", "owner/Llama-4B-Instruct-1M", "Llama-4B-Instruct-1M", "BF16", None)
+    eight_b = catalog._model_group("llama", "owner/Llama-8B-Instruct-1M", "Llama-8B-Instruct-1M", "BF16", None)
+    two_m = catalog._model_group("llama", "owner/Llama-8B-Instruct-2M", "Llama-8B-Instruct-2M", "BF16", None)
+    assert four_b["id"] == eight_b["id"]
+    assert four_b["name"] == "Llama-Instruct-1M"
+    assert two_m["id"] != eight_b["id"]
 
 
 def test_bounded_page_keeps_larger_sizes_instead_of_only_the_smallest_models(tmp_path):

@@ -13,14 +13,32 @@ authority for live API and image capabilities.
 
 ## Browsing and removing models
 
-The app's **Models…** view lists application model families. Choose a family to
-browse compatible models, sizes and quantizations and download a choice directly.
+The app's **Models…** view lists application model families. Search filters the
+current view immediately and does not trigger another Hugging Face request.
+Search text is transient; sort choices persist independently for **On this Mac**,
+the family overview and family detail. The saved-model view sorts by name A–Z or
+Z–A, or total disk bytes from its visible versions ascending or descending. The
+family overview sorts by name A–Z or Z–A; family detail sorts by name in either
+direction or model size ascending or descending. Unknown numeric values sort last
+in either direction. Choose a family to browse compatible models, sizes and
+quantizations and download a choice directly.
 Conversion-only families are omitted. Cards offer text or image artifacts when
 both are available, with image output selected by default only when the full
 Qwen3.5 BF16 model's vision configuration and processing metadata pass inspection.
 An image choice still needs the normal installation and local runtime checks.
 The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
+
+Family cards group model sizes and quantizations into compact variant rows.
+Same-publisher size and quantization variants share a card. Base, Instruct,
+Thinking, context-length variants and fine-tunes remain distinct. A cross-publisher
+group is allowed only for a registered MLX 4-bit/8-bit export whose tokenizer
+configuration points to a registered same-family base and whose basename matches
+after removing the quantization export suffix. An optional `model_group` descriptor
+provides its 32-character `id`, display `name` and `publisher`; it is presentation
+metadata and does not change the immutable source entry ID. Family-size sorting
+uses the minimum or maximum known model size among the visible versions. Counts
+are never inferred from model names or quantized packed tensors.
 
 The download catalogue combines registered reference sources with a bounded live
 Hugging Face search. Parsed configuration identifies the family; repository
@@ -159,7 +177,11 @@ This source-free command returns a schema-1 report with `family_id`, `status`
 (`ready`, `offline` or `error`), a fixed `message`, `items` and `has_more`. Each
 item binds an opaque `id` to `repo`, immutable `revision`, `name`, optional
 `size_label`, `parameter_count` and `weight_bytes`, `quantization`, offered
-`artifact_modes` and `default_artifact_mode`. A ready report may have no choices.
+`artifact_modes` and `default_artifact_mode`. It may also include an optional
+`model_group` object with exactly `id` (lowercase 32-character hex), `name` and
+`publisher` (the Hugging Face owner). This object is for presentation only; item
+IDs, repository, revision, size and quantization continue to identify each
+downloadable source row. A ready report may have no choices.
 It does not create converted output or grant runtime capabilities. `--offline`
 returns an offline discovery report without contacting Hugging Face.
 
