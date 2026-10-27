@@ -47,6 +47,10 @@ and source version when available. Sort by model name A–Z or Z–A, or total d
 size ascending or descending. In **Model families**, model cards group size and
 quantization choices into compact rows. Choose a family, filter its model cards,
 then choose a row and **Download**.
+Inside a family, the tabs at the top switch between **All models** and each
+available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
+Search narrows the selected tab and sorting applies to its matching rows.
+Entering another family starts at **All models**.
 When text and image artifacts are both offered, choose which to install. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last

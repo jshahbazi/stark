@@ -30,6 +30,12 @@ The download and preparation progress remain in the browser. Completion adds
 the model to the library without selecting it for use.
 
 Family cards group model sizes and quantizations into compact variant rows.
+Each family opens on **All models**, followed by tabs for the quantizations and
+precisions present in its current catalogue. Tabs come from the full current
+family list; search and sort narrow/reorder the selected tab without refetching
+metadata. If a selected format disappears after refresh, the view returns to
+**All models**. Switching families also resets that filter. The row's source ID,
+download status and text/image choice remain unchanged by filtering.
 Same-publisher size and quantization variants share a card. Base, Instruct,
 Thinking, context-length variants and fine-tunes remain distinct. A cross-publisher
 group is allowed only for a registered MLX 4-bit/8-bit export whose tokenizer

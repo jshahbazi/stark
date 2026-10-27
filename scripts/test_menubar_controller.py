@@ -360,6 +360,59 @@ extension EngineController {
             var large = catalogItem("large"); large["parameter_count"] = Int64(1_700_000_000); large["size_label"] = "1.7B"
             guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: [catalogItem("small"), small4, small8, large])) else { return false }
             return catalog.items.map(\.id) == ["small", "small4", "small8", "large"]
+        case "catalog-quantization-tabs":
+            var four = catalogItem("four"); four["quantization"] = "4-bit"
+            var duplicate = catalogItem("duplicate"); duplicate["quantization"] = "4-bit"
+            var eight = catalogItem("eight"); eight["quantization"] = "8-bit"
+            var sixteen = catalogItem("sixteen"); sixteen["quantization"] = "16-bit"
+            guard let catalog = FamilyModelCatalog(catalogReport("qwen3", items: [sixteen, eight, catalogItem("full"), four, duplicate])) else { return false }
+            let tabs = CatalogQuantizationFilter.tabs(for: catalog.items)
+            guard tabs.map(\.title) == ["All models", "4-bit", "8-bit", "16-bit", "BF16"],
+                  Set(tabs).count == tabs.count,
+                  CatalogQuantizationFilter.tabs(for: []) == [.all],
+                  CatalogQuantizationFilter.tabs(for: [catalog.items[0]]) == [.all, .quantization("16-bit")] else { return false }
+            return CatalogQuantizationFilter.all.matches(catalog.items[0]) &&
+                CatalogQuantizationFilter.quantization("4-bit").matches(catalog.items[3]) &&
+                !CatalogQuantizationFilter.quantization("4-bit").matches(catalog.items[2])
+        case "catalog-quantization-refresh-fallback":
+            var four = catalogItem("four"); four["quantization"] = "4-bit"
+            var eight = catalogItem("eight"); eight["quantization"] = "8-bit"
+            guard let previous = FamilyModelCatalog(catalogReport("qwen3", items: [four, eight])),
+                  let refreshed = FamilyModelCatalog(catalogReport("qwen3_5", items: [eight, catalogItem("full")])) else { return false }
+            let selected = CatalogQuantizationFilter.quantization("4-bit")
+            guard selected.resolved(for: previous.items) == selected,
+                  selected.resolved(for: refreshed.items) == .all,
+                  selected.resolved(for: []) == .all,
+                  CatalogQuantizationFilter.all.resolved(for: refreshed.items) == .all else { return false }
+            let fallback = CatalogBrowserInventory(items: refreshed.items, quantization: selected.resolved(for: refreshed.items))
+            return Set(fallback.groups.flatMap { $0.items.map(\.id) }) == Set(["eight", "full"])
+        case "catalog-quantization-search-sort-target":
+            var downloaded = groupedCatalogItem("downloaded-four", repo: "owner/Model-0.6B-4bit", name: "Model-0.6B-4bit",
+                                                group: "1", groupName: "Model", publisher: "owner", quantization: "4-bit")
+            downloaded["installed_ids"] = ["fixture-model"]
+            let raw = [
+                groupedCatalogItem("full", repo: "owner/Model-2B", name: "Model-2B", group: "1", groupName: "Model", publisher: "owner", size: "2B"),
+                groupedCatalogItem("eight", repo: "owner/Model-0.6B-8bit", name: "Model-0.6B-8bit", group: "1", groupName: "Model", publisher: "owner", quantization: "8-bit"),
+                downloaded,
+                groupedCatalogItem("available-four", repo: "owner/Model-1.7B-4bit", name: "Model-1.7B-4bit", group: "1", groupName: "Model", publisher: "owner", size: "1.7B", quantization: "4-bit")
+            ]
+            engine.models = [InstalledModel(id: "fixture-model", name: "Downloaded", path: "/private/fixture", apiID: "saved", artifactMode: .text)]
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse, items: raw))
+            guard let catalog = engine.catalog else { return false }
+            let filter = CatalogQuantizationFilter.quantization("4-bit")
+            let visible = CatalogBrowserInventory(items: catalog.items, query: "MODEL", sort: .sizeDescending, quantization: filter)
+            guard visible.groups.count == 1, visible.groups[0].items.map(\.id) == ["available-four", "downloaded-four"],
+                  engine.catalogItemIsDownloaded(visible.groups[0].items[1], artifactMode: .text),
+                  !engine.catalogItemIsDownloaded(visible.groups[0].items[0], artifactMode: .text),
+                  CatalogBrowserInventory(items: catalog.items, query: "BF16", quantization: filter).groups.isEmpty,
+                  CatalogBrowserInventory(items: catalog.items, quantization: .all).groups[0].items.count == 4 else { return false }
+            engine.installCatalogItem(id: visible.groups[0].items[0].id, artifactMode: .text)
+            let request = command()
+            return request["command"] as? String == "install_catalog" && request["entry_id"] as? String == "available-four" &&
+                request["catalog_request_id"] as? String == browse["request_id"] as? String &&
+                request["artifact_mode"] as? String == "text" && request["repo"] == nil && request["revision"] == nil &&
+                engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model"
         case "catalog-grouped-size-quantization-rows":
             let raw = [
                 groupedCatalogItem("large", repo: "Qwen/Qwen3-1.7B", name: "Qwen3-1.7B", group: "1", groupName: "Qwen3", publisher: "Qwen", size: "1.7B"),
@@ -1276,6 +1329,17 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_preserves_provider_order_for_size_and_quantized_variants(self):
         self.exercise("catalog-provider-order")
+
+    def test_catalog_quantization_tabs_are_dynamic_unique_and_naturally_ordered(self):
+        self.exercise("catalog-quantization-tabs")
+
+    def test_catalog_quantization_selection_falls_back_after_formats_change(self):
+        self.exercise("catalog-quantization-refresh-fallback")
+
+    def test_quantization_tabs_intersect_search_sort_and_keep_exact_download_targets(
+        self,
+    ):
+        self.exercise("catalog-quantization-search-sort-target")
 
     def test_catalog_groups_sizes_and_quantizations_without_changing_entry_ids(self):
         self.exercise("catalog-grouped-size-quantization-rows")

@@ -618,6 +618,30 @@ struct FamilyModelCatalog {
     }
 }
 
+enum CatalogQuantizationFilter: Hashable {
+    case all
+    case quantization(String)
+
+    var title: String {
+        switch self { case .all: return "All models"; case .quantization(let value): return value }
+    }
+
+    static func tabs(for items: [FamilyModelCatalog.Item]) -> [Self] {
+        [.all] + Set(items.map(\.quantization)).sorted {
+            let order = $0.localizedStandardCompare($1)
+            return order == .orderedSame ? $0 < $1 : order == .orderedAscending
+        }.map(Self.quantization)
+    }
+
+    func resolved(for items: [FamilyModelCatalog.Item]) -> Self {
+        Self.tabs(for: items).contains(self) ? self : .all
+    }
+
+    func matches(_ item: FamilyModelCatalog.Item) -> Bool {
+        switch self { case .all: return true; case .quantization(let value): return item.quantization == value }
+    }
+}
+
 struct CatalogBrowserInventory {
     struct Group: Identifiable {
         let id: String
@@ -632,10 +656,12 @@ struct CatalogBrowserInventory {
     }
     let groups: [Group]
 
-    init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending) {
+    init(items: [FamilyModelCatalog.Item], query: String = "", sort: ModelBrowserSort = .sizeAscending,
+         quantization: CatalogQuantizationFilter = .all) {
+        let quantization = quantization.resolved(for: items)
         func makeGroup(id: String, name: String, publisher: String, items: [FamilyModelCatalog.Item]) -> Group? {
             let visible = items.filter {
-                ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
+                quantization.matches($0) && ModelBrowserSearch.matches(query, fields: [name, publisher, $0.name, $0.repo, $0.revision,
                                                            $0.sizeLabel ?? "", $0.quantization] + $0.artifactModes.map(\.title))
             }.sorted { first, second in
                 let rowSort: ModelBrowserSort = sort == .sizeDescending ? .sizeDescending : .sizeAscending
@@ -1735,6 +1761,7 @@ struct ModelsView: View {
     @State private var savedQuery = ""
     @State private var familiesQuery = ""
     @State private var catalogQuery = ""
+    @State private var catalogQuantization = CatalogQuantizationFilter.all
     @State private var savedSort = ModelBrowserPreferences.load(.saved)
     @State private var familiesSort = ModelBrowserPreferences.load(.families)
     @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
@@ -1746,6 +1773,20 @@ struct ModelsView: View {
 
     private var browserScope: ModelBrowserScope {
         selectedFamily != nil ? .catalog : (tab == .onThisMac ? .saved : .families)
+    }
+
+    private var catalogItems: [FamilyModelCatalog.Item] {
+        guard let family = selectedFamily, let catalog = engine.catalog,
+              catalog.familyID == family.id, catalog.status == .ready else { return [] }
+        return catalog.items
+    }
+
+    private var quantizationTabs: [CatalogQuantizationFilter] {
+        CatalogQuantizationFilter.tabs(for: catalogItems)
+    }
+
+    private var quantizationBinding: Binding<CatalogQuantizationFilter> {
+        Binding(get: { catalogQuantization.resolved(for: catalogItems) }, set: { catalogQuantization = $0 })
     }
 
     private var searchPrompt: String {
@@ -1795,6 +1836,11 @@ struct ModelsView: View {
                     Text(choice.title(modelCount: engine.models.count)).tag(choice)
                 }
             }.pickerStyle(.segmented).labelsHidden() }
+            else {
+                Picker("Quantization", selection: quantizationBinding) {
+                    ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
+                }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
+            }
             HStack(spacing: 10) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField(searchPrompt, text: queryBinding).textFieldStyle(.roundedBorder)
@@ -1823,7 +1869,7 @@ struct ModelsView: View {
                     else { LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
                         ForEach(visibleFamilies(families)) { family in
                             Button {
-                                selectedFamily = family; artifactChoices = [:]; catalogQuery = ""
+                                selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
                                 engine.requestModelCatalog(familyID: family.id)
                             } label: {
                                 HStack {
@@ -1860,8 +1906,13 @@ struct ModelsView: View {
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 640, height: 580)
-            .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:] }
+            .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
             .onChange(of: tab) { leaveFamily() }
+            .onChange(of: quantizationTabs) {
+                guard !engine.catalogLoading, engine.catalog?.status == .ready,
+                      engine.catalog?.familyID == selectedFamily?.id else { return }
+                catalogQuantization = catalogQuantization.resolved(for: catalogItems)
+            }
             .onDisappear { engine.cancelModelCatalog() }
             .alert(item: $removalConfirmation) { confirmation in
                 Alert(title: Text(confirmation.action.title + "?"), message: Text(confirmation.message),
@@ -1956,7 +2007,7 @@ struct ModelsView: View {
     }
 
     private func leaveFamily() {
-        selectedFamily = nil; artifactChoices = [:]
+        selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all
         engine.cancelModelCatalog()
     }
 
@@ -1971,7 +2022,8 @@ struct ModelsView: View {
             VStack(spacing: 10) { ProgressView(); Text("Finding models…").foregroundStyle(.secondary) }
                 .frame(maxWidth: .infinity, minHeight: 220)
         } else if let catalog = engine.catalog, catalog.familyID == family.id, catalog.status == .ready {
-            let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort).groups
+            let groups = CatalogBrowserInventory(items: catalog.items, query: catalogQuery, sort: catalogSort,
+                                                 quantization: catalogQuantization).groups
             if catalog.items.isEmpty {
                 VStack(spacing: 10) {
                     Text("No models listed yet").font(.headline)
