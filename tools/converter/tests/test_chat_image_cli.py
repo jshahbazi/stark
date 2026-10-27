@@ -106,9 +106,9 @@ def test_image_cli_attaches_placeholder_once_and_reuses_owned_image_after_reset(
     assert worker.requests == []
 
 
-def test_image_option_requires_qualified_worker_before_reading_path(model, tmp_path):
+def test_image_option_requires_enabled_images_before_reading_path(model, tmp_path):
     worker = FakeWorker(images=False)
-    with pytest.raises(ChatError, match="not qualified"):
+    with pytest.raises(ChatError, match="unavailable"):
         run_chat(options(model, image=tmp_path / "does-not-exist.png"), worker)
 
 

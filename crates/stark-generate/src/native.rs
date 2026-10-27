@@ -61,15 +61,29 @@ impl NativeBackend {
         if path.join("speculator").exists() {
             return Err("speculator_not_supported");
         }
-        let config: Value =
-            serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
-                .map_err(|_| "invalid_model_config")?;
-        let vocab_size = config
-            .get("decoder_config")
-            .and_then(|decoder| decoder.get("vocab_size"))
-            .and_then(Value::as_u64)
-            .filter(|size| *size > 0 && *size <= u32::MAX as u64)
-            .ok_or("invalid_model_config")? as usize;
+        // The vision loader owns its bounded, no-follow selected configuration.
+        // Do not reopen it here before admission or mix EOS/vocabulary from a
+        // different path object into the model that was actually admitted.
+        let config: Option<Value> = if vision {
+            None
+        } else {
+            Some(
+                serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
+                    .map_err(|_| "invalid_model_config")?,
+            )
+        };
+        let text_vocab = config
+            .as_ref()
+            .map(|config| {
+                config
+                    .get("decoder_config")
+                    .and_then(|decoder| decoder.get("vocab_size"))
+                    .and_then(Value::as_u64)
+                    .filter(|size| *size > 0 && *size <= u32::MAX as u64)
+                    .map(|size| size as usize)
+                    .ok_or("invalid_model_config")
+            })
+            .transpose()?;
         let engine = Engine::<Metal>::new().map_err(|_| "metal_initialization_failed")?;
         let runtime_identity = engine.metal_device_identity();
         let model = if vision {
@@ -81,13 +95,24 @@ impl NativeBackend {
             NativeModel::Text(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
             NativeModel::Vision(model) => (model.tokenizer(), &model.generation_config().stop_token_ids),
         };
+        let (vocab_size, codec_eos) = match &model {
+            NativeModel::Vision(model) => (model.vocab_size() as usize, model.codec_eos_token()),
+            NativeModel::Text(_) => (
+                text_vocab.ok_or("invalid_model_config")?,
+                config
+                    .as_ref()
+                    .and_then(|config| config.get("token_codec_config"))
+                    .and_then(|codec| codec.get("eos_token"))
+                    .and_then(Value::as_str),
+            ),
+        };
         let tokenizer_ids: HashSet<u32> = tokenizer.get_vocab(true).into_values().collect();
         if tokenizer_ids.iter().any(|id| *id as usize >= vocab_size) {
             return Err("invalid_model_config");
         }
         let eos_token_ids = crate::model_stops::model_stop_token_ids(
             stops,
-            config.get("token_codec_config").and_then(|codec| codec.get("eos_token")).and_then(Value::as_str),
+            codec_eos,
             vocab_size,
             |token| tokenizer.token_to_id(token),
             |id| tokenizer_ids.contains(&id),
@@ -170,12 +195,26 @@ impl GenerationBackend for NativeBackend {
         let identity = model.artifact_identity();
         Some(ImageArtifactIdentity {
             schema_version: identity.schema_version,
-            artifact_sha256: identity.artifact_sha256,
-            config_sha256: identity.config_sha256,
-            tokenizer_sha256: identity.tokenizer_sha256,
-            processor_sha256: identity.processor_sha256,
-            template_sha256: identity.template_sha256,
+            artifact_sha256: &identity.artifact_sha256,
+            config_sha256: &identity.config_sha256,
+            tokenizer_sha256: &identity.tokenizer_sha256,
+            processor_sha256: &identity.processor_sha256,
+            template_sha256: &identity.template_sha256,
         })
+    }
+
+    fn image_family_profile(&self) -> Option<(&str, u32)> {
+        match &self.model {
+            NativeModel::Vision(model) => Some(model.family_profile()),
+            NativeModel::Text(_) => None,
+        }
+    }
+
+    fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
+        match &self.model {
+            NativeModel::Vision(model) => Some(model.source_identity()),
+            NativeModel::Text(_) => None,
+        }
     }
 
     fn cancelled(

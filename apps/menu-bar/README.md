@@ -40,7 +40,9 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 Chat mode shows the conversation; send with the button or Command-Return, Return inserts a newline. **New Chat** clears the conversation and the worker's context while keeping the model loaded. Failed or cancelled messages return to the composer. Replies appear when generation completes; the app does not stream. Decision mode takes a context, a question and 2 to 16 comma-separated answers, and requires a template that exposes a direct-answer position; otherwise it reports a compatibility error before scoring.
 
-Qualified vision builds enable **Attach Image** in Chat mode. Choose, drop, or paste one PNG/JPEG up to 4 MiB, preview it, or remove it before sending. PNG/JPEG paste representations are supported; TIFF-only clipboard images are rejected. The original bytes feed the common native image pipeline. One image stays in memory and is included with every turn; choose **New Chat** to replace it. Image loading can be cancelled; Cancel during generation stops the model. Stop, model/mode changes, advanced-option changes and quit clear the image. Recoverable errors restore the draft image. **Enable image input when converting** opts into the pinned Qwen3.5-0.8B BF16 conversion; converted vision folders are detected automatically. See the [exact qualification boundary](../../docs/MULTIMODAL_IMPLEMENTATION.md).
+**Enable image input when converting** opts into the supported Qwen3.5 vision path. It accepts the pinned reference checkpoint and compatible full merged BF16 fine-tunes with the implemented 0.8B geometry; converted vision folders are detected automatically. For a schema-3 family installation, Stark stops the running model and checks text/image execution, token accounting, recovery and cleanup before adding the model to the library. Run repeats native admission and uses a matching private receipt or checks again. Unsupported sizes, LoRA-only repositories, quantized vision weights and unrecognized metadata fail admission. See the [family contract](../../docs/VISION_FAMILY_CONTRACT.md).
+
+Passing host evidence enables **Attach Image** in Chat mode. The composer and Connection Details distinguish **locally checked** models from **reference verified** models; a local pass does not prove visual accuracy or parity with the official model. Choose, drop, or paste one PNG/JPEG up to 4 MiB, preview it, or remove it before sending. PNG/JPEG paste representations are supported; TIFF-only clipboard images are rejected. The original bytes feed the common native image pipeline. One image stays in memory and is included with every turn; choose **New Chat** to replace it. Image loading can be cancelled; Cancel during generation stops the model. Stop, model/mode changes, advanced-option changes and quit clear the image. Recoverable errors restore the draft image.
 
 Images briefly use opaque files in per-process owner-only temporary directories; claimed files are unlinked before decoding and normal completion/Stop/quit cleans unused files. Image bytes, paths and filenames are never included in the control messages or logs. Hard-killing both processes before a file is claimed can leave a private file.
 
@@ -56,13 +58,14 @@ The modal's model picker chooses which model ID to inspect and include in the JS
 
 The server starts with Stark, binds only to `127.0.0.1`, prefers port 8000 and otherwise picks a free port; always use the URL shown. Each launch generates a new random key, held in memory and delivered to the UI over the backend's private pipe. The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copies of the API key, connection JSON and curl example carry concealed and transient pasteboard markers so clipboard software that honors them can avoid retaining or syncing credentials. These markers are advisory; receiving applications and clipboard software that ignores them can still read the copied data. Use the explicit **Copy** button for the key; **Show** reveals it without enabling text selection.
 
-The API offers authenticated health, capability, model listing and chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Qualified vision workers accept inline PNG/JPEG image data URLs. Output defaults to the smaller of 512 tokens and the model limit (at most 4,096); context is model-bounded and capped at 16,384 tokens. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
+The API offers authenticated health, capability, model listing and chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Workers with active passing image evidence accept inline PNG/JPEG image data URLs; the status document reports `image_verification`. Output defaults to the smaller of 512 tokens and the model limit (at most 4,096); context is model-bounded and capped at 16,384 tokens. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
 
 ## Where the app keeps state
 
 | Data | Location |
 | --- | --- |
 | Model registry and managed models | `~/Library/Application Support/Stark` (folders registered in place stay where they are) |
+| Local image-check receipts | `~/Library/Application Support/Stark/image-checks`; private identity hashes and boolean results, reused only for an identical runtime |
 | Selected model, playground mode, pending update workspace | `UserDefaults` for `com.starkengine.menubar` (`selectedModel`, `playgroundMode`, `appUpdateWorkspace`) |
 | Conversations, decision results, system prompt and limits | Memory only; cleared on Stop, mode change or quit |
 | API key | Memory only; regenerated at each launch |
@@ -77,7 +80,7 @@ Deleting the Application Support folder and the UserDefaults domain resets the a
 ```sh
 uv run --no-project --python 3.13.13 python scripts/test_build_menubar.py
 uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update scripts.test_install_app
-uv run --no-project --python 3.13.13 python scripts/test_menubar_controller.py
+uv run --project tools/converter --locked python scripts/test_menubar_controller.py
 ```
 
 The first two run in CI. The controller test needs Xcode because it compiles `StarkApp.swift`.

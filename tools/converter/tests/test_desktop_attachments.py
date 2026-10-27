@@ -333,11 +333,11 @@ def test_reset_allows_new_image_and_clears_previous_placeholder(desktop):
     assert len(controller.messages) == 2
 
 
-def test_unqualified_worker_is_rejected_before_claim(desktop):
+def test_unchecked_worker_is_rejected_before_claim(desktop):
     controller, root = desktop
     controller.worker.images = False
     reference = stage(root)
-    with pytest.raises(DesktopError, match="not qualified"):
+    with pytest.raises(DesktopError, match="not passed checks"):
         controller.generate(controller.epoch, "first", reference)
     assert not controller.worker.calls and (root / IDENTIFIER).exists()
     assert controller.settings_summary()["images"] is False

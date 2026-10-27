@@ -81,6 +81,56 @@ extension EngineController {
             engine.apply(imageReady)
             engine.selectedID = "different-fixture"
             return engine.supportsImages && !engine.canAttachImage
+        case "image-local-evidence":
+            var verified = imageReady
+            verified["image_verification"] = "locally_tested"
+            engine.apply(verified)
+            guard engine.supportsImages, engine.imageVerification == "locally_tested",
+                  engine.imageVerificationNote.contains("Reference parity is unverified"),
+                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            engine.pendingOptions = engine.options
+            engine.state = "configuring"
+            verified["event"] = "configured"
+            engine.apply(verified)
+            return engine.modelReady && engine.supportsImages && engine.imageVerification == "locally_tested"
+        case "image-reference-evidence":
+            var verified = imageReady
+            verified["image_verification"] = "reference_verified"
+            engine.apply(verified)
+            guard engine.supportsImages, engine.imageVerification == "reference_verified",
+                  engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            verified["images"] = false
+            engine.apply(verified)
+            return !engine.supportsImages && engine.imageVerification == "unverified" &&
+                !engine.imageVerificationNote.contains("has reference-parity verification")
+        case "image-unknown-evidence":
+            var unsupported = imageReady
+            unsupported["image_verification"] = "self-declared-reference-pass"
+            engine.apply(unsupported)
+            guard engine.imageVerification == "unverified",
+                  !engine.imageVerificationNote.contains("has reference-parity verification") else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return !engine.supportsImages && engine.imageVerification == "unverified"
+        case "image-install-check-clears":
+            try! engine.attachImage(bytes: imageBytes)
+            let image = engine.draftImage!
+            engine.messages = [ChatMessage(text: "synthetic image turn", isUser: true, image: image)]
+            engine.conversationImage = image
+            _ = try! engine.attachmentStaging!.stage(image)
+            engine.imageVerification = "reference_verified"
+            engine.state = "installing"
+            engine.apply(["event": "image_check", "state": "checking"])
+            return engine.state == "installing" && engine.busy && engine.loadedID.isEmpty && engine.loadedMode == nil &&
+                !engine.supportsImages && engine.imageVerification == "unverified" &&
+                engine.messages.isEmpty && engine.draftImage == nil && engine.conversationImage == nil &&
+                staged().isEmpty && engine.message == "Checking image support on this Mac…"
+        case "image-install-check-state-guard":
+            try! engine.attachImage(bytes: imageBytes)
+            engine.apply(["event": "image_check", "state": "checking"])
+            guard engine.modelReady, engine.loadedID == "fixture-model", engine.draftImage != nil else { return false }
+            engine.state = "installing"
+            engine.apply(["event": "image_check", "state": "self-declared-pass"])
+            return engine.loadedID == "fixture-model" && engine.supportsImages && engine.draftImage != nil
         case "image-bounds":
             for bytes in [Data(), Data([0, 1, 2]), imageBytes + Data(count: ImageAttachment.maximumBytes)] {
                 do { try engine.attachImage(bytes: bytes); return false } catch {}
@@ -445,6 +495,21 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_image_backend_error_releases_attachment(self):
         self.exercise("image-backend-error-cleanup")
+
+    def test_local_image_evidence_remains_distinct_after_configuration(self):
+        self.exercise("image-local-evidence")
+
+    def test_reference_image_evidence_requires_available_images(self):
+        self.exercise("image-reference-evidence")
+
+    def test_unknown_image_evidence_is_not_promoted(self):
+        self.exercise("image-unknown-evidence")
+
+    def test_install_image_checks_clear_previous_session_and_keep_busy(self):
+        self.exercise("image-install-check-clears")
+
+    def test_install_image_check_events_are_state_guarded(self):
+        self.exercise("image-install-check-state-guard")
 
 
 if __name__ == "__main__":

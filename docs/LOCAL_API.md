@@ -1,6 +1,6 @@
 # Stark local API
 
-The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. The qualified source developer path uses BF16 `Qwen/Qwen3.5-0.8B` and the exact worker, artifact and runtime in the [image execution record](archive/runs/2026-10-26-qwen35-image-execution.md). The API binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
+The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
 
 ## Connection and authentication
 
@@ -37,9 +37,17 @@ Public model IDs use the full Hugging Face repository ID (`owner/model`) for mod
 
 ## Image qualification
 
-`capabilities.images` becomes true only when the loaded worker's schema-2 `mediaref-v1` contract matches a passed [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) record. The host checks all five loaded file hashes—weights, config, tokenizer, processor and template—plus the worker executable hash, Metal device properties and current macOS version. It hashes the executable before launch and again when readiness arrives, requiring both hashes to match the record. Native readiness reports `qualified: false` because qualification comes from the host's external catalog.
+`capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result:
 
-The catalog contains the developer `5fc92516…` and Developer ID signed `741a3ea7…` worker tuples for the same BF16 Qwen3.5 artifact on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Their records bind the [developer execution evidence](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker evidence](archive/runs/2026-10-27-qwen35-signed-worker.md). The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers the delivered GUI as well. Public notarized distribution remains pending. A rebuilt, signed or modified worker needs a new record whenever its executable hash changes.
+| Value | Meaning |
+| --- | --- |
+| `reference_verified` | The schema-2 `mediaref-v1` contract matches a passed external execution record for the exact artifact, worker and runtime. |
+| `locally_tested` | The admitted family passed bounded local text/image, token-accounting, recoverable-error and cleanup checks, or reused an identical private receipt. |
+| `unverified` | No passing evidence is active; images are disabled. |
+
+The host checks all five loaded file hashes—weights, config, tokenizer, processor and template—plus the worker executable hash, Metal device properties and current macOS version. It hashes the executable before launch and again when readiness arrives. Local receipts also bind the checker, Python/dependency versions, family/schema versions and image limits. Installation metadata cannot enable the capability. Native readiness reports `qualified: false` because the host supplies the evidence decision. See the [family contract and cache rules](VISION_FAMILY_CONTRACT.md).
+
+The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains the developer `5fc92516…` and Developer ID signed `741a3ea7…` worker tuples for the same BF16 Qwen3.5 artifact on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Their records bind the [developer execution evidence](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker evidence](archive/runs/2026-10-27-qwen35-signed-worker.md). The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers that delivered GUI. Public notarized distribution remains pending. A rebuilt, signed or modified worker requires matching reference evidence or fresh local checks. `locally_tested` does not assert reference parity or visual accuracy for a fine-tune.
 
 ## Chat completions
 
@@ -82,13 +90,13 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN` or infinity |
 | 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
 | 400 | `invalid_messages` | The chat template rejected the messages |
-| 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No exact image qualification, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
+| 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
 | 400 | `request_too_large` | Rendered worker request exceeds the 1 MiB encoded line limit |
 | 401 | `invalid_api_key` | Missing or wrong bearer key |
 | 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
 | 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |
-| 413 | `body_too_large` | Body exceeds the active body cap: 1 MiB normally, or 6 MiB for qualified image requests |
+| 413 | `body_too_large` | Body exceeds the active body cap: 1 MiB normally, or 6 MiB when image capability is enabled |
 | 413 | `image_too_large` | Decoded image exceeds the 4 MiB service limit |
 | 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
 | 429 | `server_busy`, `queue_full`, `queue_timeout`, `body_budget_full` | Connection limit, queue limit, queue wait expired, or shared pending raw-body budget reached |
@@ -112,4 +120,4 @@ A client appearing here does not mean its agents, tools or other workflows are s
 
 ## Compatibility boundary
 
-The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the exact local qualification gate; other multimodal content, tools, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported.
+The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, tools, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported.

@@ -4,7 +4,7 @@ Stark ships two native workers. Each is a standalone executable that loads one c
 
 | Worker | Purpose | Contract |
 | --- | --- | --- |
-| `stark-generate` | Tokenize, decode and generate text; prepare and generate one image request for its qualified Qwen3.5 path | [Generation](GENERATION.md) |
+| `stark-generate` | Tokenize, decode and generate text; prepare and generate one image request for its admitted Qwen3.5 family | [Generation](GENERATION.md) |
 | `stark-score` | Next-token logits and probabilities for candidate tokens | [Scoring](SCORING.md) |
 
 This page describes what the two protocols share. The per-worker pages define the requests, replies and error codes.
@@ -49,7 +49,7 @@ The first line a worker writes is its readiness reply. On success it starts with
 
 Each tag names the exact request and reply shape documented on the per-worker page at the time of writing. A tag changes when the shape it covers changes incompatibly; new readiness keys can appear without a tag change. Treat an unrecognised tag as incompatible rather than guessing.
 
-Image readiness describes implemented functionality and loaded identity. Its `qualified: false` field does not prevent a host from finding a passed external record. The host enables image input only at the intersection of the supported contract, all five loaded artifact-file hashes, the worker executable hash observed before launch and checked again at readiness, the Metal device identity and the current macOS version. The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains the qualified developer tuple; [Generation](GENERATION.md#image-qualification) defines its scope.
+Image readiness describes implemented functionality and loaded identity. Its `qualified: false` field leaves the evidence decision to the host. A matching [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) record enables the exact schema-2 tuple as `reference_verified`. The [family path](VISION_FAMILY_CONTRACT.md) enables an admitted compatible model as `locally_tested` after bounded automatic execution checks. Both bind all five artifact-file hashes, the worker hash observed before launch and checked again at readiness, the Metal device and macOS version; local receipts additionally bind checker and Python dependency identities. [Generation](GENERATION.md#image-qualification) defines the evidence levels and scope.
 
 ## Error classes
 

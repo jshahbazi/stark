@@ -42,7 +42,7 @@ Some catalog profiles take tokenizer or generation metadata from another reposit
 
 The output directory contains `config.json`, `tokenizer.json`, `model.safetensors` and `conversion.json`. The receipt records the source revision and content hashes, converter inputs, dependency lock, emitted file hashes, workspace use and the native-loading status. BF16 is the default output dtype and the only one the engine loads; F16 and F32 outputs are conversion-only and are marked runtime-blocked. The converter stages into a private temporary directory and publishes with an atomic no-replace rename, so a failed or interrupted conversion leaves no partial output.
 
-A successful conversion validates the complete supported layout. It does not run the model: new conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record (see [qualification](#catalog-coverage-and-qualification)).
+A successful conversion validates the complete supported layout. It does not run the model. Text conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record. Vision conversion reports the applicable unverified layout/family status or a matching exact record (see [qualification](#catalog-coverage-and-qualification)).
 
 ## Command reference
 
@@ -60,7 +60,7 @@ stark-convert [SOURCE] [options]
 | `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
-| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the exact pinned Qwen3.5-0.8B BF16 checkpoint; see the [qualified image path](../../docs/MULTIMODAL_IMPLEMENTATION.md) |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the pinned Qwen3.5-0.8B BF16 checkpoint or the supported merged-BF16 [family profile](../../docs/VISION_FAMILY_CONTRACT.md) |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
@@ -101,11 +101,17 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
 
 Vision mode uses a separate [execution catalog](stark_convert/vision_runtime_qualifications.json).
-Its first record binds all five artifact files and the generation worker to the
+Its records bind all five artifact files and the generation worker to the
 tested Metal device class and macOS version. The [execution record](../../docs/archive/runs/2026-10-26-qwen35-image-execution.md)
 includes final-logit parity, visual questions, resource observations, and failure
 recovery. Conversion returns that named-build evidence when output hashes match;
 serving additionally verifies the launched executable and current runtime.
+Compatible merged BF16 Qwen3.5 fine-tunes use schema 3 and report
+`native_loading: "supported_family_unverified"`. On installation or startup,
+the host can enable image input after automatic local checks and labels it
+`locally_tested`. Exact catalog matches are `reference_verified`. These local
+checks do not create an execution-catalog entry or prove reference parity; see
+the [family contract](../../docs/VISION_FAMILY_CONTRACT.md).
 
 Probe coverage without reading a checkpoint:
 
@@ -117,12 +123,31 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 
 The `vision-language` artifact mode is tracked separately in the
 [native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
-It validates and retains the full vision tower, processor and template for one
-pinned checkpoint. Qualified worker, CLI, Local API and Swift app builds can use
-the resulting artifact for one PNG/JPEG image. Default Qwen3.5 conversions remain
-text-only. The [local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
-covers Swift attachments and delivered-GUI execution. Public notarized release
+It validates and retains the full vision tower, processor and template for the
+pinned checkpoint or the initial merged BF16 Qwen3.5 family. That family accepts
+changed weights with the implemented 0.8B geometry and recognized tokenizer,
+template and processor forms. The worker, CLI, Local API and Swift app support
+one PNG/JPEG image after passing host evidence checks. Default Qwen3.5 conversions
+remain text-only. Larger sizes, MoE, LoRA-only repositories, quantized vision
+weights and new architectures require additional support. The
+[local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
+covers the earlier exact-tuple Swift and GUI checks. Public notarized release
 qualification remains pending.
+
+Convert a self-contained merged vision checkpoint with:
+
+```sh
+uv run --project tools/converter --locked stark-convert my-org/qwen35-08b-merged \
+  --metadata-profile hf-generic --artifact-mode vision-language \
+  --write-source-manifest runtime/converter-sources/qwen35-merged.json \
+  --output models/qwen35-merged-vision
+```
+
+Use a local source path plus `--offline` for a downloaded folder. The converter
+uses the checkpoint's own metadata; it does not borrow sidecars from the official
+model. Family conversion performs structural validation. Installation checks
+execution on the current Mac before registering a schema-3 model. See the
+[complete family boundary](../../docs/VISION_FAMILY_CONTRACT.md).
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
 

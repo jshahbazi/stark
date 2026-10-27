@@ -21,6 +21,9 @@ def make_artifact(path: Path, *, vision: bool, processor: bool = True, template:
     }
     if vision:
         config["type"] = "Qwen35VisionLanguageModelConfig"
+        # These legacy install-routing fixtures use the schema-2 path. Native
+        # admission and qualification use separate complete artifact fixtures.
+        config["artifact_contract"] = {"type": "Qwen35VisionLanguageArtifact", "schema_version": 2}
     (path / "config.json").write_text(json.dumps(config))
     (path / "tokenizer.json").write_text("{}")
     (path / "model.safetensors").write_bytes(b"synthetic weights")

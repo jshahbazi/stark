@@ -38,9 +38,13 @@ def build_qwen35_vision_plan(vision_config: dict, tensors: dict[str, TensorInfo]
         "hidden_act",
         "deepstack_visual_indexes",
         "initializer_range",
+        "dtype",
+        "torch_dtype",
     }
     if set(vision_config) - allowed:
         raise UnsupportedConversion("Qwen3.5 vision config contains unsupported fields")
+    if any(vision_config.get(key, "bfloat16") != "bfloat16" for key in ("dtype", "torch_dtype")):
+        raise UnsupportedConversion("Qwen3.5 vision dtype hints must declare BF16")
     hidden = _positive(vision_config, "hidden_size")
     intermediate = _positive(vision_config, "intermediate_size")
     depth = _positive(vision_config, "depth")

@@ -23,8 +23,8 @@ use crate::{
     parameters::{ParameterLoaderError, ParameterTree},
 };
 
-/// Internal architectural description. The artifact loader additionally requires
-/// the exact official 0.8B configuration and checkpoint identity.
+/// Internal architectural description. Its admitting loader validates either
+/// the exact official artifact or a supported structural family profile.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct VisionTowerConfig {
     pub(crate) depth: u32,

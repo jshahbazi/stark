@@ -18,7 +18,8 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Worker protocols](WORKER_PROTOCOLS.md) | Conventions shared by both workers: framing, readiness and version tags, error classes, privacy |
 | [Text generation](GENERATION.md) | `stark-generate` requests, replies, streaming, stop sequences, cancellation, error codes, and the terminal chat client |
-| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Exact-checkpoint vision conversion, qualified worker/API/CLI image input, and remaining attachment/distribution work |
+| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Native Qwen3.5 conversion, preprocessing, tower, fusion and image transport |
+| [Vision model families](VISION_FAMILY_CONTRACT.md) | Merged BF16 Qwen3.5 admission, automatic installation checks and evidence levels |
 | [Probability scoring](SCORING.md) | `stark-score` requests, replies, the consecutive cache, error codes and the digest probe |
 
 ## Developing Stark
@@ -45,3 +46,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [brand/](brand/README.md) | Logo provenance and colour tokens |
 
 New validation runs belong in the pull request that made the change, or under `archive/runs/` when they must be preserved; reference pages describe current behaviour only.
+
+The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
+records changed-weight conversion and automatic local image checks through the
+desktop, API and Swift controller.

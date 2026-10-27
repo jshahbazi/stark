@@ -415,6 +415,8 @@ class ConverterPackageTests(unittest.TestCase):
                 "chat.py",
                 "media.py",
                 "vision_runtime.py",
+                "image_checks.py",
+                "vision_family.py",
                 "vision_runtime_qualifications.json",
             ):
                 relative = "stark_convert/" + name
@@ -446,6 +448,8 @@ class ConverterPackageTests(unittest.TestCase):
             for missing in (
                 "stark_convert/progress.py",
                 "stark_convert/desktop_media.py",
+                "stark_convert/image_checks.py",
+                "stark_convert/vision_family.py",
                 "stark_convert/media.py",
                 "stark_convert/vision_runtime_qualifications.json",
                 "stark_convert/_build_inputs/uv.lock",

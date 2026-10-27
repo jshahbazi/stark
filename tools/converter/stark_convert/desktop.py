@@ -21,13 +21,22 @@ from pathlib import Path
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .chat import ChatCancelled, ChatError, ChatImageError, ChatRequestTooLarge, Worker, load_template
+from .chat import (
+    ChatCancelled,
+    ChatError,
+    ChatImageError,
+    ChatRequestTooLarge,
+    Worker,
+    load_template,
+    read_model_config,
+)
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .registry import get_model
 from .sources import huggingface_repository
+from .vision_runtime import FAMILY_PROFILE
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -69,13 +78,25 @@ def model_valid(path):
     if not path.is_dir() or not all((path / name).is_file() for name in MODEL_FILES):
         return False
     try:
-        config = json.loads((path / "config.json").read_text())
+        config = read_model_config(path)
         if not isinstance(config.get("decoder_config"), dict):
             return False
-        if config.get("type") == "Qwen35VisionLanguageModelConfig" and not all(
-            (path / name).is_file() for name in ("preprocessor_config.json", "chat_template.jinja")
-        ):
-            return False
+        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+            codec = config.get("token_codec_config", {})
+            contract = config.get("artifact_contract")
+            if (
+                not isinstance(contract, dict)
+                or type(contract.get("schema_version")) is not int
+                or contract["schema_version"] not in (2, 3)
+            ):
+                return False
+            return (
+                all((path / name).is_file() for name in ("preprocessor_config.json", "chat_template.jinja"))
+                and isinstance(codec, dict)
+                and codec.get("type") == "ChatCodecConfig"
+                and isinstance(codec.get("prompt_template"), str)
+                and bool(codec["prompt_template"])
+            )
         load_template(path)
         return True
     except Exception:
@@ -266,7 +287,6 @@ class Desktop:
             self.codec = None
             self.template = None
         if worker is not None:
-            terminate(worker.process)
             worker.close()
 
     def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
@@ -470,13 +490,13 @@ class Desktop:
             name = path.name
             converted = model_valid(path)
             try:
-                is_stark = "decoder_config" in json.loads((path / "config.json").read_text())
+                is_stark = "decoder_config" in read_model_config(path)
             except Exception:
                 is_stark = False
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
             if converted:
-                config = json.loads((path / "config.json").read_text())
+                config = read_model_config(path)
                 stored_mode = "vision-language" if config.get("type") == "Qwen35VisionLanguageModelConfig" else "text"
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
@@ -500,9 +520,16 @@ class Desktop:
                 ),
                 None,
             )
-            if previous is not None:
-                if not model_valid(Path(previous["path"])):
-                    raise DesktopError("The installed model folder is missing or incomplete.")
+        if previous is not None:
+            if not model_valid(Path(previous["path"])):
+                raise DesktopError("The installed model folder is missing or incomplete.")
+            verification = self.check_family_install(epoch, Path(previous["path"]))
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                if verification is not None:
+                    previous["image_verification"] = verification
+                    self.persist()
                 self.finish_install_progress(epoch, skipped=True)
                 self.emit("installed", epoch, model={k: previous[k] for k in ("id", "name", "path")})
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
@@ -545,9 +572,12 @@ class Desktop:
                     managed = self.model_dir / identifier
                     output.replace(managed)
                     path = managed
+            verification = self.check_family_install(epoch, path)
             model = {"id": identifier, "name": name, "path": str(path), "source": source_key}
             if selected_mode == "vision-language":
                 model["artifact_mode"] = selected_mode
+            if verification is not None:
+                model["image_verification"] = verification
             with self.lock:
                 if epoch != self.epoch:
                     return
@@ -567,14 +597,69 @@ class Desktop:
             if managed is not None:
                 shutil.rmtree(managed, ignore_errors=True)
 
+    def check_family_install(self, epoch, path):
+        """Check a family artifact before publishing it, with one loaded worker."""
+        config = read_model_config(path)
+        contract = config.get("artifact_contract", {})
+        if (
+            config.get("type") != "Qwen35VisionLanguageModelConfig"
+            or not isinstance(contract, dict)
+            or contract.get("schema_version") != 3
+        ):
+            return None
+        family = contract.get("family")
+        if (
+            not isinstance(family, dict)
+            or family != {"profile": FAMILY_PROFILE, "version": 1}
+            or type(family.get("version")) is not int
+        ):
+            raise DesktopError("This image model family is not supported.")
+        with self.lock:
+            if epoch != self.epoch:
+                raise DesktopError("Image checks were interrupted by a model change.")
+        self.emit("image_check", epoch, state="checking")
+        self.status("installing", "Checking image support on this Mac…", epoch)
+        with self.lock:
+            if epoch != self.epoch:
+                raise DesktopError("Image checks were interrupted by a model change.")
+            self.close_worker()
+        worker = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    raise DesktopError("Image checks were interrupted by a model change.")
+                worker = Worker(self.executable, path, self.timeout)
+                worker.image_check_dir = self.data_dir / "image-checks"
+                self.worker = worker
+            ready = worker.read()
+            with self.lock:
+                if epoch != self.epoch or self.worker is not worker:
+                    raise DesktopError("Image checks were interrupted by a model change.")
+                if (
+                    ready.get("ready") is not True
+                    or ready.get("mode") != "text-generation-v1"
+                    or worker.images is not True
+                    or worker.image_verification != "locally_tested"
+                ):
+                    raise DesktopError("This model did not pass local image execution checks.")
+                return "locally_tested"
+        except ChatError as error:
+            raise DesktopError(str(error)) from None
+        finally:
+            with self.lock:
+                current = self.worker is worker
+                if current:
+                    self.close_worker()
+            if not current and worker is not None:
+                worker.close()
+
     def run(self, epoch, identifier, mode="chat"):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        codec, template = load_template(Path(model["path"]))
-        if mode == "decision" and json.loads((Path(model["path"]) / "config.json").read_text()).get("type") == (
-            "Qwen35VisionLanguageModelConfig"
-        ):
+        vision = read_model_config(Path(model["path"])).get("type") == "Qwen35VisionLanguageModelConfig"
+        codec, template = (None, None) if vision else load_template(Path(model["path"]))
+        if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")
         with self.lock:
             if epoch != self.epoch:
@@ -585,7 +670,14 @@ class Desktop:
                 else Worker(self.executable, Path(model["path"]), self.timeout)
             )
             self.worker = worker
+            if mode == "chat":
+                worker.image_check_dir = self.data_dir / "image-checks"
+                worker.image_check_progress = lambda: self.status(
+                    "loading", "Checking image support on this Mac…", epoch
+                )
         ready = worker.read()
+        if vision:
+            codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
         if mode == "decision":
             if (
                 ready.get("ready") is not True
@@ -644,6 +736,7 @@ class Desktop:
             "images": bool(self.attachments is not None and self.worker and getattr(self.worker, "images", False)),
             "image_attachment_transport": "private-file-v1",
             "max_image_bytes": MAX_IMAGE_BYTES,
+            "image_verification": getattr(self.worker, "image_verification", "unverified"),
         }
 
     def configure(self, payload):
@@ -690,7 +783,7 @@ class Desktop:
             if reference is not None and (
                 attachments is None or self.worker is None or not getattr(self.worker, "images", False)
             ):
-                raise DesktopError("The loaded model is not qualified for image attachments.")
+                raise DesktopError("Image support has not passed checks for this model.")
             if previous_image is not None and reference is None:
                 raise DesktopError("Resupply the conversation image or start a new chat.")
             history = list(self.messages)
@@ -779,7 +872,7 @@ class Desktop:
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
         if image is not None:
             if not getattr(worker, "images", False):
-                raise APIError(400, "The loaded model is not qualified for image requests.", "images_unsupported")
+                raise APIError(400, "Image support has not passed checks for this model.", "images_unsupported")
             options = {
                 "context_tokens": context,
                 "max_new_tokens": maximum,
@@ -863,6 +956,11 @@ class Desktop:
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
                 "models": self.api_models(),
+                "image_verification": (
+                    getattr(self.worker, "image_verification", "unverified")
+                    if self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                    else "unverified"
+                ),
                 "capabilities": {
                     "chat_completions": True,
                     "streaming": True,

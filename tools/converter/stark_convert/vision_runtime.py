@@ -15,6 +15,7 @@ from .vision_contract import REPO, REVISION
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _OS_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?\Z")
 _ARTIFACT = "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4"
+FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
 _ARTIFACT_HASHES = {
     "artifact_sha256",
     "config_sha256",
@@ -72,14 +73,11 @@ def image_input_contract(value: object) -> dict | None:
     if (
         value.get("version") != "mediaref-v1"
         or value.get("transport") != "owner-private-file-v1"
-        or value.get("model_source") != REPO
-        or value.get("model_revision") != REVISION
-        or value.get("artifact_sha256") != _ARTIFACT
         or not _valid_runtime_identity(value.get("runtime_identity"))
         or type(value.get("max_images")) is not int
         or value["max_images"] != 1
         or type(value.get("artifact_schema_version")) is not int
-        or value["artifact_schema_version"] != 2
+        or value["artifact_schema_version"] not in (2, 3)
         or any(not isinstance(value.get(key), str) or _HASH.fullmatch(value[key]) is None for key in _ARTIFACT_HASHES)
         or not isinstance(operations, list)
         or any(not isinstance(item, str) for item in operations)
@@ -101,7 +99,45 @@ def image_input_contract(value: object) -> dict | None:
         )
     ):
         return None
+    if value["artifact_schema_version"] == 2:
+        if (
+            value.get("model_source") != REPO
+            or value.get("model_revision") != REVISION
+            or value.get("artifact_sha256") != _ARTIFACT
+        ):
+            return None
+    elif not family_image_input_contract(value):
+        return None
     return dict(value)
+
+
+def family_image_input_contract(value: object) -> bool:
+    """Recognize the native implementation profile, never execution evidence."""
+    if not isinstance(value, dict):
+        return False
+    source, revision = value.get("model_source"), value.get("model_revision")
+    return (
+        value.get("family_profile") == FAMILY_PROFILE
+        and type(value.get("family_version")) is int
+        and value["family_version"] == 1
+        and isinstance(source, str)
+        and 0 < len(source) <= 256
+        and not source.startswith(("/", "."))
+        and ".." not in source.split("/")
+        and all(char.isascii() and (char.isalnum() or char in "_./-") for char in source)
+        and (revision is None or isinstance(revision, str) and re.fullmatch(r"[0-9a-f]{40,64}", revision) is not None)
+        and _valid_runtime_identity(value.get("runtime_identity"))
+        and all(
+            type(value.get(key)) is int and 0 < value[key] <= maximum
+            for key, maximum in (
+                ("max_compressed_bytes", 20 * 1024 * 1024),
+                ("max_source_pixels", 32_000_000),
+                ("max_processed_pixels", 1_048_576),
+                ("max_patches", 4096),
+                ("max_image_tokens", 1024),
+            )
+        )
+    )
 
 
 def _unique_object(pairs):
@@ -165,7 +201,7 @@ def qualified_image_worker(
     expected_worker_sha256: str | None = None,
 ) -> bool:
     """Match all five admitted files and the executable to completed image evidence."""
-    if image_input_contract(contract) is None:
+    if image_input_contract(contract) is None or contract.get("artifact_schema_version") != 2:
         return False
     try:
         worker_hash = file_hash(Path(executable))

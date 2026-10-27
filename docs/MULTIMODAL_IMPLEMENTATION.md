@@ -5,11 +5,13 @@ checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
 follows the native Rust/Metal tower and decoder route. The converter has an
 experimental full-vision artifact mode. The engine has BF16 projected-feature
 fusion, Qwen3.5 M-RoPE, native image decoding, preprocessing, and vision-tower
-execution. A guarded public facade admits one exact BF16 artifact. The normal
+execution. A guarded public facade admits the exact BF16 reference artifact and
+the [versioned merged-BF16 family](VISION_FAMILY_CONTRACT.md). The normal
 generation worker, terminal client, and Local API implement one-image requests.
 The developer worker, CLI, and Local API have exact execution qualifications for
-the recorded BF16 artifact and worker builds on Apple M5 Max with macOS 26.7.1. Other
-tuples continue to report `images:false`. The official-weight tower passes the unchanged
+the recorded BF16 artifact and worker builds on Apple M5 Max with macOS 26.7.1.
+Compatible models can enable images after automatic local execution checks;
+the host labels that evidence `locally_tested`. The official-weight tower passes the unchanged
 2% numeric gate: all fifteen checkpoints across four fixtures are bit-exact on
 CPU and Metal. The [parity validation record](archive/runs/2026-10-26-qwen35-vision-parity.md)
 records this result and the remaining qualification boundaries. The earlier
@@ -26,8 +28,9 @@ cleanup, source/notice audits, and the remaining public-release boundary.
 
 ## Implemented conversion boundary
 
-`stark-convert --artifact-mode vision-language` is opt-in and accepts only this
-checkpoint and BF16 output. The default `text` mode retains the existing text
+`stark-convert --artifact-mode vision-language` is opt-in and accepts the exact
+reference checkpoint or a merged BF16 Qwen3.5 fine-tune that passes the
+[initial 0.8B family contract](VISION_FAMILY_CONTRACT.md). The default `text` mode retains the existing text
 conversion layout, scalar RoPE, source manifests, and native qualification
 matching. Its receipt explicitly records text input and `text-generation-v1` for
 language models. Existing text-only Qwen3.5 artifacts cannot gain vision support
@@ -35,9 +38,10 @@ without reconversion.
 
 The vision mode:
 
-- Pins the model configuration, tokenizer, tokenizer configuration, and processor
-  and template files by revision and SHA256. It also checks the exact source
-  safetensors payload and index identities, including for a local source folder.
+- Pins the reference model's configuration, tokenizer, tokenizer configuration,
+  processor, template and safetensors identities. Family conversion instead
+  validates the implemented operations and geometry and binds the selected
+  checkpoint's own metadata and changed weights into source provenance.
 - Validates the image/video/wrapper special-token IDs against the tokenizer and
   its added-token metadata.
 - Preserves every required visual tensor under `vision.*`, in the source layout
@@ -45,9 +49,10 @@ The vision mode:
   all twelve attention/MLP blocks, and the patch merger. Missing, extra,
   malformed, or unsupported visual tensors fail conversion. Declared auxiliary
   MTP weights remain omitted, as in the text adapter.
-- Copies the exact `preprocessor_config.json` and `chat_template.jinja` into the
-  output and embeds their recipe and identities in the model configuration.
-  The pinned inline and standalone templates must agree.
+- Retains a reviewed `chat_template.jinja` and writes the supported processor
+  recipe as `preprocessor_config.json`. Family conversion recognizes two source
+  processor serializations and preserves their actual raw filename/hash in
+  provenance. Inline and standalone templates must agree.
 - Uses a private, atomic conversion directory and rechecks every source before
   publication. Source manifests use schema 3 and bind `artifact_mode`; text and
   vision manifests cannot be substituted for each other.
@@ -86,16 +91,17 @@ has a [separate execution record](archive/runs/2026-10-27-qwen35-signed-worker.m
 
 The root model tag is `Qwen35VisionLanguageModelConfig`. Ordinary text model
 resolution rejects it. The generation worker selects `VisionLanguageModel` for
-this explicit type. Its loader verifies the exact configuration, weights, tokenizer, processor, and
-template byte hashes before tensor allocation, keeps their opened descriptors,
-and rechecks them before publishing the loaded instance. The original artifact
-tag is retained. This loader does not establish execution qualification.
+this explicit type. Its loader verifies the configuration, tensor headers,
+weights, tokenizer, processor and template against the applicable exact or
+family contract before tensor allocation, keeps their opened descriptors, and
+rechecks them before publishing the loaded instance. The original artifact tag
+is retained. This loader does not establish execution qualification.
 
 The root and receipt embed `artifact_contract` with:
 
 | Field | Meaning |
 | --- | --- |
-| `type`, `schema_version` | `Qwen35VisionLanguageArtifact`, version 2 |
+| `type`, `schema_version` | `Qwen35VisionLanguageArtifact`, version 2 for the exact reference artifact; version 3 for family artifacts |
 | `input_modalities`, `dtype` | Artifact represents text and image inputs in BF16 |
 | `source` | Exact checkpoint revision, metadata hashes, source payload/index sizes and hashes |
 | `special_token_ids` | Validated vision wrappers, image placeholder, video placeholder |
@@ -105,9 +111,15 @@ The root and receipt embed `artifact_contract` with:
 | `transport` | `mediaref-v1`; bounded control messages reference privately staged bytes |
 | `runtime_supported`, `qualification` | `true`, `unverified`; implementation and qualification are separate |
 
+Schema 3 also records the family profile/version and hashes of the four output
+components other than the configuration itself. Its full structural admission,
+processor normalization, tokenizer/template forms and automatic checks are
+defined in the [family contract](VISION_FAMILY_CONTRACT.md).
+
 The receipt's `execution: unverified` describes conversion itself. Exact output
 matches report `native_loading: qualified_tuple` and include the named-build
-record; unmatched outputs report `supported_layout_unverified_tuple`. Conversion
+record; unmatched schema-2 outputs report `supported_layout_unverified_tuple`
+and family outputs report `supported_family_unverified`. Conversion
 does not start a model. Artifact modalities describe stored weights and
 metadata; they cannot enable service capabilities. The normalised tokenizer and
 complete model configuration remain bound by the receipt's output hashes.
@@ -200,7 +212,8 @@ Independent private replays cover decoded pixels, complete patch tensors, and
 all fifteen tower checkpoints against pinned reference code and official BF16
 weights. Numeric limits and results belong to the dated validation record;
 functional image execution alone does not establish numeric parity or output
-quality. Public image capability requires a qualified complete tuple.
+quality. Public image capability requires passing host evidence for the complete
+loaded identity; local execution evidence and reference evidence remain distinct.
 
 ## Decoder reference arithmetic
 
@@ -220,7 +233,9 @@ division, and BF16 product boundaries. DeltaNet prefill uses 64-token chunks,
 FP32 scratch, and source matrix/triangular-solve sequencing. Its CPU reference
 accumulates cumulative decay in FP64; Metal emulates those IEEE additions with
 integer arithmetic and rounds each prefix to FP32. This profile is selected
-after exact artifact admission and keeps the Legacy profile for text artifacts.
+after exact or supported-family artifact admission and keeps the Legacy profile
+for text artifacts. Family admission preserves the implemented arithmetic; it
+does not establish a fine-tune's agreement with reference outputs.
 
 ## Worker and service transport
 
@@ -242,8 +257,9 @@ The terminal client accepts `--image PATH`. The Local API accepts one inline
 PNG/JPEG data URL in ordered user content, with 4 MiB decoded compressed bytes,
 a 6 MiB request body, and a shared 24 MiB pending-body budget. Text requests keep
 their 1 MiB body limit. These byte budgets do not claim a strict process RSS cap.
-Public image capability requires an execution record matching all five admitted
-artifact files, the launched worker executable, Metal device class, and macOS
+Public image capability requires an exact external execution record or passing
+[local family checks](VISION_FAMILY_CONTRACT.md). Both bind all five admitted
+artifact files, the launched worker executable, Metal device class and macOS
 version. The executable hash is checked before launch and at readiness. Image
 transactions share one deadline across pipe writes, prepare, generate, streaming
 reads, and discard. See [generation](GENERATION.md)
@@ -251,8 +267,8 @@ and [Local API](LOCAL_API.md) for protocol and service details.
 
 ## Swift image attachments
 
-Chat mode enables **Attach Image** only after the loaded worker passes the exact
-execution catalog and negotiates `private-file-v1` with the desktop bridge. The
+Chat mode enables **Attach Image** after the loaded worker has passing host
+evidence and negotiates `private-file-v1` with the desktop bridge. The
 composer accepts a file, a file drop, or a PNG/JPEG paste representation, previews
 it, and supports removal before sending. TIFF-only clipboard representations
 are unsupported. Original encoded bytes remain unchanged; ImageIO creates only
@@ -276,19 +292,23 @@ command limit and 4 MiB encoded-image limit apply. Cleanup only touches private
 opaque files in that pinned directory. Hard-killing both processes before claim
 can leave a staging file; there is no shared-temporary-directory scan.
 
-The model installer offers **Enable image input when converting** for the pinned
-BF16 vision conversion. Existing converted folders are detected automatically.
-The default conversion behavior remains text. Connection JSON and the connection
-view report the running worker's qualified image capability.
+The model installer offers **Enable image input when converting** for supported
+merged BF16 Qwen3.5 checkpoints. Existing converted folders are detected
+automatically. Schema-3 installations stop the running model and pass local
+checks before entering the library. Run validates the admitted identity and
+reuses a matching private receipt or runs the checks again. The default
+conversion behavior remains text. Connection JSON and the connection view
+report the running worker's image capability and evidence level.
 
 ## Remaining dependencies and acceptance
 
-1. **Coverage:** additional models, dtypes, worker builds, hardware classes, or
-   OS versions require their applicable implementation and exact execution
-   evidence. The current native loader admits one pinned BF16 artifact.
+1. **Coverage:** the initial family remains limited to the implemented 0.8B dense
+   geometry, merged BF16 weights and recognized metadata. Other sizes, MoE,
+   quantized vision models and new architectures require implementation and
+   validation. A local execution pass does not inherit official quality or parity.
 2. **Distribution:** each delivered worker signature is a different executable
-   identity. Preserve a qualified nested worker when resealing an application;
-   changing it requires separate execution evidence. Public distribution also
+   identity. A changed worker requires matching reference evidence or fresh
+   local checks. Public distribution also
    requires notarization and Gatekeeper acceptance for the final app.
 
 The historical [converter review](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)

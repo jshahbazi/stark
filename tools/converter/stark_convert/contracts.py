@@ -29,7 +29,11 @@ class CapabilityResult:
     conversion: Literal["implemented", "unsupported"]
     source_validation: Literal["not_performed", "complete"] = "not_performed"
     native_loading: Literal[
-        "qualified_tuple", "supported_layout_unverified_tuple", "runtime_blocked", "unverified"
+        "qualified_tuple",
+        "supported_layout_unverified_tuple",
+        "supported_family_unverified",
+        "runtime_blocked",
+        "unverified",
     ] = "unverified"
     execution: Literal["unverified"] = "unverified"
     reason: str | None = None

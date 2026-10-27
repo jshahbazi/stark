@@ -80,6 +80,28 @@ fn native_vision_artifact_hashes_bind_exact_bytes_and_open_descriptor() {
     assert!(!file_matches(&mut file, &expected).unwrap());
 }
 
+#[cfg(unix)]
+#[stark_test]
+fn native_vision_component_open_rejects_symlinks_directories_and_fifos_without_blocking() {
+    use std::{
+        ffi::CString,
+        os::unix::{ffi::OsStrExt, fs::symlink},
+    };
+
+    let directory = PrivateDirectory::new();
+    directory.write("regular", b"synthetic component");
+    assert!(open_artifact_component(&directory.0.join("regular")).is_ok());
+    symlink(directory.0.join("regular"), directory.0.join("alias")).unwrap();
+    assert!(open_artifact_component(&directory.0.join("alias")).is_err());
+    assert!(open_artifact_component(&directory.0).is_err());
+    let fifo = directory.0.join("fifo");
+    let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: the private path is a live NUL-terminated CString and mode is a
+    // valid owner-only creation mask; mkfifo retains neither argument.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    assert!(open_artifact_component(&fifo).is_err());
+}
+
 #[stark_test]
 fn native_vision_prepared_image_exposes_actual_grid_and_token_count() {
     let limits = PreprocessLimits::default();
@@ -95,17 +117,21 @@ fn native_vision_prepared_image_exposes_actual_grid_and_token_count() {
 #[stark_test]
 fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
     let template = || vec![100, 248053, 248056, 248054, 101].into_boxed_slice();
-    let (expanded, start) = expand_image_placeholder(template(), 64, 69).unwrap();
+    let (expanded, start) = expand_image_placeholder(template(), 64, 69, 248056).unwrap();
     assert_eq!(start, 2);
     assert_eq!(expanded.len(), 68);
     assert!(expanded[2..66].iter().all(|&token| token == 248056));
     assert_eq!(&expanded[..2], &[100, 248053]);
     assert_eq!(&expanded[66..], &[248054, 101]);
-    assert!(expand_image_placeholder(template(), 64, 68).is_err());
-    assert!(expand_image_placeholder(template(), 0, 128).is_err());
-    assert!(expand_image_placeholder(template(), 1025, 2048).is_err());
-    assert!(expand_image_placeholder(vec![100, 101].into_boxed_slice(), 64, 128).is_err());
-    assert!(expand_image_placeholder(vec![248056, 248056].into_boxed_slice(), 64, 128).is_err());
+    assert!(expand_image_placeholder(template(), 64, 68, 248056).is_err());
+    assert!(expand_image_placeholder(template(), 0, 128, 248056).is_err());
+    assert!(expand_image_placeholder(template(), 1025, 2048, 248056).is_err());
+    assert!(expand_image_placeholder(vec![100, 101].into_boxed_slice(), 64, 128, 248056).is_err());
+    assert!(expand_image_placeholder(vec![248056, 248056].into_boxed_slice(), 64, 128, 248056).is_err());
+    let (changed, start) =
+        expand_image_placeholder(vec![100, 200, 300, 400, 101].into_boxed_slice(), 2, 9, 300).unwrap();
+    assert_eq!(start, 2);
+    assert_eq!(&changed[..], &[100, 200, 300, 300, 400, 101]);
 }
 
 #[cfg(backend = "cpu")]
@@ -150,6 +176,39 @@ fn native_vision_loader_rejects_unbound_and_speculative_artifacts() {
 #[cfg(backend = "metal")]
 fn official_image_tokens() -> Box<[u64]> {
     [100, 248053].into_iter().chain(std::iter::repeat_n(248056, 64)).chain([248054, 101]).collect()
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+#[ignore]
+fn native_vision_family_profile_matches_real_converted_components_without_gpu_weights() {
+    let path = PathBuf::from(std::env::var("STARK_TEST_MODEL_PATH").expect("model path required"));
+    let mut config: serde_json::Value = serde_json::from_slice(&fs::read(path.join("config.json")).unwrap()).unwrap();
+    let hashes: BTreeMap<&str, String> = ARTIFACT_FILES
+        .iter()
+        .filter(|(name, _)| *name != "config.json")
+        .map(|(name, _)| {
+            let mut file = open_artifact_component(&path.join(name)).unwrap();
+            (*name, file_digest(&mut file).unwrap())
+        })
+        .collect();
+    config["artifact_contract"]["schema_version"] = serde_json::json!(3);
+    config["artifact_contract"]["family"] = serde_json::json!({"profile":family::PROFILE,"version":family::VERSION});
+    config["artifact_contract"]["component_hashes"] = serde_json::to_value(&hashes).unwrap();
+    let tokenizer_bytes = fs::read(path.join("tokenizer.json")).unwrap();
+    let tokenizer = tokenizers::Tokenizer::from_bytes(tokenizer_bytes).unwrap();
+    let admitted = family::admit(
+        &config,
+        &hashes,
+        &fs::read(path.join("preprocessor_config.json")).unwrap(),
+        &fs::read(path.join("chat_template.jinja")).unwrap(),
+        &tokenizer,
+    )
+    .unwrap();
+    assert_eq!(admitted.tower, official_tower_config());
+    assert_eq!(admitted.tokens.image, 248056);
+    let mut weights = open_artifact_component(&path.join("model.safetensors")).unwrap();
+    family::validate_weights(&mut weights).unwrap();
 }
 
 #[cfg(backend = "metal")]

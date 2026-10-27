@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import plistlib
+import re
 import select
 import shutil
 import signal
@@ -27,6 +28,16 @@ from pathlib import Path
 
 PYTHON = Path("libexec/python/bin/python3.13")
 PACKAGE = Path("libexec/python/lib/python3.13/site-packages/stark_convert")
+EVIDENCE_LEVELS = ("reference_verified", "locally_tested")
+MAX_REPLY_BYTES = 65536
+LOCAL_CHECKS = {
+    "text_generation",
+    "image_generation",
+    "image_token_accounting",
+    "recoverable_image_error",
+    "fresh_image_replay",
+    "staging_cleanup",
+}
 ADAPTATION_NOTICES = (
     "pytorch-LICENSE",
     "ggml-LICENSE",
@@ -139,6 +150,143 @@ def circle_png() -> bytes:
     )
 
 
+def metadata_bytes(path: Path, maximum: int, stage: str) -> bytes:
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        require(stat.S_ISREG(before.st_mode) and 0 < before.st_size <= maximum, stage)
+        data = stream.read(maximum + 1)
+        after = os.fstat(stream.fileno())
+    require(
+        len(data) == before.st_size
+        and all(
+            getattr(before, key) == getattr(after, key)
+            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        ),
+        stage,
+    )
+    return data
+
+
+class InstallObservation:
+    """Observe checking before the first published model-library event."""
+
+    def __init__(self, schema: int):
+        self.schema = schema
+        self.checking = False
+        self.published = False
+        self.installed = False
+
+    def observe(self, event: dict) -> None:
+        if event.get("event") == "image_check" and event.get("state") == "checking":
+            require(not self.published, "image_check_after_model_publication")
+            self.checking = True
+        if event.get("event") == "models" and event.get("models"):
+            require(self.schema != 3 or self.checking, "install_image_check_missing")
+            self.published = True
+        if event.get("event") == "installed":
+            require(self.schema != 3 or self.checking, "install_image_check_missing")
+            self.installed = True
+
+
+def verify_readiness(ready: dict, evidence_level: str) -> None:
+    require(ready.get("images") is True, "packaged_worker_unqualified")
+    require(
+        ready.get("image_verification") == evidence_level,
+        "image_evidence_level_mismatch",
+    )
+    require(
+        ready.get("image_attachment_transport") == "private-file-v1",
+        "attachment_transport_invalid",
+    )
+
+
+def generation_limits(settings: dict) -> tuple[int, int]:
+    context, maximum = settings.get("context_tokens"), settings.get("max_new_tokens")
+    require(
+        type(context) is int and 2 <= context <= 16384, "generation_context_invalid"
+    )
+    require(
+        type(maximum) is int and 0 < maximum <= min(4096, context - 1),
+        "generation_limit_invalid",
+    )
+    return context, maximum
+
+
+def verify_reply(reply: dict, evidence_level: str, context: int, maximum: int) -> None:
+    text = reply.get("text")
+    require(
+        isinstance(text, str)
+        and bool(text.strip())
+        and len(text.encode("utf-8")) <= MAX_REPLY_BYTES,
+        "generation_missing_or_oversize",
+    )
+    require(
+        type(reply.get("input_tokens")) is int
+        and reply["input_tokens"] > 0
+        and type(reply.get("output_tokens")) is int
+        and 0 < reply["output_tokens"] <= maximum
+        and reply["input_tokens"] + reply["output_tokens"] <= context,
+        "usage_missing_or_out_of_bounds",
+    )
+    require(
+        reply.get("finish_reason")
+        in {"eos", "stop_token", "stop_sequence", "length", "context"},
+        "generation_finish_invalid",
+    )
+    if evidence_level == "reference_verified":
+        require("circle" in text.lower(), "synthetic_shape_mismatch")
+
+
+def receipt_snapshot(root: Path) -> dict:
+    """Keep receipt contents private; compare immutable identity between runs."""
+    require(root.is_dir(), "local_receipt_missing")
+    paths = sorted(root.iterdir())
+    require(len(paths) == 1, "local_receipt_inventory_invalid")
+    path = paths[0]
+    require(
+        re.fullmatch(r"[0-9a-f]{64}\.json", path.name), "local_receipt_name_invalid"
+    )
+    before = path.lstat()
+    require(
+        stat.S_ISREG(before.st_mode)
+        and before.st_uid == os.getuid()
+        and stat.S_IMODE(before.st_mode) == 0o600
+        and before.st_nlink == 1,
+        "local_receipt_permissions_invalid",
+    )
+    data = metadata_bytes(path, 65536, "local_receipt_invalid")
+    receipt = json.loads(data)
+    require(
+        isinstance(receipt, dict)
+        and type(receipt.get("schema_version")) is int
+        and receipt["schema_version"] == 1
+        and receipt.get("evidence_level") == "locally_tested"
+        and isinstance(receipt.get("identity"), dict)
+        and receipt["identity"]
+        and isinstance(receipt.get("checks"), dict)
+        and set(receipt["checks"]) == LOCAL_CHECKS
+        and all(value is True for value in receipt["checks"].values()),
+        "local_receipt_invalid",
+    )
+    after = path.lstat()
+    require(
+        all(
+            getattr(before, key) == getattr(after, key)
+            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        ),
+        "local_receipt_changed",
+    )
+    return {
+        "name": path.name,
+        "identity": tuple(
+            getattr(after, key)
+            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        ),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 class Backend:
     def __init__(self, arguments: list[str | Path], environment: dict, cwd: Path):
         self.process = subprocess.Popen(
@@ -160,7 +308,12 @@ class Backend:
         self.process.stdin.flush()
 
     def until(
-        self, predicate, *, timeout: float = 180, allow_error: bool = False
+        self,
+        predicate,
+        *,
+        timeout: float = 180,
+        allow_error: bool = False,
+        observe=None,
     ) -> dict:
         assert self.process.stdout is not None
         deadline = time.monotonic() + timeout
@@ -174,6 +327,8 @@ class Backend:
                     allow_error or event.get("event") != "error",
                     "backend_rejected_request",
                 )
+                if observe is not None:
+                    observe(event)
                 if predicate(event):
                     return event
                 continue
@@ -205,8 +360,25 @@ class Backend:
                 stream.close()
 
 
-def qualify(app: Path, model: Path) -> dict:
+def qualify(app: Path, model: Path, evidence_level: str = "reference_verified") -> dict:
+    require(evidence_level in EVIDENCE_LEVELS, "image_evidence_level_invalid")
     app, model = app.resolve(strict=True), model.resolve(strict=True)
+    config_bytes = metadata_bytes(
+        model / "config.json", 1024 * 1024, "model_config_invalid"
+    )
+    config = json.loads(config_bytes)
+    require(
+        isinstance(config, dict) and isinstance(config.get("artifact_contract"), dict),
+        "image_model_schema_invalid",
+    )
+    schema = config["artifact_contract"].get("schema_version")
+    require(
+        config.get("type") == "Qwen35VisionLanguageModelConfig"
+        and type(schema) is int
+        and schema in (2, 3),
+        "image_model_schema_invalid",
+    )
+    model_config_hash = hashlib.sha256(config_bytes).hexdigest()
     metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     require(
         metadata.get("CFBundleIdentifier") == "com.starkengine.menubar",
@@ -255,7 +427,7 @@ def qualify(app: Path, model: Path) -> dict:
             "import importlib,json,sys;from pathlib import Path;"
             "root=Path(sys.argv[1]).resolve();"
             "mods=[importlib.import_module('stark_convert.'+n) for n in "
-            "['desktop','desktop_media','media','vision_runtime','chat']];"
+            "['desktop','desktop_media','media','vision_runtime','chat','image_checks','vision_family']];"
             "assert all(Path(m.__file__).resolve().is_relative_to(root) for m in mods);"
             "assert Path(sys.executable).resolve().is_relative_to(root);"
             "assert (Path(mods[0].__file__).parent/'vision_runtime_qualifications.json').is_file();"
@@ -293,29 +465,106 @@ def qualify(app: Path, model: Path) -> dict:
         )
         try:
             backend.until(lambda event: event.get("event") == "models")
+            installation = InstallObservation(schema)
             backend.send({"command": "install", "kind": "local", "source": str(model)})
             models = backend.until(
-                lambda event: event.get("event") == "models" and event.get("models")
+                lambda event: event.get("event") == "models" and event.get("models"),
+                observe=installation.observe,
             )
             backend.until(
                 lambda event: (
                     event.get("event") == "status"
                     and event.get("message") == "Model installed"
-                )
+                ),
+                observe=installation.observe,
+            )
+            require(
+                installation.installed and installation.published,
+                "install_publication_missing",
             )
             identifier = models["models"][0]["id"]
+            registry_path = home / "model-library/models.json"
+            registry = json.loads(
+                metadata_bytes(registry_path, 1024 * 1024, "model_registry_invalid")
+            )
+            require(
+                isinstance(registry, list)
+                and len(registry) == 1
+                and registry[0].get("id") == identifier,
+                "model_registry_invalid",
+            )
+            if schema == 3:
+                require(
+                    registry[0].get("image_verification") == "locally_tested",
+                    "registry_image_evidence_invalid",
+                )
+            receipt = None
+            if evidence_level == "locally_tested" and schema == 3:
+                receipt = receipt_snapshot(home / "model-library/image-checks")
+                reinstallation = InstallObservation(schema)
+                backend.send(
+                    {"command": "install", "kind": "local", "source": str(model)}
+                )
+                repeated = backend.until(
+                    lambda event: event.get("event") == "installed",
+                    observe=reinstallation.observe,
+                )
+                require(
+                    repeated.get("model", {}).get("id") == identifier,
+                    "reinstall_model_identity_changed",
+                )
+                backend.until(
+                    lambda event: (
+                        event.get("event") == "status"
+                        and event.get("message") == "Model already installed"
+                    )
+                )
+                require(
+                    receipt_snapshot(home / "model-library/image-checks") == receipt,
+                    "reinstall_receipt_replaced",
+                )
             backend.send({"command": "run", "model_id": identifier, "mode": "chat"})
             ready = backend.until(lambda event: event.get("event") == "ready")
-            require(ready.get("images") is True, "packaged_worker_unqualified")
-            require(
-                ready.get("image_attachment_transport") == "private-file-v1",
-                "attachment_transport_invalid",
-            )
+            verify_readiness(ready, evidence_level)
             backend.until(
                 lambda event: (
                     event.get("event") == "status" and event.get("state") == "ready"
                 )
             )
+            if receipt is not None:
+                require(
+                    receipt_snapshot(home / "model-library/image-checks") == receipt,
+                    "run_receipt_replaced",
+                )
+            if evidence_level == "locally_tested":
+                context_limit = ready.get("max_context_tokens")
+                output_limit = ready.get("max_output_tokens")
+                require(
+                    type(context_limit) is int and context_limit >= 512,
+                    "generation_context_invalid",
+                )
+                require(
+                    type(output_limit) is int and output_limit > 0,
+                    "generation_limit_invalid",
+                )
+                context = min(2048, context_limit)
+                maximum = min(32, output_limit, context - 1)
+                backend.send(
+                    {
+                        "command": "configure",
+                        "context_tokens": context,
+                        "max_new_tokens": maximum,
+                        "system_prompt": None,
+                        "thinking": False,
+                    }
+                )
+                ready = backend.until(lambda event: event.get("event") == "configured")
+                verify_readiness(ready, evidence_level)
+                require(
+                    generation_limits(ready) == (context, maximum),
+                    "generation_configuration_mismatch",
+                )
+            context, maximum = generation_limits(ready)
             image = circle_png()
             outputs = []
             for turn in range(2):
@@ -348,18 +597,7 @@ def qualify(app: Path, model: Path) -> dict:
                     )
                 )
                 require(not list(attachment_root.iterdir()), "attachment_file_retained")
-                require(
-                    "circle" in reply.get("text", "").lower(),
-                    "synthetic_shape_mismatch",
-                )
-            require(
-                all(
-                    reply.get("input_tokens", 0) > 0
-                    and reply.get("output_tokens", 0) > 0
-                    for reply in outputs
-                ),
-                "usage_missing",
-            )
+                verify_reply(reply, evidence_level, context, maximum)
         finally:
             backend.close()
         require(not list(attachment_root.iterdir()), "attachment_cleanup_failed")
@@ -370,12 +608,18 @@ def qualify(app: Path, model: Path) -> dict:
             "native_media_cleanup_failed",
         )
         require(inventory(installed) == source_inventory, "installed_bundle_mutated")
+        require(
+            digest(model / "config.json") == model_config_hash, "model_config_changed"
+        )
         canonical = json.dumps(
             source_inventory, sort_keys=True, separators=(",", ":")
         ).encode()
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "passed": True,
+            "evidence_level": evidence_level,
+            "artifact_schema_version": schema,
+            "model_config_sha256": model_config_hash,
             "bundle_inventory_sha256": hashlib.sha256(canonical).hexdigest(),
             "bundle_file_count": len(source_inventory),
             "worker_sha256": digest(runtime / "libexec/stark-generate"),
@@ -386,10 +630,25 @@ def qualify(app: Path, model: Path) -> dict:
             "checks": {
                 "clean_install_copy_and_signature": True,
                 "isolated_embedded_interpreter_and_imports": True,
-                "ordinary_catalog_qualification": True,
+                "ordinary_catalog_qualification": evidence_level
+                == "reference_verified",
+                "local_execution_checks": evidence_level == "locally_tested",
+                "ready_evidence_level_matches": True,
+                "checking_before_model_publication": installation.checking
+                if schema == 3
+                else None,
+                "registry_image_evidence_matches": True if schema == 3 else None,
+                "repeat_install_preserves_model_identity": True
+                if receipt is not None
+                else None,
+                "local_receipt_unchanged_on_reinstall_and_run": True
+                if receipt is not None
+                else None,
                 "current_native_and_adaptation_notices": True,
                 "image_turns": len(outputs),
-                "synthetic_circle_matches": len(outputs),
+                "synthetic_circle_matches": len(outputs)
+                if evidence_level == "reference_verified"
+                else None,
                 "followup_resupplies_image": True,
                 "usage_present": True,
                 "attachment_and_worker_media_cleanup": True,
@@ -398,6 +657,9 @@ def qualify(app: Path, model: Path) -> dict:
             "limits": {
                 "swift_controller": "separate_harness",
                 "notarization": "not_checked",
+                "generated_answer_quality": "synthetic_circle_predicate"
+                if evidence_level == "reference_verified"
+                else "not_checked",
             },
         }
 
@@ -407,9 +669,12 @@ def main(argv=None) -> int:
     parser.add_argument("--app", type=Path, required=True)
     parser.add_argument("--model", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--evidence-level", choices=EVIDENCE_LEVELS, default="reference_verified"
+    )
     args = parser.parse_args(argv)
     try:
-        result = qualify(args.app, args.model)
+        result = qualify(args.app, args.model, args.evidence_level)
         descriptor = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(descriptor, "w") as stream:
             json.dump(result, stream, sort_keys=True, indent=2)
@@ -421,6 +686,7 @@ def main(argv=None) -> int:
         ValueError,
         KeyError,
         TypeError,
+        AttributeError,
         QualificationError,
         subprocess.SubprocessError,
     ) as error:

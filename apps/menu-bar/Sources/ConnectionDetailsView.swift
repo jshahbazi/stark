@@ -24,7 +24,8 @@ struct ConnectionDetailsView: View {
             runningModelID: engine.models.first { $0.id == modelID }?.apiID ?? "",
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
             status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
-            images: engine.supportsImages && engine.loadedMode == .chat
+            images: engine.supportsImages && engine.loadedMode == .chat,
+            imageVerification: engine.imageVerification
         )
     }
 
@@ -92,6 +93,10 @@ struct ConnectionDetailsView: View {
                  : "Image input is unavailable for the running model and app build.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            if engine.supportsImages && engine.loadedMode == .chat {
+                Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button("Copy All as JSON") {
                     if let json = connectionInfo.json { copy(json, label: "connection JSON (includes API key)", sensitive: true) }

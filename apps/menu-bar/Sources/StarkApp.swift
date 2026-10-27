@@ -223,6 +223,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var draftImage: ImageAttachment?
     @Published private(set) var conversationImage: ImageAttachment?
     @Published private(set) var supportsImages = false
+    @Published private(set) var imageVerification = "unverified"
     @Published private(set) var imageProgress = ""
     @Published private(set) var attachmentLoading = false
     @Published private(set) var mode = PlaygroundMode(rawValue: UserDefaults.standard.string(forKey: "playgroundMode") ?? "") ?? .chat
@@ -258,6 +259,13 @@ final class EngineController: ObservableObject {
     var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
+    var imageVerificationNote: String {
+        switch imageVerification {
+        case "locally_tested": return "Image support checked on this Mac. Reference parity is unverified."
+        case "reference_verified": return "Image support has reference-parity verification."
+        default: return "Image support available."
+        }
+    }
     var hasConversation: Bool { !messages.isEmpty || draftImage != nil || conversationImage != nil }
     var canSendMessage: Bool {
         modelReady && !attachmentLoading &&
@@ -306,6 +314,7 @@ final class EngineController: ObservableObject {
                 self.apiMessage = "Stark stopped. Reopen the app to reconnect."
                 self.loadedMode = nil
                 self.supportsImages = false
+                self.imageVerification = "unverified"
                 self.pendingOptions = nil
                 self.input = nil
                 self.discardPendingMessage()
@@ -371,6 +380,7 @@ final class EngineController: ObservableObject {
                 clearConversation()
                 clearDecision()
                 supportsImages = false
+                imageVerification = "unverified"
             }
         case "ready":
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
@@ -418,6 +428,11 @@ final class EngineController: ObservableObject {
             guard state == "generating", pendingMessageID != nil else { return }
             if event["phase"] as? String == "preparing" { imageProgress = "Preparing image…" }
             if event["phase"] as? String == "generating" { imageProgress = "Generating reply…" }
+        case "image_check":
+            guard state == "installing", event["state"] as? String == "checking" else { return }
+            loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
+            clearConversation(); clearDecision()
+            message = "Checking image support on this Mac…"
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
@@ -480,6 +495,9 @@ final class EngineController: ObservableObject {
         supportsImages = mode == .chat && event["images"] as? Bool == true &&
             event["image_attachment_transport"] as? String == "private-file-v1" &&
             event["max_image_bytes"] as? Int == ImageAttachment.maximumBytes
+        let verification = event["image_verification"] as? String ?? "unverified"
+        imageVerification = supportsImages && ["locally_tested", "reference_verified"].contains(verification)
+            ? verification : "unverified"
         if !supportsImages {
             draftImage = nil; conversationImage = nil; attachmentSelection = UUID(); attachmentLoading = false
         }
@@ -600,6 +618,7 @@ final class EngineController: ObservableObject {
         clearDecision()
         loadedMode = nil
         supportsImages = false
+        imageVerification = "unverified"
         state = "loading"; message = "Loading model…"
         send(["command": "run", "model_id": selectedID, "mode": mode.rawValue])
     }
@@ -702,6 +721,7 @@ final class EngineController: ObservableObject {
         clearConversation()
         clearDecision()
         supportsImages = false
+        imageVerification = "unverified"
         state = "stopping"; message = "Stopping…"
         send(["command": "stop"])
     }
@@ -749,6 +769,7 @@ final class EngineController: ObservableObject {
         process = nil
         clearConversation()
         supportsImages = false
+        imageVerification = "unverified"
         attachmentStaging = nil
     }
 }
@@ -908,7 +929,7 @@ struct InstallView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
-                Text("Vision conversion currently supports Qwen/Qwen3.5-0.8B in BF16. Converted local models retain their existing input support.")
+                Text("Image conversion supports Qwen3.5-0.8B and compatible merged BF16 fine-tunes. Vision installs check support on this Mac and stop the running model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
@@ -932,7 +953,7 @@ struct InstallView: View {
                     .buttonStyle(.borderedProminent).disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
                     .keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 470, height: 580)
+        }.padding(24).frame(width: 470, height: 600)
             .onAppear { engine.resetInstallProgress(kind: kind) }
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
     }
@@ -1198,6 +1219,9 @@ struct ChatContentView: View {
             }.frame(maxHeight: .infinity).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 12))
             if ["length", "context"].contains(engine.finishReason) {
                 Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
+            }
+            if engine.supportsImages {
+                Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
             }
             if let image = engine.draftImage {
                 HStack {

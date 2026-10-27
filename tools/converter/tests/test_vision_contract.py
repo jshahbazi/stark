@@ -111,7 +111,7 @@ def test_validate_rejects_wrong_snapshot_identity(tmp_path, repo, revision):
     snapshot = SimpleNamespace(
         repo=repo, revision=revision, manifest={"files": []}, resolve_file=lambda *args, **kwargs: tmp_path / "x"
     )
-    with pytest.raises(ConversionError, match="pinned artifact"):
+    with pytest.raises(ConversionError, match="pinned artifact|Vision family (?:processor )?metadata"):
         validate_vision_source(snapshot, "bfloat16")
 
 

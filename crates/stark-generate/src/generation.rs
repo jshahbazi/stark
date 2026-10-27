@@ -141,7 +141,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        self.schema_version == 2
+        matches!(self.schema_version, 2 | 3)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -390,6 +390,12 @@ pub(crate) trait GenerationBackend {
         false
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
+        None
+    }
+    fn image_family_profile(&self) -> Option<(&str, u32)> {
+        None
+    }
+    fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
         None
     }
     fn runtime_identity(&self) -> Option<Value> {
@@ -803,15 +809,21 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .filter(ImageArtifactIdentity::valid)
             .ok_or("invalid_model_config")?;
         let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
+        let (family_profile, family_version) = worker
+            .backend
+            .image_family_profile()
+            .filter(|(profile, version)| *profile == "qwen35-dense-bf16-merged-v1" && *version == 1)
+            .ok_or("invalid_model_config")?;
+        let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
-            "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,
+            "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
             "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
-            "artifact_schema_version":identity.schema_version,"model_source":"Qwen/Qwen3.5-0.8B",
-            "model_revision":"2fc06364715b967f1860aea9cf38778875588b17",
+            "artifact_schema_version":identity.schema_version,"model_source":model_source,
+            "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
             "tokenizer_sha256":identity.tokenizer_sha256,"processor_sha256":identity.processor_sha256,
             "template_sha256":identity.template_sha256,
@@ -896,6 +908,8 @@ mod tests {
         drained: Arc<AtomicBool>,
         invalid_tokenization: bool,
         images: bool,
+        image_schema: u32,
+        family_version: u32,
         image_preparations: usize,
         image_generations: usize,
         prepared_drops: Arc<AtomicUsize>,
@@ -997,12 +1011,24 @@ mod tests {
 
         fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
             self.images.then_some(ImageArtifactIdentity {
-                schema_version: 2,
+                schema_version: self.image_schema,
                 artifact_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 config_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 tokenizer_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
                 processor_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
                 template_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            })
+        }
+
+        fn image_family_profile(&self) -> Option<(&str, u32)> {
+            self.images.then_some(("qwen35-dense-bf16-merged-v1", self.family_version))
+        }
+
+        fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
+            self.images.then_some(if self.image_schema == 3 {
+                ("local:synthetic-merged-model", None)
+            } else {
+                ("Qwen/Qwen3.5-0.8B", Some("2fc06364715b967f1860aea9cf38778875588b17"))
             })
         }
 
@@ -1071,6 +1097,8 @@ mod tests {
             drained: Arc::new(AtomicBool::new(true)),
             invalid_tokenization: false,
             images: false,
+            image_schema: 2,
+            family_version: 1,
             image_preparations: 0,
             image_generations: 0,
             prepared_drops: Arc::new(AtomicUsize::new(0)),
@@ -1269,6 +1297,33 @@ mod tests {
     }
 
     #[test]
+    fn family_readiness_preserves_artifact_identity_and_never_self_qualifies() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.image_schema = 3;
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["image_input"]["artifact_schema_version"], 3);
+        assert_eq!(ready["image_input"]["family_profile"], "qwen35-dense-bf16-merged-v1");
+        assert_eq!(ready["image_input"]["family_version"], 1);
+        assert_eq!(ready["image_input"]["model_source"], "local:synthetic-merged-model");
+        assert!(ready["image_input"]["model_revision"].is_null());
+        assert_eq!(ready["image_input"]["qualified"], false);
+        assert_eq!(ready["image_input"]["qualification"], "unverified");
+        for (schema, version) in [(4, 1), (3, 2)] {
+            worker.backend.image_schema = schema;
+            worker.backend.family_version = version;
+            let mut output = Vec::new();
+            assert_eq!(
+                run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output),
+                Err("invalid_model_config")
+            );
+            assert!(output.is_empty());
+        }
+    }
+
+    #[test]
     fn image_readiness_is_separate_and_oversized_frames_and_eof_clear_preparation() {
         let root = crate::media::tests::PrivateRoot::new();
         let mut worker = image_worker(&root);
@@ -1284,6 +1339,8 @@ mod tests {
         assert_eq!(frames[0]["operations"], json!(["tokenize", "decode", "generate"]));
         assert_eq!(frames[0]["image_input"]["version"], "mediaref-v1");
         assert_eq!(frames[0]["image_input"]["artifact_schema_version"], 2);
+        assert_eq!(frames[0]["image_input"]["family_profile"], "qwen35-dense-bf16-merged-v1");
+        assert_eq!(frames[0]["image_input"]["family_version"], 1);
         assert_eq!(frames[0]["image_input"]["runtime_identity"]["backend"], "metal");
         assert_eq!(frames[0]["image_input"]["runtime_identity"]["device_name"], "Apple Synthetic GPU");
         assert_eq!(frames[0]["image_input"]["runtime_identity"]["apple_gpu_family"], 1008);
@@ -1299,6 +1356,7 @@ mod tests {
             assert_eq!(frames[0]["image_input"][name], expected.repeat(64));
         }
         assert_eq!(frames[0]["image_input"]["qualified"], false);
+        assert_eq!(frames[0]["image_input"]["qualification"], "unverified");
         assert_eq!(frames[1]["error"], "request_too_large");
         assert!(worker.prepared.is_none());
         post(&mut worker, image_prepare(&root));

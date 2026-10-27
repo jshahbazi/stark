@@ -99,6 +99,7 @@ rangemap.workspace = true
 bytemuck = { workspace = true, features = ["derive"] }
 num-traits.workspace = true
 libm.workspace = true
+libc.workspace = true
 itertools.workspace = true
 parking_lot.workspace = true
 image = { version = "=0.25.10", default-features = false, features = ["png"] }

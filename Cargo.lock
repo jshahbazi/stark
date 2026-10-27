@@ -1986,6 +1986,7 @@ dependencies = [
  "is_close",
  "itertools 0.14.0",
  "jpeg-decoder",
+ "libc",
  "libm",
  "libtest-mimic",
  "monostate",

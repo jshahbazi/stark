@@ -56,20 +56,36 @@ MAX_TENSOR_RANK = 32
 
 
 def authorize_source_path(root: Path, path: Path) -> Path:
-    """Allow local files and canonical HF snapshot links to sibling blobs only."""
+    """Allow local files and recognized HF cache blob links under this cache."""
     # The caller selects the root once. Resolving it again could turn a replaced
     # root directory symlink into new authority over unrelated host files.
     root = Path(os.path.abspath(root))
     resolved = path.resolve(strict=True)
     allowed = [root]
-    if (
+    hub_snapshot = (
         len(root.name) == 40
         and all(character in "0123456789abcdef" for character in root.name)
         and root.parent.name == "snapshots"
         and root.parent.parent.name.startswith("models--")
-    ):
+    )
+    if hub_snapshot:
         allowed.append(root.parent.parent / "blobs")
-    if not any(resolved.is_relative_to(directory) for directory in allowed):
+    authorized = any(resolved.is_relative_to(directory) for directory in allowed)
+    if not authorized and hub_snapshot:
+        # huggingface_hub 2.x stores shared content-addressed blobs beside the
+        # model cache. Restrict that authority to this selected cache root and
+        # the precise lowercase shard/digest layout; unrelated siblings remain
+        # outside the source even when a snapshot link points at them.
+        shared = root.parent.parent.parent / "blobs"
+        if resolved.is_relative_to(shared):
+            parts = resolved.relative_to(shared).parts
+            authorized = (
+                len(parts) == 2
+                and len(parts[1]) == 64
+                and all(character in "0123456789abcdef" for character in parts[1])
+                and parts[0] == parts[1][:2]
+            )
+    if not authorized:
         raise ConversionError("Source file is outside its authorized source roots")
     # Opening the canonical target without following any newly introduced link
     # prevents replacement between authorization and subsequent safe reads.

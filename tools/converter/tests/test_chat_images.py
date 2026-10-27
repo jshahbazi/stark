@@ -600,10 +600,11 @@ def test_worker_missing_launch_hash_fails_closed_before_catalog_lookup(tmp_path,
     assert not staging.exists()
 
 
-def test_worker_close_reaps_and_cleans_after_exit_between_poll_and_terminate():
+def test_worker_close_reaps_and_cleans_after_exit_between_poll_and_terminate(monkeypatch):
     import os
 
     class ExitedDuringTerminate:
+        pid = 12345
         stdin = io.BytesIO()
         stdout = io.BytesIO()
         reaped = False
@@ -611,14 +612,12 @@ def test_worker_close_reaps_and_cleans_after_exit_between_poll_and_terminate():
         def poll(self):
             return None
 
-        def terminate(self):
-            raise ProcessLookupError
-
         def wait(self, timeout=None):
             self.reaped = True
             return 0
 
     worker = object.__new__(Worker)
+    monkeypatch.setattr(os, "killpg", lambda *_args: (_ for _ in ()).throw(ProcessLookupError()))
     worker.process = ExitedDuringTerminate()
     worker.media = PrivateMediaStore()
     root = worker.media.root

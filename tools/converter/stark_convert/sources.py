@@ -27,6 +27,7 @@ from .streaming import ConversionError, UnsupportedConversion, authorize_source_
 from .vision_contract import REPO as VISION_REPO
 from .vision_contract import REVISION as VISION_REVISION
 from .vision_contract import source_rules
+from .vision_family import family_source_files, read_family_config
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -214,11 +215,22 @@ class SourceSnapshot:
                 or not isinstance(profile, dict)
                 or set(profile) != {"architecture", "metadata_profile"}
                 or profile["metadata_profile"] != GENERIC_PROFILE
-                or architecture_for_config(read_json(self.root / "config.json")) != profile["architecture"]
+                or architecture_for_config(
+                    read_family_config(self.resolve_file("config.json"))
+                    if self.artifact_mode == "vision-language"
+                    else read_json(self.root / "config.json")
+                )
+                != profile["architecture"]
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
-            rules = generic_files(self.repo, names)
+            rules = (
+                family_source_files(self.repo, names)
+                if self.artifact_mode == "vision-language"
+                else generic_files(self.repo, names)
+            )
             roles = set(GENERIC_REQUIRED) | set(GENERIC_OPTIONAL)
+            if self.artifact_mode == "vision-language":
+                roles.add("processor_config")
             actual = {
                 (record["role"], record["filename"]) for record in self.manifest["files"] if record["role"] in roles
             }
@@ -343,7 +355,17 @@ class SourceSnapshot:
             result["artifact_mode"] = self.artifact_mode
             result["source_manifest_sha256"] = hashlib.sha256(
                 json.dumps(
-                    {"sources": sources, "files": files, "artifact_mode": self.artifact_mode}, sort_keys=True
+                    {
+                        "sources": sources,
+                        "files": files,
+                        "artifact_mode": self.artifact_mode,
+                        **(
+                            {"conversion_profile": self.conversion_profile}
+                            if self.conversion_profile is not None
+                            else {}
+                        ),
+                    },
+                    sort_keys=True,
                 ).encode()
             ).hexdigest()
         return result
@@ -385,15 +407,17 @@ def _replay(
         if schema == 3 and (
             manifest.get("artifact_mode") != "vision-language"
             or artifact_mode != "vision-language"
-            or profile is not None
-            or metadata_profile is not None
-            or manifest.get("primary_repo") != VISION_REPO
-            or manifest.get("primary_revision") != VISION_REVISION
+            or profile is None
+            and (
+                metadata_profile is not None
+                or manifest.get("primary_repo") != VISION_REPO
+                or manifest.get("primary_revision") != VISION_REVISION
+            )
         ):
             raise ValueError()
         if schema == 1 and (profile is not None or metadata_profile is not None):
             raise ValueError()
-        if schema == 2 and (
+        if (schema == 2 or schema == 3 and profile is not None) and (
             not isinstance(profile, dict)
             or set(profile) != {"architecture", "metadata_profile"}
             or profile["metadata_profile"] != GENERIC_PROFILE
@@ -442,14 +466,14 @@ def _replay(
             ):
                 raise ValueError()
         entry = get_model(primary) if primary else None
-        if schema == 2 and entry is not None:
+        if (schema == 2 or schema == 3 and profile is not None) and entry is not None:
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         rules = (
-            generic_files(
+            (family_source_files if schema == 3 else generic_files)(
                 primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
             )
-            if schema == 2
+            if profile is not None
             else source_rules(entry, artifact_mode)
             if entry is not None
             else (
@@ -521,9 +545,16 @@ def resolve_source(
         repo = repository
     entry = get_model(repo) if repo else None
     if artifact_mode == "vision-language":
-        if repo != VISION_REPO or metadata_profile is not None or revision not in {None, VISION_REVISION}:
-            raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
-        revision = VISION_REVISION
+        if repo == VISION_REPO:
+            if metadata_profile is not None or revision not in {None, VISION_REVISION}:
+                raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
+            revision = VISION_REVISION
+        elif entry is not None:
+            raise UnsupportedConversion("Vision checkpoint is outside the implemented merged family")
+        else:
+            metadata_profile = metadata_profile or GENERIC_PROFILE
+            if architecture not in {None, "qwen3_5"}:
+                raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
     if repo is not None and entry is None and metadata_profile is None:
@@ -564,7 +595,7 @@ def resolve_source(
             )
             if not isinstance(resolved, str) or not _REVISION.fullmatch(resolved):
                 raise ConversionError("Repository revision is not immutable")
-            if artifact_mode == "vision-language" and resolved != VISION_REVISION:
+            if artifact_mode == "vision-language" and repo == VISION_REPO and resolved != VISION_REVISION:
                 raise ConversionError("Vision source resolved to a different checkpoint")
             revisions[repository] = resolved
     else:
@@ -607,8 +638,14 @@ def resolve_source(
             root = root.parent
     profile = None
     if metadata_profile == GENERIC_PROFILE:
-        rules = generic_files(repo, names)
-        detected = architecture_for_config(read_json(loader("config.json")), architecture)
+        rules = family_source_files(repo, names) if artifact_mode == "vision-language" else generic_files(repo, names)
+        config_path = authorize_source_path(root, loader("config.json"))
+        detected = architecture_for_config(
+            read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
+            architecture,
+        )
+        if artifact_mode == "vision-language" and detected != "qwen3_5":
+            raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)

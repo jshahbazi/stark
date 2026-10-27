@@ -1,5 +1,7 @@
 import base64
 import io
+import os
+import signal
 import threading
 
 import pytest
@@ -240,7 +242,7 @@ def test_image_cancellation_maps_to_499_and_releases_job():
 class BufferedStreamWorker(Worker):
     """Replay buffered protocol frames through the actual cancel/drain path."""
 
-    def __init__(self, *, fatal=False):
+    def __init__(self, *, pid, fatal=False):
         self.timeout = 2
         self._transaction_lock = threading.RLock()
         self.request_sequence = 0
@@ -250,6 +252,8 @@ class BufferedStreamWorker(Worker):
         self.image_input = dict(IMAGE_CONTRACT)
         self.images = self.streaming = self.stop_sequences = True
         self.process = self
+        self.pid = pid
+        self.group_signals = []
         self.stdin = self.Input(self)
         self.stdout = io.BytesIO()
         self.closed = False
@@ -320,6 +324,41 @@ class BufferedStreamWorker(Worker):
         return 0
 
 
+@pytest.fixture(autouse=True)
+def buffered_worker(monkeypatch):
+    workers = {}
+
+    def killpg(process_group, signum):
+        # No signal in this file may reach the host, including an unexpected
+        # fake process identity introduced by a later test change.
+        assert process_group in workers, "unregistered fake process group"
+        assert signum in {signal.SIGTERM, signal.SIGKILL}
+        worker = workers[process_group]
+        worker.group_signals.append(signum)
+        worker.terminate() if signum == signal.SIGTERM else worker.kill()
+
+    monkeypatch.setattr("stark_convert.chat.os.killpg", killpg)
+
+    def create(*, fatal=False):
+        pid = 2_000_000_000 + len(workers)
+        worker = BufferedStreamWorker(pid=pid, fatal=fatal)
+        workers[pid] = worker
+        return worker
+
+    yield create
+    for worker in workers.values():
+        worker.close()
+
+
+def test_buffered_worker_shutdown_routes_only_to_its_fake_process_group(buffered_worker):
+    first, second = buffered_worker(), buffered_worker()
+    first.close()
+    assert first.group_signals == [signal.SIGTERM] and first.closed
+    assert second.group_signals == [] and not second.closed
+    with pytest.raises(AssertionError, match="unregistered fake process group"):
+        os.killpg(2_100_000_000, signal.SIGTERM)
+
+
 def stream_payload(kind):
     request = payload(stream=True)
     if kind == "text":
@@ -329,8 +368,8 @@ def stream_payload(kind):
 
 @pytest.mark.parametrize("kind", ["image", "text"])
 @pytest.mark.parametrize("change", ["stop", "replace", "model"])
-def test_buffered_stream_delta_is_fenced_after_dispatch(kind, change, monkeypatch):
-    worker = BufferedStreamWorker()
+def test_buffered_stream_delta_is_fenced_after_dispatch(kind, change, buffered_worker):
+    worker = buffered_worker()
     desktop = make_desktop(worker)
     replacement = FakeWorker()
     deltas = []
@@ -339,7 +378,6 @@ def test_buffered_stream_delta_is_fenced_after_dispatch(kind, change, monkeypatc
         if change == "stop":
             desktop.install_progress = {}
             desktop.install_epoch = desktop.converter = None
-            monkeypatch.setattr("stark_convert.desktop.terminate", lambda process: process and process.terminate())
             desktop.stop(quiet=True)
         elif change == "replace":
             # Object identity must fence delivery even if a caller has not
@@ -376,8 +414,8 @@ def test_buffered_stream_delta_is_fenced_after_dispatch(kind, change, monkeypatc
         worker.close()
 
 
-def test_old_stream_fatal_cleanup_preserves_replacement_worker():
-    worker = BufferedStreamWorker(fatal=True)
+def test_old_stream_fatal_cleanup_preserves_replacement_worker(buffered_worker):
+    worker = buffered_worker(fatal=True)
     desktop = make_desktop(worker)
     replacement = FakeWorker()
 
@@ -398,12 +436,11 @@ def test_old_stream_fatal_cleanup_preserves_replacement_worker():
         worker.close()
 
 
-def test_stream_delivery_holds_epoch_lock_until_callback_returns(monkeypatch):
-    worker = BufferedStreamWorker()
+def test_stream_delivery_holds_epoch_lock_until_callback_returns(buffered_worker):
+    worker = buffered_worker()
     desktop = make_desktop(worker)
     desktop.install_progress = {}
     desktop.install_epoch = desktop.converter = None
-    monkeypatch.setattr("stark_convert.desktop.terminate", lambda process: process and process.terminate())
     entered, release, stop_started, stopped = (threading.Event() for _ in range(4))
     errors = []
 

@@ -1,6 +1,6 @@
 # Text generation
 
-`stark-generate` is the native generation worker. It loads one converted model and serves tokenize, decode and generate requests over a private JSON-lines protocol. Its Qwen3.5 vision path accepts one private image-file reference through a prepared-image transaction. The developer worker, CLI and Local API are qualified for the exact artifact, executable and runtime described under [image qualification](#image-qualification). The calling application renders the chat template, owns tools and the agent loop, and sends either the rendered prompt or token IDs. Conventions shared with the scoring worker (framing, readiness, error classes, privacy) are in [worker protocols](WORKER_PROTOCOLS.md).
+`stark-generate` is the native generation worker. It loads one converted model and serves tokenize, decode and generate requests over a private JSON-lines protocol. Its Qwen3.5 vision path accepts one private image-file reference through a prepared-image transaction. Image availability depends on the host evidence described under [image qualification](#image-qualification), including automatic local checks for the [supported model family](VISION_FAMILY_CONTRACT.md). The calling application renders the chat template, owns tools and the agent loop, and sends either the rendered prompt or token IDs. Conventions shared with the scoring worker (framing, readiness, error classes, privacy) are in [worker protocols](WORKER_PROTOCOLS.md).
 
 ## Interactive CLI chat
 
@@ -23,7 +23,7 @@ The client renders the converted model's chat template in a Jinja sandbox, keeps
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
-| `--image PATH` | none | Attach one local PNG or JPEG image; requires an exactly qualified worker and artifact |
+| `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
 | `--context-tokens N` | smaller of 8192 and the worker limit | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
@@ -31,15 +31,17 @@ The client renders the converted model's chat template in a Jinja sandbox, keeps
 
 Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes the same settings through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)).
 
-With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). An unsupported or unqualified worker and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
+With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
 ## Image qualification
 
 The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).
 
-The host enables images only when worker readiness describes the supported schema-2 transport and all five loaded file hashes, the worker executable hash, the reported Metal device properties and the current macOS version match that record. It snapshots the executable hash before launch and hashes the path again at readiness; both must match. Conversion metadata can identify a named qualified build, while serving verifies the executable being launched. Native readiness always reports `image_input.qualified: false` because the worker does not attest its own qualification; the host's external catalog supplies that decision.
+An exact catalog match enables images with `image_verification: "reference_verified"`. The host checks the supported schema-2 transport, all five loaded file hashes, the worker executable hash, the reported Metal device properties and current macOS version. It snapshots the executable hash before launch and hashes the path again at readiness; both must match. Conversion metadata can identify a named qualified build, while serving verifies the executable being launched.
 
-The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers attachments, delivered-GUI image execution, recovery and cleanup. Public notarized distribution remains pending. Rebuilding, signing or otherwise changing the worker bytes requires a new passed record for the resulting executable hash. See the [qualification gate](../tools/converter/stark_convert/vision_runtime.py).
+The [supported family profile](VISION_FAMILY_CONTRACT.md) also admits merged BF16 Qwen3.5 fine-tunes with the implemented 0.8B geometry. After native admission, the host runs bounded text, image, recovery, accounting and cleanup checks. Passing enables images with `image_verification: "locally_tested"`. The desktop can reuse a private receipt for an identical artifact, worker, checker, dependencies, device and OS. Terminal chat runs the checks at startup without a persistent receipt. This path also serves a supported schema-2 model when its worker has no exact catalog match. Local checks do not establish reference parity or visual accuracy. Native readiness always reports `image_input.qualified: false`; the host supplies both evidence decisions.
+
+The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers the earlier exact-tuple attachment, GUI, recovery and cleanup checks. Public notarized distribution remains pending. Rebuilding or signing the worker changes its identity, requiring matching reference evidence or fresh local checks. See the [host gate](../tools/converter/stark_convert/vision_runtime.py) and [local checker](../tools/converter/stark_convert/image_checks.py).
 
 ## Private JSON-lines protocol
 
@@ -64,7 +66,7 @@ On success the first line is:
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
 
-An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2, the source revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies the [qualification intersection](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
+An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
 
 ### Prepared image operations
 

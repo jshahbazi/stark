@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -34,24 +35,35 @@ from .sources import SourceSnapshot, huggingface_repository, resolve_source
 from .streaming import ConversionError, UnsupportedConversion, read_json, read_regular_bytes, write_plan
 from .vision_contract import REPO as VISION_REPO
 from .vision_contract import source_rules, validate_vision_source
+from .vision_family import (
+    COMPONENT_FILES,
+    OUTPUT_TOKENIZER_SHA256,
+    family_config_bytes,
+    family_processor_filename,
+    read_family_config,
+    validate_family_output_header,
+)
 
 
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
+        official = request.repo == VISION_REPO
         supported = (
             request.artifact_mode == "vision-language"
-            and request.repo == VISION_REPO
+            and (official or get_model(request.repo) is None)
             and request.dtype == "bfloat16"
             and request.model_kind == "language"
             and request.architecture in {None, "qwen3_5"}
-            and request.metadata_profile is None
+            and request.metadata_profile in ({None} if official else {None, GENERIC_PROFILE})
         )
         return CapabilityResult(
             adapter="qwen3_5" if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
-            native_loading="supported_layout_unverified_tuple" if supported else "runtime_blocked",
+            native_loading=("supported_layout_unverified_tuple" if official else "supported_family_unverified")
+            if supported
+            else "runtime_blocked",
             reason=None if supported else "unsupported_vision_tuple",
         )
     entry = get_model(request.repo)
@@ -103,6 +115,8 @@ def _validate_request(request: ConversionRequest) -> None:
     if request.artifact_mode == "vision-language" and request.require_native_support:
         from .vision_runtime import has_recorded_image_runtime
 
+        if request.repo != VISION_REPO:
+            raise UnsupportedConversion("Merged family conversion has no exact recorded native qualification")
         if not has_recorded_image_runtime():
             raise UnsupportedConversion("No named-build native image qualification is recorded")
     if request.architecture is not None and request.architecture not in CONFIG_ADAPTERS.values():
@@ -140,6 +154,12 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     )
     from .qwen3 import build_qwen3_plan
 
+    if request.artifact_mode == "vision-language" and snapshot.conversion_profile is not None:
+        request = replace(
+            request,
+            metadata_profile=request.metadata_profile or snapshot.conversion_profile["metadata_profile"],
+            architecture=request.architecture or snapshot.conversion_profile["architecture"],
+        )
     _validate_request(request)
     if snapshot.repo != request.repo:
         raise ConversionError("Request and source identity disagree")
@@ -148,7 +168,11 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     # Resolution/replay has already hashed every consumed file. Recheck selection
     # and signatures here; full content verification remains mandatory prepublish.
     snapshot.assert_unchanged(verify_content=False)
-    config = read_json(snapshot.config_path)
+    config = (
+        read_family_config(snapshot.config_path)
+        if request.artifact_mode == "vision-language"
+        else read_json(snapshot.config_path)
+    )
     artifact_contract = (
         validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
     )
@@ -214,6 +238,18 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "modernbert": build_modernbert_plan,
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
+    if artifact_contract is not None and artifact_contract["schema_version"] == 3:
+        if any(
+            source.dtype
+            not in (
+                {"BF16", "F32"}
+                if operation.kind == "cast_f32" and operation.name.endswith((".scales", ".a_log", ".dt_bias"))
+                else {"BF16"}
+            )
+            for operation in tensors.operations
+            for source in operation.sources
+        ):
+            raise UnsupportedConversion("Vision family requires merged BF16 matrices and BF16/F32 control weights")
     if artifact_contract is not None:
         for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
             if layer["rope_config"] is not None:
@@ -323,7 +359,7 @@ def convert(
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
         entry = get_model(repo)
-        if artifact_mode == "vision-language":
+        if artifact_mode == "vision-language" and entry is not None:
             entry = {
                 **entry,
                 "files": {
@@ -380,19 +416,45 @@ def convert(
                 "decoder_config": planned.tensors.decoder_config,
                 **fragments,
             }
+        family = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 3
         if planned.artifact_contract is not None:
             root_config["artifact_contract"] = planned.artifact_contract
             for filename in ("preprocessor_config.json", "chat_template.jinja"):
-                (staging / filename).write_bytes(read_regular_bytes(snapshot.resolve_file(filename)))
-                if file_hash(staging / filename) != planned.artifact_contract["source"]["hashes"][filename]:
+                hashes = planned.artifact_contract["source"]["hashes"]
+                source_filename = (
+                    family_processor_filename(hashes)
+                    if family and filename == "preprocessor_config.json"
+                    else filename
+                )
+                payload = read_regular_bytes(snapshot.resolve_file(source_filename))
+                if hashlib.sha256(payload).hexdigest() != hashes[source_filename]:
                     raise ConversionError("Vision metadata changed during conversion")
-        (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
+                if family and filename == "preprocessor_config.json":
+                    payload = json.dumps(planned.artifact_contract["processor_config"], indent=2).encode("utf-8")
+                (staging / filename).write_bytes(payload)
+        if family:
+            if file_hash(staging / "tokenizer.json") != OUTPUT_TOKENIZER_SHA256:
+                raise UnsupportedConversion("Vision family normalized tokenizer is outside the implemented profile")
+            # Hash strings have a fixed size. Reserve their exact serialized
+            # footprint before spending work on a complete weights output.
+            planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
+            (staging / "config.json").write_bytes(family_config_bytes(root_config))
+            validate_family_output_header(planned.tensors)
+        else:
+            (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
         stats = write_plan(
             planned.tensors,
             staging / "model.safetensors",
             chunk_bytes=chunk_bytes,
             **({"progress": progress} if progress is not None else {}),
         )
+        if family:
+            planned.artifact_contract["component_hashes"] = {
+                name: file_hash(staging / name) for name in COMPONENT_FILES
+            }
+            if planned.artifact_contract["component_hashes"]["model.safetensors"] != stats["output_sha256"]:
+                raise ConversionError("Vision family weights changed during conversion")
+            (staging / "config.json").write_bytes(family_config_bytes(root_config))
         elapsed = time.perf_counter() - started
         if provenance != toolchain_provenance():
             raise ConversionError("Converter tooling changed during conversion")
@@ -408,7 +470,7 @@ def convert(
         }
         from .qualifications import qualification_for
 
-        if artifact_mode == "vision-language":
+        if artifact_mode == "vision-language" and planned.artifact_contract["schema_version"] == 2:
             from .vision_runtime import image_qualification_for
 
             qualification = image_qualification_for(
@@ -422,6 +484,8 @@ def convert(
                     "template_sha256": file_hash(staging / "chat_template.jinja"),
                 },
             )
+        elif artifact_mode == "vision-language":
+            qualification = None
         else:
             qualification = qualification_for(repo, dtype, artifact_hashes)
         if request.require_native_support and qualification is None:
@@ -557,6 +621,7 @@ def main() -> int:
         if (
             Path(args.source).expanduser().is_dir()
             and repo is None
+            and args.artifact_mode == "text"
             and not (args.metadata_profile or args.source_manifest)
         ):
             print(
@@ -570,9 +635,8 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        # Replay infers catalog/profile identity from its manifest, but native
-        # vision execution is unsupported regardless of that identity. Reject
-        # it before replay hashes any checkpoint files.
+        # Replay infers identity from its manifest. Native qualification requests
+        # still require named-build evidence before any checkpoint reads.
         if not args.source_manifest or request.artifact_mode == "vision-language" and request.require_native_support:
             _validate_request(request)
         logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)

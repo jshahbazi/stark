@@ -67,6 +67,15 @@ def _read(snapshot: Any, filename: str) -> bytes:
 
 
 def validate_vision_source(snapshot: Any, dtype: str) -> dict:
+    """Preserve the official tuple; otherwise validate the supported merged family."""
+    if snapshot.repo == REPO:
+        return _validate_pinned_vision_source(snapshot, dtype)
+    from .vision_family import validate_family_source
+
+    return validate_family_source(snapshot, dtype)
+
+
+def _validate_pinned_vision_source(snapshot: Any, dtype: str) -> dict:
     """Validate the pinned metadata and return a private, versioned contract."""
     if dtype != "bfloat16" or snapshot.repo != REPO or snapshot.revision != REVISION:
         _fail()

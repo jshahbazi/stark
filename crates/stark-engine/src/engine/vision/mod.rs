@@ -1,11 +1,12 @@
-//! Exact-artifact native Qwen3.5 image preparation and request execution.
+//! Admitted native Qwen3.5 image preparation and request execution.
 //!
 //! Compressed images become opaque, model-bound CPU patch storage. Projected
 //! embeddings remain private and can only be produced by the admitted tower.
 
 use std::{
+    collections::BTreeMap,
     fmt,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, Read, Seek},
     path::Path,
     sync::Arc,
@@ -38,6 +39,8 @@ use crate::{
     parameters::{NumericalProfile, ParameterLoader, ParameterLoaderError},
 };
 
+mod family;
+
 #[cfg(test)]
 mod logit_tests;
 #[cfg(test)]
@@ -54,8 +57,8 @@ pub(crate) mod tower;
 use preprocess::{PreparedImage, PreprocessLimits, RgbImage, decode_image, prepare_image as prepare_patches};
 use tower::{VisionTower, VisionTowerConfig, VisionTowerError};
 
-// Exact deterministic Stage 1 artifact. Admission is deliberately bound to this
-// experimental tuple; metadata or a model name cannot enable another artifact.
+// The exact deterministic schema-2 artifact remains bound to its original
+// tuple. Schema 3 has a separate structural family contract below.
 const ARTIFACT_FILES: [(&str, &str); 5] = [
     ("config.json", "3f0cecb7cb3633bc271eabf69b06ac9f74b377b9ec17b441f5ceac331a71f42a"),
     ("model.safetensors", "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4"),
@@ -66,14 +69,14 @@ const ARTIFACT_FILES: [(&str, &str); 5] = [
 const ARTIFACT_SCHEMA_VERSION: u32 = 2;
 
 /// Immutable identity of the complete artifact admitted by this loaded model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VisionArtifactIdentity {
     pub schema_version: u32,
-    pub config_sha256: &'static str,
-    pub artifact_sha256: &'static str,
-    pub tokenizer_sha256: &'static str,
-    pub processor_sha256: &'static str,
-    pub template_sha256: &'static str,
+    pub config_sha256: String,
+    pub artifact_sha256: String,
+    pub tokenizer_sha256: String,
+    pub processor_sha256: String,
+    pub template_sha256: String,
 }
 
 #[derive(Deserialize)]
@@ -245,15 +248,16 @@ fn expand_image_placeholder(
     tokens: Box<[u64]>,
     image_token_count: u32,
     context_capacity: u32,
+    image_token: u64,
 ) -> Result<(Box<[u64]>, usize), InvalidInput> {
     if !(1..=1024).contains(&image_token_count) {
         return Err(InvalidInput("native image token count exceeds processor bounds"));
     }
     let start = tokens
         .iter()
-        .position(|&token| token == 248056)
+        .position(|&token| token == image_token)
         .ok_or(InvalidInput("native image prompt requires one image placeholder"))?;
-    if tokens[start + 1..].contains(&248056) {
+    if tokens[start + 1..].contains(&image_token) {
         return Err(InvalidInput("native image prompt requires exactly one unexpanded placeholder"));
     }
     let count = image_token_count as usize;
@@ -265,7 +269,7 @@ fn expand_image_placeholder(
     let mut expanded = Vec::new();
     expanded.try_reserve_exact(expanded_len).map_err(|_| InvalidInput("native image prompt allocation failed"))?;
     expanded.extend_from_slice(&tokens[..start]);
-    expanded.extend(std::iter::repeat_n(248056, count));
+    expanded.extend(std::iter::repeat_n(image_token, count));
     expanded.extend_from_slice(&tokens[start + 1..]);
     Ok((expanded.into_boxed_slice(), start))
 }
@@ -276,12 +280,23 @@ pub struct VisionLanguageModel<B: Backend> {
     tower: VisionTower<B>,
     limits: PreprocessLimits,
     failed: bool,
+    identity: VisionArtifactIdentity,
+    source: String,
+    revision: Option<String>,
+    image_tokens: ImageTokenIds,
+    model_dim: u32,
+    vocab_size: u32,
+    codec_eos_token: Option<String>,
 }
 
 fn file_matches(
     file: &mut File,
     expected: &str,
 ) -> io::Result<bool> {
+    Ok(file_digest(file)? == expected)
+}
+
+fn file_digest(file: &mut File) -> io::Result<String> {
     let mut hash = Sha256::new();
     let mut buffer = [0u8; 65_536];
     loop {
@@ -291,7 +306,26 @@ fn file_matches(
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()) == expected)
+    Ok(format!("{:x}", hash.finalize()))
+}
+
+fn open_artifact_component(path: &Path) -> io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(not(unix))]
+    if !path.symlink_metadata()?.is_file() {
+        return Err(io::Error::other("native vision artifact requires regular components"));
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::other("native vision artifact requires regular components"));
+    }
+    Ok(file)
 }
 
 fn official_tower_config() -> VisionTowerConfig {
@@ -311,8 +345,8 @@ fn official_tower_config() -> VisionTowerConfig {
 }
 
 impl<B: Backend> Engine<B> {
-    /// Load only the pinned BF16 image artifact. This explicit loader does not
-    /// broaden the text resolver or establish service/hardware qualification.
+    /// Load the pinned artifact or the explicitly supported merged BF16 family.
+    /// Admission does not establish reference parity or local execution evidence.
     pub fn load_vision_language_model(
         self: &Arc<Self>,
         model_path: &Path,
@@ -322,43 +356,143 @@ impl<B: Backend> Engine<B> {
         }
         // Verify before tensor allocation. The weights stay on this opened file
         // descriptor throughout loading, so path replacement cannot switch it.
-        let mut verified = std::collections::HashMap::new();
-        for (name, expected) in ARTIFACT_FILES {
-            let mut file = File::open(model_path.join(name))?;
-            if !file.metadata()?.is_file() || !file_matches(&mut file, expected)? {
-                return Err(InvalidInput("native vision artifact identity mismatch").into());
+        let mut verified = BTreeMap::new();
+        let mut hashes = BTreeMap::new();
+        let mut components: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
+        for (name, _) in ARTIFACT_FILES {
+            let mut file = open_artifact_component(&model_path.join(name))?;
+            let length = file.metadata()?.len();
+            let maximum = match name {
+                "config.json" => 1_048_576,
+                "tokenizer.json" => 67_108_864,
+                "preprocessor_config.json" => 65_536,
+                "chat_template.jinja" => 262_144,
+                _ => 2_000_000_000,
+            };
+            if !file.metadata()?.is_file() || length == 0 || length > maximum {
+                return Err(InvalidInput("native vision artifact exceeds component bounds").into());
             }
+            let hash = if name == "model.safetensors" {
+                file_digest(&mut file)?
+            } else {
+                // Parse precisely the owned bytes that established admission.
+                // In-place metadata edits cannot swap a reviewed tokenizer or
+                // template program between its hash and parser.
+                let mut bytes = Vec::new();
+                Read::by_ref(&mut file).take(maximum + 1).read_to_end(&mut bytes)?;
+                if bytes.len() as u64 != length || bytes.len() as u64 > maximum {
+                    return Err(InvalidInput("native vision component changed while selecting bytes").into());
+                }
+                let digest = format!("{:x}", Sha256::digest(&bytes));
+                components.insert(name, bytes);
+                digest
+            };
+            if name == "config.json" && hash != ARTIFACT_FILES[0].1 {
+                let bytes = components.get(name).ok_or(InvalidInput("missing native vision configuration"))?;
+                let candidate: serde_json::Value = serde_json::from_slice(bytes)
+                    .map_err(|_| InvalidInput("unsupported native vision artifact contract"))?;
+                if candidate["type"] != "Qwen35VisionLanguageModelConfig"
+                    || candidate["artifact_contract"]["schema_version"] != 3
+                    || candidate["artifact_contract"]["family"]
+                        != serde_json::json!({"profile":family::PROFILE,"version":family::VERSION})
+                {
+                    return Err(InvalidInput("unsupported native vision artifact contract").into());
+                }
+            }
+            hashes.insert(name, hash);
             file.rewind()?;
             verified.insert(name, file);
         }
-        let config: ArtifactConfig = serde_json::from_reader(
-            verified.get_mut("config.json").ok_or(InvalidInput("missing native vision configuration"))?,
-        )?;
+        let component =
+            |name| components.get(name).map(Vec::as_slice).ok_or(InvalidInput("missing native vision component"));
+        let raw_config: serde_json::Value = serde_json::from_slice(component("config.json")?)?;
+        let schema = raw_config["artifact_contract"]["schema_version"].as_u64();
+        // No arbitrary tokenizer regex/decoder pipeline is parsed by family v1.
+        // Its reviewed processing identity must hold before construction.
+        let pinned = match schema {
+            Some(2) => &ARTIFACT_FILES[..],
+            Some(3) => &ARTIFACT_FILES[2..3],
+            _ => return Err(InvalidInput("unsupported native vision artifact schema").into()),
+        };
+        if pinned.iter().any(|(name, expected)| hashes.get(name).map(String::as_str) != Some(*expected)) {
+            return Err(InvalidInput("native vision artifact processing identity mismatch").into());
+        }
+        let tokenizer = Arc::new(
+            tokenizers::Tokenizer::from_bytes(component("tokenizer.json")?)
+                .map_err(EngineLoadLanguageModelError::Tokenizer)?,
+        );
+        let admission = match schema {
+            Some(version) if version == u64::from(ARTIFACT_SCHEMA_VERSION) => {
+                if ARTIFACT_FILES.iter().any(|(name, expected)| hashes.get(name).map(String::as_str) != Some(*expected))
+                {
+                    return Err(InvalidInput("native vision artifact identity mismatch").into());
+                }
+                if raw_config["type"] != "Qwen35VisionLanguageModelConfig"
+                    || raw_config["artifact_contract"]["source"]["repo"] != "Qwen/Qwen3.5-0.8B"
+                    || raw_config["artifact_contract"]["source"]["revision"]
+                        != "2fc06364715b967f1860aea9cf38778875588b17"
+                    || raw_config["artifact_contract"]["transport"] != "mediaref-v1"
+                    || raw_config["artifact_contract"]["runtime_supported"] != true
+                {
+                    return Err(InvalidInput("unsupported native vision artifact contract").into());
+                }
+                family::FamilyAdmission {
+                    tower: official_tower_config(),
+                    tokens: ImageTokenIds {
+                        image: 248056,
+                        vision_start: 248053,
+                        vision_end: 248054,
+                        video: 248057,
+                    },
+                    source: "Qwen/Qwen3.5-0.8B".into(),
+                    revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
+                }
+            },
+            Some(3) => {
+                let admission = family::admit(
+                    &raw_config,
+                    &hashes,
+                    component("preprocessor_config.json")?,
+                    component("chat_template.jinja")?,
+                    &tokenizer,
+                )?;
+                family::validate_weights(
+                    verified.get_mut("model.safetensors").ok_or(InvalidInput("missing native vision weights"))?,
+                )?;
+                admission
+            },
+            _ => return Err(InvalidInput("unsupported native vision artifact schema").into()),
+        };
+        for (name, id) in [
+            ("<|vision_start|>", admission.tokens.vision_start),
+            ("<|vision_end|>", admission.tokens.vision_end),
+            ("<|image_pad|>", admission.tokens.image),
+            ("<|video_pad|>", admission.tokens.video),
+        ] {
+            if tokenizer.token_to_id(name).map(u64::from) != Some(id) {
+                return Err(InvalidInput("native vision tokenizer identity mismatch").into());
+            }
+        }
+        let config: ArtifactConfig = serde_json::from_value(raw_config)?;
         if config.kind != "Qwen35VisionLanguageModelConfig"
-            || config.artifact_contract["source"]["repo"] != "Qwen/Qwen3.5-0.8B"
-            || config.artifact_contract["source"]["revision"] != "2fc06364715b967f1860aea9cf38778875588b17"
-            || config.artifact_contract["schema_version"] != ARTIFACT_SCHEMA_VERSION
-            || config.artifact_contract["transport"] != "mediaref-v1"
-            || config.artifact_contract["runtime_supported"] != true
+            || config.artifact_contract["schema_version"].as_u64() != schema
         {
             return Err(InvalidInput("unsupported native vision artifact contract").into());
         }
+        let codec_eos_token = match &config.token_codec_config {
+            AnyTokenCodecConfig::ChatCodecConfig(codec) => codec.eos_token.clone(),
+            _ => None,
+        };
         let language_config: LanguageModelConfig = serde_json::from_value(serde_json::json!({
             "type": "LanguageModelConfig", "decoder_config": config.decoder_config,
             "token_codec_config": config.token_codec_config, "generation_config": config.generation_config,
         }))?;
-        let mut tokenizer_bytes = Vec::new();
-        verified
-            .get_mut("tokenizer.json")
-            .ok_or(InvalidInput("missing native vision tokenizer"))?
-            .read_to_end(&mut tokenizer_bytes)?;
-        let tokenizer = Arc::new(
-            tokenizers::Tokenizer::from_bytes(&tokenizer_bytes).map_err(EngineLoadLanguageModelError::Tokenizer)?,
-        );
+        let model_dim = language_config.decoder_config.transformer_config.model_dim;
+        let vocab_size = language_config.decoder_config.vocab_size;
         let weights = verified.get("model.safetensors").ok_or(InvalidInput("missing native vision weights"))?;
         let loader = ParameterLoader::new(weights, &*self.context)?
             .with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
-        let tower = VisionTower::new(&*self.context, &official_tower_config(), &loader.tree().subtree("vision"))?;
+        let tower = VisionTower::new(&*self.context, &admission.tower, &loader.tree().subtree("vision"))?;
         let language_model = self.language_model_from_config(
             model_path,
             language_config,
@@ -371,43 +505,57 @@ impl<B: Backend> Engine<B> {
         // Recheck the same selected objects before publishing loaded buffers.
         // Ordinary concurrent in-place artifact changes cannot silently acquire
         // the source identity established by the initial admission pass.
-        for (name, expected) in ARTIFACT_FILES {
+        for (name, expected) in &hashes {
             let file = verified.get_mut(name).ok_or(InvalidInput("missing native vision artifact component"))?;
             file.rewind()?;
             if !file_matches(file, expected)? {
                 return Err(InvalidInput("native vision artifact changed while loading").into());
             }
         }
-        for (name, id) in [
-            ("<|vision_start|>", 248053),
-            ("<|vision_end|>", 248054),
-            ("<|image_pad|>", 248056),
-            ("<|video_pad|>", 248057),
-        ] {
-            if language_model.tokenizer().token_to_id(name) != Some(id) {
-                return Err(InvalidInput("native vision tokenizer identity mismatch").into());
-            }
-        }
+        let hash = |name| hashes.get(name).cloned().ok_or(InvalidInput("missing native vision identity"));
         Ok(VisionLanguageModel {
             engine: self.clone(),
             language_model,
             tower,
             limits: PreprocessLimits::default(),
             failed: false,
+            identity: VisionArtifactIdentity {
+                schema_version: schema.ok_or(InvalidInput("missing native vision schema"))? as u32,
+                config_sha256: hash("config.json")?,
+                artifact_sha256: hash("model.safetensors")?,
+                tokenizer_sha256: hash("tokenizer.json")?,
+                processor_sha256: hash("preprocessor_config.json")?,
+                template_sha256: hash("chat_template.jinja")?,
+            },
+            source: admission.source,
+            revision: admission.revision,
+            image_tokens: admission.tokens,
+            model_dim,
+            vocab_size,
+            codec_eos_token,
         })
     }
 }
 
 impl<B: Backend> VisionLanguageModel<B> {
-    pub fn artifact_identity(&self) -> VisionArtifactIdentity {
-        VisionArtifactIdentity {
-            schema_version: ARTIFACT_SCHEMA_VERSION,
-            config_sha256: ARTIFACT_FILES[0].1,
-            artifact_sha256: ARTIFACT_FILES[1].1,
-            tokenizer_sha256: ARTIFACT_FILES[2].1,
-            processor_sha256: ARTIFACT_FILES[3].1,
-            template_sha256: ARTIFACT_FILES[4].1,
-        }
+    pub fn artifact_identity(&self) -> &VisionArtifactIdentity {
+        &self.identity
+    }
+
+    pub fn family_profile(&self) -> (&'static str, u32) {
+        (family::PROFILE, family::VERSION)
+    }
+
+    pub fn source_identity(&self) -> (&str, Option<&str>) {
+        (&self.source, self.revision.as_deref())
+    }
+
+    pub fn vocab_size(&self) -> u32 {
+        self.vocab_size
+    }
+
+    pub fn codec_eos_token(&self) -> Option<&str> {
+        self.codec_eos_token.as_deref()
     }
 
     pub fn tokenizer(&self) -> &Arc<tokenizers::Tokenizer> {
@@ -508,7 +656,8 @@ impl<B: Backend> VisionLanguageModel<B> {
         context_capacity: u32,
     ) -> Result<(Box<[u64]>, usize), NativeVisionError<B>> {
         self.validate_prepared_identity(image)?;
-        let (expanded, start) = expand_image_placeholder(tokens, image.image_token_count, context_capacity)?;
+        let (expanded, start) =
+            expand_image_placeholder(tokens, image.image_token_count, context_capacity, self.image_tokens.image)?;
         let input = self.preflight_prepared_prefill(expanded, image, start, context_capacity)?;
         Ok((input.tokens, start))
     }
@@ -556,7 +705,7 @@ impl<B: Backend> VisionLanguageModel<B> {
         let count = prepared.grid[1]
             .checked_mul(prepared.grid[2])
             .and_then(|n| n.checked_div(4))
-            .and_then(|n| n.checked_mul(1024))
+            .and_then(|n| n.checked_mul(self.model_dim))
             .ok_or(InvalidInput("native projected image shape overflow"))?;
         let capacity = context_capacity.min(self.language_model.max_context_length().unwrap_or(context_capacity));
         // Validate the complete token/span/grid contract before any GPU work.
@@ -565,22 +714,17 @@ impl<B: Backend> VisionLanguageModel<B> {
             tokens,
             ProjectedImage {
                 model_identity: self.language_model.model_identity.clone(),
-                model_dim: 1024,
+                model_dim: self.model_dim,
                 data_type: DataType::BF16,
                 grid,
                 token_start,
                 features: vec![bf16::ZERO; count as usize].into_boxed_slice(),
             },
-            ImageTokenIds {
-                image: 248056,
-                vision_start: 248053,
-                vision_end: 248054,
-                video: 248057,
-            },
+            self.image_tokens,
             &self.language_model.model_identity,
-            1024,
+            self.model_dim,
             DataType::BF16,
-            248320,
+            self.vocab_size,
             capacity,
         )?;
         Ok(input)
@@ -609,8 +753,10 @@ impl<B: Backend> VisionLanguageModel<B> {
         if should_cancel() {
             return Err(NativeVisionError::cancelled());
         }
-        let count =
-            image.image_token_count.checked_mul(1024).ok_or(InvalidInput("native projected image shape overflow"))?;
+        let count = image
+            .image_token_count
+            .checked_mul(self.model_dim)
+            .ok_or(InvalidInput("native projected image shape overflow"))?;
         input.image.features = self.project(&image.prepared, count as usize)?;
         // project() has waited for GPU completion and released all submissions.
         // Cancellation here leaves the decoder state fresh and the model usable.

@@ -166,7 +166,14 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
         raise ConversionError("Qwen3.5 mrope_section is malformed")
     if "mrope_interleaved" in rope_parameters:
         _bool(rope_parameters, "mrope_interleaved", False)
-    if set(config) - _KEYS:
+    annotations = {"model_name": (str, 256), "unsloth_version": (str, 64), "unsloth_fixed": (bool, None)}
+    if include_vision and any(
+        type(config[key]) is not expected_type or maximum is not None and not 0 < len(config[key]) <= maximum
+        for key, (expected_type, maximum) in annotations.items()
+        if key in config
+    ):
+        raise ConversionError("Qwen3.5 training annotation metadata is invalid")
+    if set(config) - (_KEYS | set(annotations) if include_vision else _KEYS):
         unsupported.append("Qwen3.5 config options are outside implemented coverage")
     text_only = outer.get("model_type") == "qwen3_5_text"
     architectures = (

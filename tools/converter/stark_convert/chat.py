@@ -1,9 +1,11 @@
 """Terminal chat client. Conversation content stays in memory and private pipes."""
 
 import argparse
+import hashlib
 import json
 import os
 import select
+import signal
 import stat
 import subprocess
 import sys
@@ -13,9 +15,9 @@ from pathlib import Path
 
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
-from ._build_metadata import ConversionError, file_hash
+from ._build_metadata import ConversionError, file_hash, open_regular
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
-from .vision_runtime import image_input_contract, qualified_image_worker
+from .vision_runtime import family_image_input_contract, image_input_contract, qualified_image_worker
 
 
 class ChatError(Exception):
@@ -68,12 +70,57 @@ def terminal_text(text):
     return "".join(c for c in text if c in "\n\t" or (c.isprintable() and c != "\x1b"))
 
 
-def load_template(model):
+def _chat_file(path, maximum):
+    with open_regular(path.resolve(strict=True)) as stream:
+        before = os.fstat(stream.fileno())
+        if not 0 < before.st_size <= maximum:
+            raise ValueError
+        data = stream.read(before.st_size + 1)
+        after = os.fstat(stream.fileno())
+        if len(data) != before.st_size or any(
+            getattr(before, key) != getattr(after, key)
+            for key in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        ):
+            raise ValueError
+        return data
+
+
+def read_model_config(model):
+    value = json.loads(_chat_file(model / "config.json", 2 * 1024 * 1024))
+    if not isinstance(value, dict):
+        raise ValueError
+    return value
+
+
+def load_template(model, *, expected_hashes=None):
     try:
-        codec = json.loads((model / "config.json").read_text())["token_codec_config"]
+        data = _chat_file(model / "config.json", 2 * 1024 * 1024)
+        if expected_hashes is not None and hashlib.sha256(data).hexdigest() != expected_hashes["config_sha256"]:
+            raise ValueError
+        config = json.loads(data)
+        codec = config["token_codec_config"]
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
             raise ValueError
+        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+            # Only the recognized program may reach Jinja compilation. An
+            # immutable sandbox does not bound arbitrary template computation.
+            template_hashes = {
+                "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+                "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
+            }
+            copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
+            if (
+                len(data) > 1024 * 1024
+                or len(copied) > 256 * 1024
+                or copied != source.encode("utf-8")
+                or hashlib.sha256(copied).hexdigest() not in template_hashes
+                or (
+                    expected_hashes is not None
+                    and hashlib.sha256(copied).hexdigest() != expected_hashes["template_sha256"]
+                )
+            ):
+                raise ValueError
         environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
 
         def raise_exception(_message):
@@ -82,7 +129,7 @@ def load_template(model):
         environment.globals["raise_exception"] = raise_exception
         template = environment.from_string(source)
         return codec, template
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, ConversionError):
         raise ChatError("Cannot read chat metadata; use a converted language model with a chat template.") from None
 
 
@@ -96,6 +143,12 @@ class Worker:
         self.cancelled_id = None
         self.image_input = None
         self.images = False
+        self.image_verification = "unverified"
+        self.image_check_cached = False
+        self.image_check_dir = None
+        self.model_path = Path(model)
+        self._closed = False
+        self._ready_seen = False
         self.executable = Path(executable)
         try:
             # Bind later image qualification to the exact executable observed
@@ -107,10 +160,16 @@ class Worker:
         self.media = None
         command = [str(executable), "--model-path", str(model)]
         try:
-            config = json.loads((Path(model) / "config.json").read_text())
-        except (OSError, ValueError):
+            config = read_model_config(Path(model))
+        except (OSError, ValueError, ConversionError):
             config = {}
         if isinstance(config, dict) and config.get("type") == "Qwen35VisionLanguageModelConfig":
+            from .image_checks import ImageCheckError, preflight_family_memory
+
+            try:
+                preflight_family_memory(Path(model), config)
+            except ImageCheckError as error:
+                raise ChatError(str(error)) from None
             self.media = PrivateMediaStore()
             command.extend(["--vision-staging-root", str(self.media.root)])
         read_fd, self.cancel_fd = os.pipe()
@@ -173,6 +232,9 @@ class Worker:
             if not isinstance(reply, dict):
                 raise ValueError
             if reply.get("ready") is True:
+                if getattr(self, "_ready_seen", False):
+                    raise ChatError("Unexpected worker readiness reply; restart the model.")
+                self._ready_seen = True
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
@@ -186,6 +248,35 @@ class Worker:
                         expected_worker_sha256=launch_hash,
                     )
                 )
+                self.image_verification = "reference_verified" if self.images else "unverified"
+                if (
+                    not self.images
+                    and getattr(self, "media", None) is not None
+                    and family_image_input_contract(self.image_input)
+                ):
+                    from .image_checks import ImageCheckError, verify_images
+
+                    try:
+                        progress = getattr(self, "image_check_progress", None)
+                        if progress is not None:
+                            progress()
+                        self.image_check_cached = verify_images(self, reply, directory=self.image_check_dir)
+                        self.images = True
+                        self.image_verification = "locally_tested"
+                    except BaseException as error:
+                        try:
+                            self.invalidate_image_checks()
+                        except BaseException:
+                            pass
+                        try:
+                            self.close()
+                        except BaseException:
+                            pass
+                        if isinstance(error, ImageCheckError):
+                            raise ChatError(str(error)) from None
+                        raise ChatError(
+                            "The model did not pass local image checks. Check its compatibility and memory."
+                        ) from None
             return reply
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
@@ -195,7 +286,16 @@ class Worker:
         if lock is None:
             lock = self._transaction_lock = threading.RLock()
         with lock:
-            return self._request(payload, on_delta=on_delta, cancelled=cancelled)
+            try:
+                return self._request(payload, on_delta=on_delta, cancelled=cancelled)
+            except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
+                raise
+            except BaseException:
+                try:
+                    self.invalidate_image_checks()
+                except BaseException:
+                    pass  # Preserve the primary failure; this process rejects its cache key.
+                raise
 
     def _request(self, payload, on_delta=None, cancelled=None):
         if cancelled is not None and cancelled.is_set():
@@ -251,12 +351,21 @@ class Worker:
     def request_image(self, prompt, image, options, on_delta=None, cancelled=None):
         """Own one complete prepare/generate/discard transaction on the serialized worker."""
         with self._transaction_lock:
-            self._image_deadline = time.monotonic() + self.timeout
+            self._last_image_tokens = None
+            deadline = time.monotonic() + self.timeout
+            verification_deadline = getattr(self, "_verification_deadline", None)
+            self._image_deadline = (
+                min(deadline, verification_deadline) if verification_deadline is not None else deadline
+            )
             try:
                 return self._request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
             except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
                 raise
             except BaseException:
+                try:
+                    self.invalidate_image_checks()
+                except BaseException:
+                    pass  # Cleanup must still kill/reap the native child.
                 # Fatal protocol/transport errors leave alignment unknown. Kill
                 # immediately instead of issuing another RPC or waiting again.
                 try:
@@ -332,6 +441,7 @@ class Worker:
                         or prepared["input_tokens"] + options["max_new_tokens"] > options["context_tokens"]
                     ):
                         raise ChatError("Invalid image preparation reply; restart the model.")
+                    self._last_image_tokens = prepared["image_tokens"]
                     reply = self.request(
                         {**options, "operation": "generate_image", "prepared_id": identifier},
                         on_delta=on_delta,
@@ -377,18 +487,34 @@ class Worker:
             raise ChatImageError(reply["error"])
         raise ChatError("Native image generation failed; restart the model.")
 
+    def invalidate_image_checks(self):
+        from .image_checks import invalidate_checks
+
+        self.images = False
+        self.image_verification = "unverified"
+        self.image_check_cached = False
+        invalidate_checks(self)
+
     def close(self):
+        if self.process.poll() not in (None, 0) and not getattr(self, "_closed", False):
+            try:
+                self.invalidate_image_checks()
+            except BaseException:
+                pass  # A metadata failure cannot bypass child/resource cleanup.
+        self._closed = True
+        self.images = False
+        self.image_verification = "unverified"
         try:
             if self.process.poll() is None:
                 try:
-                    self.process.terminate()
+                    os.killpg(self.process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass  # It exited between poll and terminate; still reap it.
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 try:
-                    self.process.kill()
+                    os.killpg(self.process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
                 self.process.wait()
@@ -446,10 +572,10 @@ def _read_image_file(path: Path) -> ImageData:
 
 
 def run_chat(args, worker):
-    codec, template = load_template(args.model_path)
     ready = worker.read()
     if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
         raise ChatError("Generation worker could not load this model.")
+    codec, template = load_template(args.model_path, expected_hashes=getattr(worker, "image_input", None))
     context = args.context_tokens or min(8192, ready["max_context_tokens"])
     if context > ready["max_context_tokens"] or args.max_new_tokens > ready["max_new_tokens"]:
         raise ChatError("Requested token limits exceed this worker's limits.")
@@ -457,7 +583,7 @@ def run_chat(args, worker):
     image = None
     if image_path is not None:
         if getattr(worker, "images", False) is not True:
-            raise ChatError("This worker is not qualified for image input.")
+            raise ChatError("Image support is unavailable for this model and worker.")
         image = _read_image_file(image_path)
     system = args.system if args.system is not None else codec.get("default_system_prompt")
     initial = [{"role": "system", "content": system}] if system else []
@@ -554,7 +680,8 @@ def main(argv=None):
         parser.error("token limits and timeout must be positive and finite")
     worker = None
     try:
-        load_template(args.model_path)
+        if read_model_config(args.model_path).get("type") != "Qwen35VisionLanguageModelConfig":
+            load_template(args.model_path)
         print("Loading model...", file=sys.stderr)
         worker = Worker(args.worker, args.model_path, args.timeout)
         return run_chat(args, worker)
