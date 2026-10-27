@@ -88,6 +88,33 @@ def test_vision_plan_consumes_all_tensors_and_preserves_shapes_and_bytes(tmp_pat
     )
 
 
+def test_vision_decoder_preserves_full_precision_zero_centered_rms_affine(tmp_path):
+    source = tmp_path / "source"
+    vision_fixture(source)
+    vision = build_qwen35_plan(source, include_vision=True)
+    text = build_qwen35_plan(source)
+    full = vision.decoder_config["transformer_config"]
+    legacy = text.decoder_config["transformer_config"]
+    assert full["output_norm_config"]["upcast_mode"] == "full_layer"
+    assert legacy["output_norm_config"]["upcast_mode"] == "only_normalization"
+    for layer in full["layer_configs"]:
+        for name in ("pre_mixer_norm_config", "pre_mlp_norm_config"):
+            assert layer[name]["scale_offset"] == 1.0
+            assert layer[name]["upcast_mode"] == "full_layer"
+        mixer = layer["mixer_config"]
+        if mixer["type"] == "AttentionConfig":
+            assert mixer["query_norm_config"]["upcast_mode"] == "full_layer"
+            assert mixer["key_norm_config"]["upcast_mode"] == "full_layer"
+            assert mixer["reference_bf16"] is True
+        else:
+            assert mixer["norm_config"]["upcast_mode"] == "only_normalization"
+            assert mixer["norm_config"]["scale_offset"] is None
+            assert mixer["reference_bf16"] is True
+    assert all("reference_bf16" not in layer["mixer_config"] for layer in legacy["layer_configs"])
+    # The config correction must not change any decoder tensor transforms.
+    assert [op for op in vision.operations if not op.name.startswith("vision.")] == list(text.operations)
+
+
 @pytest.mark.parametrize("dtype", ["float16", "float32"])
 def test_vision_requires_bf16_output(tmp_path, dtype):
     source = tmp_path / "source"

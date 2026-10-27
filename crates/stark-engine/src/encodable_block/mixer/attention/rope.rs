@@ -388,9 +388,15 @@ mod multimodal_tests {
         };
 
         let context = B::Context::new().unwrap();
-        let kernel =
-            <B::Kernels as Kernels>::AttentionPrepareKernel::new(&context, DataType::BF16, DataType::F32, true, true)
-                .unwrap();
+        let kernel = <B::Kernels as Kernels>::AttentionPrepareKernel::new(
+            &context,
+            DataType::BF16,
+            DataType::F32,
+            true,
+            true,
+            false,
+        )
+        .unwrap();
         let input = (0..3 * 256).map(|index| bf16::from_f32((index % 31) as f32 / 32.0 - 0.5)).collect::<Vec<_>>();
         let packed = create_buffer_with_data::<B, bf16>(&context, &input);
         let mut queries = create_buffer::<B, bf16>(&context, 256);

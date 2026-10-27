@@ -134,6 +134,7 @@ impl DeltaNetChunkedPrefill for MetalDeltaNetChunkedPrefill {
             args.value_dim,
             suffix_len,
             args.qkv_stride,
+            0,
             command_buffer,
         );
         self.cumsum.encode(&log_decay, &mut g, args.num_heads, suffix_len, command_buffer);

@@ -7,15 +7,26 @@ use std::{
     path::PathBuf,
 };
 
-fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<PathBuf, &'static str> {
+fn arguments(mut args: impl Iterator<Item = OsString>) -> Result<(PathBuf, Option<PathBuf>), &'static str> {
     if args.next().as_deref() != Some(OsStr::new("--model-path")) {
         return Err("invalid_arguments");
     }
     let path = args.next().ok_or("invalid_arguments")?;
-    if path.is_empty() || args.next().is_some() {
+    if path.is_empty() {
         return Err("invalid_arguments");
     }
-    Ok(PathBuf::from(path))
+    let staging = match args.next() {
+        None => None,
+        Some(flag) if flag == OsStr::new("--vision-staging-root") => {
+            let root = args.next().filter(|root| !root.is_empty()).ok_or("invalid_arguments")?;
+            if args.next().is_some() {
+                return Err("invalid_arguments");
+            }
+            Some(PathBuf::from(root))
+        },
+        Some(_) => return Err("invalid_arguments"),
+    };
+    Ok((PathBuf::from(path), staging))
 }
 
 fn protocol_output() -> Result<File, &'static str> {
@@ -49,17 +60,22 @@ pub fn main() {
     }
     let mut output = io::BufWriter::new(output);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let path = arguments(std::env::args_os().skip(1))?;
+        let (path, staging) = arguments(std::env::args_os().skip(1))?;
         #[cfg(feature = "metal")]
         {
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
-            let backend = crate::native::NativeBackend::load(&path, cancellation)?;
-            let mut worker = crate::generation::GenerationWorker::new(backend)?;
+            let media = staging.as_deref().map(crate::media::MediaStore::open).transpose()?;
+            let backend = if media.is_some() {
+                crate::native::NativeBackend::load_vision(&path, cancellation)?
+            } else {
+                crate::native::NativeBackend::load(&path, cancellation)?
+            };
+            let mut worker = crate::generation::GenerationWorker::new_with_media(backend, media)?;
             crate::generation::run_lines(&mut worker, &mut io::stdin().lock(), &mut output)
         }
         #[cfg(not(feature = "metal"))]
         {
-            let _ = path;
+            let _ = (path, staging);
             Err::<(), _>("native_backend_unavailable")
         }
     }));
@@ -77,13 +93,17 @@ pub fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn parse(args: &[&str]) -> Result<PathBuf, &'static str> {
+    fn parse(args: &[&str]) -> Result<(PathBuf, Option<PathBuf>), &'static str> {
         arguments(args.iter().map(OsString::from))
     }
 
     #[test]
     fn exactly_one_model_path_is_required() {
-        assert_eq!(parse(&["--model-path", "/model"]), Ok(PathBuf::from("/model")));
+        assert_eq!(parse(&["--model-path", "/model"]), Ok((PathBuf::from("/model"), None)));
+        assert_eq!(
+            parse(&["--model-path", "/model", "--vision-staging-root", "/media"]),
+            Ok((PathBuf::from("/model"), Some(PathBuf::from("/media"))))
+        );
         for args in [
             vec![],
             vec!["--model-path"],
@@ -91,6 +111,9 @@ mod tests {
             vec!["--score-model-path", "/model"],
             vec!["--model-path", "/model", "--consecutive-cache"],
             vec!["--model-path", "/model", "--model-path", "/other"],
+            vec!["--model-path", "/model", "--vision-staging-root"],
+            vec!["--model-path", "/model", "--vision-staging-root", ""],
+            vec!["--model-path", "/model", "--vision-staging-root", "/media", "--vision-staging-root", "/other"],
         ] {
             assert_eq!(parse(&args), Err("invalid_arguments"));
         }

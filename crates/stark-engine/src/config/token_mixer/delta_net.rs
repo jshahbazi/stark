@@ -10,6 +10,10 @@ pub struct DeltaNetConfig {
     pub conv_config: SeparableCausalConvConfig,
     pub out_proj_config: LinearConfig,
     pub norm_config: NormalizationConfig,
+    /// Match the pinned BF16 Qwen3.5 eager operation boundaries. Existing text
+    /// artifacts retain their established fused precision when this is absent.
+    #[serde(default)]
+    pub reference_bf16: bool,
 
     pub num_heads: u32,
     pub num_groups: u32,

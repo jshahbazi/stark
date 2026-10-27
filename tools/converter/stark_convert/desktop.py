@@ -20,7 +20,7 @@ from pathlib import Path
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .chat import ChatCancelled, ChatError, ChatRequestTooLarge, Worker, load_template
+from .chat import ChatCancelled, ChatError, ChatImageError, ChatRequestTooLarge, Worker, load_template
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .local_api import APIError, LocalAPI
 from .registry import get_model
@@ -68,6 +68,10 @@ def model_valid(path):
     try:
         config = json.loads((path / "config.json").read_text())
         if not isinstance(config.get("decoder_config"), dict):
+            return False
+        if config.get("type") == "Qwen35VisionLanguageModelConfig" and not all(
+            (path / name).is_file() for name in ("preprocessor_config.json", "chat_template.jinja")
+        ):
             return False
         load_template(path)
         return True
@@ -422,7 +426,10 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
-    def install(self, epoch, kind, source):
+    def install(self, epoch, kind, source, artifact_mode=None):
+        if artifact_mode not in (None, "text", "vision-language"):
+            raise DesktopError("Choose text or vision-language conversion.")
+        selected_mode = artifact_mode or "text"
         if kind == "local":
             path = Path(source).expanduser().resolve()
             if not path.is_dir():
@@ -436,6 +443,12 @@ class Desktop:
                 is_stark = False
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
+            if converted:
+                config = json.loads((path / "config.json").read_text())
+                stored_mode = "vision-language" if config.get("type") == "Qwen35VisionLanguageModelConfig" else "text"
+                if artifact_mode is not None and selected_mode != stored_mode:
+                    raise DesktopError("The selected conversion mode does not match this Stark artifact.")
+                selected_mode = stored_mode
         elif kind == "huggingface":
             try:
                 source = huggingface_repository(source)
@@ -447,7 +460,14 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
-            previous = next((m for m in self.models if m["source"] == source_key), None)
+            previous = next(
+                (
+                    m
+                    for m in self.models
+                    if m["source"] == source_key and m.get("artifact_mode", "text") == selected_mode
+                ),
+                None,
+            )
             if previous is not None:
                 if not model_valid(Path(previous["path"])):
                     raise DesktopError("The installed model folder is missing or incomplete.")
@@ -476,6 +496,8 @@ class Desktop:
                     command.extend(["--metadata-profile", "hf-generic"])
                 if kind == "local":
                     command.append("--offline")
+                if selected_mode == "vision-language":
+                    command.extend(["--artifact-mode", "vision-language"])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
                 result = self.run_converter(command, environment, epoch)
                 with self.lock:
@@ -492,6 +514,8 @@ class Desktop:
                     output.replace(managed)
                     path = managed
             model = {"id": identifier, "name": name, "path": str(path), "source": source_key}
+            if selected_mode == "vision-language":
+                model["artifact_mode"] = selected_mode
             with self.lock:
                 if epoch != self.epoch:
                     return
@@ -516,6 +540,10 @@ class Desktop:
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
         codec, template = load_template(Path(model["path"]))
+        if mode == "decision" and json.loads((Path(model["path"]) / "config.json").read_text()).get("type") == (
+            "Qwen35VisionLanguageModelConfig"
+        ):
+            raise DesktopError("Vision-language artifacts support Chat mode only.")
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -643,11 +671,13 @@ class Desktop:
         cancelled=None,
         epoch=None,
         thinking=False,
+        image=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             worker, template, codec = self.worker, self.template, self.codec
+            dispatch_epoch, identifier = self.epoch, self.active_model
             context = context or self.context
         if worker is None or template is None:
             raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
@@ -657,6 +687,18 @@ class Desktop:
             )
         if stop and not worker.stop_sequences:
             raise APIError(503, "This worker needs an update for stop sequences.", "stop_sequences_unavailable")
+        if on_delta is not None:
+            deliver = on_delta
+
+            def on_delta(text):
+                # Keep delivery atomic with Stop/model replacement. The HTTP
+                # writer has a bounded timeout. OSError asks Worker to cancel
+                # and consume the terminal reply before the next request.
+                with self.lock:
+                    if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
+                        raise OSError("Request no longer belongs to the running model.")
+                    deliver(text)
+
         try:
             prompt = template.render(
                 messages=messages,
@@ -668,6 +710,21 @@ class Desktop:
             )
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
+        if image is not None:
+            if not getattr(worker, "images", False):
+                raise APIError(400, "The loaded model is not qualified for image requests.", "images_unsupported")
+            options = {
+                "context_tokens": context,
+                "max_new_tokens": maximum,
+                "sampling": sampling or {"mode": "greedy"},
+                "seed": seed,
+                "stop": stop or [],
+                "stream": on_delta is not None,
+            }
+            reply = worker.request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
+            if not isinstance(reply.get("text"), str) or "error" in reply:
+                raise ValueError
+            return reply
         tokens = worker.request(
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
@@ -747,7 +804,9 @@ class Desktop:
                     "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
                     "tool_calling": False,
                     "structured_output": False,
-                    "images": False,
+                    "images": bool(
+                        self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                    ),
                     "embeddings": False,
                     "responses": False,
                 },
@@ -769,7 +828,12 @@ class Desktop:
         """
         cancelled = cancelled or threading.Event()
         with self.lock:
-            request = parse_chat_request(payload, self.api_maximum, self.api_vocab)
+            request = parse_chat_request(
+                payload,
+                self.api_maximum,
+                self.api_vocab,
+                allow_images=bool(self.worker and getattr(self.worker, "images", False)),
+            )
             maximum = request["maximum"]
             messages = request["messages"]
             if self.api_closing:
@@ -782,7 +846,7 @@ class Desktop:
                 raise APIError(
                     404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
                 )
-            epoch, identifier = self.epoch, self.active_model
+            epoch, identifier, worker = self.epoch, self.active_model, self.worker
             if len(self.api_queue) >= self.api_queue_limit:
                 raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
             ticket = object()
@@ -822,9 +886,10 @@ class Desktop:
                 stop=request["stop"],
                 cancelled=cancelled,
                 epoch=epoch,
+                image=request["image"],
             )
             with self.lock:
-                if epoch != self.epoch:
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
                     raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
                 self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
@@ -849,6 +914,12 @@ class Desktop:
             }
         except ChatCancelled:
             raise cancellation_error(cancelled) from None
+        except ChatImageError as error:
+            if error.code == "context_overflow":
+                raise APIError(400, "Image and text exceed the context budget.", "context_length_exceeded") from None
+            raise APIError(
+                400, "The image request was rejected. Check its format and token budget.", error.code
+            ) from None
         except ChatRequestTooLarge:
             raise APIError(
                 400,
@@ -865,7 +936,7 @@ class Desktop:
             raise
         except BaseException:
             with self.lock:
-                if epoch == self.epoch:
+                if epoch == self.epoch and self.worker is worker and self.active_model == identifier:
                     self.close_worker()
             raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
         finally:
@@ -917,7 +988,20 @@ class Desktop:
             self.stop(quiet=True)
             self.start(self.run, "loading", "Loading model…", payload["model_id"], mode)
         elif command == "install" and isinstance(payload.get("source"), str) and isinstance(payload.get("kind"), str):
-            self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
+            artifact_mode = payload.get("artifact_mode")
+            if artifact_mode not in (None, "text", "vision-language"):
+                raise DesktopError("Choose text or vision-language conversion.")
+            if artifact_mode is None:
+                self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
+            else:
+                self.start(
+                    self.install,
+                    "installing",
+                    "Installing model…",
+                    payload["kind"],
+                    payload["source"].strip(),
+                    artifact_mode,
+                )
         elif command == "generate" and isinstance(payload.get("text"), str) and payload["text"].strip():
             self.start(self.generate, "generating", "Generating…", payload["text"])
         elif command == "decide":

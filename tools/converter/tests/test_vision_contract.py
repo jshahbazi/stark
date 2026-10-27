@@ -80,7 +80,10 @@ def test_validate_contract_with_synthetic_pinned_metadata(tmp_path, monkeypatch)
     )
     result = validate_vision_source(snapshot, "bfloat16")
     assert result["type"] == "Qwen35VisionLanguageArtifact"
-    assert result["runtime_supported"] is False
+    assert result["schema_version"] == 2
+    assert result["runtime_supported"] is True
+    assert result["qualification"] == "unverified"
+    assert result["transport"] == "mediaref-v1"
     assert result["position_contract"]["interleaved"] is True
 
 

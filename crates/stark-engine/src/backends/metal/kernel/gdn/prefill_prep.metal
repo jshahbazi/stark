@@ -25,6 +25,7 @@ PUBLIC KERNEL(DeltaNetPrefillPrep)(
     constant const uint& value_dim,
     constant const uint& suffix_len,
     constant const uint& qkv_stride,
+    constant const uint& reference_bf16,
     const uint token_idx GROUPS(suffix_len),
     const uint hk_idx GROUPS(num_k_heads),
     const bool write_log_decay SPECIALIZE,
@@ -73,7 +74,8 @@ PUBLIC KERNEL(DeltaNetPrefillPrep)(
     const float a_raw = float(controls[control_offset + conv_dim + value_dim + num_v_heads + hv]);
     const float log_decay = -fast::exp(a_log[hv]) * activate_softplus(a_raw + dt_bias[hv]);
 
-    beta_out[token_idx * num_v_heads + hv] = 1.0f / (1.0f + fast::exp(-beta_raw));
+    const float beta = 1.0f / (1.0f + fast::exp(-beta_raw));
+    beta_out[token_idx * num_v_heads + hv] = reference_bf16 != 0 ? float(bfloat(beta)) : beta;
     if (write_log_decay) {
       decay_out[token_idx * num_v_heads + hv] = log_decay;
     } else {

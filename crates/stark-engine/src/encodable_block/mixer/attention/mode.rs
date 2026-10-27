@@ -153,7 +153,7 @@ impl<B: Backend> Attention<B> {
 
                 let cache = self.ring_capacity.map_or_else(|| KVCacheView::full(0), |_| KVCacheView::ring(0, 0));
 
-                self.kernel.encode(
+                self.encode_core(
                     AttentionArguments {
                         queries: &queries,
                         keys: &keys,
@@ -222,7 +222,7 @@ impl<B: Backend> Attention<B> {
             Some(command_buffer.allocate_constant_from_slice(batch_dim.nodes())?)
         };
 
-        self.kernel.encode(
+        self.encode_core(
             AttentionArguments {
                 queries,
                 keys: state.keys.as_ref(),
@@ -234,6 +234,37 @@ impl<B: Backend> Attention<B> {
             },
             command_buffer,
         )
+    }
+
+    fn encode_core(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            B,
+            impl BufferRef<Backend = B>,
+            impl BufferRef<Backend = B>,
+            impl BufferRef<Backend = B>,
+            impl BufferRef<Backend = B>,
+        >,
+        command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+    ) -> Result<B::ScratchBuffer, B::Error> {
+        if let Some(reference) = &self.reference {
+            if arguments.trie.is_some() || arguments.sinks.is_some() || arguments.cache.ring_params().is_some() {
+                return Err(
+                    crate::backends::common::InvalidInput("reference BF16 attention requires flat full cache").into()
+                );
+            }
+            reference.encode(
+                arguments.queries,
+                arguments.keys,
+                arguments.values,
+                arguments.suffix_length,
+                arguments.cache.prefix_len(),
+                command_buffer,
+            )
+        } else {
+            self.kernel.encode(arguments, command_buffer)
+        }
     }
 
     fn prepare_kv_and_queries(

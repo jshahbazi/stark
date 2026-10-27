@@ -26,12 +26,22 @@ struct ParameterMetadata {
     size: usize,
 }
 
+/// An internal arithmetic policy selected by an admitting loader, never by
+/// checkpoint metadata. Ordinary text loading retains the established policy.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum NumericalProfile {
+    #[default]
+    Legacy,
+    Qwen35ReferenceBF16,
+}
+
 pub struct ParameterLoader<'a, B: Backend> {
     context: &'a B::Context,
     index: HashMap<String, ParameterMetadata>,
     metadata: HashMap<String, String>,
     validated_tensors: RefCell<HashSet<String>>,
     file: &'a File,
+    numerical_profile: NumericalProfile,
 }
 
 impl<'a, B: Backend> ParameterLoader<'a, B> {
@@ -78,7 +88,16 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             metadata,
             validated_tensors: RefCell::new(HashSet::new()),
             file,
+            numerical_profile: NumericalProfile::Legacy,
         })
+    }
+
+    pub(crate) fn with_numerical_profile(
+        mut self,
+        numerical_profile: NumericalProfile,
+    ) -> Self {
+        self.numerical_profile = numerical_profile;
+        self
     }
 
     pub fn tree(&self) -> ParameterTree<'_, B> {
@@ -152,6 +171,10 @@ pub struct ParameterTree<'loader, B: Backend> {
 }
 
 impl<'loader, B: Backend> ParameterTree<'loader, B> {
+    pub(crate) fn numerical_profile(&self) -> NumericalProfile {
+        self.loader.numerical_profile
+    }
+
     fn join_prefix(
         &self,
         name: &str,
@@ -228,7 +251,7 @@ mod payload_tests {
 
     use stark_engine_macros::stark_test;
 
-    use super::ParameterLoader;
+    use super::{NumericalProfile, ParameterLoader};
     use crate::{
         backends::{
             common::{Backend, BufferRef, Context},
@@ -278,5 +301,18 @@ mod payload_tests {
         let leaf = tree.leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap();
         assert_eq!(&*leaf.read_slice::<u8>().unwrap(), &[4, 5, 6]);
         assert_eq!(leaf.read_buffer().unwrap().copyout::<u8>(), [4, 5, 6]);
+    }
+
+    #[stark_test]
+    fn numerical_profile_defaults_to_legacy_and_reaches_subtrees() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(1, &[0]);
+        let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+        assert_eq!(loader.tree().numerical_profile(), NumericalProfile::Legacy);
+        let loader = loader.with_numerical_profile(NumericalProfile::Qwen35ReferenceBF16);
+        assert_eq!(
+            loader.tree().subtree("decoder").subtree("mixer").numerical_profile(),
+            NumericalProfile::Qwen35ReferenceBF16
+        );
     }
 }

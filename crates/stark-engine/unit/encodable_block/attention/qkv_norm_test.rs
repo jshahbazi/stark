@@ -27,7 +27,7 @@ fn run_key_value_row_stride_test<B: Backend>() {
         has_scale: false,
         has_biases: false,
     };
-    let key = QKVNorm::<B>::build_head(&context, DataType::F32, config, None, HEAD_DIM)
+    let key = QKVNorm::<B>::build_head(&context, DataType::F32, config, None, HEAD_DIM, false)
         .expect("failed to construct key norm");
     let norm = QKVNorm {
         query: None,

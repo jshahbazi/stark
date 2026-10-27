@@ -1,31 +1,33 @@
 use half::bf16;
 use stark_engine_macros::kernel;
 
-// SLEEF expf_u10, revision 5a1d179df9cf652951b59010a2d2075372d67f68.
-// Copyright Naoki Shibata and contributors, Boost Software License 1.0;
-// see scripts/licenses/distribution/sleef-LICENSE.txt.
-fn vision_exp(x: f32) -> f32 {
-    if x < -104.0 {
-        return 0.0;
+/// Pinned BF16 text attention rounds the dot product and its scalar multiply
+/// separately, then adds a BF16 causal mask before FP32 softmax.
+#[kernel(ReferenceCausalScoresBF16)]
+pub fn reference_causal_scores_bf16(
+    input: *const f32,
+    output: *mut bf16,
+    key_count: u32,
+    rows: u32,
+    prefix_len: u32,
+    scale: f32,
+) {
+    for row in 0..rows as usize {
+        for column in 0..key_count as usize {
+            let index = row * key_count as usize + column;
+            let value = if column <= prefix_len as usize + row {
+                bf16::from_f32(unsafe { bf16::from_f32(*input.add(index)).to_f32() } * scale)
+            } else {
+                bf16::from_bits(0xff7f)
+            };
+            unsafe {
+                *output.add(index) = value;
+            }
+        }
     }
-    if x > 100.0 {
-        return f32::INFINITY;
-    }
-    let q = (x * 1.4426950408889634f32).round_ties_even();
-    let s = q.mul_add(-0.693145751953125f32, x);
-    let s = q.mul_add(-1.428606765330187e-6f32, s);
-    let mut u = 0.00019852761761285365f32;
-    u = u.mul_add(s, 0.0013930435525253415f32);
-    u = u.mul_add(s, 0.008333360776305199f32);
-    u = u.mul_add(s, 0.041666485369205475f32);
-    u = u.mul_add(s, 0.1666666716337204f32);
-    u = u.mul_add(s, 0.5);
-    u = 1.0 + (s * s).mul_add(u, s);
-    let half = (q as i32) >> 1;
-    let first = f32::from_bits(((half + 127) as u32) << 23);
-    let second = f32::from_bits(((q as i32 - half + 127) as u32) << 23);
-    (u * first) * second
 }
+
+use crate::backends::common::vision_math::vision_exp;
 
 /// The pinned FP32 softmax reduces four lanes, folds crosswise, and multiplies
 /// by the reciprocal before the eager attention's single BF16 conversion.

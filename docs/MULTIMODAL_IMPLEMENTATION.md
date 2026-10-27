@@ -3,17 +3,23 @@
 The first target is one static image with the official BF16 `Qwen/Qwen3.5-0.8B`
 checkpoint at `2fc06364715b967f1860aea9cf38778875588b17`. The implementation
 follows the native Rust/Metal tower and decoder route. The converter has an
-experimental full-vision artifact mode. The engine now has a private BF16
-projected-feature fusion and Qwen3.5 M-RoPE core, plus experimental native image
-decoding, preprocessing, and vision-tower execution. The private loader admits
-one exact BF16 artifact. Worker transport and app attachments remain
-unimplemented. Exact-tuple product qualification is pending, and the Local API
-continues to report `images:false`. The official-weight tower passes the unchanged
+experimental full-vision artifact mode. The engine has BF16 projected-feature
+fusion, Qwen3.5 M-RoPE, native image decoding, preprocessing, and vision-tower
+execution. A guarded public facade admits one exact BF16 artifact. The normal
+generation worker, terminal client, and Local API implement one-image requests.
+The developer worker, CLI, and Local API have one exact execution qualification:
+the recorded BF16 artifact and worker on Apple M5 Max with macOS 26.7.1. Other
+tuples continue to report `images:false`. The official-weight tower passes the unchanged
 2% numeric gate: all fifteen checkpoints across four fixtures are bit-exact on
 CPU and Metal. The [parity validation record](archive/runs/2026-10-26-qwen35-vision-parity.md)
 records this result and the remaining qualification boundaries. The earlier
 [native vision record](archive/runs/2026-10-26-qwen35-native-vision-preprocessing.md)
 retains the source-bound failing result.
+The [image execution qualification](archive/runs/2026-10-26-qwen35-image-execution.md)
+records bit-exact complete decoder logits across three fixtures, including the
+1-megapixel boundary, and release-worker visual and lifecycle checks.
+The [activation replay](archive/runs/2026-10-26-qwen35-image-activation.md) verifies
+fresh conversion, ordinary catalog-gated API/CLI use, and final regressions.
 
 ## Implemented conversion boundary
 
@@ -52,6 +58,7 @@ An experimental conversion can be prepared with:
 ```sh
 uv run --project tools/converter --locked stark-convert Qwen/Qwen3.5-0.8B \
   --artifact-mode vision-language \
+  --require-native-support \
   --write-source-manifest runtime/converter-sources/qwen35-08b-vision.json \
   --output models/qwen35-08b-vision
 ```
@@ -59,36 +66,50 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen3.5-0.8B \
 This command downloads model weights. A completed conversion establishes artifact
 validation only; it does not execute or qualify the model. Replay requires the
 same `--artifact-mode vision-language` argument. `--require-native-support`
-rejects this mode before source resolution.
+requires matching named-build evidence for the exact output. A record identifies
+a worker build and runtime; serving checks the executable actually launched,
+device class, and OS. After building the recorded worker, use the artifact with:
+
+```sh
+./scripts/stark chat --model-path models/qwen35-08b-vision --image /absolute/path/to/image.png
+```
+
+The Local API accepts ordered user content containing `image_url` with an inline
+PNG/JPEG data URL. Swift image attachments and a signed packaged installation
+remain separate milestones.
 
 ## Versioned artifact contract
 
-The root model tag is `Qwen35VisionLanguageModelConfig`. Public model resolution
-and the text worker loader reject it. The crate-private experimental vision
-loader verifies the exact configuration, weights, tokenizer, processor, and
+The root model tag is `Qwen35VisionLanguageModelConfig`. Ordinary text model
+resolution rejects it. The generation worker selects `VisionLanguageModel` for
+this explicit type. Its loader verifies the exact configuration, weights, tokenizer, processor, and
 template byte hashes before tensor allocation, keeps their opened descriptors,
 and rechecks them before publishing the loaded instance. The original artifact
-tag is retained. This loader does not establish worker capability or converter
-qualification.
+tag is retained. This loader does not establish execution qualification.
 
 The root and receipt embed `artifact_contract` with:
 
 | Field | Meaning |
 | --- | --- |
-| `type`, `schema_version` | `Qwen35VisionLanguageArtifact`, version 1 |
+| `type`, `schema_version` | `Qwen35VisionLanguageArtifact`, version 2 |
 | `input_modalities`, `dtype` | Artifact represents text and image inputs in BF16 |
 | `source` | Exact checkpoint revision, metadata hashes, source payload/index sizes and hashes |
 | `special_token_ids` | Validated vision wrappers, image placeholder, video placeholder |
 | `vision_config`, `processor_config` | Exact source architecture/projector and processor metadata |
 | `position_contract` | M-RoPE sections and interleaving; attention configs use `Qwen35MRoPEConfig` |
 | `tensor_layout` | `hf-qwen35-vision-v1`; visual tensors keep their source shape and axis order |
-| `transport` | `unsupported`; no worker image input protocol is implemented |
-| `runtime_supported`, `qualification` | `false`, `unverified` |
+| `transport` | `mediaref-v1`; bounded control messages reference privately staged bytes |
+| `runtime_supported`, `qualification` | `true`, `unverified`; implementation and qualification are separate |
 
-The receipt reports `native_loading: runtime_blocked`, `execution: unverified`,
-and no native qualification. Artifact modalities describe stored weights and
+The receipt's `execution: unverified` describes conversion itself. Exact output
+matches report `native_loading: qualified_tuple` and include the named-build
+record; unmatched outputs report `supported_layout_unverified_tuple`. Conversion
+does not start a model. Artifact modalities describe stored weights and
 metadata; they cannot enable service capabilities. The normalised tokenizer and
 complete model configuration remain bound by the receipt's output hashes.
+Earlier experimental version-1 artifacts require reconversion. The version-2
+configuration binds decoder BF16 operation boundaries as well as the image
+transport; the exact serialized model weights remain unchanged.
 
 ## Native fusion and positions
 
@@ -122,8 +143,12 @@ replays for the native preprocessing and tower work below.
 
 ## Native preprocessing and vision tower
 
-`engine::vision` provides a private native path from compressed image bytes to
-projected features and the existing multimodal stream. The stream's exclusive
+`engine::vision::VisionLanguageModel` provides a guarded native path from compressed
+image bytes to projected features and the existing multimodal stream. The public
+API accepts encoded image bytes and returns an opaque owned preparation. Clients
+cannot construct projected embeddings. Preparation decodes and preprocesses once;
+generation consumes the object and validates its model identity and prompt span.
+The stream's exclusive
 model borrow covers preprocessing, tower execution, language prefill, and decode.
 State/model ownership, sampling, context agreement, and output headroom are
 checked before image decoding. Context exhaustion cannot return the decoder's
@@ -171,35 +196,73 @@ Independent private replays cover decoded pixels, complete patch tensors, and
 all fifteen tower checkpoints against pinned reference code and official BF16
 weights. Numeric limits and results belong to the dated validation record;
 functional image execution alone does not establish numeric parity or output
-quality. Public serving remains disabled until the complete tuple is qualified.
+quality. Public image capability requires a qualified complete tuple.
+
+## Decoder reference arithmetic
+
+The admitted vision artifact enables a private reference numerical profile.
+Ordinary and Q/K RMSNorm use FP32 normalization and affine arithmetic before
+their BF16 output boundary. Reference-enabled DeltaNet retains FP32 recurrent
+state and preserves the source's BF16 convolution, sigmoid, core-output, and
+gated-normalization boundaries. Attention preserves BF16 rotary products,
+scores, probabilities, and output gating through an eager path. Other artifacts
+retain the existing execution profile. End-to-end qualification compares final
+decoder logits against the fully pinned reference, including its child model
+classes; matching only the vision tower is insufficient.
+
+Decoder BF16 linears and tied readout use the source's 32-stream FP32
+accumulation followed by one BF16 cast. SiLU retains its source exponential,
+division, and BF16 product boundaries. DeltaNet prefill uses 64-token chunks,
+FP32 scratch, and source matrix/triangular-solve sequencing. Its CPU reference
+accumulates cumulative decay in FP64; Metal emulates those IEEE additions with
+integer arithmetic and rounds each prefix to FP32. This profile is selected
+after exact artifact admission and keeps the Legacy profile for text artifacts.
+
+## Worker and service transport
+
+The host creates an empty owner-private staging directory before starting the
+worker. Image JSON contains a random object ID, byte length, and MIME type. The
+worker opens objects relative to a pinned directory descriptor, validates a
+private regular single-link file, reads bounded bytes, and unlinks the claimed
+name while retaining its open descriptor through completion. A prepared handle
+is single-use and model-scoped. Invalid requests, cancellation, unrelated
+operations, EOF, and failures release prepared state. Native cleanup failures
+fence the worker before any success or cancellation result becomes visible.
+
+Normal host shutdown removes the directory. Worker teardown removes only opaque
+private staged files from the directory it verified empty at startup. Killing
+both processes before claim can leave a staged object behind; no shared temporary
+directory scan or persistent content cache is introduced.
+
+The terminal client accepts `--image PATH`. The Local API accepts one inline
+PNG/JPEG data URL in ordered user content, with 4 MiB decoded compressed bytes,
+a 6 MiB request body, and a shared 24 MiB pending-body budget. Text requests keep
+their 1 MiB body limit. These byte budgets do not claim a strict process RSS cap.
+Public image capability requires an execution record matching all five admitted
+artifact files, the launched worker executable, Metal device class, and macOS
+version. The executable hash is checked before launch and at readiness. Image
+transactions share one deadline across pipe writes, prepare, generate, streaming
+reads, and discard. See [generation](GENERATION.md)
+and [Local API](LOCAL_API.md) for protocol and service details.
 
 ## Remaining dependencies and acceptance
 
-1. **Transport and lifecycle:** support inline image data URLs through bounded
-   HTTP bodies and private staging references. Preserve the 1 MiB worker frame
-   limit, authentication, serialization, epoch fencing, cancellation, and cleanup.
-   Choose resource budgets using measurements before advertising them.
-2. **Exact-tuple qualification:** extend the passing tower fixture gate to
-   end-to-end decoder logits and visual task quality. Measure peak memory and encode/prefill
-   latency, test failure recovery, and publish aggregate evidence only.
-3. **Swift and distribution:** add attachment input and progress through the
+1. **Coverage:** additional models, dtypes, worker builds, hardware classes, or
+   OS versions require their applicable implementation and exact execution
+   evidence. The current native loader admits one pinned BF16 artifact.
+2. **Swift and distribution:** add attachment input and progress through the
    common media pipeline, then qualify a packaged installation. Enable image
    capabilities only for the intersection of the qualified artifact, worker,
    and service policy.
 
-Synthetic converter tests and header inspection do not establish preprocessing,
-native inference, numeric parity, output quality, or supported hardware budgets.
-The official-weight end-to-end conversion and offline manifest replay now pass.
-All 153 emitted vision tensor payloads match their source shapes, dtypes, and
-byte hashes. The normalised special-token IDs and six M-RoPE layer descriptions
-also pass inspection. Experimental native tower execution is recorded separately
-from these earlier converter-only results; it does not qualify public image
-inference.
-No model weights or native image outputs are checked into the repository.
-The [follow-up review record](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
-binds the real conversion and regression checks to the converter and artifact
-hashes. The [earlier converter record](archive/runs/2026-10-26-qwen35-vision-artifact-contract.md)
-preserves the initial synthetic and header-only evidence.
+The historical [converter review](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
+binds real conversion and regression checks to their source and artifact hashes.
+It verifies all 153 visual tensor payloads, normalized special IDs, and six
+M-RoPE layer descriptions. The [initial converter record](archive/runs/2026-10-26-qwen35-vision-artifact-contract.md)
+preserves its synthetic and header-only evidence. The current execution record
+separately covers decoder numerics, output quality, memory observations,
+cancellation, cleanup, and the supported runtime. Model weights and native
+image outputs remain ignored.
 
 ## Primary references and provenance
 

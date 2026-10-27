@@ -15,6 +15,7 @@ pub fn delta_net_conv_update<T: ArrayElement + Float>(
     kernel_size: u32,
     conv_dim: u32,
     state_stride: u32,
+    reference_bf16: u32,
     #[specialize] has_bias: bool,
 ) {
     let kernel_size = kernel_size as usize;
@@ -40,7 +41,12 @@ pub fn delta_net_conv_update<T: ArrayElement + Float>(
         acc += x * unsafe { *conv_weight.add(weight_offset + tap_count) };
 
         unsafe {
-            *in_out.add(channel) = T::from(ActivationType::SILU.activate(acc)).unwrap();
+            let convolution = if reference_bf16 != 0 {
+                bf16::from_f32(acc).to_f32()
+            } else {
+                acc
+            };
+            *in_out.add(channel) = T::from(ActivationType::SILU.activate(convolution)).unwrap();
         }
 
         for tap in 1..tap_count {

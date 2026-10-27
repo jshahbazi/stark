@@ -9,7 +9,7 @@ use crate::{
     backends::{
         common::{
             Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
-            kernel::{ActivationTransform, NormalizationKernel},
+            kernel::{ActivationTransform, NormalizationKernel, ReferenceRMSBF16Kernel},
         },
         cpu::Cpu,
     },
@@ -227,4 +227,108 @@ fn test_normalization_f32_f32_f32() {
 #[stark_test]
 fn test_normalization_bf16_bf16_bf16() {
     test_normalization::<bf16, bf16, bf16>();
+}
+
+fn public_rms_value(index: usize) -> bf16 {
+    bf16::from_bits(
+        (0x3000 + ((index * 7919) % 0x1800)) as u16
+            | if index % 3 == 0 {
+                0x8000
+            } else {
+                0
+            },
+    )
+}
+
+fn reference_rms<B: Backend>() {
+    use sha2::{Digest, Sha256};
+    let context = B::Context::new().unwrap();
+    for (width, packed, residual, expected) in [
+        (256usize, true, false, "51eb2c10762e9c046e913a8d6e7f2b9dc8a9fc1b62fd0bb6d080d246c405967e"),
+        (1024, false, false, "e1c9f60636227287f2fe8a5b8a7953e1d1d3bc70e1701bb41c07bcebb10933ba"),
+        (1024, false, true, "1162e58882e9015a29dcf23bb39cd4a70c75a960687b9a710149b7c9759629b1"),
+    ] {
+        let values = (0..2 * width).map(public_rms_value).collect::<Vec<_>>();
+        let scales = (0..width).map(|i| ((i % 7) as f32 - 3.0) / 8.0).collect::<Vec<_>>();
+        let input = create_buffer_with_data::<B, bf16>(&context, &values);
+        let scales = create_buffer_with_data::<B, f32>(&context, &scales);
+        let initial = if packed {
+            let mut data = vec![bf16::from_f32(-3.0); 4 * width];
+            data[width..3 * width].copy_from_slice(&values);
+            data
+        } else {
+            vec![bf16::ZERO; 2 * width]
+        };
+        let mut output = create_buffer_with_data::<B, bf16>(&context, &initial);
+        let skip = (0..2 * width)
+            .map(|i| {
+                if residual {
+                    public_rms_value(i + 13)
+                } else {
+                    bf16::from_f32(-7.0)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut shortcut = create_buffer_with_data::<B, bf16>(&context, &skip);
+        let kernel = <B::Kernels as Kernels>::ReferenceRMSBF16Kernel::new(&context, packed, !packed, residual).unwrap();
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        kernel.encode(
+            (!packed).then_some(&input),
+            &scales,
+            &mut output,
+            (!packed).then_some(&mut shortcut),
+            if packed {
+                1
+            } else {
+                2
+            },
+            width as u32,
+            if packed {
+                4 * width as u32
+            } else {
+                width as u32
+            },
+            1e-6,
+            1.0,
+            u32::from(packed),
+            if packed {
+                2
+            } else {
+                1
+            },
+            &mut command,
+        );
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        let actual = buffer_to_vec::<B, bf16>(&output);
+        let actual = if packed {
+            assert_eq!(&actual[..width], &initial[..width]);
+            assert_eq!(&actual[3 * width..], &initial[3 * width..]);
+            &actual[width..3 * width]
+        } else {
+            let copied = buffer_to_vec::<B, bf16>(&shortcut);
+            let expected_skip = values
+                .iter()
+                .zip(&skip)
+                .map(|(x, s)| {
+                    if residual {
+                        bf16::from_f32(x.to_f32() + s.to_f32())
+                    } else {
+                        *x
+                    }
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(copied, expected_skip);
+            &actual[..]
+        };
+        // Golden hashes are independent pinned Torch BF16 forward results on
+        // the public integer-bit-pattern inputs, using eight CPU threads.
+        let bytes = actual.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect::<Vec<_>>();
+        assert_eq!(format!("{:x}", Sha256::digest(bytes)), expected);
+    }
+}
+
+#[stark_test]
+fn test_reference_rms_bf16_source_cascade_packed_and_residual() {
+    reference_rms::<Cpu>();
+    for_each_non_cpu_backend!(|B| reference_rms::<B>());
 }

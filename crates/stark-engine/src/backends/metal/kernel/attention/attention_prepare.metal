@@ -9,7 +9,8 @@ METAL_FUNC ElementT apply_rope(
     const device RopeT* sines,
     uint32_t batch_idx,
     uint32_t head_dim_idx,
-    uint32_t rope_dim
+    uint32_t rope_dim,
+    bool reference_bf16
 ) {
   const uint32_t half_rope_dim = rope_dim / 2;
   const uint32_t paired_idx =
@@ -19,6 +20,16 @@ METAL_FUNC ElementT apply_rope(
   const float signed_paired = head_dim_idx < half_rope_dim ? -paired : paired;
   const float cos_val = float(cosines[batch_idx * rope_dim + head_dim_idx]);
   const float sin_val = float(sines[batch_idx * rope_dim + head_dim_idx]);
+
+  if (reference_bf16) {
+    // Explicit BF16 storage preserves the source dtype boundaries even when
+    // the ordinary attention path is compiled with contraction enabled.
+    const bfloat cosine = bfloat(cos_val);
+    const bfloat sine = bfloat(sin_val);
+    volatile bfloat first = bfloat(input * float(cosine));
+    volatile bfloat second = bfloat(signed_paired * float(sine));
+    return static_cast<ElementT>(float(first) + float(second));
+  }
 
   return static_cast<ElementT>(input * cos_val + signed_paired * sin_val);
 }
@@ -43,6 +54,7 @@ PUBLIC KERNEL(AttentionPrepareKVOnly) (
   const constant uint32_t& input_row_stride,
   const constant uint32_t& batch_dim,
   const bool has_rope SPECIALIZE,
+  const bool reference_bf16 SPECIALIZE,
   const uint32_t head_dim_idx AXIS(head_dim, 128),
   const uint32_t head_idx AXIS(num_q_heads + num_kv_heads * 2, 1),
   const uint32_t batch_idx AXIS(batch_dim, 1)
@@ -56,7 +68,7 @@ PUBLIC KERNEL(AttentionPrepareKVOnly) (
 
   ElementT element = qkvg_head[head_dim_idx];
   if (has_rope && head_dim_idx < rope_dim && is_key) {
-    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim, reference_bf16);
   }
   if (is_key) {
     const uint32_t k_idx =
@@ -88,6 +100,7 @@ PUBLIC KERNEL(AttentionPrepare) (
   const constant uint32_t& batch_dim,
   const bool has_kv SPECIALIZE,
   const bool has_rope SPECIALIZE,
+  const bool reference_bf16 SPECIALIZE,
   const uint32_t head_dim_idx AXIS(head_dim, 128),
   const uint32_t head_idx AXIS(num_q_heads + num_kv_heads.unwrap_or(0) * 2, 1),
   const uint32_t batch_idx AXIS(batch_dim, 1)
@@ -99,7 +112,7 @@ PUBLIC KERNEL(AttentionPrepare) (
 
   ElementT element = qkvg_head[head_dim_idx];
   if (has_rope && head_dim_idx < rope_dim && (is_query || is_key)) {
-    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim, reference_bf16);
   }
 
   if (is_query) {

@@ -80,6 +80,46 @@ fn native_vision_artifact_hashes_bind_exact_bytes_and_open_descriptor() {
     assert!(!file_matches(&mut file, &expected).unwrap());
 }
 
+#[stark_test]
+fn native_vision_prepared_image_exposes_actual_grid_and_token_count() {
+    let limits = PreprocessLimits::default();
+    let source = RgbImage::try_new(1, 1, vec![120, 130, 140], &limits).unwrap();
+    let prepared = prepare_patches(&source, &limits).unwrap();
+    let image = PreparedVisionImage::from_prepared(Arc::new(()), prepared).unwrap();
+    assert_eq!(image.grid(), [1, 16, 16]);
+    assert_eq!(image.processed_dimensions(), [256, 256]);
+    assert_eq!(image.image_token_count(), 64);
+    assert_eq!(image.prepared.patches.len(), 16 * 16 * 3 * 2 * 16 * 16);
+}
+
+#[stark_test]
+fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
+    let template = || vec![100, 248053, 248056, 248054, 101].into_boxed_slice();
+    let (expanded, start) = expand_image_placeholder(template(), 64, 69).unwrap();
+    assert_eq!(start, 2);
+    assert_eq!(expanded.len(), 68);
+    assert!(expanded[2..66].iter().all(|&token| token == 248056));
+    assert_eq!(&expanded[..2], &[100, 248053]);
+    assert_eq!(&expanded[66..], &[248054, 101]);
+    assert!(expand_image_placeholder(template(), 64, 68).is_err());
+    assert!(expand_image_placeholder(template(), 0, 128).is_err());
+    assert!(expand_image_placeholder(template(), 1025, 2048).is_err());
+    assert!(expand_image_placeholder(vec![100, 101].into_boxed_slice(), 64, 128).is_err());
+    assert!(expand_image_placeholder(vec![248056, 248056].into_boxed_slice(), 64, 128).is_err());
+}
+
+#[cfg(backend = "cpu")]
+#[stark_test]
+fn native_vision_public_error_hides_private_source_exceptions() {
+    use crate::backends::cpu::Cpu;
+
+    let error = NativeVisionError::<Cpu>::from(io::Error::other("private-source-marker"));
+    assert_eq!(error.kind(), NativeVisionErrorKind::Artifact);
+    assert!(!error.to_string().contains("private-source-marker"));
+    assert!(!format!("{error:?}").contains("private-source-marker"));
+    assert!(std::error::Error::source(&error).is_none());
+}
+
 #[cfg(backend = "cpu")]
 #[stark_test]
 fn native_vision_loader_rejects_unbound_and_speculative_artifacts() {
@@ -87,12 +127,24 @@ fn native_vision_loader_rejects_unbound_and_speculative_artifacts() {
 
     let engine = Engine::<Cpu>::new().unwrap();
     let directory = PrivateDirectory::new();
-    assert!(matches!(engine.load_vision_language_model(&directory.0), Err(NativeVisionError::IO(_))));
+    assert!(
+        engine
+            .load_vision_language_model(&directory.0)
+            .is_err_and(|error| error.kind() == NativeVisionErrorKind::Artifact)
+    );
     directory.write("config.json", br#"{"type":"Qwen35VisionLanguageModelConfig"}"#);
-    assert!(matches!(engine.load_vision_language_model(&directory.0), Err(NativeVisionError::InvalidInput(_))));
+    assert!(
+        engine
+            .load_vision_language_model(&directory.0)
+            .is_err_and(|error| error.kind() == NativeVisionErrorKind::InvalidInput)
+    );
     fs::remove_file(directory.0.join("config.json")).unwrap();
     fs::create_dir(directory.0.join("speculator")).unwrap();
-    assert!(matches!(engine.load_vision_language_model(&directory.0), Err(NativeVisionError::InvalidInput(_))));
+    assert!(
+        engine
+            .load_vision_language_model(&directory.0)
+            .is_err_and(|error| error.kind() == NativeVisionErrorKind::InvalidInput)
+    );
 }
 
 #[cfg(backend = "metal")]
@@ -133,14 +185,39 @@ fn native_vision_official_artifact_image_request_metal() {
     let engine = Engine::<Metal>::new().unwrap();
     let mut model = engine.load_vision_language_model(&path).unwrap();
     let encoded = synthetic_png();
+    assert!(
+        model
+            .prepare_image_controlled(b"invalid image", || true)
+            .is_err_and(|error| error.kind() == NativeVisionErrorKind::Cancelled)
+    );
+    for cancel_at in [2, 4] {
+        let mut checks = 0;
+        assert!(
+            model
+                .prepare_image_controlled(&encoded, || {
+                    checks += 1;
+                    checks == cancel_at
+                })
+                .is_err_and(|error| error.kind() == NativeVisionErrorKind::Cancelled)
+        );
+        assert_eq!(checks, cancel_at);
+        assert!(!model.is_fenced());
+    }
     assert!(matches!(
         model.prepare_prefill(official_image_tokens(), b"invalid image", 2, 128),
-        Err(NativeVisionError::InvalidInput(_))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::InvalidInput(_)
+        })
     ));
     assert!(!model.failed);
     let mut forged_span = official_image_tokens();
     forged_span[3] = 102;
-    assert!(matches!(model.prepare_prefill(forged_span, &encoded, 2, 128), Err(NativeVisionError::InvalidInput(_))));
+    assert!(matches!(
+        model.prepare_prefill(forged_span, &encoded, 2, 128),
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::InvalidInput(_)
+        })
+    ));
     assert!(!model.failed);
 
     let prepared = model.prepare_prefill(official_image_tokens(), &encoded, 2, 128).unwrap();
@@ -154,6 +231,12 @@ fn native_vision_official_artifact_image_request_metal() {
     // A state from another loaded instance must fail before even decoding the
     // deliberately malformed image, and must not poison either loaded model.
     let mut foreign = engine.load_vision_language_model(&path).unwrap();
+    let foreign_image = foreign.prepare_image(&encoded).unwrap();
+    assert!(
+        model.prepare_prompt(vec![100, 248053, 248056, 248054, 101].into_boxed_slice(), &foreign_image, 128).is_err()
+    );
+    assert!(!model.is_fenced());
+    drop(foreign_image);
     let mut foreign_state = foreign.create_empty_state(Some(128), 0).unwrap();
     assert!(matches!(
         model.stream_image(
@@ -164,7 +247,9 @@ fn native_vision_official_artifact_image_request_metal() {
             &mut foreign_state,
             greedy_options(&model)
         ),
-        Err(NativeVisionError::Stream(LanguageModelStreamError::ForeignState))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::Stream(LanguageModelStreamError::ForeignState)
+        })
     ));
     assert!(foreign_state.tokens().is_empty());
     assert!(!model.failed);
@@ -174,7 +259,9 @@ fn native_vision_official_artifact_image_request_metal() {
     let mut undersized = model.create_empty_state(Some(64), 0).unwrap();
     assert!(matches!(
         model.stream_image(official_image_tokens(), b"invalid image", 2, 128, &mut undersized, greedy_options(&model)),
-        Err(NativeVisionError::Stream(LanguageModelStreamError::ContextOverflow))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::Stream(LanguageModelStreamError::ContextOverflow)
+        })
     ));
     assert!(undersized.tokens().is_empty());
     assert!(!model.failed);
@@ -185,9 +272,11 @@ fn native_vision_official_artifact_image_request_metal() {
     let mut generous = model.create_empty_state(Some(128), 0).unwrap();
     assert!(matches!(
         model.stream_image(official_image_tokens(), b"invalid image", 2, 70, &mut generous, greedy_options(&model)),
-        Err(NativeVisionError::InvalidInput(InvalidInput(
-            "native image context must match the allocated request state"
-        )))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::InvalidInput(InvalidInput(
+                "native image context must match the allocated request state"
+            ))
+        })
     ));
     assert!(generous.tokens().is_empty());
     assert_eq!(generous.vision_validation_state(), (0, None));
@@ -199,7 +288,9 @@ fn native_vision_official_artifact_image_request_metal() {
     let mut no_headroom = model.create_empty_state(Some(68), 0).unwrap();
     assert!(matches!(
         model.stream_image(official_image_tokens(), b"invalid image", 2, 68, &mut no_headroom, greedy_options(&model)),
-        Err(NativeVisionError::Stream(LanguageModelStreamError::ContextOverflow))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::Stream(LanguageModelStreamError::ContextOverflow)
+        })
     ));
     assert!(no_headroom.tokens().is_empty());
     assert_eq!(no_headroom.vision_validation_state(), (0, None));
@@ -211,14 +302,44 @@ fn native_vision_official_artifact_image_request_metal() {
     out_of_vocabulary[0] = 248320;
     assert!(matches!(
         model.stream_image(out_of_vocabulary, b"invalid image", 2, 128, &mut state, greedy_options(&model)),
-        Err(NativeVisionError::Stream(LanguageModelStreamError::InvalidToken))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::Stream(LanguageModelStreamError::InvalidToken)
+        })
     ));
     assert!(state.tokens().is_empty());
     assert!(!model.failed);
+    // A cancellation arriving during the submitted vision pass is observed
+    // after its completion, before any decoder prefill or state mutation.
+    let image = model.prepare_image(&encoded).unwrap();
+    let (tokens, start) =
+        model.prepare_prompt(vec![100, 248053, 248056, 248054, 101].into_boxed_slice(), &image, 128).unwrap();
+    let mut checks = 0;
+    assert!(
+        model
+            .stream_prepared_image_controlled(tokens, image, start, 128, &mut state, greedy_options(&model), || {
+                checks += 1;
+                checks == 3
+            },)
+            .is_err_and(|error| error.kind() == NativeVisionErrorKind::Cancelled)
+    );
+    assert_eq!(checks, 3);
+    assert!(state.tokens().is_empty());
+    assert_eq!(state.vision_validation_state(), (0, None));
+    assert!(!model.is_fenced());
     let mut returned = Vec::new();
     {
-        let mut stream =
-            model.stream_image(official_image_tokens(), &encoded, 2, 128, &mut state, greedy_options(&model)).unwrap();
+        let prepared = model.prepare_image(&encoded).unwrap();
+        assert_eq!(prepared.image_token_count(), 64);
+        assert_eq!(prepared.grid(), [1, 16, 16]);
+        let (tokens, token_start) =
+            model.prepare_prompt(vec![100, 248053, 248056, 248054, 101].into_boxed_slice(), &prepared, 128).unwrap();
+        let mut malformed = tokens.clone();
+        malformed[token_start - 1] = 99;
+        assert!(model.preflight_prepared_prefill(malformed, &prepared, token_start, 128).is_err());
+        assert!(!model.is_fenced());
+        let mut stream = model
+            .stream_prepared_image(tokens, prepared, token_start, 128, &mut state, greedy_options(&model))
+            .unwrap();
         assert_eq!(stream.metrics().num_tokens_prefilled, 68);
         for _ in 0..2 {
             let token = stream.next().unwrap().unwrap();
@@ -231,7 +352,9 @@ fn native_vision_official_artifact_image_request_metal() {
     assert!(!model.failed);
     assert!(matches!(
         model.stream_image(official_image_tokens(), b"invalid image", 2, 128, &mut state, greedy_options(&model)),
-        Err(NativeVisionError::Stream(LanguageModelStreamError::InvalidMultimodal))
+        Err(NativeVisionError {
+            failure: NativeVisionFailure::Stream(LanguageModelStreamError::InvalidMultimodal)
+        })
     ));
 
     // Recoverable validation errors and completed requests leave the immutable

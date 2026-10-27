@@ -452,12 +452,16 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
     norm_config = {
         "epsilon": epsilon,
         "scale_offset": None if quantization is not None else 1.0,
-        "upcast_mode": "only_normalization",
+        # Qwen3.5 keeps zero-centered RMS normalization and its gain in FP32
+        # through one final activation cast. Preserve the existing text export
+        # profile while qualifying the exact full-vision artifact separately.
+        "upcast_mode": "full_layer" if include_vision else "only_normalization",
         "subtract_mean": False,
         "has_scale": True,
         "has_biases": False,
     }
-    delta_norm = {**norm_config, "scale_offset": None}
+    # RMSNormGated deliberately casts normalized values before its direct gain.
+    delta_norm = {**norm_config, "scale_offset": None, "upcast_mode": "only_normalization"}
     mlp = {
         "type": "DenseMLPConfig",
         "linear_config": {},
@@ -482,6 +486,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
             "value_head_dim": value_dim,
             "kernel_size": kernel,
         }
+        if include_vision:
+            # The pinned BF16 conditional model materializes its activation
+            # boundaries inside DeltaNet instead of fusing them in FP32.
+            mixer["reference_bf16"] = True
         if layer == "full_attention":
             mixer = {
                 "type": "AttentionConfig",
@@ -503,6 +511,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: 
                 "normalize_values": False,
                 "is_kv_sharing": False,
             }
+            if include_vision:
+                mixer["reference_bf16"] = True
         layer_configs.append(
             {
                 "pre_mixer_norm_config": norm_config,

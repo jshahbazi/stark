@@ -124,7 +124,7 @@ def validate_vision_source(snapshot: Any, dtype: str) -> dict:
         _fail()
     return {
         "type": "Qwen35VisionLanguageArtifact",
-        "schema_version": 1,
+        "schema_version": 2,
         "input_modalities": ["text", "image"],
         "dtype": dtype,
         "source": {
@@ -144,7 +144,7 @@ def validate_vision_source(snapshot: Any, dtype: str) -> dict:
             "interleaved": rope.get("mrope_interleaved"),
         },
         "tensor_layout": "hf-qwen35-vision-v1",
-        "transport": "unsupported",
+        "transport": "mediaref-v1",
         "qualification": "unverified",
-        "runtime_supported": False,
+        "runtime_supported": True,
     }

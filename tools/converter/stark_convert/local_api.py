@@ -19,6 +19,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+MAX_TEXT_BODY_BYTES = 1024 * 1024
+MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
+MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
+
 
 class APIError(Exception):
     """An expected API error with a safe client-visible message."""
@@ -124,6 +128,17 @@ class LocalAPI:
         self._request_timeout = request_timeout
         self._write_timeout = write_timeout
         self._closing = threading.Event()
+        self._body_lock = threading.Lock()
+        self._pending_body_bytes = 0
+
+    def _body_limit(self) -> int:
+        status = self._status() if self._status is not None else {}
+        capabilities = status.get("capabilities", {}) if isinstance(status, dict) else {}
+        return (
+            MAX_IMAGE_BODY_BYTES
+            if isinstance(capabilities, dict) and capabilities.get("images") is True
+            else MAX_TEXT_BODY_BYTES
+        )
 
     def start(self) -> dict[str, str]:
         with self._lock:
@@ -274,6 +289,7 @@ class LocalAPI:
             def do_POST(self):
                 cancelled = threading.Event()
                 monitor = None
+                reserved_body = 0
                 try:
                     self._guard()
                     if self.path != "/v1/chat/completions":
@@ -289,8 +305,13 @@ class LocalAPI:
                     if len(raw_length.lstrip("0")) > 7:
                         raise APIError(413, "Request body is too large", "body_too_large")
                     length = int(raw_length.lstrip("0") or "0")
-                    if length > 1024 * 1024:
+                    if length > api._body_limit():
                         raise APIError(413, "Request body is too large", "body_too_large")
+                    with api._body_lock:
+                        if api._pending_body_bytes + length > MAX_PENDING_BODY_BYTES:
+                            raise APIError(429, "Pending request bytes exceed the server budget", "body_budget_full")
+                        api._pending_body_bytes += length
+                        reserved_body = length
                     content_type = self.headers.get("Content-Type")
                     if content_type and content_type.split(";", 1)[0].strip().lower() != "application/json":
                         raise APIError(415, "Content-Type must be application/json", "unsupported_media_type")
@@ -308,6 +329,8 @@ class LocalAPI:
                         raise APIError(400, "Malformed JSON", "invalid_json") from None
                     if not isinstance(payload, dict):
                         raise APIError(400, "Request body must be an object", "invalid_request")
+                    if length > MAX_TEXT_BODY_BYTES and not self._contains_image(payload):
+                        raise APIError(413, "Text request body is too large", "body_too_large")
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
                     streaming = payload.get("stream", False)
@@ -394,9 +417,22 @@ class LocalAPI:
                     else:
                         self._error(error)
                 finally:
+                    if reserved_body:
+                        with api._body_lock:
+                            api._pending_body_bytes -= reserved_body
                     cancelled.set()
                     if monitor is not None:
                         monitor.join(timeout=0.2)
+
+            @staticmethod
+            def _contains_image(payload):
+                messages = payload.get("messages")
+                return isinstance(messages, list) and any(
+                    isinstance(message, dict)
+                    and isinstance(message.get("content"), list)
+                    and any(isinstance(part, dict) and part.get("type") == "image_url" for part in message["content"])
+                    for message in messages
+                )
 
             @staticmethod
             def _pairs(pairs):

@@ -29,7 +29,7 @@ fn get_output<T: ArrayElement + Float, B: Backend>(
     config: &Config,
 ) -> Vec<T> {
     let context = B::Context::new().expect("Failed to create Context");
-    let kernel = <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, T::data_type())
+    let kernel = <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, T::data_type(), false)
         .expect("Failed to create SigmoidGateKernel");
 
     let qkvg = create_buffer_with_data::<B, T>(&context, qkvg_data);
@@ -153,4 +153,24 @@ fn test_sigmoid_gate_bf16() {
         head_dim: 256,
         suffix_length: 1,
     });
+}
+
+fn run_reference_bf16<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    let kernel =
+        <<B as Backend>::Kernels as Kernels>::SigmoidGateKernel::new(&context, bf16::data_type(), true).unwrap();
+    // Independent pinned Torch BF16 sigmoid then product on public values.
+    // A single final cast gives one lower BF16 unit at all four positions.
+    let gate = create_buffer_with_data::<B, bf16>(&context, &[49272, 49256, 49240, 49232].map(bf16::from_bits));
+    let mut output = create_buffer_with_data::<B, bf16>(&context, &[bf16::from_bits(16269); 4]);
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    kernel.encode(&gate, &mut output, 4, 1, 4, &mut command);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    assert_eq!(buffer_to_vec::<B, bf16>(&output), [15544, 15595, 15638, 15657].map(bf16::from_bits));
+}
+
+#[stark_test]
+fn test_sigmoid_gate_reference_bf16_materializes_sigmoid() {
+    run_reference_bf16::<Cpu>();
+    for_each_non_cpu_backend!(|B| run_reference_bf16::<B>());
 }

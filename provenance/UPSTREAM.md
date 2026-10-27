@@ -32,6 +32,20 @@ the Arm-derived `exp_u20` routine; its Arm Optimized Routines MIT/Apache notice
 and attribution are also preserved. The vision softmax exponential adapts the
 pinned SLEEF u10 routine and double-float helpers.
 
+The exact Qwen3.5 vision artifact also selects reference arithmetic for decoder
+linears, RMS normalization, SiLU, attention, and DeltaNet. RMS row sums adapt
+the pinned PyTorch `SumKernel.cpp` cascade and `ReduceOps.cpp` mean sequence.
+The DeltaNet chunk algorithm follows Transformers revision
+`2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397`, modeling source SHA-256
+`af05d0acfe79fff8aea1c75f93516a6a72bc80f6f901329a73e66a3866fe1e7c`.
+Its cumulative sum uses PyTorch's CPU FP64 accumulator; Metal emulates the
+required IEEE additions with integers and rounds each prefix to FP32.
+Sequential FP32 fused matrix and triangular-solve schedules are measured
+compatibility with Accelerate on the qualified runtime. The source licenses,
+Qwen/Hugging Face 2025 attribution, pinned source hashes, and adaptation scope
+are included in the distribution notice manifest and copied through its notice
+collector. Existing text artifacts retain the Legacy execution profile.
+
 Model weights, private fixtures, runtime executables, and host application archives are excluded. The original pinned upstream README is stored verbatim as [UPSTREAM_README.md](UPSTREAM_README.md); its relative links refer to the upstream tree and are not expected to resolve here. The current build and validation receipts identify the complete standalone source and executable hashes.
 
 ## Naming and compatibility

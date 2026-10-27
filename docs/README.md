@@ -18,7 +18,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | --- | --- |
 | [Worker protocols](WORKER_PROTOCOLS.md) | Conventions shared by both workers: framing, readiness and version tags, error classes, privacy |
 | [Text generation](GENERATION.md) | `stark-generate` requests, replies, streaming, stop sequences, cancellation, error codes, and the terminal chat client |
-| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Experimental exact-checkpoint vision artifacts, blocked runtime boundary, and remaining native image milestones |
+| [Native image implementation](MULTIMODAL_IMPLEMENTATION.md) | Exact-checkpoint vision conversion, qualified worker/API/CLI image input, and remaining attachment/distribution work |
 | [Probability scoring](SCORING.md) | `stark-score` requests, replies, the consecutive cache, error codes and the digest probe |
 
 ## Developing Stark

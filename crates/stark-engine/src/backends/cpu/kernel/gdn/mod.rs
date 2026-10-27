@@ -4,5 +4,8 @@ pub mod conv_update;
 pub mod norm_gate;
 pub mod prefill;
 pub mod prefill_prep;
+pub mod reference;
+pub mod reference_chunk;
+pub mod reference_conv;
 pub mod tree_verify;
 pub mod update;

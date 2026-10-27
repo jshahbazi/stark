@@ -51,6 +51,7 @@ fn run_conv_update<B: Backend>(
         kernel_size,
         conv_dim,
         state_stride,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -99,6 +100,7 @@ fn run_delta_net_update<B: Backend, T: ArrayElement>(
         key_dim,
         value_dim,
         1e-6f32,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -228,6 +230,7 @@ fn test_delta_net_conv_scan() {
         tap_count as u32,
         conv_dim as u32,
         total_proj_dim as u32,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -388,6 +391,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
         value_dim as u32,
         suffix_len as u32,
         qkv_stride as u32,
+        0,
         &mut command_buffer,
     );
     prefill_k.encode(
@@ -419,6 +423,7 @@ fn run_prefill_with_norm_gate_typed<B: Backend, T: ArrayElement>(
         total_proj_dim as u32,
         1e-6f32,
         suffix_len as u32,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -570,6 +575,7 @@ fn test_delta_net_prefill_prep() {
         value_dim as u32,
         suffix_len as u32,
         total_proj_dim as u32,
+        0,
         &mut cpu_enc,
     );
     cpu_enc.end_encoding().submit().wait_until_completed().unwrap();
@@ -624,6 +630,7 @@ fn test_delta_net_prefill_prep() {
         value_dim as u32,
         suffix_len as u32,
         total_proj_dim as u32,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -720,6 +727,7 @@ fn bench_delta_net_prefill() {
             value_dim as u32,
             suffix_len as u32,
             total_proj_dim as u32,
+            0,
             &mut command_buffer,
         );
         command_buffer.end_encoding().submit().wait_until_completed().unwrap();
@@ -748,6 +756,7 @@ fn bench_delta_net_prefill() {
             value_dim as u32,
             suffix_len as u32,
             total_proj_dim as u32,
+            0,
             &mut command_buffer,
         );
         prefill_k.encode(
@@ -779,6 +788,7 @@ fn bench_delta_net_prefill() {
             total_proj_dim as u32,
             1e-6f32,
             suffix_len as u32,
+            0,
             &mut command_buffer,
         );
         command_buffer.end_encoding().submit().wait_until_completed().unwrap();

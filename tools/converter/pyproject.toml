@@ -30,7 +30,7 @@ build-backend = "setuptools.build_meta"
 include = ["stark_convert*"]
 
 [tool.setuptools.package-data]
-stark_convert = ["catalog.json", "native_qualifications.json"]
+stark_convert = ["catalog.json", "native_qualifications.json", "vision_runtime_qualifications.json"]
 
 [tool.uv]
 python-preference = "only-managed"

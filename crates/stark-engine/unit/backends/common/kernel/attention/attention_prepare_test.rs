@@ -27,6 +27,7 @@ fn run<B: Backend>() -> Output {
         DataType::F32,
         true,
         false,
+        false,
     )
     .expect("Failed to create AttentionPrepareKernel");
     let qkvg = [
@@ -86,6 +87,7 @@ fn run_query_only<B: Backend>() -> Vec<bf16> {
         DataType::F32,
         false,
         false,
+        false,
     )
     .expect("Failed to create AttentionPrepareKernel");
     let qg = [1.0, 2.0, 3.0, 4.0, 101.0, 102.0, 103.0, 104.0, 11.0, 12.0, 13.0, 14.0, 111.0, 112.0, 113.0, 114.0]
@@ -132,6 +134,52 @@ fn test_attention_prepare_uses_query_gate_row_stride() {
     });
 }
 
+fn run_reference_bf16_rope<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    let kernel = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKernel::new(
+        &context,
+        DataType::BF16,
+        DataType::F32,
+        false,
+        true,
+        true,
+    )
+    .unwrap();
+    // Independent pinned Torch BF16 arithmetic on public [1.1, 2.3] and
+    // FP32 sin/cos(0.3). Keeping only a final cast instead gives [16063,16417].
+    let input = [16269, 16403, 49261, 16515].map(bf16::from_bits);
+    let packed = create_buffer_with_data::<B, bf16>(&context, &input);
+    let cosines = create_buffer_with_data::<B, f32>(&context, &[f32::from_bits(1064603887); 2]);
+    let sines = create_buffer_with_data::<B, f32>(&context, &[f32::from_bits(1050103405); 2]);
+    let mut queries = create_buffer::<B, bf16>(&context, 4);
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    kernel.encode(
+        &packed,
+        &mut queries,
+        None::<&mut B::GlobalBuffer>,
+        None::<&mut B::GlobalBuffer>,
+        Some(&cosines),
+        Some(&sines),
+        1,
+        None,
+        4,
+        Some(2),
+        None,
+        4,
+        1,
+        &mut command,
+    );
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, bf16>(&queries);
+    assert_eq!(actual, [16066, 16418, 49261, 16515].map(bf16::from_bits));
+}
+
+#[stark_test]
+fn test_attention_prepare_reference_bf16_materializes_rotary_products() {
+    run_reference_bf16_rope::<Cpu>();
+    for_each_non_cpu_backend!(|B| run_reference_bf16_rope::<B>());
+}
+
 fn run_kv_only_exact<B: Backend>() {
     let context = B::Context::new().expect("failed to create context");
     // Include dispatch-family and preserved scorer-batch boundaries. Preparation
@@ -146,6 +194,7 @@ fn run_kv_only_exact<B: Backend>() {
                 DataType::F32,
                 true,
                 rope_dim.is_some(),
+                false,
             )
             .expect("failed to create ordinary prepare");
             let kv_only = <<B as Backend>::Kernels as Kernels>::AttentionPrepareKVOnlyKernel::new(
@@ -153,6 +202,7 @@ fn run_kv_only_exact<B: Backend>() {
                 DataType::BF16,
                 DataType::F32,
                 rope_dim.is_some(),
+                false,
             )
             .expect("failed to create KV-only prepare");
             let prefix = 3;

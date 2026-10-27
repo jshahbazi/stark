@@ -82,7 +82,7 @@ def vision_source(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("inline_template", [False, True])
-def test_vision_conversion_publishes_complete_blocked_artifact(
+def test_vision_conversion_publishes_complete_runtime_supported_artifact(
     vision_source,
     tmp_path,
     monkeypatch,
@@ -102,8 +102,10 @@ def test_vision_conversion_publishes_complete_blocked_artifact(
     assert receipt["capability"]["native_loading"] == "runtime_blocked"
     assert receipt["capability"]["execution"] == "unverified"
     assert receipt["native_qualification"] is None
-    assert receipt["artifact_contract"]["runtime_supported"] is False
-    assert receipt["artifact_contract"]["transport"] == "unsupported"
+    assert receipt["artifact_contract"]["schema_version"] == 2
+    assert receipt["artifact_contract"]["runtime_supported"] is True
+    assert receipt["artifact_contract"]["qualification"] == "unverified"
+    assert receipt["artifact_contract"]["transport"] == "mediaref-v1"
     assert receipt["artifact_contract"]["source"]["revision"] == REVISION
     assert receipt["transform_peak_bytes"] <= 4096
     assert all(source["repo"] == REPO for source in receipt["sources"])
@@ -173,6 +175,8 @@ def test_vision_manifest_rejects_missing_metadata_and_mode_downgrades(vision_sou
     ],
 )
 def test_unsupported_vision_tuple_fails_before_source_resolution(monkeypatch, tmp_path, change):
+    # A native-support request has no qualifying build in this scenario.
+    monkeypatch.setattr("stark_convert.vision_runtime._records", lambda: [])
     request = replace(ConversionRequest(REPO, artifact_mode="vision-language"), **change)
     monkeypatch.setattr(cli, "resolve_source", lambda *a, **kw: pytest.fail("resolved an unsupported tuple"))
     with pytest.raises(UnsupportedConversion):
@@ -202,12 +206,13 @@ def test_probe_separates_conversion_from_runtime_support():
     cap = cli.capability(ConversionRequest(REPO, artifact_mode="vision-language"))
     assert cap.conversion == "implemented"
     assert cap.source_validation == "not_performed"
-    assert cap.native_loading == "runtime_blocked"
-    assert cap.reason == "native_vision_unimplemented"
+    assert cap.native_loading == "supported_layout_unverified_tuple"
+    assert cap.reason is None
 
 
 @pytest.mark.parametrize("replay", [False, True])
-def test_cli_native_vision_fails_before_source_resolution(tmp_path, monkeypatch, capsys, replay):
+def test_cli_native_vision_without_records_fails_before_source_resolution(tmp_path, monkeypatch, capsys, replay):
+    monkeypatch.setattr("stark_convert.vision_runtime._records", lambda: [])
     args = [
         "stark-convert",
         REPO,

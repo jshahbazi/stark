@@ -31,6 +31,10 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
     pub(super) multimodal_failed: bool,
+    #[cfg(test)]
+    pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
+    #[cfg(test)]
+    pub(crate) vision_prefill_layer_readbacks: Option<(usize, Box<[B::GlobalBuffer]>)>,
 }
 
 impl<B: Backend> LanguageModelState<B> {
@@ -103,6 +107,10 @@ impl<B: Backend> LanguageModel<B> {
             speculator_state,
             max_context_length,
             multimodal_failed: false,
+            #[cfg(test)]
+            vision_prefill_logits_readback: None,
+            #[cfg(test)]
+            vision_prefill_layer_readbacks: None,
         })
     }
 }

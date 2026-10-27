@@ -21,6 +21,7 @@ pub fn delta_net_conv_direct<T: ArrayElement + Float>(
     output_stride: u32,
     state_stride: u32,
     conv_dim: u32,
+    reference_bf16: u32,
     #[specialize] has_bias: bool,
 ) {
     let suffix_len = suffix_len as usize;
@@ -50,7 +51,13 @@ pub fn delta_net_conv_direct<T: ArrayElement + Float>(
                 acc += unsafe { *conv_weight.add(channel * kernel_size + tap) } * sample;
             }
             unsafe {
-                *output.add(token * output_stride + channel) = T::from(ActivationType::SILU.activate(acc)).unwrap();
+                let convolution = if reference_bf16 != 0 {
+                    bf16::from_f32(acc).to_f32()
+                } else {
+                    acc
+                };
+                *output.add(token * output_stride + channel) =
+                    T::from(ActivationType::SILU.activate(convolution)).unwrap();
             }
         }
     }

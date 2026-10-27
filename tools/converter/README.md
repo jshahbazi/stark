@@ -60,12 +60,12 @@ stark-convert [SOURCE] [options]
 | `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
-| `--artifact-mode MODE` | `text` (default), `vision-language` | Experimental full-vision artifacts for the exact pinned Qwen3.5-0.8B BF16 checkpoint. Native image loading is blocked; see the [image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md) |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the exact pinned Qwen3.5-0.8B BF16 checkpoint; see the [qualified image path](../../docs/MULTIMODAL_IMPLEMENTATION.md) |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
 | `--write-source-manifest PATH` | | Write a private manifest describing every selected source file |
-| `--require-native-support` | | Fail unless the exact artifact matches a stored load-only qualification. Requires BF16 and a catalog model |
+| `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
 | `--capabilities` | | Report catalog coverage for `SOURCE` without reading or downloading it |
 | `--backend` | `auto`, `streaming` | Accepted for compatibility; both select the same implementation |
 | `--version` | | Print the converter version |
@@ -98,7 +98,14 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 | ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router` (both repositories currently inaccessible) |
 
-Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. Twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Every other implemented identity, every size variant, and every generic conversion starts as `unverified`, or `runtime_blocked` when its dtype or dimensions exceed what the engine loads. `--require-native-support` refuses anything but an exact match. Remaining catalog rows (specialized, MoE, multimodal and later-generation variants) fail with an unsupported category.
+Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
+
+Vision mode uses a separate [execution catalog](stark_convert/vision_runtime_qualifications.json).
+Its first record binds all five artifact files and the generation worker to the
+tested Metal device class and macOS version. The [execution record](../../docs/archive/runs/2026-10-26-qwen35-image-execution.md)
+includes final-logit parity, visual questions, resource observations, and failure
+recovery. Conversion returns that named-build evidence when output hashes match;
+serving additionally verifies the launched executable and current runtime.
 
 Probe coverage without reading a checkpoint:
 
@@ -108,11 +115,13 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 
 ## Future checkpoints and architecture tracking
 
-The experimental `vision-language` artifact mode is tracked separately in the
+The `vision-language` artifact mode is tracked separately in the
 [native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
 It validates and retains the full vision tower, processor and template for one
-pinned checkpoint. It does not enable image input or native inference. Default
-Qwen3.5 conversions remain text-only.
+pinned checkpoint. Qualified developer worker, CLI, and Local API builds can use
+the resulting artifact for one PNG/JPEG image. Default Qwen3.5 conversions remain
+text-only. Swift attachments and signed packaged-installation qualification
+remain planned.
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
 

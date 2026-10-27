@@ -55,7 +55,9 @@ Conversion downloads the model; use a new output directory each time. Chat loads
 
 ### Use Stark from another app
 
-Stark serves an OpenAI-style text-chat API for clients on the same Mac. Run a model, open **Connection Details** from Stark's menu, and paste the **Base URL**, **API key** and **Model ID** into the client's OpenAI-compatible provider settings. The key changes on every launch. Browser-origin requests, remote devices, tool calls, embeddings, images and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model, open **Connection Details** from Stark's menu, and paste the **Base URL**, **API key** and **Model ID** into the client's OpenAI-compatible provider settings. The key changes on every launch. Browser-origin requests, remote devices, tool calls, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+
+The [qualified native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG through the developer CLI and Local API for the recorded Qwen3.5-0.8B BF16 artifact, worker, Apple M5 Max device class, and macOS version. Swift attachments and signed packaged-installation qualification remain planned.
 
 ## Models and application integration
 

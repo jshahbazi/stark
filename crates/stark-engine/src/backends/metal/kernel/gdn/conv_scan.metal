@@ -28,6 +28,7 @@ PUBLIC KERNEL(DeltaNetConvScan)(
     constant const uint& state_stride,
     constant const uint& conv_dim,
     constant const uint& out_stride,
+    constant const uint& reference_bf16,
     const bool has_bias SPECIALIZE,
     const uint token_idx AXIS(suffix_len + kernel_size - 1, 1),
     const uint channel_idx AXIS(conv_dim, 32)
@@ -44,7 +45,8 @@ PUBLIC KERNEL(DeltaNetConvScan)(
     }
 
     const size_t dst = size_t(token_idx) * out_stride + channel_idx;
-    in_proj[dst] = static_cast<T>(activate_silu(acc));
+    const float convolution = reference_bf16 != 0 ? float(bfloat(acc)) : acc;
+    in_proj[dst] = static_cast<T>(activate_silu(convolution));
   } else {
     const uint tap = token_idx - suffix_len;
     const size_t padded_index = size_t(token_idx) * row_stride + channel_idx;

@@ -51,8 +51,8 @@ def capability(request: ConversionRequest) -> CapabilityResult:
             adapter="qwen3_5" if supported else None,
             model_kind=request.model_kind,
             conversion="implemented" if supported else "unsupported",
-            native_loading="runtime_blocked",
-            reason="native_vision_unimplemented" if supported else "unsupported_vision_tuple",
+            native_loading="supported_layout_unverified_tuple" if supported else "runtime_blocked",
+            reason=None if supported else "unsupported_vision_tuple",
         )
     entry = get_model(request.repo)
     if request.metadata_profile == GENERIC_PROFILE:
@@ -101,7 +101,10 @@ def _validate_request(request: ConversionRequest) -> None:
     if request.require_native_support and request.dtype != "bfloat16":
         raise UnsupportedConversion("Native dense loading requires BF16")
     if request.artifact_mode == "vision-language" and request.require_native_support:
-        raise UnsupportedConversion("Native vision loading is not implemented")
+        from .vision_runtime import has_recorded_image_runtime
+
+        if not has_recorded_image_runtime():
+            raise UnsupportedConversion("No named-build native image qualification is recorded")
     if request.architecture is not None and request.architecture not in CONFIG_ADAPTERS.values():
         raise UnsupportedConversion("Unsupported requested architecture")
     if request.metadata_profile is not None:
@@ -405,7 +408,22 @@ def convert(
         }
         from .qualifications import qualification_for
 
-        qualification = qualification_for(repo, dtype, artifact_hashes) if artifact_mode == "text" else None
+        if artifact_mode == "vision-language":
+            from .vision_runtime import image_qualification_for
+
+            qualification = image_qualification_for(
+                repo,
+                dtype,
+                {
+                    "artifact_sha256": stats["output_sha256"],
+                    "config_sha256": artifact_hashes["config_sha256"],
+                    "tokenizer_sha256": artifact_hashes["tokenizer_sha256"],
+                    "processor_sha256": file_hash(staging / "preprocessor_config.json"),
+                    "template_sha256": file_hash(staging / "chat_template.jinja"),
+                },
+            )
+        else:
+            qualification = qualification_for(repo, dtype, artifact_hashes)
         if request.require_native_support and qualification is None:
             raise UnsupportedConversion("No recorded named-build native qualification for these exact artifacts")
         converted_capability = replace(
@@ -482,7 +500,7 @@ def main() -> int:
         "--artifact-mode",
         choices=("text", "vision-language"),
         default="text",
-        help="Experimental full vision artifact conversion; native image execution is not implemented",
+        help="Full vision artifact conversion; image execution requires an exact native qualification record",
     )
     parser.add_argument(
         "--architecture", choices=sorted(set(CONFIG_ADAPTERS.values())), help="Assert the checkpoint architecture"
@@ -497,7 +515,7 @@ def main() -> int:
     parser.add_argument(
         "--require-native-support",
         action="store_true",
-        help="Require an exact stored load-only qualification for its named Stark build",
+        help="Require an exact stored native qualification for the output and its named Stark build",
     )
     parser.add_argument("--source-manifest", type=Path)
     parser.add_argument("--write-source-manifest", type=Path)

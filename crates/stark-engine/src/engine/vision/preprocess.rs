@@ -79,10 +79,12 @@ impl RgbImage {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn width(&self) -> u32 {
         self.width
     }
 
+    #[cfg(test)]
     pub(crate) fn height(&self) -> u32 {
         self.height
     }

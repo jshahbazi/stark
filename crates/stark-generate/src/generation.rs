@@ -7,6 +7,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
+
 pub(crate) const MAX_CONTEXT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -90,6 +92,94 @@ enum Request {
         #[serde(default)]
         request_id: u64,
     },
+    PrepareImage {
+        rendered_prompt: String,
+        image: ImageReference,
+        context_tokens: u32,
+        max_new_tokens: u32,
+        #[serde(default)]
+        request_id: u64,
+    },
+    GenerateImage {
+        prepared_id: String,
+        context_tokens: u32,
+        max_new_tokens: u32,
+        #[serde(default)]
+        seed: u64,
+        #[serde(default)]
+        sampling: Sampling,
+        #[serde(default)]
+        stop_token_ids: Vec<u32>,
+        #[serde(default)]
+        stream: bool,
+        #[serde(default)]
+        stop: Vec<String>,
+        #[serde(default)]
+        request_id: u64,
+    },
+    DiscardImage {
+        #[serde(default)]
+        prepared_id: Option<String>,
+    },
+}
+
+pub(crate) struct PreparedImageMetadata {
+    pub input_tokens: usize,
+    pub image_tokens: u32,
+    pub grid: [u32; 3],
+    pub processed_dimensions: [u32; 2],
+}
+
+pub(crate) struct ImageArtifactIdentity<'a> {
+    pub schema_version: u32,
+    pub artifact_sha256: &'a str,
+    pub config_sha256: &'a str,
+    pub tokenizer_sha256: &'a str,
+    pub processor_sha256: &'a str,
+    pub template_sha256: &'a str,
+}
+
+impl ImageArtifactIdentity<'_> {
+    fn valid(&self) -> bool {
+        self.schema_version == 2
+            && [
+                self.artifact_sha256,
+                self.config_sha256,
+                self.tokenizer_sha256,
+                self.processor_sha256,
+                self.template_sha256,
+            ]
+            .iter()
+            .all(|value| {
+                value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+    }
+}
+
+struct PreparedRequest<P> {
+    id: String,
+    image: P,
+    metadata: PreparedImageMetadata,
+    context_tokens: u32,
+    max_new_tokens: u32,
+    _lease: ImageLease,
+}
+
+fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
+    let [temporal, height, width] = metadata.grid;
+    temporal == 1
+        && height > 0
+        && width > 0
+        && height.is_multiple_of(2)
+        && width.is_multiple_of(2)
+        && height.checked_mul(width).is_some_and(|patches| patches <= 4096 && patches / 4 == metadata.image_tokens)
+        && metadata.processed_dimensions[0].checked_div(16) == Some(width)
+        && metadata.processed_dimensions[1].checked_div(16) == Some(height)
+        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
+        && metadata.input_tokens >= metadata.image_tokens as usize + 2
+        && metadata.input_tokens <= MAX_CONTEXT_TOKENS as usize
+        && metadata.image_tokens > 0
+        && metadata.image_tokens <= 1024
 }
 
 pub(crate) struct GenerationOptions {
@@ -173,6 +263,19 @@ pub(crate) fn collect_tokens_controlled(
         on_token,
         cancelled,
     )
+}
+
+/// A stream's Drop can discover an error in its owned lookahead submission.
+/// Check its model fence after draining, including when collection cancelled.
+pub(crate) fn native_result_after_cleanup<T>(
+    result: Result<T, &'static str>,
+    fenced: bool,
+) -> Result<T, &'static str> {
+    if fenced {
+        Err("native_generation_failed")
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
@@ -262,6 +365,8 @@ fn collect_tokens_with_clock_and_callback(
 }
 
 pub(crate) trait GenerationBackend {
+    type PreparedImage;
+
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
     fn eos_token_ids(&self) -> &[u32];
@@ -281,12 +386,46 @@ pub(crate) trait GenerationBackend {
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str>;
+    fn supports_images(&self) -> bool {
+        false
+    }
+    fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
+        None
+    }
+    fn runtime_identity(&self) -> Option<Value> {
+        None
+    }
+    fn cancelled(
+        &mut self,
+        _request_id: u64,
+    ) -> Result<bool, &'static str> {
+        Ok(false)
+    }
+    fn prepare_image(
+        &mut self,
+        _input_token_ids: Vec<u32>,
+        _encoded: &[u8],
+        _context_tokens: u32,
+        _request_id: u64,
+    ) -> Result<(Self::PreparedImage, PreparedImageMetadata), &'static str> {
+        Err("images_not_supported")
+    }
+    fn generate_image(
+        &mut self,
+        _image: Self::PreparedImage,
+        _options: &GenerationOptions,
+        _on_text: Option<&mut TextCallback<'_>>,
+    ) -> Result<GeneratedTokens, &'static str> {
+        Err("images_not_supported")
+    }
 }
 
 pub(crate) type TextCallback<'a> = dyn FnMut(&str) -> Result<(), &'static str> + 'a;
 
-pub(crate) struct GenerationWorker<B> {
+pub(crate) struct GenerationWorker<B: GenerationBackend> {
     backend: B,
+    media: Option<MediaStore>,
+    prepared: Option<PreparedRequest<B::PreparedImage>>,
 }
 
 fn valid_ids(
@@ -306,7 +445,15 @@ fn write_reply(
 }
 
 impl<B: GenerationBackend> GenerationWorker<B> {
+    #[cfg(test)]
     pub(crate) fn new(backend: B) -> Result<Self, &'static str> {
+        Self::new_with_media(backend, None)
+    }
+
+    pub(crate) fn new_with_media(
+        backend: B,
+        media: Option<MediaStore>,
+    ) -> Result<Self, &'static str> {
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
@@ -315,7 +462,88 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         }
         Ok(Self {
             backend,
+            media,
+            prepared: None,
         })
+    }
+
+    fn validate_options(
+        &self,
+        options: &GenerationOptions,
+    ) -> Result<(), &'static str> {
+        if options.context_tokens == 0
+            || options.context_tokens > MAX_CONTEXT_TOKENS
+            || options.max_new_tokens == 0
+            || options.max_new_tokens > MAX_NEW_TOKENS
+            || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
+            || options.stop.len() > 4
+            || options.stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
+            || !valid_ids(&options.extra_stop_token_ids, self.backend.vocab_size())
+            || options.extra_stop_token_ids.iter().collect::<HashSet<_>>().len() != options.extra_stop_token_ids.len()
+        {
+            return Err("invalid_generation_request");
+        }
+        if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
+            return Err("context_overflow");
+        }
+        options.sampling.validate(self.backend.vocab_size())
+    }
+
+    fn generate_completion(
+        &mut self,
+        input: &[u32],
+        image: Option<B::PreparedImage>,
+        input_tokens: usize,
+        options: &GenerationOptions,
+        stream: bool,
+        output: &mut impl Write,
+    ) -> Result<Value, &'static str> {
+        let started = Instant::now();
+        let mut emitted = String::new();
+        let generated = {
+            let mut on_text = |text: &str| {
+                if !text.is_empty() {
+                    write_reply(output, &json!({"event":"delta","text":text}))?;
+                    emitted.push_str(text);
+                }
+                Ok(())
+            };
+            let on_text = if stream {
+                Some(&mut on_text as &mut TextCallback<'_>)
+            } else {
+                None
+            };
+            match image {
+                Some(image) => self.backend.generate_image(image, options, on_text)?,
+                None => self.backend.generate(input, options, on_text)?,
+            }
+        };
+        if !valid_ids(&generated.generated_token_ids, self.backend.vocab_size())
+            || generated.sampled_tokens > options.max_new_tokens as usize
+            || input_tokens + generated.sampled_tokens > options.context_tokens as usize
+            || generated.sampled_tokens
+                != generated.generated_token_ids.len() + usize::from(generated.stop_token_id.is_some())
+        {
+            return Err("invalid_generation_output");
+        }
+        let text = match &generated.text {
+            Some(text) => text.clone(),
+            None => self.backend.decode(&generated.generated_token_ids, false)?,
+        };
+        if stream {
+            let suffix = text.strip_prefix(&emitted).ok_or("decoding_failed")?;
+            if !suffix.is_empty() {
+                write_reply(output, &json!({"event":"delta","text":suffix}))?;
+            }
+        }
+        Ok(json!({"generated_token_ids":generated.generated_token_ids,"text":text,
+            "input_tokens":input_tokens,"output_tokens":generated.generated_token_ids.len(),
+            "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
+            "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64(),
+            "prefill_seconds":generated.prefill_seconds,"decode_seconds":generated.decode_seconds,
+            "input_tokens_per_second":tokens_per_second(input_tokens, generated.prefill_seconds),
+            "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
+            "timing_method":"first-token-wall-clock-v1"}))
     }
 
     fn tokenize(
@@ -365,22 +593,17 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 stop,
                 request_id,
             } => {
-                if context_tokens == 0
-                    || context_tokens > MAX_CONTEXT_TOKENS
-                    || max_new_tokens == 0
-                    || max_new_tokens > MAX_NEW_TOKENS
-                    || stop_token_ids.len() > MAX_EXTRA_STOPS
-                    || stop.len() > 4
-                    || stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
-                    || !valid_ids(&stop_token_ids, self.backend.vocab_size())
-                    || stop_token_ids.iter().collect::<HashSet<_>>().len() != stop_token_ids.len()
-                {
-                    return Err("invalid_generation_request");
-                }
-                if self.backend.max_context_length().is_some_and(|max| context_tokens > max) {
-                    return Err("context_overflow");
-                }
-                sampling.validate(self.backend.vocab_size())?;
+                let options = GenerationOptions {
+                    context_tokens,
+                    max_new_tokens,
+                    seed,
+                    sampling,
+                    eos_token_ids: self.backend.eos_token_ids().to_vec(),
+                    extra_stop_token_ids: stop_token_ids,
+                    stop,
+                    request_id,
+                };
+                self.validate_options(&options)?;
                 let input = match (rendered_prompt, input_token_ids) {
                     (Some(prompt), None) => self.tokenize(&prompt, false)?,
                     (None, Some(ids)) => ids,
@@ -392,6 +615,93 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if input.len() >= context_tokens as usize {
                     return Err("context_overflow");
                 }
+                self.generate_completion(&input, None, input.len(), &options, stream, output)
+            },
+            Request::PrepareImage {
+                rendered_prompt,
+                image,
+                context_tokens,
+                max_new_tokens,
+                request_id,
+            } => {
+                if !self.backend.supports_images() || self.media.is_none() {
+                    return Err("images_not_supported");
+                }
+                let options = GenerationOptions {
+                    context_tokens,
+                    max_new_tokens,
+                    seed: 0,
+                    sampling: Sampling::default(),
+                    eos_token_ids: self.backend.eos_token_ids().to_vec(),
+                    extra_stop_token_ids: Vec::new(),
+                    stop: Vec::new(),
+                    request_id,
+                };
+                self.validate_options(&options)?;
+                if self.backend.cancelled(request_id)? {
+                    return Err("generation_cancelled");
+                }
+                let tokens = self.tokenize(&rendered_prompt, false)?;
+                if tokens.is_empty() {
+                    return Err("invalid_image_request");
+                }
+                // The one source image placeholder cannot shrink. Reject a
+                // known overflow before opening bytes or decoding the image.
+                if tokens.len().checked_add(max_new_tokens as usize).is_none_or(|total| total > context_tokens as usize)
+                {
+                    return Err("context_overflow");
+                }
+                let staged = self.media.as_ref().ok_or("images_not_supported")?.read(&image)?;
+                if self.backend.cancelled(request_id)? {
+                    return Err("generation_cancelled");
+                }
+                let (image, metadata) =
+                    self.backend.prepare_image(tokens, &staged.bytes, context_tokens, request_id)?;
+                if self.backend.cancelled(request_id)? {
+                    return Err("generation_cancelled");
+                }
+                if !valid_image_metadata(&metadata) {
+                    return Err("invalid_image_preparation_output");
+                }
+                if metadata
+                    .input_tokens
+                    .checked_add(max_new_tokens as usize)
+                    .is_none_or(|total| total > context_tokens as usize)
+                {
+                    return Err("context_overflow");
+                }
+                let id = opaque_id()?;
+                let reply = json!({"prepared_id":id,"input_tokens":metadata.input_tokens,
+                    "image_tokens":metadata.image_tokens,"grid":metadata.grid,
+                    "processed_dimensions":metadata.processed_dimensions});
+                self.prepared = Some(PreparedRequest {
+                    id,
+                    image,
+                    metadata,
+                    context_tokens,
+                    max_new_tokens,
+                    _lease: staged.lease,
+                });
+                Ok(reply)
+            },
+            Request::GenerateImage {
+                prepared_id,
+                context_tokens,
+                max_new_tokens,
+                seed,
+                sampling,
+                stop_token_ids,
+                stream,
+                stop,
+                request_id,
+            } => {
+                let prepared = self.prepared.take().ok_or("invalid_prepared_image")?;
+                if !valid_id(&prepared_id) || prepared.id != prepared_id {
+                    return Err("invalid_prepared_image");
+                }
+                if prepared.context_tokens != context_tokens || prepared.max_new_tokens != max_new_tokens {
+                    return Err("invalid_generation_request");
+                }
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
@@ -402,55 +712,30 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     stop,
                     request_id,
                 };
-                let started = Instant::now();
-                let mut emitted = String::new();
-                let generated = {
-                    let mut on_text = |text: &str| {
-                        if !text.is_empty() {
-                            write_reply(output, &json!({"event":"delta","text":text}))?;
-                            emitted.push_str(text);
-                        }
-                        Ok(())
-                    };
-                    self.backend.generate(
-                        &input,
-                        &options,
-                        if stream {
-                            Some(&mut on_text)
-                        } else {
-                            None
-                        },
-                    )?
-                };
-                if !valid_ids(&generated.generated_token_ids, self.backend.vocab_size())
-                    || generated.sampled_tokens > options.max_new_tokens as usize
-                    || input.len() + generated.sampled_tokens > context_tokens as usize
-                    || generated.sampled_tokens
-                        != generated.generated_token_ids.len() + usize::from(generated.stop_token_id.is_some())
+                self.validate_options(&options)?;
+                if self.backend.cancelled(request_id)? {
+                    return Err("generation_cancelled");
+                }
+                self.generate_completion(
+                    &[],
+                    Some(prepared.image),
+                    prepared.metadata.input_tokens,
+                    &options,
+                    stream,
+                    output,
+                )
+            },
+            Request::DiscardImage {
+                prepared_id,
+            } => {
+                let prepared = self.prepared.take();
+                if prepared_id
+                    .as_ref()
+                    .is_some_and(|id| !valid_id(id) || prepared.as_ref().is_some_and(|value| value.id != *id))
                 {
-                    return Err("invalid_generation_output");
+                    return Err("invalid_prepared_image");
                 }
-                // Decode the complete vector, preserving UTF-8 boundaries and specials.
-                let text = match &generated.text {
-                    Some(text) => text.clone(),
-                    None => self.backend.decode(&generated.generated_token_ids, false)?,
-                };
-                if stream {
-                    // Byte-fallback decoders may retain an incomplete character at EOS.
-                    // Reconcile only after native cleanup; never retract emitted text.
-                    let suffix = text.strip_prefix(&emitted).ok_or("decoding_failed")?;
-                    if !suffix.is_empty() {
-                        write_reply(output, &json!({"event":"delta","text":suffix}))?;
-                    }
-                }
-                Ok(json!({"generated_token_ids":generated.generated_token_ids,"text":text,
-                    "input_tokens":input.len(),"output_tokens":generated.generated_token_ids.len(),
-                    "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
-                    "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64(),
-                    "prefill_seconds":generated.prefill_seconds,"decode_seconds":generated.decode_seconds,
-                    "input_tokens_per_second":tokens_per_second(input.len(), generated.prefill_seconds),
-                    "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
-                    "timing_method":"first-token-wall-clock-v1"}))
+                Ok(json!({"discarded":prepared.is_some()}))
             },
         }
     }
@@ -460,11 +745,22 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         bytes: &[u8],
         output: &mut impl Write,
     ) -> Result<(), &'static str> {
-        let result = serde_json::from_slice::<Request>(bytes)
-            .map_err(|_| "invalid_request")
-            .and_then(|request| self.handle(request, output));
+        let request = serde_json::from_slice::<Request>(bytes).map_err(|_| "invalid_request");
+        if !matches!(&request, Ok(Request::GenerateImage { .. } | Request::DiscardImage { .. })) {
+            self.prepared = None;
+        }
+        let result = request.and_then(|request| self.handle(request, output));
+        if result.is_err() {
+            self.prepared = None;
+        }
         match result {
-            Ok(value) => write_reply(output, &value),
+            Ok(value) => {
+                let result = write_reply(output, &value);
+                if result.is_err() {
+                    self.prepared = None;
+                }
+                result
+            },
             Err(code) => {
                 if code == "protocol_write_failed" {
                     return Err(code);
@@ -475,6 +771,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     "native_generation_failed"
                         | "invalid_generation_output"
                         | "invalid_tokenization_output"
+                        | "invalid_image_preparation_output"
                         | "decoding_failed"
                         | "cancel_channel_failed"
                 ) {
@@ -492,26 +789,52 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
-    write_reply(
-        output,
-        &json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
+    let mut readiness = json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
         "mode":"text-generation-v1","operations":["tokenize","decode","generate"],
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
         "max_context_tokens":MAX_CONTEXT_TOKENS.min(worker.backend.max_context_length().unwrap_or(MAX_CONTEXT_TOKENS)),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
-        "stop_sequences":true,"cancellation":"pipe-v1"}),
-    )?;
+        "stop_sequences":true,"cancellation":"pipe-v1"});
+    if worker.media.is_some() && worker.backend.supports_images() {
+        let identity = worker
+            .backend
+            .image_artifact_identity()
+            .filter(ImageArtifactIdentity::valid)
+            .ok_or("invalid_model_config")?;
+        let runtime_identity = worker.backend.runtime_identity().ok_or("invalid_model_config")?;
+        readiness["image_input"] = json!({
+            "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,
+            "operations":["prepare_image","generate_image","discard_image"],
+            "formats":["image/jpeg","image/png"],"max_images":1,
+            "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
+            "max_source_dimension":16_384,
+            "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
+            "artifact_schema_version":identity.schema_version,"model_source":"Qwen/Qwen3.5-0.8B",
+            "model_revision":"2fc06364715b967f1860aea9cf38778875588b17",
+            "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
+            "tokenizer_sha256":identity.tokenizer_sha256,"processor_sha256":identity.processor_sha256,
+            "template_sha256":identity.template_sha256,
+            "runtime_identity":runtime_identity,
+            "prepared_policy":"single-use-next-operation"
+        });
+    }
+    write_reply(output, &readiness)?;
     loop {
         let mut bytes = Vec::new();
-        let count = Read::by_ref(input)
-            .take(MAX_REQUEST_BYTES as u64 + 1)
-            .read_until(b'\n', &mut bytes)
-            .map_err(|_| "protocol_read_failed")?;
+        let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
+            Ok(count) => count,
+            Err(_) => {
+                worker.prepared = None;
+                return Err("protocol_read_failed");
+            },
+        };
         if count == 0 {
+            worker.prepared = None;
             return Ok(());
         }
         if bytes.len() > MAX_REQUEST_BYTES {
+            worker.prepared = None;
             // Drain the rest of this frame so the next request remains independent.
             if bytes.last() != Some(&b'\n') {
                 loop {
@@ -541,7 +864,7 @@ mod tests {
         io,
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -572,8 +895,28 @@ mod tests {
         sampling: Vec<Sampling>,
         drained: Arc<AtomicBool>,
         invalid_tokenization: bool,
+        images: bool,
+        image_preparations: usize,
+        image_generations: usize,
+        prepared_drops: Arc<AtomicUsize>,
+        cancel_image: bool,
+        cancel_after_prepare: bool,
+        fail_image_prepare: bool,
     }
+
+    struct FakePreparedImage {
+        dropped: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FakePreparedImage {
+        fn drop(&mut self) {
+            self.dropped.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
     impl GenerationBackend for FakeBackend {
+        type PreparedImage = FakePreparedImage;
+
         fn vocab_size(&self) -> usize {
             8
         }
@@ -647,6 +990,75 @@ mod tests {
                 &mut on_token,
             )
         }
+
+        fn supports_images(&self) -> bool {
+            self.images
+        }
+
+        fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
+            self.images.then_some(ImageArtifactIdentity {
+                schema_version: 2,
+                artifact_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                config_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                tokenizer_sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                processor_sha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                template_sha256: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            })
+        }
+
+        fn runtime_identity(&self) -> Option<Value> {
+            self.images.then(|| {
+                json!({
+                    "backend":"metal",
+                    "device_name":"Apple Synthetic GPU",
+                    "apple_gpu_family":1008,
+                    "gpu_core_count":32,
+                    "supports_mxu":false
+                })
+            })
+        }
+
+        fn cancelled(
+            &mut self,
+            _: u64,
+        ) -> Result<bool, &'static str> {
+            Ok(self.cancel_image)
+        }
+
+        fn prepare_image(
+            &mut self,
+            _: Vec<u32>,
+            _: &[u8],
+            _: u32,
+            _: u64,
+        ) -> Result<(FakePreparedImage, PreparedImageMetadata), &'static str> {
+            self.image_preparations += 1;
+            if self.fail_image_prepare {
+                return Err("invalid_image_request");
+            }
+            self.cancel_image = self.cancel_after_prepare;
+            Ok((
+                FakePreparedImage {
+                    dropped: self.prepared_drops.clone(),
+                },
+                PreparedImageMetadata {
+                    input_tokens: 7,
+                    image_tokens: 4,
+                    grid: [1, 4, 4],
+                    processed_dimensions: [64, 64],
+                },
+            ))
+        }
+
+        fn generate_image(
+            &mut self,
+            _image: FakePreparedImage,
+            options: &GenerationOptions,
+            on_text: Option<&mut TextCallback<'_>>,
+        ) -> Result<GeneratedTokens, &'static str> {
+            self.image_generations += 1;
+            self.generate(&[2; 7], options, on_text)
+        }
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
@@ -658,6 +1070,13 @@ mod tests {
             sampling: Vec::new(),
             drained: Arc::new(AtomicBool::new(true)),
             invalid_tokenization: false,
+            images: false,
+            image_preparations: 0,
+            image_generations: 0,
+            prepared_drops: Arc::new(AtomicUsize::new(0)),
+            cancel_image: false,
+            cancel_after_prepare: false,
+            fail_image_prepare: false,
         })
         .unwrap()
     }
@@ -671,6 +1090,225 @@ mod tests {
         let mut output = Vec::new();
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
         serde_json::from_slice(&output).unwrap()
+    }
+
+    fn image_worker(root: &crate::media::tests::PrivateRoot) -> GenerationWorker<FakeBackend> {
+        let mut worker = worker();
+        worker.backend.images = true;
+        worker.media = Some(MediaStore::open(&root.0).unwrap());
+        worker
+    }
+
+    fn image_prepare(root: &crate::media::tests::PrivateRoot) -> Value {
+        let image = root.image();
+        json!({"operation":"prepare_image","rendered_prompt":"fixture",
+            "image":{"id":image.id,"byte_length":image.byte_length,"media_type":image.media_type},
+            "context_tokens":16,"max_new_tokens":8,"request_id":10})
+    }
+
+    fn image_generate(prepared: &Value) -> Value {
+        json!({"operation":"generate_image","prepared_id":prepared["prepared_id"],
+            "context_tokens":16,"max_new_tokens":8,"request_id":11})
+    }
+
+    #[test]
+    fn image_prepare_reports_expanded_counts_and_generation_consumes_once() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert!(valid_id(prepared["prepared_id"].as_str().unwrap()));
+        assert_eq!(prepared["input_tokens"], 7);
+        assert_eq!(prepared["image_tokens"], 4);
+        assert!(prepared.get("token_ids").is_none());
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 0);
+        let request = image_generate(&prepared);
+        let reply = post(&mut worker, request.clone());
+        assert_eq!(reply["input_tokens"], 7);
+        assert_eq!(reply["finish_reason"], "eos");
+        assert_eq!(worker.backend.image_preparations, 1);
+        assert_eq!(worker.backend.image_generations, 1);
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        assert_eq!(post(&mut worker, request)["error"], "invalid_prepared_image");
+        assert_eq!(post(&mut worker, json!({"operation":"discard_image"}))["discarded"], false);
+        assert_eq!(post(&mut worker, standard())["finish_reason"], "eos");
+    }
+
+    #[test]
+    fn image_preparation_is_opt_in_and_unknown_fields_remain_rejected() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut vision_worker = image_worker(&root);
+        let mut text = worker();
+        assert_eq!(post(&mut text, image_prepare(&root))["error"], "images_not_supported");
+        assert_eq!(text.backend.image_preparations, 0);
+        let mut request = image_prepare(&root);
+        request["image"]["path"] = json!("not-allowed");
+        assert_eq!(post(&mut vision_worker, request)["error"], "invalid_request");
+        let mut request = image_prepare(&root);
+        request["input_token_ids"] = json!([2]);
+        assert_eq!(post(&mut vision_worker, request)["error"], "invalid_request");
+        assert_eq!(vision_worker.backend.image_preparations, 0);
+    }
+
+    #[test]
+    fn another_request_or_invalid_frame_releases_the_pending_image() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let first = post(&mut worker, image_prepare(&root));
+        let second = post(&mut worker, image_prepare(&root));
+        assert_ne!(first["prepared_id"], second["prepared_id"]);
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        worker.process_line(b"{", &mut Vec::new()).unwrap();
+        assert!(worker.prepared.is_none());
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+        let pending = post(&mut worker, image_prepare(&root));
+        post(&mut worker, json!({"operation":"tokenize","text":"fixture"}));
+        assert_eq!(post(&mut worker, image_generate(&pending))["error"], "invalid_prepared_image");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn prepared_handles_are_worker_scoped_and_bound_to_the_reserved_budget() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut first = image_worker(&root);
+        let mut second = image_worker(&root);
+        let prepared = post(&mut first, image_prepare(&root));
+        post(&mut second, image_prepare(&root));
+        assert_eq!(post(&mut second, image_generate(&prepared))["error"], "invalid_prepared_image");
+        assert!(second.prepared.is_none());
+        let mut changed = image_generate(&prepared);
+        changed["max_new_tokens"] = json!(7);
+        assert_eq!(post(&mut first, changed)["error"], "invalid_generation_request");
+        assert!(first.prepared.is_none());
+        assert_eq!(post(&mut first, image_generate(&prepared))["error"], "invalid_prepared_image");
+        assert_eq!(first.backend.image_generations, 0);
+        assert_eq!(second.backend.image_generations, 0);
+    }
+
+    #[test]
+    fn preparation_failure_cancellation_and_context_overflow_allow_request_b() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.fail_image_prepare = true;
+        assert_eq!(post(&mut worker, image_prepare(&root))["error"], "invalid_image_request");
+        worker.backend.fail_image_prepare = false;
+        worker.backend.cancel_after_prepare = true;
+        assert_eq!(post(&mut worker, image_prepare(&root))["error"], "generation_cancelled");
+        assert!(worker.prepared.is_none());
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        worker.backend.cancel_after_prepare = false;
+        worker.backend.cancel_image = false;
+        let mut overflow = image_prepare(&root);
+        overflow["context_tokens"] = json!(14);
+        assert_eq!(post(&mut worker, overflow)["error"], "context_overflow");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert_eq!(post(&mut worker, image_generate(&prepared))["finish_reason"], "eos");
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn known_text_and_output_overflow_is_rejected_before_opening_image_bytes() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let mut request = image_prepare(&root);
+        std::fs::remove_file(root.0.join(request["image"]["id"].as_str().unwrap())).unwrap();
+        request["context_tokens"] = json!(8);
+        assert_eq!(post(&mut worker, request)["error"], "context_overflow");
+        assert_eq!(worker.backend.image_preparations, 0);
+    }
+
+    #[test]
+    fn image_streaming_uses_the_existing_delta_and_terminal_contract() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepared = post(&mut worker, image_prepare(&root));
+        let mut request = image_generate(&prepared);
+        request["stream"] = json!(true);
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frames = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0]["event"], "delta");
+        assert_eq!(frames[1]["event"], "delta");
+        assert_eq!(frames[2]["input_tokens"], 7);
+        assert_eq!(frames[2]["finish_reason"], "eos");
+        assert!(worker.backend.drained.load(Ordering::SeqCst));
+        assert!(worker.prepared.is_none());
+    }
+
+    #[test]
+    fn image_native_and_writer_failures_release_prepared_state_after_cleanup() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        let prepare = image_prepare(&root);
+        assert_eq!(
+            worker.process_line(
+                &serde_json::to_vec(&prepare).unwrap(),
+                &mut FailingWriter {
+                    fail_flush: false
+                }
+            ),
+            Err("protocol_write_failed")
+        );
+        assert!(worker.prepared.is_none());
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 1);
+        let prepared = post(&mut worker, image_prepare(&root));
+        worker.backend.tokens = vec![Err("native_generation_failed")];
+        let mut output = Vec::new();
+        assert_eq!(
+            worker.process_line(&serde_json::to_vec(&image_generate(&prepared)).unwrap(), &mut output),
+            Err("native_operation_failed")
+        );
+        assert!(worker.backend.drained.load(Ordering::SeqCst));
+        assert!(worker.prepared.is_none());
+        assert_eq!(worker.backend.prepared_drops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn image_readiness_is_separate_and_oversized_frames_and_eof_clear_preparation() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        post(&mut worker, image_prepare(&root));
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(vec![b'x'; MAX_REQUEST_BYTES + 1]), &mut output).unwrap();
+        let frames = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(frames[0]["mode"], "text-generation-v1");
+        assert_eq!(frames[0]["operations"], json!(["tokenize", "decode", "generate"]));
+        assert_eq!(frames[0]["image_input"]["version"], "mediaref-v1");
+        assert_eq!(frames[0]["image_input"]["artifact_schema_version"], 2);
+        assert_eq!(frames[0]["image_input"]["runtime_identity"]["backend"], "metal");
+        assert_eq!(frames[0]["image_input"]["runtime_identity"]["device_name"], "Apple Synthetic GPU");
+        assert_eq!(frames[0]["image_input"]["runtime_identity"]["apple_gpu_family"], 1008);
+        assert_eq!(frames[0]["image_input"]["runtime_identity"]["gpu_core_count"], 32);
+        assert_eq!(frames[0]["image_input"]["runtime_identity"]["supports_mxu"], false);
+        for (name, expected) in [
+            ("artifact_sha256", "b"),
+            ("config_sha256", "a"),
+            ("tokenizer_sha256", "c"),
+            ("processor_sha256", "d"),
+            ("template_sha256", "e"),
+        ] {
+            assert_eq!(frames[0]["image_input"][name], expected.repeat(64));
+        }
+        assert_eq!(frames[0]["image_input"]["qualified"], false);
+        assert_eq!(frames[1]["error"], "request_too_large");
+        assert!(worker.prepared.is_none());
+        post(&mut worker, image_prepare(&root));
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()).unwrap();
+        assert!(worker.prepared.is_none());
+        let mut text = self::worker();
+        let mut output = Vec::new();
+        run_lines(&mut text, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert!(ready.get("image_input").is_none());
     }
 
     #[test]
@@ -707,6 +1345,60 @@ mod tests {
         assert_eq!(tokens_per_second(result.sampled_tokens - 1, result.decode_seconds), Some(0.5));
         assert!(drained.load(Ordering::SeqCst));
         assert!(clock.next().is_none());
+    }
+
+    #[test]
+    fn cleanup_failure_fences_success_and_cancellation_before_the_result_is_visible() {
+        struct LookaheadStream {
+            fence: Arc<AtomicBool>,
+            fail_on_drop: bool,
+        }
+        impl Iterator for LookaheadStream {
+            type Item = Result<u64, &'static str>;
+            fn next(&mut self) -> Option<Self::Item> {
+                Some(Ok(3))
+            }
+        }
+        impl Drop for LookaheadStream {
+            fn drop(&mut self) {
+                self.fence.store(self.fail_on_drop, Ordering::SeqCst);
+            }
+        }
+        for cancelled in [false, true] {
+            for fail_on_drop in [false, true] {
+                let fence = Arc::new(AtomicBool::new(false));
+                let options = GenerationOptions {
+                    context_tokens: 8,
+                    max_new_tokens: 1,
+                    seed: 0,
+                    sampling: Sampling::default(),
+                    eos_token_ids: vec![1],
+                    extra_stop_token_ids: Vec::new(),
+                    stop: Vec::new(),
+                    request_id: 1,
+                };
+                let result = collect_tokens_controlled(
+                    LookaheadStream {
+                        fence: fence.clone(),
+                        fail_on_drop,
+                    },
+                    1,
+                    &options,
+                    8,
+                    Instant::now(),
+                    &mut |_| Ok(true),
+                    &mut || Ok(cancelled),
+                );
+                let result = native_result_after_cleanup(result, fence.load(Ordering::SeqCst));
+                if fail_on_drop {
+                    assert!(result.is_err_and(|code| code == "native_generation_failed"));
+                } else if cancelled {
+                    assert!(result.is_err_and(|code| code == "generation_cancelled"));
+                } else {
+                    assert!(result.is_ok());
+                }
+            }
+        }
     }
 
     #[test]

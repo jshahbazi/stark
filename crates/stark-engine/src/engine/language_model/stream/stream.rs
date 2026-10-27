@@ -379,6 +379,13 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 let split_logits_row = model.decoder.prefill_cache_skips_trailing_layers();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
+                #[cfg(test)]
+                let vision_layer_indices = model_state
+                    .vision_prefill_layer_readbacks
+                    .as_ref()
+                    .map(|(_, buffers)| (0..buffers.len() as u32).collect::<Box<[_]>>());
+                #[cfg(test)]
+                let hidden_feature_layer_indices = vision_layer_indices.as_deref().or(hidden_feature_layer_indices);
 
                 for (input_chunk, sample_last) in input
                     .chunks(max_batch_size)
@@ -433,10 +440,39 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                         &mut model_state.transformer_state,
                         &mut command_buffer,
                     )?;
+                    // Test-only private layer traces reuse the existing
+                    // residual-combined hidden-feature path. Rows are copied
+                    // into request-owned readbacks across prefill chunks.
+                    #[cfg(test)]
+                    if let Some((row_bytes, readbacks)) = &mut model_state.vision_prefill_layer_readbacks {
+                        let features = decoder_output.hidden_features.as_ref().unwrap();
+                        if features.len() != readbacks.len() {
+                            return Err(LanguageModelStreamError::InvalidMultimodal);
+                        }
+                        for (feature, readback) in features.iter().zip(readbacks.iter_mut()) {
+                            let start = chunk_start * *row_bytes;
+                            let end = start + input_chunk.len() * *row_bytes;
+                            if end > readback.size() || feature.size() != end - start {
+                                return Err(LanguageModelStreamError::InvalidMultimodal);
+                            }
+                            command_buffer.encode_copy(feature, readback.subrange_mut(start..end));
+                        }
+                    }
                     let logits = decoder_output.logits;
 
                     if sample_last {
                         let logits = logits.unwrap();
+
+                        // Private validation observes the final prompt row
+                        // before penalties or sampling. Ownership stays in the
+                        // request state until stream Drop completes the pass.
+                        #[cfg(test)]
+                        if let Some(readback) = &mut model_state.vision_prefill_logits_readback {
+                            if (&logits).size() != readback.size() {
+                                return Err(LanguageModelStreamError::InvalidMultimodal);
+                            }
+                            command_buffer.encode_copy(&logits, readback);
+                        }
 
                         let seeds = if matches!(options.sampling_method, SamplingMethod::Stochastic { .. }) {
                             Some(
@@ -1091,7 +1127,8 @@ impl<'a, B: Backend> Drop for LanguageModelStream<'a, B> {
                 let completion = in_flight.pending.unwrap().wait(|pending| pending.wait_until_completed().map(|_| ()));
                 if completion.is_err()
                     && (self.model_state.multimodal_failed
-                        || self.model_state.transformer_state.rotary_position_delta().is_some())
+                        || self.model_state.transformer_state.rotary_position_delta().is_some()
+                        || self.failure_fence.is_some())
                 {
                     fence_multimodal_state(self.model_state);
                     if let Some(fence) = &mut self.failure_fence {

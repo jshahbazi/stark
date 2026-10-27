@@ -15,6 +15,7 @@ PUBLIC KERNEL(DeltaNetConvUpdate)(
     constant const uint& kernel_size,
     constant const uint& conv_dim,
     constant const uint& state_stride,
+    constant const uint& reference_bf16,
     const bool has_bias SPECIALIZE,
     const uint channel_idx AXIS(conv_dim, 256)
 ) {
@@ -31,7 +32,8 @@ PUBLIC KERNEL(DeltaNetConvUpdate)(
   }
   acc += float(weight_row[tap_count]) * x;
 
-  in_out[channel_idx] = static_cast<T>(activate_silu(acc));
+  const float convolution = reference_bf16 != 0 ? float(bfloat(acc)) : acc;
+  in_out[channel_idx] = static_cast<T>(activate_silu(convolution));
 
   for (uint tap = 0; tap + 1 < tap_count; ++tap) {
     state[state_offset + tap] = state[state_offset + tap + 1];

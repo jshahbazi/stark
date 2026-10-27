@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from .local_api import APIError
+from .media import MediaError, parse_image_url
 
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _FIELDS = {
@@ -50,29 +51,44 @@ def _finite_number(value: Any, message: str) -> float:
     return number
 
 
-def _content(value: Any) -> str:
+def _text(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise _bad("Message content must contain valid Unicode.") from None
+    return value
+
+
+def _content(value: Any, images: list | None = None) -> str | list[dict]:
     if isinstance(value, str):
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            raise _bad("Message content must contain valid Unicode.") from None
-        return value
+        return _text(value)
     if not isinstance(value, list):
-        raise _bad("Message content must be text or text content parts.")
+        raise _bad("Message content must be text or supported content parts.")
     pieces = []
+    image_parts = False
     for part in value:
-        if (
-            not isinstance(part, dict)
-            or set(part) != {"type", "text"}
-            or part["type"] != "text"
-            or not isinstance(part["text"], str)
-        ):
-            raise _bad("Message content parts must be text objects.")
-        pieces.append(_content(part["text"]))
-    return "".join(pieces)
+        if not isinstance(part, dict):
+            raise _bad("Message content parts must be supported objects.")
+        if part.get("type") == "text" and set(part) == {"type", "text"} and isinstance(part["text"], str):
+            pieces.append({"type": "text", "text": _text(part["text"])})
+        elif part.get("type") == "image_url" and set(part) == {"type", "image_url"}:
+            if images is None:
+                raise _bad("The loaded model does not support image requests.", "images_unsupported")
+            if images:
+                raise _bad("Only one image per request is supported.", "too_many_images")
+            try:
+                image = parse_image_url(part["image_url"])
+            except MediaError as error:
+                raise APIError(error.status, str(error), error.code) from None
+            images.append(image)
+            pieces.append({"type": "image"})
+            image_parts = True
+        else:
+            raise _bad("Unsupported message content part.", "unsupported_parameter")
+    return pieces if image_parts else "".join(part["text"] for part in pieces)
 
 
-def _messages(value: Any) -> list[dict[str, str]]:
+def _messages(value: Any, images: list | None = None) -> list[dict]:
     if not isinstance(value, list) or not value:
         raise _bad("messages must be a non-empty array.")
     result = []
@@ -90,7 +106,7 @@ def _messages(value: Any) -> list[dict[str, str]]:
             not isinstance(message["name"], str) or len(message["name"]) > 64 or not _NAME.fullmatch(message["name"])
         ):
             raise _bad("Message name must be an ASCII identifier of at most 64 characters.")
-        normalized = {"role": role, "content": _content(message["content"])}
+        normalized = {"role": role, "content": _content(message["content"], images if role == "user" else None)}
         if "reasoning_content" in message:
             reasoning = message["reasoning_content"]
             if role != "assistant" or not isinstance(reasoning, str):
@@ -102,8 +118,10 @@ def _messages(value: Any) -> list[dict[str, str]]:
     return result
 
 
-def parse_chat_request(payload: Any, max_output: int, vocab_size: int) -> dict[str, Any]:
-    """Validate a text-only request; user and metadata are accepted then discarded."""
+def parse_chat_request(
+    payload: Any, max_output: int, vocab_size: int, *, allow_images: bool = False
+) -> dict[str, Any]:
+    """Normalize content without exposing image bytes to templates or worker JSON."""
     if not isinstance(payload, dict):
         raise _bad("Request body must be an object.")
     unknown = set(payload) - _FIELDS
@@ -193,7 +211,16 @@ def parse_chat_request(payload: Any, max_output: int, vocab_size: int) -> dict[s
         or any(not isinstance(item, str) or not item or len(item) > 1024 for item in stop)
     ):
         raise _bad("stop must contain at most four non-empty strings of at most 1024 characters.")
-    messages = _messages(payload.get("messages"))
+    images = [] if allow_images else None
+    messages = _messages(payload.get("messages"), images)
+    text_bytes = sum(
+        len(message["content"].encode("utf-8"))
+        if isinstance(message["content"], str)
+        else sum(len(part.get("text", "").encode("utf-8")) for part in message["content"])
+        for message in messages
+    ) + sum(len(message.get("reasoning_content", "").encode("utf-8")) for message in messages)
+    if text_bytes > 1024 * 1024:
+        raise APIError(413, "Message text exceeds the request limit.", "text_too_large")
     for item in stop:
         _content(item)
     sampling = {"mode": "greedy"}
@@ -205,4 +232,12 @@ def parse_chat_request(payload: Any, max_output: int, vocab_size: int) -> dict[s
             sampling["top_k"] = top_k
         if min_p is not None:
             sampling["min_p"] = min_p
-    return {"model": model, "messages": messages, "maximum": maximum, "sampling": sampling, "seed": seed, "stop": stop}
+    return {
+        "model": model,
+        "messages": messages,
+        "maximum": maximum,
+        "sampling": sampling,
+        "seed": seed,
+        "stop": stop,
+        "image": images[0] if images else None,
+    }

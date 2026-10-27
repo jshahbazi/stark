@@ -4,11 +4,13 @@ use thiserror::Error;
 mod input_rht;
 mod matmul;
 mod qlora_wrapper;
+mod reference_bf16;
 mod rht_wrapper;
 mod untied_readout;
 
 pub use matmul::{LinearMatmul, LinearMatmulError};
 pub use qlora_wrapper::{QLoRALinearWrapper, QLoRALinearWrapperError};
+pub(crate) use reference_bf16::ReferenceBF16Matmul;
 pub use rht_wrapper::{RHTLinearWrapper, RHTLinearWrapperError};
 pub use untied_readout::UntiedReadout;
 

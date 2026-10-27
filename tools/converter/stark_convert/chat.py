@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import select
+import stat
 import subprocess
 import sys
 import threading
@@ -11,6 +12,10 @@ import time
 from pathlib import Path
 
 from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+from ._build_metadata import ConversionError, file_hash
+from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
+from .vision_runtime import image_input_contract, qualified_image_worker
 
 
 class ChatError(Exception):
@@ -23,6 +28,39 @@ class ChatCancelled(ChatError):
 
 class ChatRequestTooLarge(ChatError):
     """An oversized request rejected before writing any bytes to the worker."""
+
+
+class ChatImageError(ChatError):
+    """A recoverable, content-free image request rejection."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__("The image request could not be prepared or executed.")
+
+
+_RECOVERABLE_IMAGE_ERRORS = {
+    "invalid_request",
+    "request_too_large",
+    "images_not_supported",
+    "invalid_image_reference",
+    "image_read_failed",
+    "invalid_image_request",
+    "invalid_prepared_image",
+    "image_request_setup_failed",
+    "invalid_generation_request",
+    "context_overflow",
+    "invalid_sampling_request",
+    "generation_cancelled",
+    "tokenization_failed",
+}
+_FATAL_WORKER_ERRORS = {
+    "native_generation_failed",
+    "invalid_generation_output",
+    "invalid_tokenization_output",
+    "decoding_failed",
+    "cancel_channel_failed",
+    "invalid_image_preparation_output",
+}
 
 
 def terminal_text(text):
@@ -54,12 +92,32 @@ class Worker:
         self.pending = b""
         self.cancellation = False
         self.request_sequence = 0
+        self._transaction_lock = threading.RLock()
         self.cancelled_id = None
+        self.image_input = None
+        self.images = False
+        self.executable = Path(executable)
+        try:
+            # Bind later image qualification to the exact executable observed
+            # before launch, so a concurrent replacement cannot qualify the
+            # different file now present at this path.
+            self._launch_worker_sha256 = file_hash(self.executable)
+        except (OSError, ValueError, TypeError, ConversionError):
+            self._launch_worker_sha256 = None
+        self.media = None
+        command = [str(executable), "--model-path", str(model)]
+        try:
+            config = json.loads((Path(model) / "config.json").read_text())
+        except (OSError, ValueError):
+            config = {}
+        if isinstance(config, dict) and config.get("type") == "Qwen35VisionLanguageModelConfig":
+            self.media = PrivateMediaStore()
+            command.extend(["--vision-staging-root", str(self.media.root)])
         read_fd, self.cancel_fd = os.pipe()
         os.set_blocking(self.cancel_fd, False)
         try:
             self.process = subprocess.Popen(
-                [str(executable), "--model-path", str(model)],
+                command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -70,6 +128,8 @@ class Worker:
             )
         except BaseException:
             os.close(self.cancel_fd)
+            if self.media is not None:
+                self.media.close()
             raise
         finally:
             os.close(read_fd)
@@ -86,7 +146,9 @@ class Worker:
             raise ChatError("Cannot cancel worker; restart the model.") from None
 
     def read(self, cancelled=None, request_id=None):
-        deadline = time.monotonic() + self.timeout
+        deadline = getattr(self, "_image_deadline", None)
+        if deadline is None:
+            deadline = time.monotonic() + self.timeout
         while b"\n" not in self.pending:
             remaining = deadline - time.monotonic()
             if cancelled is not None and cancelled.is_set() and request_id is not None:
@@ -103,6 +165,8 @@ class Worker:
             self.pending += chunk
             if len(self.pending) > 16 * 1024 * 1024:
                 raise ChatError("Worker reply exceeded the size limit; chat closed.")
+        if getattr(self, "_image_deadline", None) is not None and time.monotonic() >= deadline:
+            raise ChatError("Worker timed out; chat closed.")
         line, self.pending = self.pending.split(b"\n", 1)
         try:
             reply = json.loads(line)
@@ -110,28 +174,51 @@ class Worker:
                 raise ValueError
             if reply.get("ready") is True:
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
+                self.image_input = image_input_contract(reply.get("image_input"))
+                launch_hash = getattr(self, "_launch_worker_sha256", None)
+                self.images = (
+                    getattr(self, "media", None) is not None
+                    and self.image_input is not None
+                    and isinstance(launch_hash, str)
+                    and qualified_image_worker(
+                        self.image_input,
+                        self.executable,
+                        expected_worker_sha256=launch_hash,
+                    )
+                )
             return reply
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
 
     def request(self, payload, on_delta=None, cancelled=None):
+        lock = getattr(self, "_transaction_lock", None)
+        if lock is None:
+            lock = self._transaction_lock = threading.RLock()
+        with lock:
+            return self._request(payload, on_delta=on_delta, cancelled=cancelled)
+
+    def _request(self, payload, on_delta=None, cancelled=None):
         if cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
-        request_id = 0 if payload.get("operation") == "generate" else None
-        if payload.get("operation") == "generate" and getattr(self, "cancellation", False):
+        cancellable_operation = payload.get("operation") in {"generate", "prepare_image", "generate_image"}
+        request_id = 0 if cancellable_operation else None
+        if cancellable_operation and getattr(self, "cancellation", False):
             self.request_sequence += 1
             request_id = self.request_sequence
             payload = {**payload, "request_id": request_id}
         data = json.dumps(payload, ensure_ascii=False).encode() + b"\n"
         if len(data) > 1024 * 1024:
             raise ChatRequestTooLarge("Conversation exceeds the worker request limit; use /reset.")
-        # FileIO writes can be partial for large prompts.
-        view = memoryview(data)
-        while view:
-            count = self.process.stdin.write(view)
-            if not count:
-                raise ChatError("Cannot send request to worker.")
-            view = view[count:]
+        if getattr(self, "_image_deadline", None) is not None:
+            self._write_image_frame(data)
+        else:
+            # FileIO writes can be partial for large prompts.
+            view = memoryview(data)
+            while view:
+                count = self.process.stdin.write(view)
+                if not count:
+                    raise ChatError("Cannot send request to worker.")
+                view = view[count:]
         chunks = []
         control = cancelled
         while True:
@@ -139,6 +226,8 @@ class Worker:
                 self.cancel(request_id)
             reply = self.read(control, request_id) if control is not None else self.read()
             if "event" not in reply:
+                if isinstance(reply.get("error"), str) and reply["error"] in _FATAL_WORKER_ERRORS:
+                    raise ChatError("Native worker failed; restart the model.")
                 if (control is not None and control.is_set()) or reply.get("error") == "generation_cancelled":
                     raise ChatCancelled("Request cancelled.")
                 if on_delta is not None and "error" not in reply and reply.get("text") != "".join(chunks):
@@ -159,20 +248,201 @@ class Worker:
                     control = control or threading.Event()
                     control.set()
 
+    def request_image(self, prompt, image, options, on_delta=None, cancelled=None):
+        """Own one complete prepare/generate/discard transaction on the serialized worker."""
+        with self._transaction_lock:
+            self._image_deadline = time.monotonic() + self.timeout
+            try:
+                return self._request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
+            except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
+                raise
+            except BaseException:
+                # Fatal protocol/transport errors leave alignment unknown. Kill
+                # immediately instead of issuing another RPC or waiting again.
+                try:
+                    if self.process.poll() is None:
+                        self.process.kill()
+                        self.process.wait()
+                except (OSError, AttributeError):
+                    pass
+                try:
+                    self.close()
+                except BaseException:
+                    pass  # Preserve the original request failure.
+                raise
+            finally:
+                self._image_deadline = None
+
+    def _write_image_frame(self, data):
+        """Bound pipe backpressure by the same image transaction deadline."""
+        descriptor = self.process.stdin.fileno()
+        was_blocking = os.get_blocking(descriptor)
+        os.set_blocking(descriptor, False)
+        try:
+            view = memoryview(data)
+            while view:
+                remaining = self._image_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ChatError("Worker timed out; chat closed.")
+                if not select.select([], [descriptor], [], remaining)[1]:
+                    continue
+                try:
+                    written = os.write(descriptor, view)
+                except BlockingIOError:
+                    continue
+                if not written:
+                    raise ChatError("Cannot send request to worker.")
+                view = view[written:]
+        except OSError:
+            raise ChatError("Cannot send request to worker.") from None
+        finally:
+            try:
+                os.set_blocking(descriptor, was_blocking)
+            except OSError:
+                pass  # A concurrent close already invalidated this descriptor.
+
+    def _request_image(self, prompt, image, options, on_delta=None, cancelled=None):
+        if self.media is None or self.image_input is None:
+            raise ChatImageError("images_not_supported")
+        primary_fatal = None
+        try:
+            with self.media.stage(image) as reference:
+                aligned = True
+                try:
+                    prepared = self.request(
+                        {
+                            "operation": "prepare_image",
+                            "image": reference,
+                            "rendered_prompt": prompt,
+                            "context_tokens": options["context_tokens"],
+                            "max_new_tokens": options["max_new_tokens"],
+                        },
+                        cancelled=cancelled,
+                    )
+                    self._check_image_reply(prepared)
+                    identifier = prepared.get("prepared_id")
+                    if (
+                        not isinstance(identifier, str)
+                        or len(identifier) != 32
+                        or any(c not in "0123456789abcdef" for c in identifier)
+                        or type(prepared.get("input_tokens")) is not int
+                        or type(prepared.get("image_tokens")) is not int
+                        or not 0 < prepared["image_tokens"] <= self.image_input["max_image_tokens"]
+                        or not prepared["image_tokens"] < prepared["input_tokens"]
+                        or prepared["input_tokens"] + options["max_new_tokens"] > options["context_tokens"]
+                    ):
+                        raise ChatError("Invalid image preparation reply; restart the model.")
+                    reply = self.request(
+                        {**options, "operation": "generate_image", "prepared_id": identifier},
+                        on_delta=on_delta,
+                        cancelled=cancelled,
+                    )
+                    self._check_image_reply(reply)
+                    if (
+                        not isinstance(reply.get("text"), str)
+                        or type(reply.get("input_tokens")) is not int
+                        or reply["input_tokens"] != prepared["input_tokens"]
+                        or type(reply.get("output_tokens")) is not int
+                        or not 0 <= reply["output_tokens"] <= options["max_new_tokens"]
+                        or reply.get("finish_reason")
+                        not in {"eos", "stop_token", "stop_sequence", "length", "context"}
+                    ):
+                        raise ChatError("Invalid image generation reply; restart the model.")
+                    return reply
+                except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
+                    raise
+                except BaseException as error:
+                    primary_fatal = error
+                    aligned = False
+                    raise
+                finally:
+                    # Consume the discard reply even after cancellation, keeping
+                    # the next request aligned with the private JSON protocol.
+                    if aligned and self.process.poll() is None:
+                        if time.monotonic() >= self._image_deadline:
+                            raise ChatError("Worker timed out; chat closed.")
+                        cleared = self.request({"operation": "discard_image"})
+                        if type(cleared.get("discarded")) is not bool:
+                            raise ChatError("Image cleanup failed; restart the model.")
+        except MediaError:
+            if primary_fatal is not None:
+                raise primary_fatal from None
+            raise ChatError("Private image staging failed; restart the model.") from None
+
+    @staticmethod
+    def _check_image_reply(reply):
+        if "error" not in reply:
+            return
+        if isinstance(reply["error"], str) and reply["error"] in _RECOVERABLE_IMAGE_ERRORS:
+            raise ChatImageError(reply["error"])
+        raise ChatError("Native image generation failed; restart the model.")
+
     def close(self):
-        if self.process.poll() is None:
-            self.process.terminate()
+        try:
+            if self.process.poll() is None:
+                try:
+                    self.process.terminate()
+                except ProcessLookupError:
+                    pass  # It exited between poll and terminate; still reap it.
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
                 self.process.wait()
-        self.process.stdin.close()
-        self.process.stdout.close()
-        cancel_fd = getattr(self, "cancel_fd", None)
-        if cancel_fd is not None:
-            self.cancel_fd = None
-            os.close(cancel_fd)
+        finally:
+            for pipe in (self.process.stdin, self.process.stdout):
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
+            cancel_fd = getattr(self, "cancel_fd", None)
+            if cancel_fd is not None:
+                self.cancel_fd = None
+                try:
+                    os.close(cancel_fd)
+                except OSError:
+                    pass
+            media, self.media = getattr(self, "media", None), None
+            if media is not None:
+                media.close()
+
+
+def _read_image_file(path: Path) -> ImageData:
+    """Read one bounded regular image file without exposing its path in errors."""
+    descriptor = None
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        metadata = os.fstat(descriptor)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_IMAGE_BYTES:
+            raise OSError
+        payload = bytearray()
+        while len(payload) <= MAX_IMAGE_BYTES:
+            remaining = MAX_IMAGE_BYTES + 1 - len(payload)
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if not payload or len(payload) > MAX_IMAGE_BYTES:
+            raise ValueError
+    except (OSError, TypeError, ValueError):
+        raise ChatError("Image file is invalid or unavailable.") from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+    data = bytes(payload)
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        media_type = "image/png"
+    elif data.startswith(b"\xff\xd8\xff") and data.endswith(b"\xff\xd9"):
+        media_type = "image/jpeg"
+    else:
+        raise ChatError("Image file is invalid or unavailable.")
+    return ImageData(data, media_type)
 
 
 def run_chat(args, worker):
@@ -183,9 +453,16 @@ def run_chat(args, worker):
     context = args.context_tokens or min(8192, ready["max_context_tokens"])
     if context > ready["max_context_tokens"] or args.max_new_tokens > ready["max_new_tokens"]:
         raise ChatError("Requested token limits exceed this worker's limits.")
+    image_path = getattr(args, "image", None)
+    image = None
+    if image_path is not None:
+        if getattr(worker, "images", False) is not True:
+            raise ChatError("This worker is not qualified for image input.")
+        image = _read_image_file(image_path)
     system = args.system if args.system is not None else codec.get("default_system_prompt")
     initial = [{"role": "system", "content": system}] if system else []
     messages = list(initial)
+    image_attached = False
     print("Stark chat. /reset clears history; /exit quits. Ctrl-D or Ctrl-C exits.")
     while True:
         try:
@@ -199,12 +476,16 @@ def run_chat(args, worker):
             return 0
         if text.strip() == "/reset":
             messages = list(initial)
+            image_attached = False
             print("Conversation cleared.")
             continue
         if text.strip() == "/help":
             print("Enter one message per line. Commands: /reset, /exit, /quit, /help.")
             continue
-        candidate = [*messages, {"role": "user", "content": text}]
+        content = text
+        if image is not None and not image_attached:
+            content = [{"type": "image"}, {"type": "text", "text": text}]
+        candidate = [*messages, {"role": "user", "content": content}]
         try:
             prompt = template.render(
                 messages=candidate,
@@ -214,22 +495,33 @@ def run_chat(args, worker):
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
-            tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
-            count = tokens.get("token_count")
-            if not isinstance(count, int):
-                raise ChatError("Worker could not tokenize the conversation.")
-            if count + args.max_new_tokens > context:
-                print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
-                continue
-            reply = worker.request(
-                {
-                    "operation": "generate",
-                    "rendered_prompt": prompt,
-                    "context_tokens": context,
-                    "max_new_tokens": args.max_new_tokens,
-                    "sampling": {"mode": "greedy"},
-                }
-            )
+            if image is not None:
+                reply = worker.request_image(
+                    prompt,
+                    image,
+                    {
+                        "context_tokens": context,
+                        "max_new_tokens": args.max_new_tokens,
+                        "sampling": {"mode": "greedy"},
+                    },
+                )
+            else:
+                tokens = worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False})
+                count = tokens.get("token_count")
+                if not isinstance(count, int):
+                    raise ChatError("Worker could not tokenize the conversation.")
+                if count + args.max_new_tokens > context:
+                    print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
+                    continue
+                reply = worker.request(
+                    {
+                        "operation": "generate",
+                        "rendered_prompt": prompt,
+                        "context_tokens": context,
+                        "max_new_tokens": args.max_new_tokens,
+                        "sampling": {"mode": "greedy"},
+                    }
+                )
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
@@ -239,11 +531,14 @@ def run_chat(args, worker):
             raise
         print("Stark> " + terminal_text(reply["text"]) + "\n")
         messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+        if image is not None:
+            image_attached = True
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, prog="stark chat")
     parser.add_argument("--model-path", type=Path, required=True, help="Converted Stark model directory")
+    parser.add_argument("--image", type=Path, help="Attach one local PNG or JPEG image to terminal chat")
     parser.add_argument("--worker", type=Path, default=Path("stark-generate"), help=argparse.SUPPRESS)
     parser.add_argument("--system", help="System message (default: model metadata)")
     parser.add_argument("--context-tokens", type=int, help="Context budget (default: up to 8192)")
