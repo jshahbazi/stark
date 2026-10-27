@@ -287,6 +287,7 @@ pub struct VisionLanguageModel<B: Backend> {
     model_dim: u32,
     vocab_size: u32,
     codec_eos_token: Option<String>,
+    family_profile: family::FamilyProfile,
 }
 
 fn file_matches(
@@ -359,6 +360,7 @@ impl<B: Backend> Engine<B> {
         let mut verified = BTreeMap::new();
         let mut hashes = BTreeMap::new();
         let mut components: BTreeMap<&str, Vec<u8>> = BTreeMap::new();
+        let mut family_profile = family::FamilyProfile::FixedV1;
         for (name, _) in ARTIFACT_FILES {
             let mut file = open_artifact_component(&model_path.join(name))?;
             let length = file.metadata()?.len();
@@ -367,7 +369,7 @@ impl<B: Backend> Engine<B> {
                 "tokenizer.json" => 67_108_864,
                 "preprocessor_config.json" => 65_536,
                 "chat_template.jinja" => 262_144,
-                _ => 2_000_000_000,
+                _ => family_profile.max_weight_bytes(),
             };
             if !file.metadata()?.is_file() || length == 0 || length > maximum {
                 return Err(InvalidInput("native vision artifact exceeds component bounds").into());
@@ -393,11 +395,11 @@ impl<B: Backend> Engine<B> {
                     .map_err(|_| InvalidInput("unsupported native vision artifact contract"))?;
                 if candidate["type"] != "Qwen35VisionLanguageModelConfig"
                     || candidate["artifact_contract"]["schema_version"] != 3
-                    || candidate["artifact_contract"]["family"]
-                        != serde_json::json!({"profile":family::PROFILE,"version":family::VERSION})
                 {
                     return Err(InvalidInput("unsupported native vision artifact contract").into());
                 }
+                family_profile = family::FamilyProfile::parse(&candidate["artifact_contract"]["family"])
+                    .ok_or(InvalidInput("unsupported native vision artifact family"))?;
             }
             hashes.insert(name, hash);
             file.rewind()?;
@@ -411,10 +413,13 @@ impl<B: Backend> Engine<B> {
         // Its reviewed processing identity must hold before construction.
         let pinned = match schema {
             Some(2) => &ARTIFACT_FILES[..],
-            Some(3) => &ARTIFACT_FILES[2..3],
+            Some(3) => &ARTIFACT_FILES[..0],
             _ => return Err(InvalidInput("unsupported native vision artifact schema").into()),
         };
-        if pinned.iter().any(|(name, expected)| hashes.get(name).map(String::as_str) != Some(*expected)) {
+        if pinned.iter().any(|(name, expected)| hashes.get(name).map(String::as_str) != Some(*expected))
+            || schema == Some(3)
+                && !hashes.get("tokenizer.json").is_some_and(|digest| family_profile.accepts_tokenizer(digest))
+        {
             return Err(InvalidInput("native vision artifact processing identity mismatch").into());
         }
         let tokenizer = Arc::new(
@@ -446,6 +451,8 @@ impl<B: Backend> Engine<B> {
                     },
                     source: "Qwen/Qwen3.5-0.8B".into(),
                     revision: Some("2fc06364715b967f1860aea9cf38778875588b17".into()),
+                    profile: family::FamilyProfile::FixedV1,
+                    tensors: None,
                 }
             },
             Some(3) => {
@@ -458,6 +465,7 @@ impl<B: Backend> Engine<B> {
                 )?;
                 family::validate_weights(
                     verified.get_mut("model.safetensors").ok_or(InvalidInput("missing native vision weights"))?,
+                    &admission,
                 )?;
                 admission
             },
@@ -533,6 +541,7 @@ impl<B: Backend> Engine<B> {
             model_dim,
             vocab_size,
             codec_eos_token,
+            family_profile: admission.profile,
         })
     }
 }
@@ -543,7 +552,7 @@ impl<B: Backend> VisionLanguageModel<B> {
     }
 
     pub fn family_profile(&self) -> (&'static str, u32) {
-        (family::PROFILE, family::VERSION)
+        self.family_profile.identity()
     }
 
     pub fn source_identity(&self) -> (&str, Option<&str>) {

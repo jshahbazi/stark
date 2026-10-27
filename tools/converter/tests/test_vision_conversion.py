@@ -167,7 +167,7 @@ def test_vision_manifest_rejects_missing_metadata_and_mode_downgrades(vision_sou
 @pytest.mark.parametrize(
     "change",
     [
-        {"repo": "Qwen/Qwen3.5-2B"},
+        {"repo": "Qwen/Qwen3-0.6B"},
         {"dtype": "float16"},
         {"model_kind": "classifier"},
         {"metadata_profile": "hf-generic"},

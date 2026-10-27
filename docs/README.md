@@ -50,3 +50,6 @@ New validation runs belong in the pull request that made the change, or under `a
 The [Qwen3.5 family installation run](archive/runs/2026-10-27-qwen35-family-installation.md)
 records changed-weight conversion and automatic local image checks through the
 desktop, API and Swift controller.
+The [config-derived Qwen3.5 family run](archive/runs/2026-10-27-qwen35-config-driven-family.md)
+separates larger-model conversion/runtime evidence from metadata and operator
+coverage for other sizes.

@@ -21,7 +21,7 @@ def _positive(config: dict, name: str) -> int:
 
 def build_qwen35_vision_plan(vision_config: dict, tensors: dict[str, TensorInfo], model_dim: int):
     """Return copy operations and consumed source names for official HF vision weights."""
-    if not isinstance(vision_config, dict) or vision_config.get("model_type") != "qwen3_5":
+    if not isinstance(vision_config, dict) or vision_config.get("model_type") not in ("qwen3_5", "qwen3_5_vision"):
         raise ConversionError("Qwen3.5 vision_config must declare qwen3_5")
     allowed = {
         "model_type",

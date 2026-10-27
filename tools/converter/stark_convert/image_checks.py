@@ -21,13 +21,14 @@ from ._build_metadata import file_hash
 from .media import ImageData
 from .vision_runtime import (
     _ARTIFACT_HASHES,
-    FAMILY_PROFILE,
+    CONFIGURED_FAMILY_PROFILE,
     _current_os_version,
     family_image_input_contract,
     image_input_contract,
+    supported_image_family,
 )
 
-CHECK_VERSION = 1
+CHECK_VERSION = 2
 _MAX_RECEIPT_BYTES = 65536
 _INVALIDATED = set()
 _CHECKS = {
@@ -54,18 +55,66 @@ def preflight_family_memory(model: Path, config: dict) -> None:
     if not isinstance(contract, dict) or contract.get("schema_version") != 3:
         return
     family = contract.get("family")
-    if (
-        not isinstance(family, dict)
-        or family != {"profile": FAMILY_PROFILE, "version": 1}
-        or type(family.get("version")) is not int
-    ):
+    if not supported_image_family(family):
         raise ImageCheckError("This image model family is not supported.")
     try:
         size = (model / "model.safetensors").stat().st_size
         available = psutil.virtual_memory().available
-        if size <= 0 or type(available) is not int or available < size + 512 * 1024 * 1024:
+        scratch = (
+            _configured_check_memory(config) if family["profile"] == CONFIGURED_FAMILY_PROFILE else 512 * 1024 * 1024
+        )
+        if size <= 0 or type(available) is not int or available < size + scratch:
             raise ImageCheckError("Not enough available memory to check this image model.")
     except OSError:
+        raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
+
+
+def _configured_check_memory(config: dict) -> int:
+    """Estimate the initial 2048-token check, without claiming a peak-memory bound."""
+
+    def integer(mapping, key, maximum=1048576):
+        if not isinstance(mapping, dict):
+            raise ValueError
+        value = mapping.get(key)
+        if type(value) is not int or not 0 < value <= maximum:
+            raise ValueError
+        return value
+
+    try:
+        transformer = config["decoder_config"]["transformer_config"]
+        width, hidden = integer(transformer, "model_dim"), integer(transformer, "hidden_dim")
+        layers = transformer["layer_configs"]
+        if not isinstance(layers, list) or not 0 < len(layers) <= 256:
+            raise ValueError
+        state, projections, delta_scratch = 0, width, 0
+        for layer in layers:
+            mixer = layer["mixer_config"]
+            heads, groups, head = (integer(mixer, key) for key in ("num_heads", "num_groups", "head_dim"))
+            if mixer["type"] == "AttentionConfig":
+                state += 2 * 2048 * groups * head * 4
+                projections = max(projections, (2 * heads + 2 * groups) * head)
+            elif mixer["type"] == "DeltaNetConfig":
+                value, kernel = integer(mixer, "value_head_dim"), integer(mixer, "kernel_size")
+                convolution = 2 * groups * head + heads * value
+                state += 4 * (heads * head * value + convolution * kernel)
+                projections = max(projections, convolution + heads * value)
+                planes = ((2048 + 63) // 64) * heads
+                delta_scratch = max(
+                    delta_scratch, 4 * (8 * planes * 64 * head + 2 * planes * 64 * 64 + heads * 64 * head)
+                )
+            else:
+                raise ValueError
+        vision = config["artifact_contract"]["vision_config"]
+        vision_width, vision_hidden, vision_heads = (
+            integer(vision, key) for key in ("hidden_size", "intermediate_size", "num_heads")
+        )
+        # The profile keeps the 256x256 RGB check and 16-pixel patch recipe.
+        # FP32 storage factors deliberately overestimate BF16 arrays. Layer
+        # scratch is reused; recurrent/KV state is retained across all layers.
+        text_scratch = 16 * 2048 * (width + hidden + projections)
+        vision_scratch = 16 * 256 * (vision_width + vision_hidden) + 4 * vision_heads * 256 * 256
+        return max(512 * 1024 * 1024, state + text_scratch + delta_scratch + vision_scratch)
+    except (KeyError, TypeError, ValueError, OverflowError):
         raise ImageCheckError("Cannot inspect this image model's memory requirements.") from None
 
 
@@ -82,6 +131,9 @@ def check_identity(worker) -> dict:
     contract = worker.image_input
     if image_input_contract(contract) is None or not family_image_input_contract(contract):
         raise ImageCheckError("This worker does not implement the supported image family.")
+    vocabulary = getattr(worker, "_image_ready_vocabulary", None)
+    if type(vocabulary) is not int or not 0 < vocabulary <= 1048576:
+        raise ImageCheckError("The image worker reports unsupported vocabulary limits.")
     observed = file_hash(worker.executable)
     if observed != worker._launch_worker_sha256:
         raise ImageCheckError("The image worker changed while loading.")
@@ -98,8 +150,9 @@ def check_identity(worker) -> dict:
         "checker_sha256": checker.hexdigest(),
         "python_version": list(sys.version_info[:3]),
         "runtime_dependencies": _dependency_versions(),
-        "family_profile": FAMILY_PROFILE,
-        "family_version": 1,
+        "family_profile": contract["family_profile"],
+        "family_version": contract["family_version"],
+        "vocabulary_size": vocabulary,
         "artifact_schema_version": contract["artifact_schema_version"],
         "artifact_hashes": {key: contract[key] for key in sorted(_ARTIFACT_HASHES)},
         "worker_sha256": observed,
@@ -293,11 +346,15 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
     store = None
     identity = None
     try:
-        identity = check_identity(worker)
         context = ready.get("max_context_tokens")
         maximum = ready.get("max_new_tokens")
+        vocabulary = ready.get("vocab_size")
         if type(context) is not int or context < 512 or type(maximum) is not int or maximum < 1:
             raise ImageCheckError("The image worker reports unsupported token limits.")
+        if type(vocabulary) is not int or not 0 < vocabulary <= 1048576:
+            raise ImageCheckError("The image worker reports unsupported vocabulary limits.")
+        worker._image_ready_vocabulary = vocabulary
+        identity = check_identity(worker)
         if directory is not None:
             store = CheckStore(directory)
             if store.load(identity):
@@ -340,7 +397,7 @@ def verify_images(worker, ready: dict, *, directory: Path | None = None) -> bool
             or base_count < 3
             or not isinstance(tokens.get("token_ids"), list)
             or len(tokens["token_ids"]) != base_count
-            or any(type(token) is not int or not 0 <= token < 248320 for token in tokens["token_ids"])
+            or any(type(token) is not int or not 0 <= token < vocabulary for token in tokens["token_ids"])
         ):
             raise ImageCheckError("The model did not pass image prompt token accounting.")
         try:

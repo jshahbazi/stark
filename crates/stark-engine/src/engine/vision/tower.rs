@@ -957,6 +957,51 @@ mod tests {
         assert!(rotary_tables(&positions, 6).is_err());
     }
 
+    #[cfg(feature = "cpu")]
+    #[stark_test]
+    fn vision_nonstandard_head_width_and_mlp_inner_tail_execute_on_cpu() {
+        use crate::{
+            backends::{
+                common::{CommandBufferExecutable, CommandBufferPending, Context},
+                cpu::Cpu,
+            },
+            tests::helpers::{buffer_to_vec, create_buffer_with_data},
+        };
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let (rows, heads, width) = (4u32, 2u32, 72u32);
+        let attention = VisionEagerAttention::<Cpu>::new(&context, heads * width, heads).unwrap();
+        let queries = create_buffer_with_data::<Cpu, bf16>(&context, &vec![bf16::ONE; (rows * heads * width) as usize]);
+        let keys = create_buffer_with_data::<Cpu, bf16>(&context, &vec![bf16::ONE; (rows * heads * width) as usize]);
+        let values =
+            (0..rows * heads * width).map(|index| bf16::from_f32((index / (heads * width)) as f32)).collect::<Vec<_>>();
+        let values = create_buffer_with_data::<Cpu, bf16>(&context, &values);
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let mut q = commands.allocate_scratch_for_shape(&[heads, rows, width], DataType::BF16).unwrap();
+        let mut k = commands.allocate_scratch_for_shape(&[rows, heads, width], DataType::BF16).unwrap();
+        let mut v = commands.allocate_scratch_for_shape(&[rows, heads, width], DataType::BF16).unwrap();
+        commands.encode_copy(&queries, &mut q);
+        commands.encode_copy(&keys, &mut k);
+        commands.encode_copy(&values, &mut v);
+        let output = attention.encode(&q, &k, &v, rows, &mut commands).unwrap();
+        let mut readback = context.create_buffer((rows * heads * width) as usize * 2).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        assert!(buffer_to_vec::<Cpu, bf16>(&readback).iter().all(|value| *value == bf16::from_f32(1.5)));
+
+        // 4304 has a 16-element tail after the 32-stream accumulation loop.
+        let input = create_buffer_with_data::<Cpu, bf16>(&context, &vec![bf16::ONE; 4304]);
+        let weights = create_buffer_with_data::<Cpu, bf16>(&context, &vec![bf16::ONE; 4304]);
+        let kernel = <<Cpu as Backend>::Kernels as Kernels>::VisionMatmulBF16Kernel::new(&context).unwrap();
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        let mut output = commands.allocate_scratch_for_shape(&[1, 1], DataType::F32).unwrap();
+        kernel.encode(&input, &weights, &mut output, 1, 1, 4304, 4304, 1, 32, &mut commands);
+        let mut readback = context.create_buffer(4).unwrap();
+        commands.encode_copy(&output, &mut readback);
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        assert_eq!(buffer_to_vec::<Cpu, f32>(&readback), vec![4304.0]);
+        assert_eq!(rotary_tables(&[[0, 0], [2, 7]], 72).unwrap().0.len(), 144);
+    }
+
     #[stark_test]
     fn vision_learned_positions_use_align_corners_and_merge_order() {
         let config = VisionTowerConfig {
@@ -996,6 +1041,13 @@ mod tests {
         let mut invalid = table;
         invalid[0] = bf16::NAN;
         assert!(interpolated_positions(&config, &invalid, &positions, grid).is_err());
+        let mut single_position = config.clone();
+        single_position.num_position_embeddings = 1;
+        let single_table = (0..8).map(|value| bf16::from_f32(value as f32)).collect::<Vec<_>>();
+        assert_eq!(
+            interpolated_positions(&single_position, &single_table, &positions, grid).unwrap(),
+            single_table.repeat(positions.len())
+        );
         let mut invalid = config;
         invalid.num_position_embeddings = 3;
         assert!(invalid.validate().is_err());

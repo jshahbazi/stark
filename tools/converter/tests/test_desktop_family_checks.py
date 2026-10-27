@@ -14,7 +14,7 @@ from test_image_checks import family_contract
 from stark_convert.chat import ChatError, Worker
 from stark_convert.desktop import Desktop, DesktopError
 from stark_convert.image_checks import CheckStore
-from stark_convert.vision_runtime import FAMILY_PROFILE
+from stark_convert.vision_runtime import CONFIGURED_FAMILY_PROFILE, FAMILY_PROFILE
 
 
 def artifact(path, *, schema=3, vision=True):
@@ -104,9 +104,19 @@ def events(desktop):
     return [json.loads(line) for line in desktop.output.getvalue().splitlines()]
 
 
-def test_family_install_checks_before_publication_and_releases_temporary_worker(host, tmp_path):
+@pytest.mark.parametrize(
+    "family",
+    [
+        {"profile": FAMILY_PROFILE, "version": 1},
+        {"profile": CONFIGURED_FAMILY_PROFILE, "version": 2},
+    ],
+)
+def test_family_install_checks_before_publication_and_releases_temporary_worker(host, tmp_path, family):
     desktop, instances, _state = host
     model = artifact(tmp_path / "merged")
+    config = json.loads((model / "config.json").read_text())
+    config["artifact_contract"]["family"] = family
+    (model / "config.json").write_text(json.dumps(config))
     desktop.install(desktop.epoch, "local", str(model))
     assert len(instances) == 1 and instances[0].closed
     assert desktop.worker is None and desktop.active_model is None

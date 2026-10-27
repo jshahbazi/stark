@@ -36,7 +36,7 @@ from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .registry import get_model
 from .sources import huggingface_repository
-from .vision_runtime import FAMILY_PROFILE
+from .vision_runtime import supported_image_family
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -608,11 +608,7 @@ class Desktop:
         ):
             return None
         family = contract.get("family")
-        if (
-            not isinstance(family, dict)
-            or family != {"profile": FAMILY_PROFILE, "version": 1}
-            or type(family.get("version")) is not int
-        ):
+        if not supported_image_family(family):
             raise DesktopError("This image model family is not supported.")
         with self.lock:
             if epoch != self.epoch:

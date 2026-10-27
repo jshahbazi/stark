@@ -16,6 +16,8 @@ _HASH = re.compile(r"[0-9a-f]{64}\Z")
 _OS_VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?\Z")
 _ARTIFACT = "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4"
 FAMILY_PROFILE = "qwen35-dense-bf16-merged-v1"
+CONFIGURED_FAMILY_PROFILE = "qwen35-dense-bf16-merged-v2"
+_FAMILY_VERSIONS = {FAMILY_PROFILE: 1, CONFIGURED_FAMILY_PROFILE: 2}
 _ARTIFACT_HASHES = {
     "artifact_sha256",
     "config_sha256",
@@ -117,9 +119,7 @@ def family_image_input_contract(value: object) -> bool:
         return False
     source, revision = value.get("model_source"), value.get("model_revision")
     return (
-        value.get("family_profile") == FAMILY_PROFILE
-        and type(value.get("family_version")) is int
-        and value["family_version"] == 1
+        supported_image_family({"profile": value.get("family_profile"), "version": value.get("family_version")})
         and isinstance(source, str)
         and 0 < len(source) <= 256
         and not source.startswith(("/", "."))
@@ -137,6 +137,17 @@ def family_image_input_contract(value: object) -> bool:
                 ("max_image_tokens", 1024),
             )
         )
+    )
+
+
+def supported_image_family(value: object) -> bool:
+    """Recognize versioned implementation profiles without admitting geometry."""
+    return (
+        isinstance(value, dict)
+        and set(value) == {"profile", "version"}
+        and isinstance(value.get("profile"), str)
+        and type(value.get("version")) is int
+        and _FAMILY_VERSIONS.get(value["profile"]) == value["version"]
     )
 
 

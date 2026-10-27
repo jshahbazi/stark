@@ -208,7 +208,7 @@ fn native_vision_family_profile_matches_real_converted_components_without_gpu_we
     assert_eq!(admitted.tower, official_tower_config());
     assert_eq!(admitted.tokens.image, 248056);
     let mut weights = open_artifact_component(&path.join("model.safetensors")).unwrap();
-    family::validate_weights(&mut weights).unwrap();
+    family::validate_weights(&mut weights, &admitted).unwrap();
 }
 
 #[cfg(backend = "metal")]

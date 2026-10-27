@@ -124,12 +124,24 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 The `vision-language` artifact mode is tracked separately in the
 [native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
 It validates and retains the full vision tower, processor and template for the
-pinned checkpoint or the initial merged BF16 Qwen3.5 family. That family accepts
-changed weights with the implemented 0.8B geometry and recognized tokenizer,
-template and processor forms. The worker, CLI, Local API and Swift app support
+pinned checkpoint or the merged BF16 dense Qwen3.5 family. New family artifacts
+use config-derived version 2: supported decoder/tower dimensions and tensor
+shapes come from validated configuration within operation, indexing and storage
+bounds. Previously converted fixed version-1 0.8B artifacts remain readable.
+Both require recognized tokenizer, template and processor forms. Version 2
+additionally accepts a second reviewed tokenizer processing program, the stock
+reasoning template and equivalent processor files when their normalized recipes
+agree. The two tokenizer programs share vocabulary and special tokens but
+intentionally differ for some combining-mark text; conversion preserves the
+selected program. Formatting/key-order equivalence cannot admit an arbitrary
+new program. Schema 2 and version 1 retain their original tokenizer gate. The
+worker, CLI, Local API and Swift app support
 one PNG/JPEG image after passing host evidence checks. Default Qwen3.5 conversions
-remain text-only. Larger sizes, MoE, LoRA-only repositories, quantized vision
-weights and new architectures require additional support. The
+remain text-only. A model's size or repository name does not establish support;
+its complete graph and weights must pass admission and its local execution
+checks must pass before images are enabled. MoE, LoRA-only repositories,
+quantized vision weights, unrecognized operations and new architectures require
+additional support. The
 [local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
 covers the earlier exact-tuple Swift and GUI checks. Public notarized release
 qualification remains pending.
@@ -137,13 +149,14 @@ qualification remains pending.
 Convert a self-contained merged vision checkpoint with:
 
 ```sh
-uv run --project tools/converter --locked stark-convert my-org/qwen35-08b-merged \
-  --metadata-profile hf-generic --artifact-mode vision-language \
+uv run --project tools/converter --locked stark-convert my-org/qwen35-merged \
+  --artifact-mode vision-language \
   --write-source-manifest runtime/converter-sources/qwen35-merged.json \
   --output models/qwen35-merged-vision
 ```
 
-Use a local source path plus `--offline` for a downloaded folder. The converter
+Vision mode selects the family profile automatically from a supported complete
+checkpoint. Use a local source path plus `--offline` for a downloaded folder. The converter
 uses the checkpoint's own metadata; it does not borrow sidecars from the official
 model. Family conversion performs structural validation. Installation checks
 execution on the current Mac before registering a schema-3 model. See the
@@ -158,7 +171,7 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
   --output models/future-model-stark
 ```
 
-The adapter is selected from the checkpoint's `model_type` and the full config and tensor layout are validated. `hf-generic` requires self-contained `config.json`, `tokenizer.json` and `tokenizer_config.json`, uses `generation_config.json` and `chat_template.jinja` when present, and requires a supported chat template and explicit EOS identifiers for language models. Duplicate inline and Jinja templates must agree exactly. The checkpoint's own tokenizer, template and generation fields are used with plain system, user and assistant roles; output parsers, reasoning controls and default system prompts need a reviewed catalog profile. Hugging Face text-only exports with `model_type=qwen3_5_text` select the `qwen3_5` adapter; a nested text or vision wrapper that conflicts with the text layout is rejected.
+The adapter is selected from the checkpoint's `model_type` and the full config and tensor layout are validated. `hf-generic` requires self-contained `config.json`, `tokenizer.json` and `tokenizer_config.json`, uses `generation_config.json` and `chat_template.jinja` when present, and requires a supported chat template and explicit EOS identifiers for language models. Duplicate inline and Jinja templates must agree exactly. Generic text conversion uses the checkpoint's own tokenizer, template and generation fields with plain system, user and assistant roles; output parsers, reasoning controls and default system prompts need a reviewed catalog profile. Version-2 vision artifacts receive the reviewed family boolean thinking control. Hugging Face text-only exports with `model_type=qwen3_5_text` select the `qwen3_5` adapter; a nested text or vision wrapper that conflicts with the text layout is rejected.
 
 Trained `Qwen/Qwen3-4B-Instruct-2507` and `empero-ai/Qwen3.8-4B-Distill` checkpoints are covered step by step in the [trained checkpoint guide](../../docs/QWEN_TRAINED_CHECKPOINTS.md).
 

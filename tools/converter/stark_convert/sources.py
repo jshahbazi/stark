@@ -186,7 +186,7 @@ class SourceSnapshot:
     @property
     def config_path(self) -> Path:
         """Return the declared model config, including external source rules."""
-        entry = get_model(self.repo) if self.repo else None
+        entry = get_model(self.repo) if self.repo and self.conversion_profile is None else None
         rule = entry["files"]["model_config"] if entry else {"repo": self.repo, "filename": "config.json"}
         return self.resolve_file(rule["filename"], repo=rule["repo"])
 
@@ -204,7 +204,7 @@ class SourceSnapshot:
     def _assert_selection(self) -> None:
         if self.artifact_mode not in {"text", "vision-language"}:
             raise ConversionError("Unknown source artifact mode")
-        entry = get_model(self.repo) if self.repo else None
+        entry = get_model(self.repo) if self.repo and self.conversion_profile is None else None
         names = tuple(
             sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file())
         )
@@ -465,7 +465,7 @@ def _replay(
                 or any(type(number) is not int for number in record["signature"])
             ):
                 raise ValueError()
-        entry = get_model(primary) if primary else None
+        entry = get_model(primary) if primary and profile is None else None
         if (schema == 2 or schema == 3 and profile is not None) and entry is not None:
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
@@ -549,9 +549,12 @@ def resolve_source(
             if metadata_profile is not None or revision not in {None, VISION_REVISION}:
                 raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
             revision = VISION_REVISION
-        elif entry is not None:
-            raise UnsupportedConversion("Vision checkpoint is outside the implemented merged family")
         else:
+            if entry is not None and entry.get("adapter") != "qwen3_5":
+                raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
+            # Vision family sources always bind their own metadata, even when
+            # the text catalog has external metadata rules for this repository.
+            entry = None
             metadata_profile = metadata_profile or GENERIC_PROFILE
             if architecture not in {None, "qwen3_5"}:
                 raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")

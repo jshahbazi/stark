@@ -10,7 +10,7 @@ import pytest
 
 from stark_convert import image_checks
 from stark_convert.chat import ChatError, ChatImageError, Worker
-from stark_convert.vision_runtime import FAMILY_PROFILE
+from stark_convert.vision_runtime import CONFIGURED_FAMILY_PROFILE, FAMILY_PROFILE
 
 
 def family_contract(**changes):
@@ -63,6 +63,7 @@ class FakeWorker:
         self.model_path = root / "model"
         self.model_path.mkdir()
         self.image_input = family_contract()
+        self._image_ready_vocabulary = 248320
         self.timeout = 3
         self.calls = []
         self.closed = False
@@ -123,7 +124,7 @@ def worker(tmp_path, monkeypatch):
     return instance
 
 
-READY = {"max_context_tokens": 8192, "max_new_tokens": 4096}
+READY = {"max_context_tokens": 8192, "max_new_tokens": 4096, "vocab_size": 248320}
 
 
 @pytest.fixture(autouse=True)
@@ -215,7 +216,7 @@ def test_runtime_or_checker_change_invalidates_receipt(worker, tmp_path, monkeyp
             image_checks, "file_hash", lambda path: previous(path) if Path(path) == worker.executable else "e" * 64
         )
     elif change == "version":
-        monkeypatch.setattr(image_checks, "CHECK_VERSION", 2)
+        monkeypatch.setattr(image_checks, "CHECK_VERSION", image_checks.CHECK_VERSION + 1)
     elif change == "python":
         monkeypatch.setattr(image_checks, "sys", SimpleNamespace(version_info=(3, 13, 99)))
     elif change == "dependency":
@@ -559,3 +560,130 @@ def test_memory_preflight_rejects_boolean_family_version(worker, monkeypatch):
     config = {"artifact_contract": {"schema_version": 3, "family": {"profile": FAMILY_PROFILE, "version": True}}}
     with pytest.raises(image_checks.ImageCheckError, match="not supported"):
         image_checks.preflight_family_memory(worker.model_path, config)
+
+
+def configured_model(*, width=2560, hidden=9216, layers=32, value_heads=32):
+    return {
+        "artifact_contract": {
+            "schema_version": 3,
+            "family": {"profile": CONFIGURED_FAMILY_PROFILE, "version": 2},
+            "vision_config": {"hidden_size": 1024, "intermediate_size": 4096, "num_heads": 16},
+        },
+        "decoder_config": {
+            "transformer_config": {
+                "model_dim": width,
+                "hidden_dim": hidden,
+                "layer_configs": [
+                    {
+                        "mixer_config": {
+                            "type": "AttentionConfig" if index % 4 == 3 else "DeltaNetConfig",
+                            "num_heads": 16 if index % 4 == 3 else value_heads,
+                            "num_groups": 4 if index % 4 == 3 else 16,
+                            "head_dim": 256 if index % 4 == 3 else 128,
+                            "value_head_dim": 128,
+                            "kernel_size": 4,
+                        }
+                    }
+                    for index in range(layers)
+                ],
+            },
+        },
+    }
+
+
+def test_configured_family_check_and_receipt_reuse(worker, tmp_path):
+    worker.image_input.update(family_profile=CONFIGURED_FAMILY_PROFILE, family_version=2)
+    directory = tmp_path / "checks"
+    assert image_checks.verify_images(worker, READY, directory=directory) is False
+    value = json.loads(next(directory.iterdir()).read_bytes())
+    assert value["identity"]["family_profile"] == CONFIGURED_FAMILY_PROFILE
+    assert value["identity"]["family_version"] == 2
+    assert value["identity"]["vocabulary_size"] == READY["vocab_size"]
+    worker.calls.clear()
+    assert image_checks.verify_images(worker, READY, directory=directory) is True
+    assert worker.calls == []
+
+
+@pytest.mark.parametrize("vocabulary", [None, True, 0, -1, 1048577, 248320.0])
+def test_invalid_readiness_vocabulary_rejected_before_cache_reuse(worker, tmp_path, vocabulary):
+    directory = tmp_path / "checks"
+    image_checks.verify_images(worker, READY, directory=directory)
+    worker.calls.clear()
+    with pytest.raises(image_checks.ImageCheckError, match="vocabulary limits"):
+        image_checks.verify_images(worker, {**READY, "vocab_size": vocabulary}, directory=directory)
+    assert worker.calls == []
+
+
+def test_ready_vocabulary_change_cannot_reuse_old_receipt(worker, tmp_path):
+    directory = tmp_path / "checks"
+    image_checks.verify_images(worker, READY, directory=directory)
+    worker.image_replies, worker.image_counts = [reply(), reply()], [64, 64]
+    worker.calls.clear()
+    assert image_checks.verify_images(worker, {**READY, "vocab_size": 262144}, directory=directory) is False
+    assert worker.calls == ["text", "tokenize", "invalid", "image", "image"]
+
+
+def test_token_accounting_uses_reported_vocabulary_bound(worker):
+    worker.token_reply["token_ids"][0] = 8
+    with pytest.raises(image_checks.ImageCheckError, match="image prompt token accounting"):
+        image_checks.verify_images(worker, {**READY, "vocab_size": 8})
+    assert worker.calls == ["text", "tokenize"]
+
+
+def test_configured_memory_budget_includes_geometry_dependent_state_and_scratch(worker, monkeypatch):
+    config = configured_model()
+    estimate = image_checks._configured_check_memory(config)
+    assert estimate > 512 * 1024 * 1024
+    larger = configured_model(width=5120, hidden=17408, layers=64, value_heads=48)
+    assert image_checks._configured_check_memory(larger) > estimate
+    (worker.model_path / "model.safetensors").write_bytes(b"synthetic weights")
+    monkeypatch.setattr(image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=estimate))
+    with pytest.raises(image_checks.ImageCheckError, match="available memory"):
+        image_checks.preflight_family_memory(worker.model_path, config)
+    monkeypatch.setattr(image_checks.psutil, "virtual_memory", lambda: SimpleNamespace(available=estimate + 1000))
+    image_checks.preflight_family_memory(worker.model_path, config)
+
+
+@pytest.mark.parametrize("value", [None, True, [], {}, 0, -1, 2**100, 2560.0])
+def test_malformed_configured_memory_geometry_has_fixed_error(value):
+    config = configured_model()
+    config["decoder_config"]["transformer_config"]["model_dim"] = value
+    with pytest.raises(image_checks.ImageCheckError, match="memory requirements"):
+        image_checks._configured_check_memory(config)
+
+
+@pytest.mark.parametrize(
+    "family,accepted",
+    [
+        (None, False),
+        ({"profile": FAMILY_PROFILE, "version": 1}, False),
+        ({"profile": CONFIGURED_FAMILY_PROFILE, "version": True}, False),
+        ({"profile": CONFIGURED_FAMILY_PROFILE, "version": 1}, False),
+        ({"profile": CONFIGURED_FAMILY_PROFILE, "version": 2, "extra": True}, False),
+        ({"profile": CONFIGURED_FAMILY_PROFILE, "version": 2}, True),
+    ],
+)
+def test_stock_default_thinking_template_requires_supported_configured_family(tmp_path, monkeypatch, family, accepted):
+    from stark_convert import chat
+
+    template = b"{{ messages[0].content }}"
+    original = hashlib.sha256
+    reviewed = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+    monkeypatch.setattr(
+        chat.hashlib,
+        "sha256",
+        lambda data=b"": SimpleNamespace(hexdigest=lambda: reviewed) if data == template else original(data),
+    )
+    config = {
+        "type": "Qwen35VisionLanguageModelConfig",
+        "token_codec_config": {"type": "ChatCodecConfig", "prompt_template": template.decode()},
+        "artifact_contract": {"schema_version": 2 if family is None else 3, "family": family},
+    }
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    (tmp_path / "chat_template.jinja").write_bytes(template)
+    if accepted:
+        _codec, compiled = chat.load_template(tmp_path)
+        assert compiled.render(messages=[{"content": "synthetic"}]) == "synthetic"
+    else:
+        with pytest.raises(ChatError, match="chat metadata"):
+            chat.load_template(tmp_path)

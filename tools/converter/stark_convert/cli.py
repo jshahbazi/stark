@@ -36,12 +36,15 @@ from .streaming import ConversionError, UnsupportedConversion, read_json, read_r
 from .vision_contract import REPO as VISION_REPO
 from .vision_contract import source_rules, validate_vision_source
 from .vision_family import (
+    ALTERNATE_OUTPUT_TOKENIZER_SHA256,
     COMPONENT_FILES,
     OUTPUT_TOKENIZER_SHA256,
     family_config_bytes,
     family_processor_filename,
+    family_reasoning_profile,
     read_family_config,
     validate_family_output_header,
+    validate_family_plan,
 )
 
 
@@ -51,7 +54,7 @@ def capability(request: ConversionRequest) -> CapabilityResult:
         official = request.repo == VISION_REPO
         supported = (
             request.artifact_mode == "vision-language"
-            and (official or get_model(request.repo) is None)
+            and (official or get_model(request.repo) is None or get_model(request.repo).get("adapter") == "qwen3_5")
             and request.dtype == "bfloat16"
             and request.model_kind == "language"
             and request.architecture in {None, "qwen3_5"}
@@ -121,6 +124,10 @@ def _validate_request(request: ConversionRequest) -> None:
             raise UnsupportedConversion("No named-build native image qualification is recorded")
     if request.architecture is not None and request.architecture not in CONFIG_ADAPTERS.values():
         raise UnsupportedConversion("Unsupported requested architecture")
+    if request.artifact_mode == "vision-language":
+        if capability(request).conversion == "unsupported":
+            raise UnsupportedConversion("Unsupported catalog tuple")
+        return
     if request.metadata_profile is not None:
         if (
             request.metadata_profile != GENERIC_PROFILE
@@ -239,6 +246,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     }
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:
+        validate_family_plan(tensors)
         if any(
             source.dtype
             not in (
@@ -359,7 +367,7 @@ def convert(
         provenance = toolchain_provenance()
         planned = plan_conversion(snapshot, request)
         entry = get_model(repo)
-        if artifact_mode == "vision-language" and entry is not None:
+        if artifact_mode == "vision-language" and entry is not None and snapshot.conversion_profile is None:
             entry = {
                 **entry,
                 "files": {
@@ -380,6 +388,11 @@ def convert(
         if snapshot.conversion_profile is not None:
             names = tuple(record["filename"] for record in snapshot.manifest["files"])
             entry = generic_entry(repo, planned.request.architecture, names)
+            if (
+                planned.artifact_contract is not None
+                and planned.artifact_contract.get("family", {}).get("version") == 2
+            ):
+                entry["metadata"]["reasoning_id"] = family_reasoning_profile(planned.artifact_contract)
         config = {**planned.model_config, "_stark_model_repo": repo}
         if artifact_mode == "vision-language":
             # The exact checkpoint publishes the same template inline and as a
@@ -433,7 +446,10 @@ def convert(
                     payload = json.dumps(planned.artifact_contract["processor_config"], indent=2).encode("utf-8")
                 (staging / filename).write_bytes(payload)
         if family:
-            if file_hash(staging / "tokenizer.json") != OUTPUT_TOKENIZER_SHA256:
+            if file_hash(staging / "tokenizer.json") not in {
+                OUTPUT_TOKENIZER_SHA256,
+                ALTERNATE_OUTPUT_TOKENIZER_SHA256,
+            }:
                 raise UnsupportedConversion("Vision family normalized tokenizer is outside the implemented profile")
             # Hash strings have a fixed size. Reserve their exact serialized
             # footprint before spending work on a complete weights output.

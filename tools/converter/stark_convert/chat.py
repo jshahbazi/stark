@@ -17,7 +17,13 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from ._build_metadata import ConversionError, file_hash, open_regular
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
-from .vision_runtime import family_image_input_contract, image_input_contract, qualified_image_worker
+from .vision_runtime import (
+    CONFIGURED_FAMILY_PROFILE,
+    family_image_input_contract,
+    image_input_contract,
+    qualified_image_worker,
+    supported_image_family,
+)
 
 
 class ChatError(Exception):
@@ -109,6 +115,10 @@ def load_template(model, *, expected_hashes=None):
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
+            contract = config.get("artifact_contract")
+            family = contract.get("family") if isinstance(contract, dict) else None
+            if supported_image_family(family) and family["profile"] == CONFIGURED_FAMILY_PROFILE:
+                template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (
                 len(data) > 1024 * 1024

@@ -19,7 +19,7 @@ from stark_convert.profiles import GENERIC_PROFILE
 from stark_convert.sources import resolve_source
 from stark_convert.streaming import ConversionError, UnsupportedConversion, read_safetensors_header
 from stark_convert.vision_contract import REPO
-from stark_convert.vision_family import FAMILY_PROFILE, family_source_files, validate_family_source
+from stark_convert.vision_family import FAMILY_PROFILE, FAMILY_VERSION, family_source_files, validate_family_source
 
 FINE_TUNE = "example/merged-qwen35"
 REVISION = "a" * 40
@@ -28,22 +28,37 @@ REVISION = "a" * 40
 @pytest.fixture
 def family_source(request, monkeypatch, tmp_path):
     # Tiny dimensions make full atomic conversion model-free. The production
-    # profile constants remain the actual 0.8B geometry; only this fixture changes
-    # them, so successful conversion does not establish native support or parity.
+    # kernel constraints are explicitly reduced only in this fixture, so
+    # successful conversion does not establish native support or parity.
     source = request.getfixturevalue("pinned_vision_source")
     config = json.loads((source / "config.json").read_text())
+    config["vision_config"]["num_position_embeddings"] = 4
+    (source / "config.json").write_text(json.dumps(config))
+    weights = source / "model.safetensors"
+    _, infos = read_safetensors_header(weights)
+    values = {}
+    for key, info in infos.items():
+        array = (
+            np.frombuffer(tensor_bytes(info), dtype={"BF16": "<u2", "F32": "<f4"}[info.dtype])
+            .copy()
+            .reshape(info.shape)
+        )
+        values[key] = (info.dtype, array[:4] if key == "model.visual.pos_embed.weight" else array)
+    save_tensors(weights, values)
     text = normalize_qwen35_config(config)
-    monkeypatch.setattr(vision_family, "_TEXT_GEOMETRY", {key: text[key] for key in vision_family._TEXT_GEOMETRY})
-    monkeypatch.setattr(
-        vision_family,
-        "_VISION_GEOMETRY",
-        {key: config["vision_config"][key] for key in vision_family._VISION_GEOMETRY},
-    )
-    monkeypatch.setattr(vision_family, "_LAYER_TYPES", text["layer_types"])
+    monkeypatch.setattr(vision_family, "_TEXT_ALIGNMENT", 4)
+    monkeypatch.setattr(vision_family, "_ATTENTION_HEAD_DIM", 2)
+    monkeypatch.setattr(vision_family, "_DELTA_HEAD_DIM", 2)
+    monkeypatch.setattr(vision_family, "_VISION_HEAD_ALIGNMENT", 2)
     monkeypatch.setattr(vision_family, "_ROPE", text["rope_parameters"])
     monkeypatch.setattr(vision_family, "_PROCESSOR", json.loads((source / "preprocessor_config.json").read_text()))
     monkeypatch.setattr(
         vision_family, "_SOURCE_TOKENIZER_SHA256", hashlib.sha256((source / "tokenizer.json").read_bytes()).hexdigest()
+    )
+    monkeypatch.setattr(
+        vision_family,
+        "_TOKENIZER_PROGRAM_FINGERPRINTS",
+        {vision_family.tokenizer_program_fingerprint((source / "tokenizer.json").read_bytes())},
     )
     monkeypatch.setattr(
         vision_family, "_TEMPLATE_SHA256", hashlib.sha256((source / "chat_template.jinja").read_bytes()).hexdigest()
@@ -92,7 +107,7 @@ def test_local_family_auto_resolution_and_manifest_replay(family_source, tmp_pat
     assert replay.receipt() == source.receipt()
     contract = validate_family_source(replay, "bfloat16")
     assert contract["schema_version"] == 3
-    assert contract["family"] == {"profile": FAMILY_PROFILE, "version": 1}
+    assert contract["family"] == {"profile": FAMILY_PROFILE, "version": FAMILY_VERSION}
     assert contract["source"]["repo"] == (repo or "local")
     assert contract["source"]["revision"] is None
     assert contract["qualification"] == "unverified"
@@ -148,7 +163,7 @@ def test_family_normalizes_recognized_processor_serializations(family_source, tm
     assert replay.receipt() == source.receipt()
 
 
-@pytest.mark.parametrize("mutation", ["disabled", "unknown_image", "unknown_top", "ambiguous", "nested_class"])
+@pytest.mark.parametrize("mutation", ["disabled", "unknown_image", "unknown_top", "disagrees", "nested_class"])
 def test_family_rejects_changed_or_ambiguous_processor_features(family_source, mutation):
     source_path = family_source / "preprocessor_config.json"
     processor = json.loads(source_path.read_text())
@@ -162,13 +177,61 @@ def test_family_rejects_changed_or_ambiguous_processor_features(family_source, m
             nested["custom_image_code"] = "unsupported"
         elif mutation == "nested_class":
             nested["image_processor"]["processor_class"] = "UnsupportedProcessor"
+        elif mutation == "disagrees":
+            nested["image_processor"]["image_mean"] = [0.0, 0.5, 0.5]
         (family_source / "processor_config.json").write_text(json.dumps(nested))
-        if mutation != "ambiguous":
+        if mutation != "disagrees":
             source_path.unlink()
     if mutation in {"disabled", "unknown_image"}:
         source_path.write_text(json.dumps(processor))
     with pytest.raises((UnsupportedConversion, ConversionError), match="processor"):
         validate_family_source(snapshot(family_source), "bfloat16")
+
+
+def test_family_binds_both_equivalent_own_processor_serializations(family_source, tmp_path):
+    original = json.loads((family_source / "preprocessor_config.json").read_text())
+    nested = {
+        "processor_class": original["processor_class"],
+        "image_processor": {**original, **vision_family._PROCESSOR_DEFAULTS},
+    }
+    path = family_source / "processor_config.json"
+    path.write_text(json.dumps(nested))
+    receipt = cli.convert(family_source, tmp_path / "output", repo=FINE_TUNE, artifact_mode="vision-language")
+    hashes = receipt["artifact_contract"]["source"]["hashes"]
+    assert {"processor_config.json", "preprocessor_config.json"} <= set(hashes)
+    assert hashes["processor_config.json"] == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert receipt["artifact_contract"]["processor_config"] == original
+
+
+def test_cataloged_dense_vision_source_uses_own_metadata_and_replays(family_source, tmp_path):
+    repo = "Qwen/Qwen3.5-4B"
+    source = snapshot(family_source, repo=repo)
+    assert {record["repo"] for record in source.manifest["files"]} == {repo}
+    assert source.config_path == family_source / "config.json"
+    manifest = tmp_path / "cataloged-vision.json"
+    source.write_manifest(manifest)
+    replay = resolve_source(family_source, source_manifest=manifest, artifact_mode="vision-language", offline=True)
+    assert replay.receipt() == source.receipt()
+    receipt = cli.convert(replay, tmp_path / "output", repo=repo, artifact_mode="vision-language")
+    assert receipt["artifact_contract"]["family"] == {"profile": FAMILY_PROFILE, "version": 2}
+    assert receipt["native_qualification"] is None
+
+
+def test_family_emits_untied_embeddings_and_normalizes_the_vision_type_alias(family_source, tmp_path):
+    path = family_source / "config.json"
+    config = json.loads(path.read_text())
+    config["tie_word_embeddings"] = False
+    config["text_config"]["tie_word_embeddings"] = False
+    config["vision_config"]["model_type"] = "qwen3_5_vision"
+    path.write_text(json.dumps(config))
+    output = tmp_path / "output"
+    receipt = cli.convert(family_source, output, repo=FINE_TUNE, artifact_mode="vision-language")
+    published = json.loads((output / "config.json").read_text())
+    assert published["decoder_config"]["embedding_config"]["type"] == "UntiedEmbeddingConfig"
+    assert receipt["artifact_contract"]["vision_config"]["model_type"] == "qwen3_5"
+    _, tensors = read_safetensors_header(output / "model.safetensors")
+    assert "decoder.embedding.input_embedding.weights" in tensors
+    assert "decoder.embedding.output_embedding.weights" in tensors
 
 
 def test_family_accepts_recognized_normalized_source_tokenizer(family_source, tmp_path, monkeypatch):
@@ -229,6 +292,30 @@ def test_family_requires_the_recognized_normalized_tokenizer_for_embedded_metada
         validate_family_source(snapshot(family_source), "bfloat16")
 
 
+def test_family_accepts_equivalent_tokenizer_serialization_and_preserves_raw_provenance(family_source, tmp_path):
+    path = family_source / "tokenizer.json"
+    original_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.write_text(json.dumps(json.loads(path.read_text()), sort_keys=True, separators=(",", ":")))
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert actual_hash != original_hash
+    output = tmp_path / "output"
+    receipt = cli.convert(family_source, output, repo=FINE_TUNE, artifact_mode="vision-language")
+    assert receipt["artifact_contract"]["source"]["hashes"]["tokenizer.json"] == actual_hash
+    assert receipt["artifact_contract"]["component_hashes"]["tokenizer.json"] == cli.OUTPUT_TOKENIZER_SHA256
+
+
+def test_family_does_not_construct_an_unknown_tokenizer_program(family_source, monkeypatch):
+    path = family_source / "tokenizer.json"
+    value = json.loads(path.read_text())
+    value["normalizer"] = {"type": "Lowercase"}
+    path.write_text(json.dumps(value))
+    monkeypatch.setattr(
+        vision_family, "Tokenizer", SimpleNamespace(from_str=lambda *_args: pytest.fail("unknown program"))
+    )
+    with pytest.raises(UnsupportedConversion, match="outside the implemented profile"):
+        validate_family_source(snapshot(family_source), "bfloat16")
+
+
 def test_family_accepts_only_the_reviewed_alternate_template_hash(family_source, tmp_path, monkeypatch):
     path = family_source / "chat_template.jinja"
     template = path.read_text() + "\n{# synthetic reviewed variant #}"
@@ -245,6 +332,22 @@ def test_family_accepts_only_the_reviewed_alternate_template_hash(family_source,
     path.write_text(template + " ")
     with pytest.raises(UnsupportedConversion, match="outside the implemented profile"):
         validate_family_source(snapshot(family_source), "bfloat16")
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_family_declares_the_known_template_reasoning_control(family_source, tmp_path, monkeypatch, thinking):
+    if thinking:
+        path = family_source / "chat_template.jinja"
+        path.write_text(path.read_text() + "\n{# synthetic default-on variant #}")
+        monkeypatch.setattr(vision_family, "_THINKING_TEMPLATE_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
+    output = tmp_path / "output"
+    cli.convert(family_source, output, repo=FINE_TUNE, artifact_mode="vision-language")
+    codec = json.loads((output / "config.json").read_text())["token_codec_config"]
+    assert codec["reasoning_config"] == {
+        "default_reasoning_effort": "medium" if thinking else "no_reasoning",
+        "field_name": "enable_thinking",
+        "reasoning_effort_to_field_value": {"medium": True, "no_reasoning": False},
+    }
 
 
 def test_family_request_reports_implemented_but_unverified_native_support():
@@ -374,7 +477,6 @@ def test_family_permits_unused_padded_embedding_and_output_rows(family_source, t
     value = json.loads(path.read_text())
     value["text_config"]["vocab_size"] = 20
     path.write_text(json.dumps(value))
-    monkeypatch.setitem(vision_family._TEXT_GEOMETRY, "vocab_size", 20)
     weights = family_source / "model.safetensors"
     _, infos = read_safetensors_header(weights)
     tensors = {

@@ -812,7 +812,9 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         let (family_profile, family_version) = worker
             .backend
             .image_family_profile()
-            .filter(|(profile, version)| *profile == "qwen35-dense-bf16-merged-v1" && *version == 1)
+            .filter(|(profile, version)| {
+                matches!((*profile, *version), ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2))
+            })
             .ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
         readiness["image_input"] = json!({
@@ -910,6 +912,7 @@ mod tests {
         images: bool,
         image_schema: u32,
         family_version: u32,
+        family_profile: &'static str,
         image_preparations: usize,
         image_generations: usize,
         prepared_drops: Arc<AtomicUsize>,
@@ -1021,7 +1024,7 @@ mod tests {
         }
 
         fn image_family_profile(&self) -> Option<(&str, u32)> {
-            self.images.then_some(("qwen35-dense-bf16-merged-v1", self.family_version))
+            self.images.then_some((self.family_profile, self.family_version))
         }
 
         fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
@@ -1099,6 +1102,7 @@ mod tests {
             images: false,
             image_schema: 2,
             family_version: 1,
+            family_profile: "qwen35-dense-bf16-merged-v1",
             image_preparations: 0,
             image_generations: 0,
             prepared_drops: Arc::new(AtomicUsize::new(0)),
@@ -1311,6 +1315,15 @@ mod tests {
         assert!(ready["image_input"]["model_revision"].is_null());
         assert_eq!(ready["image_input"]["qualified"], false);
         assert_eq!(ready["image_input"]["qualification"], "unverified");
+        worker.backend.family_profile = "qwen35-dense-bf16-merged-v2";
+        worker.backend.family_version = 2;
+        let mut dynamic_output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut dynamic_output).unwrap();
+        let dynamic_ready: Value = serde_json::from_slice(&dynamic_output).unwrap();
+        assert_eq!(dynamic_ready["image_input"]["family_profile"], "qwen35-dense-bf16-merged-v2");
+        assert_eq!(dynamic_ready["image_input"]["family_version"], 2);
+        assert_eq!(dynamic_ready["image_input"]["qualification"], "unverified");
+        worker.backend.family_profile = "qwen35-dense-bf16-merged-v1";
         for (schema, version) in [(4, 1), (3, 2)] {
             worker.backend.image_schema = schema;
             worker.backend.family_version = version;

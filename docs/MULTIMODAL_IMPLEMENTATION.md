@@ -29,8 +29,10 @@ cleanup, source/notice audits, and the remaining public-release boundary.
 ## Implemented conversion boundary
 
 `stark-convert --artifact-mode vision-language` is opt-in and accepts the exact
-reference checkpoint or a merged BF16 Qwen3.5 fine-tune that passes the
-[initial 0.8B family contract](VISION_FAMILY_CONTRACT.md). The default `text` mode retains the existing text
+reference checkpoint or a merged BF16 dense Qwen3.5 model that passes the
+[config-derived family contract](VISION_FAMILY_CONTRACT.md). Dimensions and
+tensor shapes come from validated configuration within supported operation and
+storage bounds. The default `text` mode retains the existing text
 conversion layout, scalar RoPE, source manifests, and native qualification
 matching. Its receipt explicitly records text input and `text-generation-v1` for
 language models. Existing text-only Qwen3.5 artifacts cannot gain vision support
@@ -42,6 +44,13 @@ The vision mode:
   processor, template and safetensors identities. Family conversion instead
   validates the implemented operations and geometry and binds the selected
   checkpoint's own metadata and changed weights into source provenance.
+- Version 2 recognizes two reviewed tokenizer processing programs and preserves
+  the checkpoint's selected program. Their shared vocabulary does not imply
+  identical tokenization: the alternate letter-splitting program treats
+  combining marks differently and has different ByteLevel trimming/decoder
+  flags. The original schema-2/version-1 tokenizer gate remains unchanged;
+  arbitrary new tokenizer programs fail admission. See the exact identities in
+  the [family contract](VISION_FAMILY_CONTRACT.md).
 - Validates the image/video/wrapper special-token IDs against the tokenizer and
   its added-token metadata.
 - Preserves every required visual tensor under `vision.*`, in the source layout
@@ -51,8 +60,10 @@ The vision mode:
   MTP weights remain omitted, as in the text adapter.
 - Retains a reviewed `chat_template.jinja` and writes the supported processor
   recipe as `preprocessor_config.json`. Family conversion recognizes two source
-  processor serializations and preserves their actual raw filename/hash in
-  provenance. Inline and standalone templates must agree.
+  processor serializations, accepts both when their normalized image recipes
+  agree, and preserves every actual raw filename/hash in provenance. Inline and
+  standalone templates must agree. Version 2 also recognizes the stock reasoning
+  template and exposes its existing boolean thinking control.
 - Uses a private, atomic conversion directory and rechecks every source before
   publication. Source manifests use schema 3 and bind `artifact_mode`; text and
   vision manifests cannot be substituted for each other.
@@ -112,9 +123,14 @@ The root and receipt embed `artifact_contract` with:
 | `runtime_supported`, `qualification` | `true`, `unverified`; implementation and qualification are separate |
 
 Schema 3 also records the family profile/version and hashes of the four output
-components other than the configuration itself. Its full structural admission,
-processor normalization, tokenizer/template forms and automatic checks are
-defined in the [family contract](VISION_FAMILY_CONTRACT.md).
+components other than the configuration itself. The fixed version-1 profile
+remains readable; new family conversion emits
+`qwen35-dense-bf16-merged-v2`/version `2`. Its native reader reconstructs the
+supported decoder/tower graph from bounded configuration and derives the full
+required tensor set. Unknown flags, mismatched shapes and unsupported operations
+fail admission. Full limits, processor normalization, tokenizer/template forms,
+reader compatibility and automatic checks are defined in the
+[family contract](VISION_FAMILY_CONTRACT.md).
 
 The receipt's `execution: unverified` describes conversion itself. Exact output
 matches report `native_loading: qualified_tuple` and include the named-build
@@ -302,10 +318,12 @@ report the running worker's image capability and evidence level.
 
 ## Remaining dependencies and acceptance
 
-1. **Coverage:** the initial family remains limited to the implemented 0.8B dense
-   geometry, merged BF16 weights and recognized metadata. Other sizes, MoE,
-   quantized vision models and new architectures require implementation and
-   validation. A local execution pass does not inherit official quality or parity.
+1. **Coverage:** config-derived dense geometry remains bounded by the implemented
+   attention/DeltaNet/tower operations, indexing and storage limits, merged BF16
+   weights and recognized metadata. A size name does not establish runtime
+   qualification. MoE, quantized vision models, alternate operations and new
+   architectures require implementation and validation. A local execution pass
+   does not inherit official quality or parity.
 2. **Distribution:** each delivered worker signature is a different executable
    identity. A changed worker requires matching reference evidence or fresh
    local checks. Public distribution also

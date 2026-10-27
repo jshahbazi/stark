@@ -1,4 +1,4 @@
-//! Versioned, structural admission for the first merged BF16 Qwen3.5 family.
+//! Versioned structural admission for merged BF16 Qwen3.5 families.
 //!
 //! This profile describes implemented operations and geometry. Its hashes bind
 //! the selected files; neither source names nor changed weights grant reference
@@ -15,8 +15,58 @@ use serde_json::{Value, json};
 use super::{ImageTokenIds, VisionTowerConfig};
 use crate::backends::common::InvalidInput;
 
+mod dynamic;
+
 pub(super) const PROFILE: &str = "qwen35-dense-bf16-merged-v1";
 pub(super) const VERSION: u32 = 1;
+pub(super) const DYNAMIC_PROFILE: &str = "qwen35-dense-bf16-merged-v2";
+pub(super) const DYNAMIC_VERSION: u32 = 2;
+type TensorMap = BTreeMap<String, (&'static str, Vec<u32>)>;
+
+pub(super) struct TensorContract {
+    tensors: TensorMap,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum FamilyProfile {
+    FixedV1,
+    DynamicV2,
+}
+
+impl FamilyProfile {
+    pub fn parse(value: &Value) -> Option<Self> {
+        if *value == json!({"profile":PROFILE,"version":VERSION}) {
+            Some(Self::FixedV1)
+        } else if *value == json!({"profile":DYNAMIC_PROFILE,"version":DYNAMIC_VERSION}) {
+            Some(Self::DynamicV2)
+        } else {
+            None
+        }
+    }
+
+    pub fn identity(self) -> (&'static str, u32) {
+        match self {
+            Self::FixedV1 => (PROFILE, VERSION),
+            Self::DynamicV2 => (DYNAMIC_PROFILE, DYNAMIC_VERSION),
+        }
+    }
+
+    pub fn max_weight_bytes(self) -> u64 {
+        match self {
+            Self::FixedV1 => 2_000_000_000,
+            Self::DynamicV2 => dynamic::MAX_WEIGHT_BYTES,
+        }
+    }
+
+    pub fn accepts_tokenizer(
+        self,
+        digest: &str,
+    ) -> bool {
+        digest == super::ARTIFACT_FILES[2].1
+            || matches!(self, Self::DynamicV2)
+                && digest == "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523"
+    }
+}
 const MAX_HEADER_BYTES: u64 = 1_048_576;
 const COMPONENTS: [&str; 4] =
     ["model.safetensors", "tokenizer.json", "preprocessor_config.json", "chat_template.jinja"];
@@ -24,12 +74,15 @@ const COMPONENTS: [&str; 4] =
 // call arguments. Both preserve the same image placeholder program.
 const TEMPLATE_HASHES: [&str; 2] =
     [super::ARTIFACT_FILES[4].1, "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67"];
+const DYNAMIC_STOCK_TEMPLATE: &str = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715";
 
 pub(super) struct FamilyAdmission {
     pub tower: VisionTowerConfig,
     pub tokens: ImageTokenIds,
     pub source: String,
     pub revision: Option<String>,
+    pub profile: FamilyProfile,
+    pub tensors: Option<TensorContract>,
 }
 
 fn invalid() -> InvalidInput {
@@ -133,7 +186,10 @@ fn logical_source(value: &str) -> bool {
         && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"._-/:".contains(&byte))
 }
 
-fn source_valid(value: &Value) -> bool {
+fn source_valid(
+    value: &Value,
+    profile: FamilyProfile,
+) -> bool {
     if !exact_keys(value, &["repo", "revision", "hashes", "weight_files"])
         || !value["repo"].as_str().is_some_and(logical_source)
         || !(value["revision"].is_null()
@@ -152,9 +208,15 @@ fn source_valid(value: &Value) -> bool {
         return false;
     };
     let required = ["config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja"];
-    (hashes.len() == 5 || hashes.len() == 6 && hashes.contains_key("generation_config.json"))
+    let processors = usize::from(hashes.contains_key("preprocessor_config.json"))
+        + usize::from(hashes.contains_key("processor_config.json"));
+    let processor_count_supported = match profile {
+        FamilyProfile::FixedV1 => processors == 1,
+        FamilyProfile::DynamicV2 => (1..=2).contains(&processors),
+    };
+    hashes.len() == required.len() + processors + usize::from(hashes.contains_key("generation_config.json"))
         && required.iter().all(|name| hashes.contains_key(*name))
-        && (hashes.contains_key("preprocessor_config.json") != hashes.contains_key("processor_config.json"))
+        && processor_count_supported
         && !weights.is_empty()
         && weights.len() <= 256
         && weights.values().any(|weight| weight["role"] == "weights")
@@ -178,6 +240,7 @@ pub(super) fn admit(
     tokenizer: &tokenizers::Tokenizer,
 ) -> Result<FamilyAdmission, InvalidInput> {
     let contract = &config["artifact_contract"];
+    let profile = FamilyProfile::parse(&contract["family"]).ok_or_else(invalid)?;
     if !exact_keys(
         contract,
         &[
@@ -201,21 +264,36 @@ pub(super) fn admit(
         || contract["schema_version"] != 3
         || contract["input_modalities"] != json!(["text", "image"])
         || contract["dtype"] != "bfloat16"
-        || contract["family"] != json!({"profile":PROFILE,"version":VERSION})
         || contract["tensor_layout"] != "hf-qwen35-vision-v1"
         || contract["transport"] != "mediaref-v1"
         || contract["qualification"] != "unverified"
         || contract["runtime_supported"] != true
         || config["type"] != "Qwen35VisionLanguageModelConfig"
-        || !source_valid(&contract["source"])
-        || config["decoder_config"] != decoder_profile()
-        || !vision_semantics(&contract["vision_config"])
+        || !source_valid(&contract["source"], profile)
         || contract["processor_config"] != processor_profile()
         || contract["position_contract"] != json!({"mrope_section":[11,11,10],"interleaved":true})
         || !exact_keys(&contract["component_hashes"], &COMPONENTS)
     {
         return Err(invalid());
     }
+    let (tower, vocab, tensors) = match profile {
+        FamilyProfile::FixedV1 => {
+            if config["decoder_config"] != decoder_profile() || !vision_semantics(&contract["vision_config"]) {
+                return Err(invalid());
+            }
+            (
+                super::official_tower_config(),
+                248320,
+                TensorContract {
+                    tensors: expected_tensors(),
+                },
+            )
+        },
+        FamilyProfile::DynamicV2 => {
+            let geometry = dynamic::geometry(&config["decoder_config"], &contract["vision_config"])?;
+            (geometry.tower, geometry.vocab, geometry.tensors)
+        },
+    };
     for name in COMPONENTS {
         let digest = contract["component_hashes"][name].as_str().ok_or_else(invalid)?;
         if !valid_hash(digest) || hashes.get(name).map(String::as_str) != Some(digest) {
@@ -224,8 +302,11 @@ pub(super) fn admit(
     }
     // The first family varies trained weights while retaining the reviewed
     // tokenizer processing and bounded, reviewed template programs.
-    if hashes.get("tokenizer.json").map(String::as_str) != Some(super::ARTIFACT_FILES[2].1)
-        || !hashes.get("chat_template.jinja").is_some_and(|digest| TEMPLATE_HASHES.contains(&digest.as_str()))
+    if !hashes.get("tokenizer.json").is_some_and(|digest| profile.accepts_tokenizer(digest))
+        || !hashes.get("chat_template.jinja").is_some_and(|digest| {
+            TEMPLATE_HASHES.contains(&digest.as_str())
+                || matches!(profile, FamilyProfile::DynamicV2) && digest == DYNAMIC_STOCK_TEMPLATE
+        })
     {
         return Err(InvalidInput("unsupported native vision family text processing"));
     }
@@ -243,7 +324,7 @@ pub(super) fn admit(
     }
     let mut ids = Vec::with_capacity(4);
     for key in ["vision_start", "vision_end", "image_pad", "video_pad"] {
-        let id = token_map[key].as_u64().filter(|id| *id < 248320).ok_or_else(invalid)?;
+        let id = token_map[key].as_u64().filter(|id| *id < u64::from(vocab)).ok_or_else(invalid)?;
         if ids.contains(&id) || tokenizer.token_to_id(&format!("<|{key}|>")) != Some(id as u32) {
             return Err(InvalidInput("native vision family token contract mismatch"));
         }
@@ -257,28 +338,14 @@ pub(super) fn admit(
     // The supported decoder has padded output rows. Tokenizer coverage is
     // smaller than that matrix, and must stay unique and entirely in range.
     if vocabulary.is_empty()
-        || vocabulary.len() > 248320
-        || vocabulary.values().any(|id| *id >= 248320)
+        || vocabulary.len() > vocab as usize
+        || vocabulary.values().any(|id| *id >= vocab)
         || vocabulary.values().copied().collect::<std::collections::HashSet<_>>().len() != vocabulary.len()
     {
         return Err(InvalidInput("native vision family vocabulary differs from decoder"));
     }
-    let vision = &contract["vision_config"];
-    let number = |key: &str| vision[key].as_u64().and_then(|value| u32::try_from(value).ok()).ok_or_else(invalid);
     Ok(FamilyAdmission {
-        tower: VisionTowerConfig {
-            depth: number("depth")?,
-            hidden_size: number("hidden_size")?,
-            intermediate_size: number("intermediate_size")?,
-            num_heads: number("num_heads")?,
-            num_position_embeddings: number("num_position_embeddings")?,
-            out_hidden_size: number("out_hidden_size")?,
-            patch_size: number("patch_size")?,
-            spatial_merge_size: number("spatial_merge_size")?,
-            temporal_patch_size: number("temporal_patch_size")?,
-            in_channels: number("in_channels")?,
-            layer_norm_eps: 1e-6,
-        },
+        tower,
         tokens: ImageTokenIds {
             vision_start: ids[0],
             vision_end: ids[1],
@@ -287,12 +354,17 @@ pub(super) fn admit(
         },
         source: contract["source"]["repo"].as_str().ok_or_else(invalid)?.into(),
         revision: contract["source"]["revision"].as_str().map(str::to_owned),
+        profile,
+        tensors: Some(tensors),
     })
 }
 
 /// Header-only complete tensor and storage validation precedes GPU weights.
-/// The first profile is intentionally a bounded geometry, not a size wildcard.
-pub(super) fn validate_weights(file: &mut File) -> Result<(), InvalidInput> {
+/// The selected profile supplies the complete validated tensor inventory.
+pub(super) fn validate_weights(
+    file: &mut File,
+    admission: &FamilyAdmission,
+) -> Result<(), InvalidInput> {
     file.rewind().map_err(|_| invalid())?;
     let mut size = [0u8; 8];
     file.read_exact(&mut size).map_err(|_| invalid())?;
@@ -303,7 +375,8 @@ pub(super) fn validate_weights(file: &mut File) -> Result<(), InvalidInput> {
     let mut bytes = vec![0; size as usize];
     file.read_exact(&mut bytes).map_err(|_| invalid())?;
     let header: Value = serde_json::from_slice(&bytes).map_err(|_| invalid())?;
-    validate_header(&header, file.metadata().map_err(|_| invalid())?.len(), size + 8)?;
+    let tensors = &admission.tensors.as_ref().ok_or_else(invalid)?.tensors;
+    validate_tensor_header(&header, file.metadata().map_err(|_| invalid())?.len(), size + 8, tensors)?;
     file.rewind().map_err(|_| invalid())?;
     Ok(())
 }
@@ -368,12 +441,22 @@ fn expected_tensors() -> BTreeMap<String, (&'static str, Vec<u32>)> {
     tensors
 }
 
+#[cfg(test)]
 fn validate_header(
     header: &Value,
     file_length: u64,
     data_start: u64,
 ) -> Result<(), InvalidInput> {
     let tensors = expected_tensors();
+    validate_tensor_header(header, file_length, data_start, &tensors)
+}
+
+fn validate_tensor_header(
+    header: &Value,
+    file_length: u64,
+    data_start: u64,
+    tensors: &TensorMap,
+) -> Result<(), InvalidInput> {
     let entries = header.as_object().ok_or_else(invalid)?;
     if entries.len() != tensors.len() + 1 {
         return Err(invalid());
@@ -382,9 +465,9 @@ fn validate_header(
     let mut specs = BTreeMap::new();
     let mut spans = Vec::with_capacity(tensors.len());
     for (name, (dtype, shape)) in tensors {
-        let entry = entries.get(&name).ok_or_else(invalid)?;
+        let entry = entries.get(name).ok_or_else(invalid)?;
         if !exact_keys(entry, &["dtype", "shape", "data_offsets"])
-            || entry["dtype"] != dtype
+            || entry["dtype"] != *dtype
             || entry["shape"] != json!(shape)
         {
             return Err(invalid());
@@ -395,7 +478,7 @@ fn validate_header(
         let bytes = shape
             .iter()
             .try_fold(
-                if dtype == "F32" {
+                if *dtype == "F32" {
                     4u64
                 } else {
                     2
@@ -408,8 +491,8 @@ fn validate_header(
         }
         spans.push((begin, end));
         if let Some(prefix) = name.strip_suffix(".weights") {
-            if dtype == "BF16" && prefix.starts_with("decoder.") {
-                specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if prefix == "decoder.embedding.embedding" {"input_output"} else {"output_input"}}));
+            if *dtype == "BF16" && prefix.starts_with("decoder.") {
+                specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}));
             }
         }
     }
@@ -451,12 +534,16 @@ mod tests {
     }
 
     fn valid_header() -> (Value, u64) {
+        valid_header_for(&expected_tensors())
+    }
+
+    fn valid_header_for(tensors: &TensorMap) -> (Value, u64) {
         let mut header = serde_json::Map::new();
         let mut metadata = serde_json::Map::new();
         let mut offset = 0;
-        for (name, (dtype, shape)) in expected_tensors() {
+        for (name, (dtype, shape)) in tensors {
             let size = shape.iter().fold(
-                if dtype == "F32" {
+                if *dtype == "F32" {
                     4u64
                 } else {
                     2
@@ -465,8 +552,8 @@ mod tests {
             );
             header.insert(name.clone(), json!({"dtype":dtype,"shape":shape,"data_offsets":[offset,offset+size]}));
             if let Some(prefix) = name.strip_suffix(".weights") {
-                if dtype == "BF16" && prefix.starts_with("decoder.") {
-                    metadata.insert(format!("{prefix}.spec"), Value::String(json!({"type":"FullPrecisionSpec","layout":if prefix == "decoder.embedding.embedding" {"input_output"} else {"output_input"}}).to_string()));
+                if *dtype == "BF16" && prefix.starts_with("decoder.") {
+                    metadata.insert(format!("{prefix}.spec"), Value::String(json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}).to_string()));
                 }
             }
             offset += size;
@@ -497,6 +584,43 @@ mod tests {
     }
 
     #[stark_test]
+    fn dynamic_family_binds_untied_header_geometry_processing_and_dual_processor_provenance() {
+        let tokenizer = tokenizer();
+        let mut hashes: BTreeMap<&str, String> = COMPONENTS.into_iter().map(|name| (name, "a".repeat(64))).collect();
+        hashes.insert("tokenizer.json", super::super::ARTIFACT_FILES[2].1.into());
+        hashes.insert("chat_template.jinja", DYNAMIC_STOCK_TEMPLATE.into());
+        let mut config = config(&hashes);
+        config["artifact_contract"]["family"] = json!({"profile":DYNAMIC_PROFILE,"version":DYNAMIC_VERSION});
+        config["artifact_contract"]["source"]["hashes"]["processor_config.json"] = json!("f".repeat(64));
+        config["decoder_config"]["embedding_config"]["type"] = json!("UntiedEmbeddingConfig");
+        config["decoder_config"]["transformer_config"]["model_dim"] = json!(4096);
+        config["decoder_config"]["transformer_config"]["hidden_dim"] = json!(12288);
+        config["artifact_contract"]["vision_config"]["out_hidden_size"] = json!(4096);
+        config["artifact_contract"]["vision_config"]["hidden_size"] = json!(1152);
+        config["artifact_contract"]["vision_config"]["intermediate_size"] = json!(4304);
+        config["artifact_contract"]["vision_config"]["num_heads"] = json!(16);
+        let processor = serde_json::to_vec(&processor_profile()).unwrap();
+        let admitted = admit(&config, &hashes, &processor, b"synthetic-template", &tokenizer).unwrap();
+        assert_eq!(admitted.profile.identity(), (DYNAMIC_PROFILE, DYNAMIC_VERSION));
+        let tensors = &admitted.tensors.as_ref().unwrap().tensors;
+        let (mut header, bytes) = valid_header_for(tensors);
+        assert!(validate_tensor_header(&header, bytes + 8, 8, tensors).is_ok());
+        let alternate_tokenizer = "06b9509352d2af50381ab2247e083b80d32d5c0aba91c272ca9ff729b6a0e523";
+        assert!(!FamilyProfile::FixedV1.accepts_tokenizer(alternate_tokenizer));
+        assert!(!FamilyProfile::DynamicV2.accepts_tokenizer(&"f".repeat(64)));
+        let mut alternate_hashes = hashes.clone();
+        alternate_hashes.insert("tokenizer.json", alternate_tokenizer.into());
+        let mut alternate_config = config.clone();
+        alternate_config["artifact_contract"]["component_hashes"] = json!(alternate_hashes);
+        assert!(admit(&alternate_config, &alternate_hashes, &processor, b"synthetic-template", &tokenizer).is_ok());
+        header["__metadata__"]["decoder.embedding.output_embedding.spec"] =
+            json!(r#"{"type":"FullPrecisionSpec","layout":"input_output"}"#);
+        assert!(validate_tensor_header(&header, bytes + 8, 8, tensors).is_err());
+        config["artifact_contract"]["family"] = json!({"profile":PROFILE,"version":VERSION});
+        assert!(admit(&config, &hashes, &processor, b"synthetic-template", &tokenizer).is_err());
+    }
+
+    #[stark_test]
     fn family_source_identity_is_logical_bounded_metadata() {
         for name in ["owner/fine-tune", "local:0123456789abcdef"] {
             assert!(logical_source(name));
@@ -511,7 +635,7 @@ mod tests {
         let weights = source["weight_files"].as_object_mut().unwrap();
         let weight = weights.remove("model.safetensors").unwrap();
         weights.insert("weights/shard-00001.safetensors".into(), weight.clone());
-        assert!(source_valid(&source));
+        assert!(source_valid(&source, FamilyProfile::FixedV1));
         for name in [
             "/weights/shard.safetensors",
             "weights//shard.safetensors",
@@ -520,7 +644,7 @@ mod tests {
             "weights\\shard.safetensors",
         ] {
             source["weight_files"] = Value::Object([(name.to_owned(), weight.clone())].into_iter().collect());
-            assert!(!source_valid(&source));
+            assert!(!source_valid(&source, FamilyProfile::FixedV1));
         }
     }
 

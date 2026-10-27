@@ -929,7 +929,7 @@ struct InstallView: View {
             }
             VStack(alignment: .leading, spacing: 5) {
                 Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
-                Text("Image conversion supports Qwen3.5-0.8B and compatible merged BF16 fine-tunes. Vision installs check support on this Mac and stop the running model.")
+                Text("Image conversion supports compatible dense Qwen3.5 BF16 models and merged fine-tunes. Vision installs check support on this Mac and stop the running model.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
