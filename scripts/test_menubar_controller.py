@@ -305,6 +305,28 @@ extension EngineController {
             return !inventory.groups[0].models[0].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models[1].detailLabels.contains("Text and images") &&
                 inventory.groups[0].models.filter(\.isRunning).map(\.id) == ["text"]
+        case "models-visible-row-name-sort":
+            let aliases = [
+                variant("zeta", name: "Zeta", display: modelDisplay("owner/first", name: "Alpha")),
+                variant("alpha", name: "Alpha", display: modelDisplay("owner/second", name: "Zeta"))
+            ]
+            let ascending = ModelsInventory(models: aliases, loadedID: "", registry: nil)
+            let descending = ModelsInventory(models: aliases, loadedID: "", registry: nil, sort: .nameDescending)
+            let sizeTie = ModelsInventory(models: aliases, loadedID: "", registry: nil, sort: .sizeAscending)
+            guard ascending.groups.flatMap({ $0.models.map(\.id) }) == ["alpha", "zeta"],
+                  descending.groups.flatMap({ $0.models.map(\.id) }) == ["zeta", "alpha"],
+                  sizeTie.groups.flatMap({ $0.models.map(\.id) }) == ["alpha", "zeta"] else { return false }
+            var compact = modelDisplay("owner/group", name: "Alpha"); compact["quantization"] = "4-bit"
+            var beta = modelDisplay("owner/other", name: "Zulu"); beta["quantization"] = "4-bit"
+            let grouped = [
+                variant("zeta", name: "Zeta", display: compact),
+                variant("full", name: "Other", display: modelDisplay("owner/group", name: "Alpha")),
+                variant("beta", name: "Beta", display: beta)
+            ]
+            let all = ModelsInventory(models: grouped, loadedID: "", registry: nil)
+            let filtered = ModelsInventory(models: grouped, loadedID: "", registry: nil, query: "4-bit")
+            return all.groups.map(\.name) == ["Alpha", "Zulu"] &&
+                filtered.groups.flatMap({ $0.models.map(\.id) }) == ["beta", "zeta"]
         case "image-catalog-stale-family":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -1314,6 +1336,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_groups_and_variants_have_deterministic_natural_order(self):
         self.exercise("models-variant-order")
+
+    def test_saved_name_sort_matches_visible_rows_after_group_filtering(self):
+        self.exercise("models-visible-row-name-sort")
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")

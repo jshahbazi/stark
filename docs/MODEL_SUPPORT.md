@@ -65,8 +65,11 @@ a candidate. Offline and failed discovery have fixed messages and can be retried
 
 **On this Mac** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
-standalone entry with its stored name. Cards show matrix quantization, stored
-weight-file size and source revision when available. Matrix representation is
+standalone entry with its stored name. Compact rows place the saved name,
+quantization, stored weight-file size, repo link and removal control on one line.
+Multiple versions retain a shared model heading. Row help retains the family,
+image support and full source revision when known; removal confirmations also
+include image support and the short source version. Matrix representation is
 read from bounded native Safetensors header metadata; normal floating-point
 convolution/control exceptions do not change the quantized matrix label. Receipt
 identity is used only when its source-manifest schema/digest, current

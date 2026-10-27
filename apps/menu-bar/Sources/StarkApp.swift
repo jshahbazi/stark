@@ -813,8 +813,10 @@ struct ModelsInventory {
             }
             return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
         }.sorted { first, second in
-            sort.precedes(first.name, id: first.id, size: first.totalBytes,
-                          second.name, id: second.id, size: second.totalBytes)
+            let firstName = first.models.count == 1 ? first.models[0].name : first.name
+            let secondName = second.models.count == 1 ? second.models[0].name : second.name
+            return sort.precedes(firstName, id: first.id, size: first.totalBytes,
+                                 secondName, id: second.id, size: second.totalBytes)
         }
         let visibleIDs = Set(groups.flatMap { $0.models.map(\.id) })
         self.models = allModels.filter { visibleIDs.contains($0.id) }
@@ -1868,7 +1870,7 @@ struct ModelsView: View {
                     if engine.models.isEmpty { emptyState(tab) }
                     else if inventory.groups.isEmpty { noSearchResults("No matching models") }
                     else {
-                        LazyVStack(spacing: 12) {
+                        LazyVStack(spacing: 4) {
                             ForEach(inventory.groups) { group in modelGroup(group) }
                         }
                     }
@@ -1946,65 +1948,46 @@ struct ModelsView: View {
     }
 
     private func modelGroup(_ group: ModelsInventory.Group) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(group.name).font(.headline).fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 0) {
+            if group.models.count > 1 {
+                HStack(spacing: 8) {
+                    Text(group.name).font(.caption.weight(.semibold)).lineLimit(1)
                     if let family = group.family { Text(family).font(.caption).foregroundStyle(.secondary) }
-                }
-                Spacer(minLength: 0)
-                if group.models.count == 1, group.models[0].isRunning { runningBadge }
-                if group.models.count == 1 { removalButton(group.models[0]) }
+                    Spacer(minLength: 0)
+                }.padding(.vertical, 6)
             }
             ForEach(group.models) { model in
-                if model.name != group.name || !model.detailLabels.isEmpty || group.models.count > 1 || model.repositoryURL != nil {
-                    HStack(alignment: .top, spacing: 12) {
-                        VStack(alignment: .leading, spacing: 7) {
-                            if model.name != group.name || (group.models.count > 1 && model.detailLabels.isEmpty) {
-                                Text(model.name).font(.callout).fixedSize(horizontal: false, vertical: true)
-                            }
-                            ViewThatFits(in: .horizontal) {
-                                HStack(spacing: 6) {
-                                    ForEach(model.detailLabels, id: \.self) { variantDetail($0, model: model).fixedSize() }
-                                }
-                                VStack(alignment: .leading, spacing: 6) {
-                                    ForEach(model.detailLabels, id: \.self) { variantDetail($0, model: model) }
-                                }
-                            }
-                            if model.detailLabels.isEmpty { modelRepositoryLink(model) }
-                        }
-                        Spacer(minLength: 0)
-                        if group.models.count > 1, model.isRunning { runningBadge }
-                        if group.models.count > 1 { removalButton(model) }
-                    }
-                    if group.models.count > 1, model.id != group.models.last?.id { Divider() }
-                }
+                savedModelRow(model, family: group.family)
+                if model.id != group.models.last?.id { Divider() }
             }
         }
-        .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12).padding(.vertical, 4).frame(maxWidth: .infinity, alignment: .leading)
         .background(.quaternary.opacity(0.2), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(.quaternary, lineWidth: 1))
     }
 
-    private var runningBadge: some View {
-        Text("Running").font(.caption.weight(.medium))
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.accentColor.opacity(0.1), in: Capsule())
+    private func savedModelRow(_ model: ModelsInventory.Model, family: String?) -> some View {
+        HStack(spacing: 10) {
+            Text(model.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+            if model.isRunning { Text("Running").font(.caption).foregroundStyle(.secondary).fixedSize() }
+            Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
+                .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
+            Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
+                .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
+            modelRepositoryLink(model).frame(width: 28, alignment: .leading)
+            removalButton(model).frame(width: 22)
+        }.frame(minHeight: 32)
+            .help(savedModelHelp(model, family: family))
+            .accessibilityElement(children: .contain).accessibilityLabel(model.name)
     }
 
-    private func variantBadge(_ label: String, model: ModelsInventory.Model) -> some View {
-        Text(label).font(.caption).foregroundStyle(.secondary)
-            .padding(.horizontal, 8).padding(.vertical, 4)
-            .background(Color.primary.opacity(0.055), in: Capsule())
-            .help(label.hasPrefix("Version ") ? model.sourceRevision ?? label : label)
-    }
-
-    private func variantDetail(_ label: String, model: ModelsInventory.Model) -> some View {
-        HStack(spacing: 6) {
-            variantBadge(label, model: model)
-            let anchor = model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? model.detailLabels.last
-            if label == anchor { modelRepositoryLink(model) }
-        }
+    private func savedModelHelp(_ model: ModelsInventory.Model, family: String?) -> String {
+        var details = [model.name]
+        if let family = family { details.append(family) }
+        details.append(contentsOf: model.detailLabels.filter { !$0.hasPrefix("Version ") })
+        if let revision = model.sourceRevision { details.append("Version " + revision) }
+        return details.joined(separator: "\n")
     }
 
     @ViewBuilder

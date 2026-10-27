@@ -46,8 +46,10 @@ not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
-**On this Mac** groups saved variants by model and shows quantization, disk size
-and source version when available. Sort by model name A–Z or Z–A, or total disk
+**On this Mac** shows compact rows with the saved name, quantization, file size,
+repo link and removal button on one line. Multiple saved variants keep a shared
+model heading. Hover a row for its family, source version and image support when
+available. Sort by model name A–Z or Z–A, or total disk
 size ascending or descending. Saved versions with a recorded source repository
 also have a **link** beside the file size; local imports can use their conversion
 receipt to identify that source. Models without a known repository omit the link.
