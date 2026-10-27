@@ -20,6 +20,9 @@ records bit-exact complete decoder logits across three fixtures, including the
 1-megapixel boundary, and release-worker visual and lifecycle checks.
 The [activation replay](archive/runs/2026-10-26-qwen35-image-activation.md) verifies
 fresh conversion, ordinary catalog-gated API/CLI use, and final regressions.
+The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
+records production-controller checks, delivered-GUI image execution, recovery,
+cleanup, source/notice audits, and the remaining public-release boundary.
 
 ## Implemented conversion boundary
 

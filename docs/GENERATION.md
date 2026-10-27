@@ -35,11 +35,11 @@ With `--image`, the CLI reads one regular local file with a 4 MiB limit and acce
 
 ## Image qualification
 
-The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains one passed schema-2 record for BF16 `Qwen/Qwen3.5-0.8B`: worker SHA-256 `5fc92516c9f803df90316599a3930c1e2104cf320ae23361ff807e48bde08ec6`, Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. The record binds all five artifact-file hashes and the SHA-256 of the [execution evidence](archive/runs/2026-10-26-qwen35-image-execution.md).
+The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).
 
 The host enables images only when worker readiness describes the supported schema-2 transport and all five loaded file hashes, the worker executable hash, the reported Metal device properties and the current macOS version match that record. It snapshots the executable hash before launch and hashes the path again at readiness; both must match. Conversion metadata can identify a named qualified build, while serving verifies the executable being launched. Native readiness always reports `image_input.qualified: false` because the worker does not attest its own qualification; the host's external catalog supplies that decision.
 
-This record covers the source developer worker, CLI and Local API loop. Swift attachments and a signed packaged installation require their own qualification. Rebuilding, signing or otherwise changing the worker bytes requires a new passed record for the resulting executable hash. See the [qualification gate](../tools/converter/stark_convert/vision_runtime.py).
+The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers attachments, delivered-GUI image execution, recovery and cleanup. Public notarized distribution remains pending. Rebuilding, signing or otherwise changing the worker bytes requires a new passed record for the resulting executable hash. See the [qualification gate](../tools/converter/stark_convert/vision_runtime.py).
 
 ## Private JSON-lines protocol
 

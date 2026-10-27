@@ -118,10 +118,11 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 The `vision-language` artifact mode is tracked separately in the
 [native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
 It validates and retains the full vision tower, processor and template for one
-pinned checkpoint. Qualified developer worker, CLI, and Local API builds can use
+pinned checkpoint. Qualified worker, CLI, Local API and Swift app builds can use
 the resulting artifact for one PNG/JPEG image. Default Qwen3.5 conversions remain
-text-only. Swift attachments and signed packaged-installation qualification
-remain planned.
+text-only. The [local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
+covers Swift attachments and delivered-GUI execution. Public notarized release
+qualification remains pending.
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
 
