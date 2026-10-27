@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import __version__
 from .contracts import CapabilityResult, ConversionRequest, ConversionResult, PlannedConversion
+from .model_support import MODES, preflight_source, support_matrix
 from .profiles import GENERIC_PROFILE, generic_entry
 from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
 from .provenance import file_hash, toolchain_provenance
@@ -349,6 +350,8 @@ def convert(
             architecture=architecture,
             metadata_profile=metadata_profile,
             artifact_mode=artifact_mode,
+            dtype=dtype,
+            model_kind=model_kind,
             **({"progress": progress} if progress is not None else {}),
         )
     )
@@ -575,7 +578,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--backend", choices=("auto", "streaming"), default="auto")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
-    parser.add_argument("--model-kind", choices=("language", "classifier", "tts"), default="language")
+    parser.add_argument("--model-kind", choices=("language", "classifier", "tts"))
     parser.add_argument(
         "--artifact-mode",
         choices=("text", "vision-language"),
@@ -593,6 +596,15 @@ def main() -> int:
     parser.add_argument("--chunk-mib", type=int, default=8)
     parser.add_argument("--capabilities", action="store_true", help="Probe catalog coverage without reading a source")
     parser.add_argument(
+        "--list-families",
+        action="store_true",
+        help="List structural family coverage separately from checkpoint qualification",
+    )
+    parser.add_argument(
+        "--preflight", action="store_true", help="Check bounded model metadata without downloading weights"
+    )
+    parser.add_argument("--support-mode", choices=MODES, help="Check the requested app mode before weight downloads")
+    parser.add_argument(
         "--require-native-support",
         action="store_true",
         help="Require an exact stored native qualification for the output and its named Stark build",
@@ -605,6 +617,11 @@ def main() -> int:
     progress_sink = None
     progress = None
     try:
+        if sum((args.capabilities, args.list_families, args.preflight)) > 1:
+            raise ValueError("conflicting_inspection_actions")
+        if args.list_families:
+            print(json.dumps(support_matrix(), sort_keys=True))
+            return 0
         if args.progress_fd is not None:
             progress_sink = FDProgressSink(args.progress_fd)
             progress = ProgressReporter(progress_sink)
@@ -613,10 +630,32 @@ def main() -> int:
         repo = args.repo or (args.source if args.source and not Path(args.source).expanduser().is_dir() else None)
         if repo is not None:
             repo = huggingface_repository(repo)
+        if args.preflight:
+            if not args.source:
+                raise ValueError("missing_arguments")
+            logging.getLogger("huggingface_hub").setLevel(logging.CRITICAL)
+            os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+            result = preflight_source(
+                args.source,
+                repo=repo,
+                revision=args.revision,
+                mode=args.support_mode or args.artifact_mode,
+                dtype=args.dtype,
+                model_kind=args.model_kind,
+                architecture=args.architecture,
+                offline=args.offline,
+            )
+            print(json.dumps(result, sort_keys=True))
+            return 0
+        if args.support_mode is not None and (args.support_mode == "vision-language") != (
+            args.artifact_mode == "vision-language"
+        ):
+            raise ValueError("support_mode_artifact_mode_mismatch")
+        model_kind = args.model_kind or "language"
         request = ConversionRequest(
             repo,
             args.dtype,
-            args.model_kind,
+            model_kind,
             args.backend,
             args.chunk_mib * 1024 * 1024,
             args.require_native_support,
@@ -666,6 +705,9 @@ def main() -> int:
             architecture=args.architecture,
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,
+            support_mode=args.support_mode,
+            dtype=args.dtype,
+            model_kind=model_kind,
             **({"progress": progress} if progress is not None else {}),
         )
         if args.write_source_manifest:
@@ -678,7 +720,7 @@ def main() -> int:
             backend=args.backend,
             chunk_bytes=request.workspace_bytes,
             require_native_support=args.require_native_support,
-            model_kind=args.model_kind,
+            model_kind=model_kind,
             architecture=args.architecture,
             metadata_profile=args.metadata_profile,
             artifact_mode=args.artifact_mode,

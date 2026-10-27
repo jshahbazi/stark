@@ -9,6 +9,7 @@ test extension. Compiler/runtime output is suppressed; only counts are printed.
 from __future__ import annotations
 
 import io
+import json
 import platform
 import subprocess
 import sys
@@ -65,15 +66,209 @@ extension EngineController {
             }
             return complete()
         }
+        func supportReport(_ status: String = "conditional") -> [String: Any] {
+            ["schema_version": 1, "status": status, "mode": "text", "message": "Fixture support check",
+             "reasons": ["Fixture reason"], "warnings": ["Fixture warning"],
+             "pending_checks": ["Fixture runtime check"],
+             "modes": ["text": "conditional", "decision": "conditional", "vision-language": "unsupported"]]
+        }
+        func supportEvent(_ request: [String: Any], status: String = "conditional") -> [String: Any] {
+            ["event": "model_support", "request_id": request["support_request_id"]!, "report": supportReport(status)]
+        }
+        func familyRegistry() -> [String: Any] {
+            var modes: [String: Any] = [:]
+            for mode in ["text", "decision", "vision-language"] {
+                modes[mode] = ["status": mode == "vision-language" ? "unsupported" : "conditional",
+                               "message": "Fixture mode support", "caveats": ["Fixture caveat"]]
+            }
+            return ["schema_version": 1, "modes": ["text", "decision", "vision-language"],
+                    "families": [["family_id": "fixture", "name": "Fixture family", "architecture_aliases": ["FixtureModel"],
+                                  "config_classes": ["FixtureConfig"], "model_kind": "causal-language-model",
+                                  "conversion": ["status": "implemented", "containers": ["safetensors"],
+                                                 "source_formats": ["BF16"], "output_dtypes": ["BF16"]], "modes": modes]]]
+        }
         switch scenario {
         case "vision-install-opt-in":
             engine.install(source: "Qwen/Qwen3.5-0.8B", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
             return requested["command"] as? String == "install" &&
-                requested["artifact_mode"] as? String == "vision-language"
+                requested["artifact_mode"] as? String == "vision-language" &&
+                requested["support_mode"] as? String == "vision-language" &&
+                UUID(uuidString: requested["support_request_id"] as? String ?? "") != nil &&
+                engine.downloadProgress.state == "waiting"
         case "text-install-default":
             engine.install(source: "Qwen/Qwen3-0.6B", kind: "huggingface")
-            return command()["artifact_mode"] == nil
+            let requested = command()
+            return requested["artifact_mode"] == nil && requested["support_mode"] as? String == "decision"
+        case "text-install-purpose":
+            engine.mode = .chat
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            return requested["support_mode"] as? String == "text" &&
+                requested["artifact_mode"] == nil && engine.downloadProgress.state == "waiting"
+        case "support-registry":
+            engine.apply(["event": "model_families", "report": familyRegistry()])
+            guard let registry = engine.modelFamilies, registry.families.count == 1,
+                  registry.families[0].name == "Fixture family",
+                  registry.families[0].modes[.text]?.status.title == "Checks required",
+                  registry.families[0].modes[.visionLanguage]?.status.title == "Unavailable" else { return false }
+            var future = familyRegistry()
+            future["schema_version"] = 2
+            engine.apply(["event": "model_families", "report": future])
+            engine.requestModelFamilies()
+            return engine.modelFamilies?.families.first?.id == "fixture" && command()["command"] as? String == "support"
+        case "support-live-contract":
+            guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
+                  let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
+            engine.apply(["event": "model_families", "report": registry])
+            guard let families = engine.modelFamilies?.families, families.count == 13,
+                  let classifier = families.first(where: { $0.modelKind == "classifier" }),
+                  classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
+                  let qwen3 = families.first(where: { $0.id == "qwen3" }),
+                  qwen3.sourceFormatLabels == ["Safetensors floating-point", "MLX 4-bit (affine)", "MLX 8-bit (affine)"],
+                  qwen3.outputDtypeLabels == ["BF16", "F16", "F32"],
+                  families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
+            engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
+            let requested = command()
+            engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
+            return engine.installSupportReport?.status == .inconclusive &&
+                engine.installSupportReport?.modes.values.allSatisfy({ $0 == .inconclusive }) == true
+        case "support-registry-invalid":
+            var raw = familyRegistry()
+            raw["schema_version"] = true
+            guard ModelFamilyRegistry(raw) == nil else { return false }
+            raw = familyRegistry()
+            raw["modes"] = ["text", "decision", "vision-language", "unrecognized"]
+            guard ModelFamilyRegistry(raw) == nil else { return false }
+            raw = familyRegistry()
+            var families = raw["families"] as! [[String: Any]]
+            var modes = families[0]["modes"] as! [String: [String: Any]]
+            modes["text"]!["status"] = "qualified"
+            families[0]["modes"] = modes
+            raw["families"] = families
+            engine.apply(["event": "model_families", "report": raw])
+            return engine.modelFamilies == nil
+        case "image-support-warning-keeps-capability":
+            engine.imageVerification = "locally_tested"
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            var report = supportReport("unsupported")
+            report["images"] = true
+            report["image_verification"] = "reference_verified"
+            engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
+            guard engine.state == "installing" && engine.loadedID == "fixture-model" &&
+                engine.selectedID == "fixture-model" && engine.loadedMode == .chat && engine.supportsImages &&
+                engine.imageVerification == "locally_tested" && engine.installSupportReport?.status == .unsupported &&
+                engine.message == "Fixture support check" && engine.downloadProgress.state == "waiting" else { return false }
+            engine.apply(["event": "error", "message": "Fixture unsupported model"])
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            return engine.modelReady && engine.loadedID == "fixture-model" && engine.supportsImages &&
+                engine.imageVerification == "locally_tested" && engine.installSupportReport?.status == .unsupported
+        case "support-cannot-enable-images":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            var report = supportReport()
+            report["images"] = true
+            report["image_verification"] = "reference_verified"
+            engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
+            return !engine.supportsImages && engine.imageVerification == "unverified" &&
+                engine.loadedID == "fixture-model" && engine.installSupportReport?.status == .conditional
+        case "support-unknown-schema-status":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            for (key, value) in [("schema_version", 2 as Any), ("schema_version", true as Any), ("status", "qualified" as Any)] {
+                var report = supportReport()
+                report[key] = value
+                engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": report])
+                guard engine.installSupportReport == nil else { return false }
+            }
+            var inconclusive = supportReport("inconclusive")
+            inconclusive["modes"] = ["text": "inconclusive", "decision": "inconclusive", "vision-language": "inconclusive"]
+            engine.apply(["event": "model_support", "request_id": requested["support_request_id"]!, "report": inconclusive])
+            return engine.installSupportReport?.status == .inconclusive &&
+                engine.installSupportReport?.modes[.visionLanguage] == .inconclusive &&
+                engine.installSupportReport?.details == ["Fixture warning", "Fixture runtime check"]
+        case "support-stale-source":
+            engine.install(source: "fixture/A", kind: "huggingface")
+            let first = command()
+            engine.apply(supportEvent(first))
+            engine.state = "ready"
+            engine.resetInstallProgress(kind: "local")
+            guard engine.installSupportReport == nil else { return false }
+            engine.install(source: "fixture/B", kind: "local")
+            let second = command()
+            engine.apply(supportEvent(first, status: "unsupported"))
+            guard engine.installSupportReport == nil,
+                  first["support_request_id"] as? String != second["support_request_id"] as? String else { return false }
+            engine.apply(supportEvent(second))
+            return engine.installSupportReport?.status == .conditional && engine.downloadProgress.state == "skipped"
+        case "support-stale-mode":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let first = command()
+            engine.apply(supportEvent(first))
+            engine.state = "ready"
+            engine.loadedID = ""
+            engine.changeMode(.chat)
+            guard engine.installSupportReport == nil else { return false }
+            engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
+            let second = command()
+            engine.apply(supportEvent(first, status: "unsupported"))
+            guard engine.installSupportReport == nil, first["support_mode"] as? String == "decision",
+                  second["support_mode"] as? String == "vision-language" else { return false }
+            engine.apply(supportEvent(second))
+            return engine.installSupportReport?.status == .conditional
+        case "support-cancel":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            engine.apply(supportEvent(requested))
+            engine.stop()
+            guard command()["command"] as? String == "stop", engine.installSupportReport == nil else { return false }
+            engine.apply(supportEvent(requested))
+            engine.state = "installing"
+            engine.apply(supportEvent(requested))
+            return engine.installSupportReport == nil && engine.downloadProgress.state == "cancelled"
+        case "support-completion-fence":
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            engine.apply(supportEvent(requested))
+            engine.apply(["event": "error", "message": "Fixture install failure"])
+            engine.apply(supportEvent(requested, status: "unsupported"))
+            guard engine.installSupportReport?.status == .conditional else { return false }
+            engine.state = "ready"
+            engine.resetInstallProgress(kind: "huggingface")
+            return engine.installSupportReport == nil
+        case "support-shutdown-fence":
+            engine.apply(["event": "model_families", "report": familyRegistry()])
+            engine.install(source: "fixture/source", kind: "huggingface")
+            let requested = command()
+            engine.apply(supportEvent(requested))
+            engine.shutdown()
+            guard command()["command"] as? String == "quit", engine.modelFamilies == nil,
+                  engine.installSupportReport == nil else { return false }
+            engine.apply(supportEvent(requested))
+            return engine.installSupportReport == nil
+        case "support-display-bounds":
+            var report = supportReport()
+            report["message"] = String(repeating: "a", count: 2_001)
+            guard ModelSupportReport(report) == nil else { return false }
+            report = supportReport()
+            report["warnings"] = Array(repeating: "Fixture warning", count: 33)
+            guard ModelSupportReport(report) == nil else { return false }
+            report = supportReport()
+            report["message"] = "Fixture\u{1b}control"
+            guard ModelSupportReport(report) == nil else { return false }
+            report = supportReport()
+            report["pending_checks"] = ["tensor_headers", "tensor_operations", "native_loading", "local_execution", "single_token_labels"]
+            return ModelSupportReport(report)?.details == ["Fixture warning", "Tensor layout and operations must pass validation.",
+                "The checkpoint must run successfully in the native engine.", "Decision answer labels must each map to a unique token."]
+        case "support-alternative-modes":
+            var report = supportReport("unsupported")
+            report["mode"] = "vision-language"
+            guard let parsed = ModelSupportReport(report), parsed.alternativeModes == [.text, .decision] else { return false }
+            report["mode"] = "text"
+            guard ModelSupportReport(report)?.alternativeModes == [.decision] else { return false }
+            report["mode"] = "unrecognized"
+            return ModelSupportReport(report) == nil
         case "image-capability":
             guard engine.canAttachImage else { return false }
             engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model", "images": true])
@@ -453,6 +648,58 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_existing_install_keeps_default_mode(self):
         self.exercise("text-install-default")
+
+    def test_chat_install_forwards_text_purpose_before_download(self):
+        self.exercise("text-install-purpose")
+
+    def test_family_registry_parses_mode_labels_and_ignores_future_schema(self):
+        self.exercise("support-registry")
+
+    def test_production_registry_and_inconclusive_report_match_swift_contract(self):
+        from stark_convert.model_support import preflight_model, support_matrix
+
+        self.exercise(
+            "support-live-contract",
+            json.dumps(
+                {
+                    "registry": support_matrix(),
+                    "report": preflight_model(None, mode="vision-language"),
+                }
+            ),
+        )
+
+    def test_family_registry_rejects_unknown_modes_and_self_qualified_status(self):
+        self.exercise("support-registry-invalid")
+
+    def test_unsupported_preflight_preserves_loaded_model_and_image_evidence(self):
+        self.exercise("image-support-warning-keeps-capability")
+
+    def test_support_metadata_cannot_enable_images(self):
+        self.exercise("support-cannot-enable-images")
+
+    def test_support_report_ignores_future_schema_and_unknown_status(self):
+        self.exercise("support-unknown-schema-status")
+
+    def test_late_source_report_cannot_replace_new_install_report(self):
+        self.exercise("support-stale-source")
+
+    def test_mode_change_invalidates_previous_support_report(self):
+        self.exercise("support-stale-mode")
+
+    def test_cancelled_support_report_cannot_reappear(self):
+        self.exercise("support-cancel")
+
+    def test_failed_install_retains_current_report_and_fences_late_events(self):
+        self.exercise("support-completion-fence")
+
+    def test_shutdown_clears_registry_and_pending_support_events(self):
+        self.exercise("support-shutdown-fence")
+
+    def test_support_display_metadata_is_bounded(self):
+        self.exercise("support-display-bounds")
+
+    def test_unsupported_image_report_shows_other_conditional_modes(self):
+        self.exercise("support-alternative-modes")
 
     def test_image_byte_and_signature_bounds(self):
         self.exercise("image-bounds")

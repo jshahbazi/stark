@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import select
 import shutil
 import signal
@@ -34,12 +35,14 @@ from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
+from .model_support import support_matrix
 from .registry import get_model
 from .sources import huggingface_repository
 from .vision_runtime import supported_image_family
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
+MAX_SUPPORT_BYTES = 65536
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
@@ -155,11 +158,12 @@ class Desktop:
     """Backend for the menu bar app: model library, worker lifecycle and the loopback API.
 
     The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
-    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``) and receives
+    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``) and receives
     one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
     ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
-    ``error``). One worker is loaded at a time, under ``self.lock``. ``self.epoch``
-    increases whenever the model is stopped or replaced; commands, queued API
+    ``error``, ``model_families``, ``model_support``). One worker is loaded at a
+    time, under ``self.lock``. ``self.epoch`` increases whenever the model is
+    stopped or replaced; commands, queued API
     requests and in-flight replies carry the epoch they started under and are
     discarded when it no longer matches, so a late reply from a previous worker
     can never reach the app or a client. App chat turns and API completions share
@@ -264,6 +268,9 @@ class Desktop:
             models=[{**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models],
         )
 
+    def families(self):
+        self.emit("model_families", report=support_matrix())
+
     def persist(self):
         temporary = self.data_dir / (".models-" + uuid.uuid4().hex)
         try:
@@ -308,7 +315,7 @@ class Desktop:
                 return
             self.install_epoch = epoch
             self.install_progress = {}
-            self.progress(epoch, "download", "running" if kind == "huggingface" else "skipped")
+            self.progress(epoch, "download", "waiting" if kind == "huggingface" else "skipped")
             self.progress(epoch, "conversion", "waiting")
 
     def finish_install_progress(self, epoch, skipped=False):
@@ -478,10 +485,125 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
-    def install(self, epoch, kind, source, artifact_mode=None):
+    def run_support_check(self, command, environment, epoch):
+        """Read one bounded metadata-only report from an isolated cancellable child."""
+        process = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                )
+                self.converter = process
+            pending = bytearray()
+            deadline = time.monotonic() + min(self.timeout, 120)
+            while True:
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DesktopError("The model support check timed out. Check Hugging Face access and retry.")
+                if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > MAX_SUPPORT_BYTES:
+                    raise DesktopError("Cannot read the model support report. Update Stark and retry.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+                raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.")
+            report = json.loads(pending)
+            if (
+                not isinstance(report, dict)
+                or type(report.get("schema_version")) is not int
+                or report["schema_version"] != 1
+                or report.get("status") not in {"conditional", "unsupported", "inconclusive"}
+                or not isinstance(report.get("message"), str)
+                or not 0 < len(report["message"]) <= 2000
+                or not isinstance(report.get("source"), dict)
+            ):
+                raise ValueError
+            return report
+        except DesktopError:
+            raise
+        except (OSError, ValueError, UnicodeError, TypeError, subprocess.SubprocessError):
+            raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.") from None
+        finally:
+            if process is not None:
+                terminate(process)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process.stdout is not None:
+                    process.stdout.close()
+                with self.lock:
+                    if self.converter is process:
+                        self.converter = None
+
+    def check_install_support(self, epoch, kind, source, selected_mode, support_mode, request_id):
+        command = [
+            sys.executable,
+            "-I",
+            "-B",
+            "-m",
+            "stark_convert.cli",
+            source,
+            "--preflight",
+            "--support-mode",
+            support_mode,
+            "--artifact-mode",
+            selected_mode,
+        ]
+        if kind == "local" or get_model(source) is None:
+            command.extend(["--metadata-profile", "hf-generic"])
+        if kind == "local":
+            command.append("--offline")
+        environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+        self.status("installing", "Checking model family before downloading weights…", epoch)
+        report = self.run_support_check(command, environment, epoch)
+        with self.lock:
+            if epoch != self.epoch:
+                return None
+            if report is None:
+                raise DesktopError("Cannot check this model's family. Retry the support check.")
+            if report.get("mode") != support_mode:
+                raise DesktopError("The model support report does not match this installation. Retry.")
+            identity = report["source"]
+            revision = identity.get("revision")
+            if kind == "huggingface" and (
+                identity.get("repo") != source
+                or not isinstance(revision, str)
+                or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+            ):
+                if report["status"] == "conditional":
+                    raise DesktopError("Cannot pin this model's source revision. Retry the support check.")
+            self.emit("model_support", epoch, request_id=request_id, report=report)
+            if report["status"] != "conditional":
+                raise DesktopError(report["message"])
+            return revision
+
+    def install(self, epoch, kind, source, artifact_mode=None, support_mode=None, support_request_id=None):
         if artifact_mode not in (None, "text", "vision-language"):
             raise DesktopError("Choose text or vision-language conversion.")
         selected_mode = artifact_mode or "text"
+        if support_mode not in (None, "text", "decision", "vision-language"):
+            raise DesktopError("Choose text, decision or image support.")
+        if support_request_id is not None and (
+            not isinstance(support_request_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", support_request_id) is None
+        ):
+            raise DesktopError("Invalid model support request.")
+        if artifact_mode == "vision-language" and support_mode not in (None, "vision-language"):
+            raise DesktopError("Image artifacts support Chat mode only. Choose image input or a text artifact.")
         if kind == "local":
             path = Path(source).expanduser().resolve()
             if not path.is_dir():
@@ -509,6 +631,15 @@ class Desktop:
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
+        purpose = support_mode or selected_mode
+        if converted and selected_mode == "vision-language" and purpose == "text":
+            purpose = "vision-language"  # Ordinary Chat can import an existing image artifact.
+        if selected_mode == "vision-language" and purpose != "vision-language":
+            raise DesktopError(
+                "This vision artifact supports Chat mode only. Choose Chat or a text artifact for decisions."
+            )
+        if selected_mode != "vision-language" and purpose == "vision-language":
+            raise DesktopError("Enable image input when converting this checkpoint.")
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -537,8 +668,15 @@ class Desktop:
         identifier = uuid.uuid4().hex
         staging = self.model_dir / (".install-" + identifier)
         managed = None
+        source_revision = None
         try:
             if not converted:
+                source_revision = self.check_install_support(
+                    epoch, kind, str(path) if kind == "local" else source, selected_mode, purpose, support_request_id
+                )
+                with self.lock:
+                    if epoch != self.epoch:
+                        return
                 staging.mkdir(mode=0o700)
                 output = staging / "model"
                 command = [
@@ -550,6 +688,8 @@ class Desktop:
                     str(path) if kind == "local" else source,
                     "--output",
                     str(output),
+                    "--support-mode",
+                    purpose,
                 ]
                 if kind == "local" or get_model(source) is None:
                     command.extend(["--metadata-profile", "hf-generic"])
@@ -557,6 +697,8 @@ class Desktop:
                     command.append("--offline")
                 if selected_mode == "vision-language":
                     command.extend(["--artifact-mode", "vision-language"])
+                if source_revision is not None:
+                    command.extend(["--revision", source_revision])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
                 result = self.run_converter(command, environment, epoch)
                 with self.lock:
@@ -1139,6 +1281,8 @@ class Desktop:
         command = payload["command"]
         if command == "list":
             self.library()
+        elif command == "support":
+            self.families()
         elif command in ("stop", "quit"):
             self.stop()
             return command != "quit"
@@ -1152,7 +1296,18 @@ class Desktop:
             artifact_mode = payload.get("artifact_mode")
             if artifact_mode not in (None, "text", "vision-language"):
                 raise DesktopError("Choose text or vision-language conversion.")
-            if artifact_mode is None:
+            if "support_mode" in payload or "support_request_id" in payload:
+                self.start(
+                    self.install,
+                    "installing",
+                    "Checking model support…",
+                    payload["kind"],
+                    payload["source"].strip(),
+                    artifact_mode,
+                    payload.get("support_mode"),
+                    payload.get("support_request_id"),
+                )
+            elif artifact_mode is None:
                 self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
             else:
                 self.start(
@@ -1196,6 +1351,7 @@ class Desktop:
 
 def serve(desktop):
     desktop.library()
+    desktop.families()
     desktop.status("idle", "Choose a model to run")
     desktop.start_api()
     pending = b""

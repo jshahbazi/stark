@@ -145,6 +145,10 @@ it cannot turn a new family artifact into reference-qualified output.
 
 ## Automatic installation and startup checks
 
+The shared [family/mode preflight](MODEL_SUPPORT.md) checks source metadata before
+weight download. Its conditional result does not enable images or replace the
+following native and execution checks.
+
 For a schema-3 vision installation, the desktop bridge validates the family
 version, stops the previously loaded model, and starts a temporary worker before
 publishing the model in the library. The UI reports that image support is being

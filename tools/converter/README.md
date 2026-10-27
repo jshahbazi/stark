@@ -44,6 +44,33 @@ The output directory contains `config.json`, `tokenizer.json`, `model.safetensor
 
 A successful conversion validates the complete supported layout. It does not run the model. Text conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record. Vision conversion reports the applicable unverified layout/family status or a matching exact record (see [qualification](#catalog-coverage-and-qualification)).
 
+## Check family and mode coverage
+
+The [shared support registry](../../docs/MODEL_SUPPORT.md) describes implemented
+conversion paths, format constraints and Text, Decision and Image eligibility.
+Inspect it without downloading a checkpoint:
+
+```sh
+uv run --project tools/converter --locked stark-convert --list-families
+```
+
+Check source metadata before downloading weights:
+
+```sh
+uv run --project tools/converter --locked stark-convert owner/model \
+  --preflight --support-mode text
+```
+
+Preflight returns JSON with `conditional`, `unsupported` or `inconclusive` status;
+all three are report outcomes with exit status 0. It creates no converted model.
+A conditional result leaves complete tensor and native checks pending. An
+uncatalogued source can qualify for an implemented family path; adapter presence
+alone does not establish complete-model support, execution or decision
+calibration. `--support-mode` can also require intended-mode eligibility during
+actual conversion before weights are requested. The app uses the same path and
+pins the checked primary source revision. External catalog metadata is resolved
+and checked again during conversion.
+
 ## Command reference
 
 ```text
@@ -66,6 +93,9 @@ stark-convert [SOURCE] [options]
 | `--source-manifest PATH` | | Replay a previously written manifest |
 | `--write-source-manifest PATH` | | Write a private manifest describing every selected source file |
 | `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
+| `--list-families` | | Print the shared family/mode/format matrix without a source or download |
+| `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
+| `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |
 | `--capabilities` | | Report catalog coverage for `SOURCE` without reading or downloading it |
 | `--backend` | `auto`, `streaming` | Accepted for compatibility; both select the same implementation |
 | `--version` | | Print the converter version |

@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from test_desktop import conditional_support_report
 from test_image_checks import family_contract
 
 from stark_convert.chat import ChatError, Worker
@@ -170,6 +171,7 @@ def test_failed_converted_family_install_cleans_only_owned_output(host, tmp_path
         return 0
 
     desktop.run_converter = convert
+    desktop.run_support_check = conditional_support_report
     with pytest.raises(DesktopError, match="local image checks"):
         desktop.install(desktop.epoch, "local", str(source), "vision-language")
     assert instances[0].closed and desktop.models == []
@@ -277,14 +279,24 @@ def test_local_install_never_uses_unbounded_config_reopens(host, tmp_path, monke
         return original(path, *_args, **_kwargs)
 
     monkeypatch.setattr(Path, "read_text", read_text)
-    desktop.run_converter = lambda *_args: 1
+    desktop.run_converter = lambda *_args: pytest.fail("unreadable config reached weight conversion")
     if kind == "valid":
         desktop.install(desktop.epoch, "local", str(source))
         assert len(desktop.models) == 1
     else:
-        with pytest.raises(DesktopError, match="installation failed"):
+        expected = (
+            "Model metadata exceeds the supported inspection size limit."
+            if kind == "oversized"
+            else "Model metadata could not be read. Check the source, access and network, then try again."
+        )
+        with pytest.raises(DesktopError) as error:
             desktop.install(desktop.epoch, "local", str(source))
+        assert str(error.value) == expected
         assert not desktop.models and not desktop.registry.exists()
+        assert list(desktop.model_dir.iterdir()) == []
+        report = next(event["report"] for event in events(desktop) if event["event"] == "model_support")
+        reason = "metadata_size_limit" if kind == "oversized" else "metadata_access_failed"
+        assert report["status"] == "inconclusive" and report["reasons"] == [reason]
 
 
 @pytest.mark.parametrize("unexpected_exit", [False, True])

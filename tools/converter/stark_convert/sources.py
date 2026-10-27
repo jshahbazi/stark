@@ -19,6 +19,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .model_support import (
+    check_hub_metadata_size,
+    check_vision_processing_metadata,
+    read_metadata_bytes,
+    read_support_config,
+    require_metadata_support,
+)
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
 from .progress import DownloadProgress, ProgressCallback, ProgressReporter, reporter
 from .registry import architecture_for_config, get_model
@@ -512,6 +519,9 @@ def resolve_source(
     metadata_profile: str | None = None,
     architecture: str | None = None,
     artifact_mode: str = "text",
+    support_mode: str | None = None,
+    dtype: str = "bfloat16",
+    model_kind: str | None = None,
     progress: ProgressCallback | ProgressReporter | None = None,
 ) -> SourceSnapshot:
     """Resolve all repositories before any file downloads or conversion starts."""
@@ -520,6 +530,23 @@ def resolve_source(
         repo = huggingface_repository(repo)
     if artifact_mode not in {"text", "vision-language"}:
         raise ValueError("invalid_artifact_mode")
+    if support_mode is not None and (support_mode == "vision-language") != (artifact_mode == "vision-language"):
+        raise ValueError("support_mode_artifact_mode_mismatch")
+
+    def admit(config, *, entry=None, source_repo=None):
+        primary_repo = source_repo if source_repo is not None else repo
+        mode = support_mode or (
+            "vision-language" if artifact_mode == "vision-language" and primary_repo != VISION_REPO else None
+        )
+        return require_metadata_support(
+            config,
+            mode=mode,
+            dtype=dtype,
+            model_kind=model_kind,
+            expected_architecture=architecture or (entry.get("adapter") if entry else None),
+            container=entry["container"] if entry else ".safetensors",
+        )
+
     if source_manifest is not None:
         snapshot = _replay(
             Path(source_manifest),
@@ -528,6 +555,12 @@ def resolve_source(
             metadata_profile=metadata_profile,
             architecture=architecture,
             artifact_mode=artifact_mode,
+        )
+        selected_config = snapshot.config_path
+        admit(
+            read_support_config(selected_config, root=selected_config.parent),
+            entry=get_model(snapshot.repo) if snapshot.conversion_profile is None else None,
+            source_repo=snapshot.repo,
         )
         if progress is not None:
             progress.emit("download", "skipped", force=True)
@@ -598,11 +631,34 @@ def resolve_source(
             )
             if not isinstance(resolved, str) or not _REVISION.fullmatch(resolved):
                 raise ConversionError("Repository revision is not immutable")
+            if repository == repo and revision is not None and _REVISION.fullmatch(revision) and resolved != revision:
+                raise ConversionError("Repository resolved to a different immutable revision")
             if artifact_mode == "vision-language" and repo == VISION_REPO and resolved != VISION_REVISION:
                 raise ConversionError("Vision source resolved to a different checkpoint")
             revisions[repository] = resolved
     else:
         revisions = {repo: revision}
+    config_rule = next(rule for rule in rules if rule["role"] == "model_config")
+    if local and config_rule["repo"] == repo:
+        metadata_path = path.resolve() / _relative(config_rule["filename"])
+        metadata_root = path.resolve()
+    else:
+        repository, filename = config_rule["repo"], config_rule["filename"]
+        check_hub_metadata_size(hub, repository, filename, revisions[repository], 1024 * 1024)
+        if downloads is not None:
+            metadata_path = downloads.download(hub, repository, filename, revisions[repository])
+        else:
+            metadata_path = Path(
+                hub.hf_hub_download(
+                    repo_id=repository, filename=filename, revision=revisions[repository], local_files_only=False
+                )
+            )
+        metadata_root = metadata_path
+        for _ in _relative(filename).parts:
+            metadata_root = metadata_root.parent
+    # Reject metadata-proven exclusions before selecting or opening any primary
+    # weight payload, including catalog profiles with external model configs.
+    admit(read_support_config(metadata_path, root=metadata_root), entry=entry)
     selected = None
     if local:
         root = path.resolve()
@@ -650,6 +706,14 @@ def resolve_source(
         if artifact_mode == "vision-language" and detected != "qwen3_5":
             raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
+        if artifact_mode == "vision-language":
+
+            def inspect_sidecar(filename, maximum):
+                if not local:
+                    check_hub_metadata_size(hub, repo, filename, revisions[repo], maximum)
+                return read_metadata_bytes(loader(filename), root=root, maximum=maximum)
+
+            check_vision_processing_metadata(names, inspect_sidecar)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     descriptors = list(rules)

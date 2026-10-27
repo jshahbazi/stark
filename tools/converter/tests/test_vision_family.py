@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import struct
 from dataclasses import replace
 from types import SimpleNamespace
@@ -376,7 +377,11 @@ def test_family_rejects_invalid_training_metadata(family_source, initializer):
     value = json.loads(path.read_text())
     value["vision_config"]["initializer_range"] = initializer
     path.write_text(json.dumps(value))
-    with pytest.raises(UnsupportedConversion, match="tower operations"):
+    nonfinite = isinstance(initializer, float) and not math.isfinite(initializer)
+    with pytest.raises(
+        ConversionError if nonfinite else UnsupportedConversion,
+        match="metadata is invalid" if nonfinite else "tower operations",
+    ):
         validate_family_source(snapshot(family_source), "bfloat16")
 
 
@@ -516,6 +521,12 @@ def test_remote_family_pins_all_sidecars_to_the_actual_source_revision(family_so
             calls.append(filename)
             return str(family_source / filename)
 
+        def hf_hub_url(self, *, repo_id, filename, revision):
+            return filename
+
+        def get_hf_file_metadata(self, url):
+            return SimpleNamespace(size=(family_source / url).stat().st_size)
+
     source = resolve_source(FINE_TUNE, artifact_mode="vision-language", hub=Hub())
     assert source.revision == REVISION and source.conversion_profile["metadata_profile"] == GENERIC_PROFILE
     assert {record["repo"] for record in source.manifest["files"]} == {FINE_TUNE}
@@ -556,6 +567,12 @@ def test_remote_family_resolves_huggingface_snapshot_symlinks_automatically(fami
 
         def hf_hub_download(self, *, repo_id, filename, revision, local_files_only):
             return str(cached_source / filename)
+
+        def hf_hub_url(self, *, repo_id, filename, revision):
+            return filename
+
+        def get_hf_file_metadata(self, url):
+            return SimpleNamespace(size=(cached_source / url).stat().st_size)
 
     source = resolve_source(FINE_TUNE, revision=REVISION, artifact_mode="vision-language", hub=Hub())
     assert source.conversion_profile == {"architecture": "qwen3_5", "metadata_profile": GENERIC_PROFILE}

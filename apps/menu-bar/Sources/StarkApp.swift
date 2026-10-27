@@ -206,6 +206,193 @@ struct InstallProgress {
     }
 }
 
+enum ModelSupportMode: String, CaseIterable {
+    case text, decision
+    case visionLanguage = "vision-language"
+
+    var title: String {
+        switch self {
+        case .text: return "Text"
+        case .decision: return "Decision"
+        case .visionLanguage: return "Image"
+        }
+    }
+}
+
+enum ModelModeSupport: String {
+    case conditional, unsupported
+
+    var title: String { self == .conditional ? "Checks required" : "Unavailable" }
+}
+
+private enum SupportMetadata {
+    static func schemaOne(_ value: [String: Any]) -> Bool {
+        guard let number = value["schema_version"] as? NSNumber else { return false }
+        return CFGetTypeID(number) != CFBooleanGetTypeID() && number.doubleValue == 1
+    }
+
+    static func string(_ value: Any?, maximum: Int = 2_000) -> String? {
+        guard let value = value as? String, !value.isEmpty, value.utf8.count <= maximum,
+              !value.unicodeScalars.contains(where: { $0.value < 32 && $0 != "\n" && $0 != "\t" }) else { return nil }
+        return value
+    }
+
+    static func strings(_ value: Any?, maximumCount: Int = 32) -> [String]? {
+        guard let values = value as? [String], values.count <= maximumCount,
+              values.allSatisfy({ string($0) != nil }) else { return nil }
+        return values
+    }
+
+    static func displayCheck(_ value: String) -> String {
+        switch value {
+        case "tensor_and_operation_validation", "tensor_headers", "tensor_operations":
+            return "Tensor layout and operations must pass validation."
+        case "checkpoint_specific_execution", "native_loading", "local_execution":
+            return "The checkpoint must run successfully in the native engine."
+        case "direct_answer_template", "decision_template":
+            return "Decision requires a direct-answer chat template."
+        case "unique_single_token_labels", "single_token_labels":
+            return "Decision answer labels must each map to a unique token."
+        case "calibration_not_inherited", "checkpoint_calibration":
+            return "Decision scores need calibration for this checkpoint and workload."
+        case "qwen35_dense_bf16_geometry":
+            return "Images require the supported dense BF16 geometry."
+        case "reviewed_processing_programs":
+            return "Images require a reviewed tokenizer, processor and chat template."
+        case "local_image_checks":
+            return "Images must pass checks on this Mac."
+        case "tokenizer_and_template":
+            return "The tokenizer and chat template must pass validation."
+        default:
+            if value.contains("_") && value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.contains($0) || $0 == "_" }) {
+                return value.replacingOccurrences(of: "_", with: " ").capitalized + "."
+            }
+            return value
+        }
+    }
+
+    static func modes(_ value: Any?) -> [ModelSupportMode: ModelSupportReport.Status]? {
+        guard let values = value as? [String: String], Set(values.keys) == Set(ModelSupportMode.allCases.map(\.rawValue)) else { return nil }
+        var modes: [ModelSupportMode: ModelSupportReport.Status] = [:]
+        for mode in ModelSupportMode.allCases {
+            guard let status = values[mode.rawValue].flatMap(ModelSupportReport.Status.init(rawValue:)) else { return nil }
+            modes[mode] = status
+        }
+        return modes
+    }
+}
+
+struct ModelFamilyMode {
+    let status: ModelModeSupport
+    let message: String
+    let caveats: [String]
+}
+
+struct ModelFamily: Identifiable {
+    let id: String
+    let name: String
+    let architectureAliases: [String]
+    let configClasses: [String]
+    let modelKind: String
+    let containers: [String]
+    let sourceFormats: [String]
+    let outputDtypes: [String]
+    let modes: [ModelSupportMode: ModelFamilyMode]
+
+    var sourceFormatLabels: [String] {
+        sourceFormats.map {
+            switch $0 {
+            case "safetensors-float": return "Safetensors floating-point"
+            case "mlx-affine-4bit": return "MLX 4-bit (affine)"
+            case "mlx-affine-8bit": return "MLX 8-bit (affine)"
+            default: return $0
+            }
+        }
+    }
+
+    var outputDtypeLabels: [String] {
+        outputDtypes.map {
+            switch $0 {
+            case "bfloat16": return "BF16"
+            case "float16": return "F16"
+            case "float32": return "F32"
+            default: return $0
+            }
+        }
+    }
+
+    init?(_ value: [String: Any]) {
+        guard let id = SupportMetadata.string(value["family_id"], maximum: 128),
+              let name = SupportMetadata.string(value["name"], maximum: 256),
+              let aliases = SupportMetadata.strings(value["architecture_aliases"]),
+              let classes = SupportMetadata.strings(value["config_classes"]),
+              let kind = SupportMetadata.string(value["model_kind"], maximum: 128),
+              let conversion = value["conversion"] as? [String: Any], conversion["status"] as? String == "implemented",
+              let containers = SupportMetadata.strings(conversion["containers"]),
+              let formats = SupportMetadata.strings(conversion["source_formats"]),
+              let dtypes = SupportMetadata.strings(conversion["output_dtypes"]),
+              let rawModes = value["modes"] as? [String: [String: Any]],
+              Set(rawModes.keys) == Set(ModelSupportMode.allCases.map(\.rawValue)) else { return nil }
+        var modes: [ModelSupportMode: ModelFamilyMode] = [:]
+        for mode in ModelSupportMode.allCases {
+            guard let raw = rawModes[mode.rawValue],
+                  let status = (raw["status"] as? String).flatMap(ModelModeSupport.init(rawValue:)),
+                  let message = SupportMetadata.string(raw["message"]),
+                  let caveats = SupportMetadata.strings(raw["caveats"]) else { return nil }
+            modes[mode] = ModelFamilyMode(status: status, message: message, caveats: caveats)
+        }
+        self.id = id; self.name = name; architectureAliases = aliases; configClasses = classes; modelKind = kind
+        self.containers = containers; sourceFormats = formats; outputDtypes = dtypes; self.modes = modes
+    }
+}
+
+struct ModelFamilyRegistry {
+    let families: [ModelFamily]
+
+    init?(_ value: [String: Any]) {
+        guard SupportMetadata.schemaOne(value),
+              let modes = value["modes"] as? [String], Set(modes) == Set(ModelSupportMode.allCases.map(\.rawValue)),
+              modes.count == ModelSupportMode.allCases.count,
+              let raw = value["families"] as? [[String: Any]], raw.count <= 128 else { return nil }
+        let families = raw.compactMap(ModelFamily.init)
+        guard families.count == raw.count, Set(families.map(\.id)).count == families.count else { return nil }
+        self.families = families
+    }
+}
+
+struct ModelSupportReport {
+    enum Status: String { case conditional, unsupported, inconclusive }
+    let status: Status
+    let mode: ModelSupportMode
+    let message: String
+    let reasons: [String]
+    let warnings: [String]
+    let pendingChecks: [String]
+    let modes: [ModelSupportMode: Status]
+
+    init?(_ value: [String: Any]) {
+        guard SupportMetadata.schemaOne(value),
+              let status = (value["status"] as? String).flatMap(Status.init(rawValue:)),
+              let mode = (value["mode"] as? String).flatMap(ModelSupportMode.init(rawValue:)),
+              let message = SupportMetadata.string(value["message"]),
+              let reasons = SupportMetadata.strings(value["reasons"]),
+              let warnings = SupportMetadata.strings(value["warnings"]),
+              let checks = SupportMetadata.strings(value["pending_checks"]),
+              let modes = SupportMetadata.modes(value["modes"]) else { return nil }
+        self.status = status; self.mode = mode; self.message = message; self.reasons = reasons; self.warnings = warnings
+        pendingChecks = checks; self.modes = modes
+    }
+
+    var details: [String] {
+        var seen = Set<String>()
+        return (warnings + pendingChecks).map(SupportMetadata.displayCheck).filter { $0 != message && seen.insert($0).inserted }
+    }
+
+    var alternativeModes: [ModelSupportMode] {
+        ModelSupportMode.allCases.filter { $0 != mode && modes[$0] == .conditional }
+    }
+}
+
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
@@ -239,6 +426,8 @@ final class EngineController: ObservableObject {
     @Published var outputTokens = 0
     @Published var downloadProgress = InstallProgress()
     @Published var conversionProgress = InstallProgress()
+    @Published private(set) var modelFamilies: ModelFamilyRegistry?
+    @Published private(set) var installSupportReport: ModelSupportReport?
     @Published var options = ChatOptions()
     @Published var contextLimit = 8192
     @Published var outputLimit = 512
@@ -254,6 +443,7 @@ final class EngineController: ObservableObject {
     private var pendingDecisionAnswers: [String]?
     private var attachmentStaging: AttachmentStaging?
     private var attachmentSelection = UUID()
+    private var pendingSupportRequestID: String?
 
     var busy: Bool { ["loading", "generating", "deciding", "installing", "stopping", "configuring"].contains(state) }
     var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
@@ -279,6 +469,8 @@ final class EngineController: ObservableObject {
 
     func start(resourceURL: URL? = Bundle.main.resourceURL, dataDirectory: URL? = nil) {
         guard process == nil, let resources = resourceURL else { return }
+        clearInstallSupport()
+        modelFamilies = nil
         let runtime = resources.appendingPathComponent("runtime")
         let python = runtime.appendingPathComponent("libexec/python/bin/python3.13")
         let data = dataDirectory ?? FileManager.default.homeDirectoryForCurrentUser
@@ -316,6 +508,8 @@ final class EngineController: ObservableObject {
                 self.supportsImages = false
                 self.imageVerification = "unverified"
                 self.pendingOptions = nil
+                self.clearInstallSupport()
+                self.modelFamilies = nil
                 self.input = nil
                 self.discardPendingMessage()
                 self.clearConversation()
@@ -370,8 +564,18 @@ final class EngineController: ObservableObject {
                 return InstalledModel(id: id, name: name, path: path, apiID: $0["api_id"] as? String ?? name)
             }
             if !models.contains(where: { $0.id == selectedID }) { selectedID = models.first?.id ?? "" }
+        case "model_families":
+            guard let raw = event["report"] as? [String: Any], let registry = ModelFamilyRegistry(raw) else { return }
+            modelFamilies = registry
+        case "model_support":
+            guard state == "installing", let expected = pendingSupportRequestID,
+                  event["request_id"] as? String == expected,
+                  let raw = event["report"] as? [String: Any], let report = ModelSupportReport(raw) else { return }
+            installSupportReport = report
+            message = report.message
         case "status":
             state = event["state"] as? String ?? "idle"
+            if state != "installing" { pendingSupportRequestID = nil }
             message = event["message"] as? String ?? ""
             if state == "idle" || state == "error" {
                 loadedID = ""
@@ -405,6 +609,7 @@ final class EngineController: ObservableObject {
                 message = "Ready"
             }
         case "installed":
+            pendingSupportRequestID = nil
             if let model = event["model"] as? [String: Any], let id = model["id"] as? String {
                 selectedID = id
                 UserDefaults.standard.set(id, forKey: "selectedModel")
@@ -450,6 +655,7 @@ final class EngineController: ObservableObject {
             decisionResult = DecisionResult(answers: answers, probabilities: probabilities, choiceIndex: index)
             pendingDecisionAnswers = nil
         case "error":
+            pendingSupportRequestID = nil
             errorMessage = event["message"] as? String ?? "Unable to complete the operation."
             if state == "installing" { endInstallProgress("failed") }
             discardPendingMessage()
@@ -627,6 +833,7 @@ final class EngineController: ObservableObject {
         guard !busy, updated != mode else { return }
         let reload = !loadedID.isEmpty
         mode = updated
+        clearInstallSupport()
         UserDefaults.standard.set(updated.rawValue, forKey: "playgroundMode")
         errorMessage = nil
         clearConversation()
@@ -635,13 +842,17 @@ final class EngineController: ObservableObject {
     }
 
     func install(source: String, kind: String, artifactMode: String? = nil) {
+        guard !busy else { return }
         errorMessage = nil
         resetInstallProgress(kind: kind)
-        if kind == "huggingface" { downloadProgress.state = "running" }
-        state = "installing"; message = kind == "local" ? "Installing local model…" : "Downloading and converting model…"
-        var payload: [String: Any] = ["command": "install", "source": source, "kind": kind]
+        let requestID = UUID().uuidString.lowercased()
+        pendingSupportRequestID = requestID
+        let purpose = artifactMode == "vision-language" ? "vision-language" : (mode == .decision ? "decision" : "text")
+        state = "installing"; message = "Checking model support…"
+        var payload: [String: Any] = ["command": "install", "source": source, "kind": kind,
+                                      "support_mode": purpose, "support_request_id": requestID]
         if let artifactMode = artifactMode { payload["artifact_mode"] = artifactMode }
-        if !send(payload) { endInstallProgress("failed") }
+        if !send(payload) { pendingSupportRequestID = nil; endInstallProgress("failed") }
     }
 
     func generate() {
@@ -716,6 +927,7 @@ final class EngineController: ObservableObject {
 
     func stop() {
         errorMessage = nil
+        clearInstallSupport()
         if state == "installing" { endInstallProgress("cancelled") }
         discardPendingMessage()
         clearConversation()
@@ -728,9 +940,17 @@ final class EngineController: ObservableObject {
 
     func resetInstallProgress(kind: String) {
         guard state != "installing" else { return }
+        clearInstallSupport()
         downloadProgress = InstallProgress(state: kind == "local" ? "skipped" : "waiting")
         conversionProgress = InstallProgress()
     }
+
+    private func clearInstallSupport() {
+        pendingSupportRequestID = nil
+        installSupportReport = nil
+    }
+
+    func requestModelFamilies() { send(["command": "support"]) }
 
     private func endInstallProgress(_ state: String) {
         if ["waiting", "running"].contains(downloadProgress.state) { downloadProgress.state = state }
@@ -758,6 +978,8 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
+        clearInstallSupport()
+        modelFamilies = nil
         output?.readabilityHandler = nil
         send(["command": "quit"])
         try? input?.close()
@@ -896,14 +1118,129 @@ struct InstallStageView: View {
     }
 }
 
+struct ModelFamiliesView: View {
+    @ObservedObject var engine: EngineController
+    @Environment(\.dismiss) private var dismiss
+    @State private var expandedFamilies = Set<String>()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Supported model families").font(.title2.weight(.semibold))
+            Text("Checks required means the checkpoint must pass installation and runtime checks. Image availability comes from checks of the installed model on this Mac.")
+                .font(.callout).foregroundStyle(.secondary)
+            Text("Decision scores require calibration for your workload.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("App modes use BF16 output. F16 and F32 exports are for conversion only.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("Select a family to see formats and required checks.")
+                .font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                if let registry = engine.modelFamilies {
+                    Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
+                        GridRow {
+                            Text("Family").frame(width: 210, alignment: .leading)
+                            ForEach(ModelSupportMode.allCases, id: \.rawValue) { mode in
+                                Text(mode.title).frame(width: 110, alignment: .leading)
+                            }
+                        }.font(.caption.weight(.semibold))
+                        ForEach(registry.families) { family in
+                            GridRow {
+                                Button {
+                                    if expandedFamilies.contains(family.id) { expandedFamilies.remove(family.id) }
+                                    else { expandedFamilies.insert(family.id) }
+                                } label: {
+                                    HStack(alignment: .top, spacing: 6) {
+                                        Image(systemName: expandedFamilies.contains(family.id) ? "chevron.down" : "chevron.right")
+                                            .font(.caption2).frame(width: 8).padding(.top, 3)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(family.name).font(.callout.weight(.medium))
+                                            Text(family.architectureAliases.joined(separator: ", "))
+                                                .font(.caption2).foregroundStyle(.secondary)
+                                        }
+                                    }.frame(width: 210, alignment: .leading)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Show formats and required checks")
+                                .accessibilityLabel(family.name)
+                                .accessibilityValue(expandedFamilies.contains(family.id) ? "Expanded" : "Collapsed")
+                                ForEach(ModelSupportMode.allCases, id: \.rawValue) { mode in
+                                    Text(family.modes[mode]!.status.title)
+                                        .font(.caption).frame(width: 110, alignment: .leading)
+                                        .help(family.modes[mode]!.message)
+                                }
+                            }
+                            if expandedFamilies.contains(family.id) { GridRow {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    if family.modes.values.allSatisfy({ $0.status == .unsupported }) {
+                                        Text("Conversion only; no runtime mode is available.")
+                                    }
+                                    ForEach(caveats(family), id: \.self) { Text($0) }
+                                    Text("Source: \(family.sourceFormatLabels.joined(separator: ", ")). Output: \(family.outputDtypeLabels.joined(separator: ", ")).")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .font(.caption).fixedSize(horizontal: false, vertical: true)
+                                .gridCellColumns(4).padding(.bottom, 8)
+                            } }
+                        }
+                    }
+                } else {
+                    Text("The family registry is unavailable. Reopen this view after the runtime starts.")
+                        .font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+        }.padding(24).frame(width: 650, height: 540)
+    }
+
+    private func caveats(_ family: ModelFamily) -> [String] {
+        var seen = Set<String>()
+        return ModelSupportMode.allCases.flatMap { family.modes[$0]!.caveats }
+            .map(SupportMetadata.displayCheck).filter { seen.insert($0).inserted }
+    }
+}
+
+struct InstallSupportView: View {
+    let report: ModelSupportReport
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(report.message).font(.callout.weight(.medium))
+            ForEach(report.details, id: \.self) { detail in Text(detail).font(.caption) }
+            if !report.alternativeModes.isEmpty {
+                Text("Other modes to check: \(report.alternativeModes.map(\.title).joined(separator: ", ")).")
+                    .font(.caption)
+            }
+        }
+        .foregroundStyle(report.status == .unsupported ? Color.orange : .secondary)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .combine)
+    }
+}
+
 struct InstallView: View {
     @ObservedObject var engine: EngineController
     @State private var kind = "local"
     @State private var source = ""
     @State private var visionConversion = false
+    @State private var showingFamilies = false
     var body: some View {
+        ScrollView { form }
+            .frame(width: 470, height: 650)
+            .onAppear { engine.resetInstallProgress(kind: kind) }
+            .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
+            .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
+            .sheet(isPresented: $showingFamilies) { ModelFamiliesView(engine: engine) }
+    }
+
+    private var form: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Install a model").font(.title2.weight(.semibold))
+            HStack {
+                Text("Install a model").font(.title2.weight(.semibold))
+                Spacer()
+                Button("Supported model families…") {
+                    engine.requestModelFamilies()
+                    showingFamilies = true
+                }.buttonStyle(.link).font(.caption)
+            }
             Picker("Source", selection: $kind) {
                 Text("Local Folder").tag("local")
                 Text("Hugging Face").tag("huggingface")
@@ -934,6 +1271,7 @@ struct InstallView: View {
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
+            if let report = engine.installSupportReport { InstallSupportView(report: report) }
             VStack(spacing: 14) {
                 InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
                 InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
@@ -953,9 +1291,7 @@ struct InstallView: View {
                     .buttonStyle(.borderedProminent).disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
                     .keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 470, height: 600)
-            .onAppear { engine.resetInstallProgress(kind: kind) }
-            .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
+        }.padding(24)
     }
 }
 

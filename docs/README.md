@@ -9,6 +9,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Installation](INSTALLATION.md) | Install routes and what each verifies, source builds, prebuilt archives, updating, uninstalling, building an archive |
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connection Details, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
+| [Model-family support](MODEL_SUPPORT.md) | Shared mode/format coverage, metadata preflight and warnings before weight downloads |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |
 

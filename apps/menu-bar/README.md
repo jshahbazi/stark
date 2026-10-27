@@ -36,6 +36,16 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 **Install Model** accepts a local folder or a Hugging Face repository name or URL such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model is registered in place; a supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted. Supported models are governed by the [converter](../../tools/converter/README.md). The install dialog shows Download and Conversion progress; **Stop** cancels; **Installation Progress** in the menu and Command-I reopen the dialog.
 
+**Supported model families…** shows the shared Text, Decision and Image matrix
+with format constraints. Raw-checkpoint installation first checks bounded
+metadata for the selected use before weight download. A conditional path
+continues automatically; unsupported or inconclusive results stop inline with a
+specific explanation and available alternatives. The actual download uses the
+checked immutable primary source revision. External catalog metadata is resolved
+and checked again by conversion. Family coverage does not establish that a
+complete model has loaded, executed or produced calibrated decisions. See the
+[support states and preflight contract](../../docs/MODEL_SUPPORT.md).
+
 **Run** loads the selected model into one worker, and requests are serialized through it. Chat mode uses the generation worker; Decision mode uses the scoring worker and shows the distribution over the supplied answer choices at temperature 1, which is a comparative readout rather than calibrated confidence. **Stop** terminates the worker, including an active request. Changing modes replaces the worker and clears the previous session.
 
 Chat mode shows the conversation; send with the button or Command-Return, Return inserts a newline. **New Chat** clears the conversation and the worker's context while keeping the model loaded. Failed or cancelled messages return to the composer. Replies appear when generation completes; the app does not stream. Decision mode takes a context, a question and 2 to 16 comma-separated answers, and requires a template that exposes a direct-answer position; otherwise it reports a compatibility error before scoring.

@@ -417,6 +417,7 @@ class ConverterPackageTests(unittest.TestCase):
                 "vision_runtime.py",
                 "image_checks.py",
                 "vision_family.py",
+                "model_support.py",
                 "vision_runtime_qualifications.json",
             ):
                 relative = "stark_convert/" + name
@@ -450,6 +451,7 @@ class ConverterPackageTests(unittest.TestCase):
                 "stark_convert/desktop_media.py",
                 "stark_convert/image_checks.py",
                 "stark_convert/vision_family.py",
+                "stark_convert/model_support.py",
                 "stark_convert/media.py",
                 "stark_convert/vision_runtime_qualifications.json",
                 "stark_convert/_build_inputs/uv.lock",

@@ -150,10 +150,10 @@ def test_scalar_vector_matrix_and_zero_shapes_remain_valid(tmp_path, shape, payl
     ],
 )
 def test_local_sidecars_cannot_escape_source_root(tmp_path, filename, repo):
-    root = files(tmp_path / "source")
+    root = files(tmp_path / "source", model_type="mistral" if repo == "mistralai/Devstral-Small-2505" else "qwen3")
     if repo is None:
         (root / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
-    external = files(tmp_path / "external")
+    external = files(tmp_path / "external", model_type="mistral")
     (external / "chat_template.json").write_text("{}")
     hub = Hub(
         {

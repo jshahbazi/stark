@@ -17,10 +17,11 @@ PRIMARY = "Qwen/Qwen3-0.6B"
 PIN = "1" * 40
 
 
-def files(root, *, weights="model.safetensors"):
+def files(root, *, weights="model.safetensors", model_type="qwen3"):
     root.mkdir(parents=True, exist_ok=True)
     for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
         (root / name).write_text("{}")
+    (root / "config.json").write_text(json.dumps({"model_type": model_type}))
     (root / weights).write_bytes(b"synthetic checkpoint")
     return root
 
@@ -52,6 +53,13 @@ class Hub:
         if not path.is_file():
             raise FileNotFoundError()
         return str(path)
+
+    def hf_hub_url(self, *, repo_id, filename, revision):
+        return repo_id, filename, revision
+
+    def get_hf_file_metadata(self, url):
+        repo, filename, _revision = url
+        return SimpleNamespace(size=(self.repositories[repo] / filename).stat().st_size)
 
 
 def test_local_receipt_hashes_all_consumed_files_without_paths(tmp_path):
@@ -115,9 +123,9 @@ def test_online_pins_every_repository_before_any_download(tmp_path):
     primary = "mistralai/Devstral-Small-2505"
     external = "mistralai/Mistral-Small-3.1-24B-Base-2503"
     chat_repo = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
-    primary_root = files(tmp_path / "primary")
+    primary_root = files(tmp_path / "primary", model_type="mistral")
     (primary_root / "SYSTEM_PROMPT.txt").write_text("synthetic fixture")
-    external_root = files(tmp_path / "external")
+    external_root = files(tmp_path / "external", model_type="mistral")
     chat_root = files(tmp_path / "chat")
     (chat_root / "chat_template.json").write_text("{}")
     hub = Hub({primary: primary_root, external: external_root, chat_repo: chat_root})

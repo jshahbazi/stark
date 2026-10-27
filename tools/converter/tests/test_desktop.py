@@ -72,6 +72,47 @@ def desktop(tmp_path, executable):
     instance.stop(quiet=True)
 
 
+def conditional_support_report(command, _environment, _epoch):
+    """Explicit metadata result for converter lifecycle fixtures; no source IO."""
+    source = command[command.index("stark_convert.cli") + 1]
+    local = "--offline" in command
+    return {
+        "schema_version": 1,
+        "status": "conditional",
+        "mode": command[command.index("--support-mode") + 1],
+        "family_id": "qwen3_5",
+        "family_name": "Synthetic Qwen3.5 family",
+        "architecture": "qwen3_5",
+        "model_kind": "language",
+        "message": "Synthetic metadata admission; converter checks remain required.",
+        "reasons": ["synthetic_metadata_fixture"],
+        "warnings": [],
+        "pending_checks": ["tensor_headers", "native_loading"],
+        "modes": dict.fromkeys(("text", "decision", "vision-language"), "conditional"),
+        "alternatives": [],
+        "qualification": {"status": "not_assessed", "scope": "checkpoint_and_build", "calibration": "not_assessed"},
+        "source": {
+            "repo": None if local else source,
+            "revision": None if local else "a" * 40,
+            "metadata_sha256": {},
+            "metadata_sources": [],
+        },
+    }
+
+
+@pytest.fixture
+def converter_support(desktop, monkeypatch):
+    checks = []
+
+    def preflight(command, environment, epoch):
+        assert "--preflight" in command and "--output" not in command
+        checks.append(command)
+        return conditional_support_report(command, environment, epoch)
+
+    monkeypatch.setattr(desktop, "run_support_check", preflight)
+    return checks
+
+
 def events(desktop):
     return [json.loads(line) for line in desktop.output.getvalue().splitlines()]
 
@@ -1018,7 +1059,7 @@ def test_idle_worker_exit_is_reported_and_reaped(desktop, model):
     assert events(desktop)[-1]["state"] == "error"
 
 
-def test_raw_conversion_is_offline_and_cancel_reaps_converter(desktop, tmp_path):
+def test_raw_conversion_is_offline_and_cancel_reaps_converter(desktop, tmp_path, converter_support):
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
     commands = []
@@ -1037,6 +1078,7 @@ def test_raw_conversion_is_offline_and_cancel_reaps_converter(desktop, tmp_path)
         assert process is not None
         desktop.stop()
     assert process.poll() is not None
+    assert len(converter_support) == len(commands) == 1 and "--preflight" not in commands[0]
     assert "--offline" in commands[0]
     assert "hf-generic" in commands[0]
     assert desktop.models == []
@@ -1049,7 +1091,7 @@ def test_raw_conversion_is_offline_and_cancel_reaps_converter(desktop, tmp_path)
 @pytest.mark.parametrize(
     "source", ["{repo}", "https://huggingface.co/{repo}", " https://huggingface.co/{repo}/?download=true#model-card "]
 )
-def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, generic, source):
+def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, generic, source, converter_support):
     original = subprocess.Popen
     commands = []
 
@@ -1069,6 +1111,8 @@ def test_huggingface_conversion_publishes_complete_model(desktop, model, repo, g
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": f"https://huggingface.co/{repo}"})
         finish(desktop)
     assert len(commands) == 1
+    assert len(converter_support) == 1
+    assert commands[0][commands[0].index("--revision") + 1] == "a" * 40
     assert commands[0][commands[0].index("stark_convert.cli") + 1] == repo
     assert "--offline" not in commands[0]
     assert ("--metadata-profile" in commands[0]) is generic
@@ -1110,7 +1154,9 @@ def progress_line(phase, state, completed, total):
     return json.dumps({"phase": phase, "state": state, "completed_bytes": completed, "total_bytes": total}).encode()
 
 
-def test_converter_progress_is_numeric_private_bounded_and_completed_after_publication(desktop, model):
+def test_converter_progress_is_numeric_private_bounded_and_completed_after_publication(
+    desktop, model, converter_support
+):
     lines = [
         b"{malformed",
         b"private fixture" * 1000,
@@ -1167,7 +1213,7 @@ def test_progress_skips_local_converted_and_duplicate_models(desktop, model):
     assert progress_events(desktop, "conversion")[-1]["state"] == "skipped"
 
 
-def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, model):
+def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, model, converter_support):
     lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "running", 5, 100)]
     with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, exit_code=2)):
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
@@ -1178,7 +1224,7 @@ def test_failed_conversion_does_not_complete_progress_or_publish_model(desktop, 
     assert not list(desktop.model_dir.iterdir())
 
 
-def test_registry_failure_keeps_conversion_progress_failed(desktop, model):
+def test_registry_failure_keeps_conversion_progress_failed(desktop, model, converter_support):
     lines = [progress_line("download", "complete", 100, 100), progress_line("conversion", "complete", 200, 200)]
     with (
         patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines)),
@@ -1193,7 +1239,7 @@ def test_registry_failure_keeps_conversion_progress_failed(desktop, model):
     assert not list(desktop.model_dir.iterdir())
 
 
-def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desktop, model):
+def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desktop, model, converter_support):
     lines = [progress_line("download", "running", 5, 100)]
     with patch("stark_convert.desktop.subprocess.Popen", side_effect=progress_spawn(model, lines, pause=True)):
         desktop.dispatch({"command": "install", "kind": "huggingface", "source": "example/model"})
@@ -1214,7 +1260,7 @@ def test_cancelled_progress_reaps_converter_and_cannot_emit_late_completion(desk
     assert not list(desktop.model_dir.iterdir())
 
 
-def test_progress_pipe_descriptors_close_when_converter_spawn_fails(desktop, model):
+def test_progress_pipe_descriptors_close_when_converter_spawn_fails(desktop, model, converter_support):
     original_pipe = os.pipe
     descriptors = []
 
@@ -1237,7 +1283,7 @@ def test_progress_pipe_descriptors_close_when_converter_spawn_fails(desktop, mod
     assert not list(desktop.model_dir.iterdir())
 
 
-def test_exited_converter_cannot_leave_a_descendant_holding_progress_pipe(desktop, model, tmp_path):
+def test_exited_converter_cannot_leave_a_descendant_holding_progress_pipe(desktop, model, tmp_path, converter_support):
     original = subprocess.Popen
     child_pid_file = tmp_path / "descendant.pid"
     child_pid = None

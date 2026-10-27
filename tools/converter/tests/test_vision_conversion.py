@@ -332,7 +332,7 @@ def test_vision_resolution_rejects_wrong_pin_before_download():
         def hf_hub_download(self, **kwargs):
             pytest.fail("downloaded from a wrong revision")
 
-    with pytest.raises(ConversionError, match="different checkpoint"):
+    with pytest.raises(ConversionError, match="different checkpoint|different immutable revision"):
         resolve_source(REPO, artifact_mode="vision-language", hub=WrongPinHub())
 
 

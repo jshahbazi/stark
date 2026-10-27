@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from test_desktop import conditional_support_report
 
 from stark_convert.desktop import Desktop, DesktopError, model_valid
 
@@ -77,9 +78,9 @@ def test_local_vision_requires_explicit_mode_when_not_already_converted(desktop,
     folder = tmp_path / "source-vision"
     make_artifact(folder, vision=True)
     # A Stark artifact is admitted as converted; an upstream folder needs the
-    # converter path. Remove the Stark decoder marker to model that source.
-    config = json.loads((folder / "config.json").read_text())
-    config.pop("decoder_config")
+    # converter path. Give the routing fixture upstream metadata, with a
+    # separate explicit conditional preflight result for the mocked converter.
+    config = {"model_type": "qwen3_5", "vision_config": {}}
     (folder / "config.json").write_text(json.dumps(config))
 
     commands = []
@@ -91,6 +92,7 @@ def test_local_vision_requires_explicit_mode_when_not_already_converted(desktop,
         return 0
 
     desktop.run_converter = convert
+    desktop.run_support_check = conditional_support_report
     desktop.install(desktop.epoch, "local", str(folder), "vision-language")
     assert len(desktop.models) == 1
     assert desktop.models[0]["artifact_mode"] == "vision-language"
@@ -109,6 +111,7 @@ def test_huggingface_text_and_vision_installs_coexist_and_vision_flag_is_forward
         return 0
 
     desktop.run_converter = convert
+    desktop.run_support_check = conditional_support_report
     source = "synthetic-owner/synthetic-qwen"
     desktop.install(desktop.epoch, "huggingface", source)
     desktop.install(desktop.epoch, "huggingface", source, "vision-language")
