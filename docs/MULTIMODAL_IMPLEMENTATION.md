@@ -7,8 +7,8 @@ experimental full-vision artifact mode. The engine has BF16 projected-feature
 fusion, Qwen3.5 M-RoPE, native image decoding, preprocessing, and vision-tower
 execution. A guarded public facade admits one exact BF16 artifact. The normal
 generation worker, terminal client, and Local API implement one-image requests.
-The developer worker, CLI, and Local API have one exact execution qualification:
-the recorded BF16 artifact and worker on Apple M5 Max with macOS 26.7.1. Other
+The developer worker, CLI, and Local API have exact execution qualifications for
+the recorded BF16 artifact and worker builds on Apple M5 Max with macOS 26.7.1. Other
 tuples continue to report `images:false`. The official-weight tower passes the unchanged
 2% numeric gate: all fifteen checkpoints across four fixtures are bit-exact on
 CPU and Metal. The [parity validation record](archive/runs/2026-10-26-qwen35-vision-parity.md)
@@ -75,8 +75,9 @@ device class, and OS. After building the recorded worker, use the artifact with:
 ```
 
 The Local API accepts ordered user content containing `image_url` with an inline
-PNG/JPEG data URL. Swift image attachments and a signed packaged installation
-remain separate milestones.
+PNG/JPEG data URL. The Swift app accepts the same encoded formats through private
+file references and the common native pipeline. Its Developer ID signed worker
+has a [separate execution record](archive/runs/2026-10-27-qwen35-signed-worker.md).
 
 ## Versioned artifact contract
 
@@ -245,15 +246,47 @@ transactions share one deadline across pipe writes, prepare, generate, streaming
 reads, and discard. See [generation](GENERATION.md)
 and [Local API](LOCAL_API.md) for protocol and service details.
 
+## Swift image attachments
+
+Chat mode enables **Attach Image** only after the loaded worker passes the exact
+execution catalog and negotiates `private-file-v1` with the desktop bridge. The
+composer accepts a file, a file drop, or a PNG/JPEG paste representation, previews
+it, and supports removal before sending. TIFF-only clipboard representations
+are unsupported. Original encoded bytes remain unchanged; ImageIO creates only
+the UI thumbnail, and the native Rust decoder performs inference preprocessing.
+
+One image is retained in memory for the conversation and resupplied on every
+turn. The first image turn introduces one placeholder; follow-ups reuse it.
+**New Chat**, advanced-option changes, Stop, mode changes, process failure, and
+quit clear the image. Recoverable request errors restore the draft attachment.
+Image loading has cancellation and guards against late drop/paste callbacks
+overwriting a newer selection. Sending shows preparation/generation progress;
+Cancel during generation stops the model, matching the app's existing Stop action.
+
+Swift starts Python with an initially empty owner-only staging directory. Each
+command references one opaque 32-hex identifier, MIME type, and byte length;
+neither paths nor image bytes enter JSON-lines. The bridge pins the directory,
+checks owner-only single-link regular files through descriptor-relative,
+nonblocking, no-follow opens, verifies identity and size before/after reading,
+and unlinks the claimed pathname before native decoding. The unchanged 1 MiB
+command limit and 4 MiB encoded-image limit apply. Cleanup only touches private
+opaque files in that pinned directory. Hard-killing both processes before claim
+can leave a staging file; there is no shared-temporary-directory scan.
+
+The model installer offers **Enable image input when converting** for the pinned
+BF16 vision conversion. Existing converted folders are detected automatically.
+The default conversion behavior remains text. Connection JSON and the connection
+view report the running worker's qualified image capability.
+
 ## Remaining dependencies and acceptance
 
 1. **Coverage:** additional models, dtypes, worker builds, hardware classes, or
    OS versions require their applicable implementation and exact execution
    evidence. The current native loader admits one pinned BF16 artifact.
-2. **Swift and distribution:** add attachment input and progress through the
-   common media pipeline, then qualify a packaged installation. Enable image
-   capabilities only for the intersection of the qualified artifact, worker,
-   and service policy.
+2. **Distribution:** each delivered worker signature is a different executable
+   identity. Preserve a qualified nested worker when resealing an application;
+   changing it requires separate execution evidence. Public distribution also
+   requires notarization and Gatekeeper acceptance for the final app.
 
 The historical [converter review](archive/runs/2026-10-26-qwen35-vision-artifact-review.md)
 binds real conversion and regression checks to their source and artifact hashes.

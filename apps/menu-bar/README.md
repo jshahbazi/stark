@@ -4,7 +4,7 @@ A native macOS menu bar application for installing, running and chatting with co
 
 ## Build and install
 
-For normal use, install the [signed release](../../docs/INSTALLATION.md). The commands below rebuild the app from source during development on an Apple silicon Mac with macOS 26.4 or newer, Xcode's command line tools, uv, and an existing [standalone CLI installation](../../docs/INSTALLATION.md#install-from-a-source-checkout) whose runtime the app copies.
+For normal use, install the [signed release](../../docs/INSTALLATION.md). The commands below rebuild the app from source during development on an Apple silicon Mac with macOS 26.4 or newer, Xcode's command line tools, Rust 1.98.1, uv, and an existing [standalone CLI installation](../../docs/INSTALLATION.md#install-from-a-source-checkout) whose runtime the app copies. The builder refreshes native dependency and adaptation notices for the current workers using the pinned Rust toolchain and Cargo lockfile.
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
@@ -40,6 +40,10 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 Chat mode shows the conversation; send with the button or Command-Return, Return inserts a newline. **New Chat** clears the conversation and the worker's context while keeping the model loaded. Failed or cancelled messages return to the composer. Replies appear when generation completes; the app does not stream. Decision mode takes a context, a question and 2 to 16 comma-separated answers, and requires a template that exposes a direct-answer position; otherwise it reports a compatibility error before scoring.
 
+Qualified vision builds enable **Attach Image** in Chat mode. Choose, drop, or paste one PNG/JPEG up to 4 MiB, preview it, or remove it before sending. PNG/JPEG paste representations are supported; TIFF-only clipboard images are rejected. The original bytes feed the common native image pipeline. One image stays in memory and is included with every turn; choose **New Chat** to replace it. Image loading can be cancelled; Cancel during generation stops the model. Stop, model/mode changes, advanced-option changes and quit clear the image. Recoverable errors restore the draft image. **Enable image input when converting** opts into the pinned Qwen3.5-0.8B BF16 conversion; converted vision folders are detected automatically. See the [exact qualification boundary](../../docs/MULTIMODAL_IMPLEMENTATION.md).
+
+Images briefly use opaque files in per-process owner-only temporary directories; claimed files are unlinked before decoding and normal completion/Stop/quit cleans unused files. Image bytes, paths and filenames are never included in the control messages or logs. Hard-killing both processes before a file is claimed can leave a private file.
+
 **Advanced Options** in the playground window sets the system prompt, context size, output limit and thinking mode. Defaults are up to 8,192 context tokens, 512 output tokens and thinking off; the context must leave room for the whole output limit, and a model with smaller limits reduces the values. **Apply and New Chat** starts a fresh conversation with the model loaded; **Restore Defaults** fills in the defaults for review. Settings live in memory for the app session and carry across New Chat, Stop and Run, and model changes.
 
 Input throughput is a first-token wall-clock proxy that includes native setup; output throughput counts sampling after the first token. Both describe the last request; short replies may not produce an output rate. See the [timing contract](../../docs/GENERATION.md#generate).
@@ -52,7 +56,7 @@ The modal's model picker chooses which model ID to inspect and include in the JS
 
 The server starts with Stark, binds only to `127.0.0.1`, prefers port 8000 and otherwise picks a free port; always use the URL shown. Each launch generates a new random key, held in memory and delivered to the UI over the backend's private pipe. The key is for native applications on this Mac; browser-origin requests are rejected and remote devices are unsupported. Copies of the API key, connection JSON and curl example carry concealed and transient pasteboard markers so clipboard software that honors them can avoid retaining or syncing credentials. These markers are advisory; receiving applications and clipboard software that ignores them can still read the copied data. Use the explicit **Copy** button for the key; **Show** reveals it without enabling text selection.
 
-The API offers authenticated health, capability, model listing and text chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Output defaults to the smaller of 512 tokens and the model limit (at most 4,096); context is model-bounded and capped at 16,384 tokens. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
+The API offers authenticated health, capability, model listing and chat completion endpoints with streaming, temperature, top-p, top-k, min-p, seed and up to four stop strings. Qualified vision workers accept inline PNG/JPEG image data URLs. Output defaults to the smaller of 512 tokens and the model limit (at most 4,096); context is model-bounded and capped at 16,384 tokens. Up to eight requests queue behind the active one for at most 30 seconds. Routes, parameters, error codes and limits are in the [local API contract](../../docs/LOCAL_API.md).
 
 ## Where the app keeps state
 

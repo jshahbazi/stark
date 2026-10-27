@@ -4,6 +4,7 @@ Only model metadata is persisted. Conversation content stays in memory and pipes
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -22,7 +23,9 @@ from jinja2.exceptions import TemplateError
 from .api_request import parse_chat_request
 from .chat import ChatCancelled, ChatError, ChatImageError, ChatRequestTooLarge, Worker, load_template
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
+from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
+from .media import MAX_IMAGE_BYTES, MediaError
 from .registry import get_model
 from .sources import huggingface_repository
 
@@ -144,7 +147,7 @@ class Desktop:
     the HTTP contract.
     """
 
-    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None):
+    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None, attachment_root=None):
         self.executable = executable
         self.score_executable = score_executable or Path(executable).with_name("stark-score")
         self.data_dir = data_dir.expanduser().absolute()
@@ -152,6 +155,7 @@ class Desktop:
         self.timeout = timeout
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
+        self._completion_events = {}
         self.output_failed = False
         self.epoch = 0
         self.job = None
@@ -165,6 +169,8 @@ class Desktop:
         self.template = None
         self.codec = None
         self.messages = []
+        self.image_identity = None
+        self.attachments = None
         self.context = 8192
         self.maximum = 512
         self.system_prompt = None
@@ -203,10 +209,21 @@ class Desktop:
                     raise DesktopError("Cannot read the model library.")
                 ids.add(model["id"])
             self.models = value
+        self.attachments = DesktopAttachments(attachment_root) if attachment_root is not None else None
 
     def emit(self, event, epoch=None, **fields):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
+                return
+            operation = getattr(self, "_completion_events", {}).get(threading.current_thread())
+            if operation is not None and (
+                event in {"ready", "reply", "decision", "error", "installed"}
+                or (event == "status" and fields.get("state") in {"ready", "idle", "error"})
+            ):
+                # The next command must be admissible when the UI sees Ready.
+                # Publish terminal events only after this operation releases its slot.
+                operation_epoch, completion = operation
+                completion.append((event, operation_epoch if epoch is None else epoch, fields))
                 return
             with self.write_lock:
                 try:
@@ -245,6 +262,7 @@ class Desktop:
             self.active_mode = None
             self.vocab_size = None
             self.messages = []
+            self.image_identity = None
             self.codec = None
             self.template = None
         if worker is not None:
@@ -311,6 +329,12 @@ class Desktop:
                 self.converter = None
         if not quiet:
             self.status("idle", "Stopped")
+        attachments = getattr(self, "attachments", None)
+        if attachments is not None:
+            try:
+                attachments.clear()
+            except MediaError:
+                raise DesktopError("Cannot clear private image storage. Quit and reopen Stark.") from None
 
     def start(self, function, state, message, *args):
         with self.lock:
@@ -324,6 +348,10 @@ class Desktop:
             self.status(state, message, epoch)
 
             def execute():
+                current = threading.current_thread()
+                completion = []
+                with self.lock:
+                    self._completion_events[current] = (epoch, completion)
                 try:
                     function(epoch, *args)
                 except (DesktopError, ChatRequestTooLarge) as error:
@@ -345,10 +373,14 @@ class Desktop:
                         self.status("error", "Operation failed", epoch)
                 finally:
                     with self.lock:
+                        self._completion_events.pop(current, None)
                         if installing and self.install_epoch == epoch:
                             self.install_epoch = None
-                        if self.job is threading.current_thread():
+                        if self.job is current:
                             self.job = None
+                            self.api_condition.notify_all()
+                        for event, event_epoch, fields in completion:
+                            self.emit(event, event_epoch, **fields)
 
             self.job = threading.Thread(target=execute, name="stark-desktop-operation", daemon=True)
             self.job.start()
@@ -609,6 +641,9 @@ class Desktop:
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
             "max_output_tokens": self.output_limit,
+            "images": bool(self.attachments is not None and self.worker and getattr(self.worker, "images", False)),
+            "image_attachment_transport": "private-file-v1",
+            "max_image_bytes": MAX_IMAGE_BYTES,
         }
 
     def configure(self, payload):
@@ -642,17 +677,49 @@ class Desktop:
             if system is None:
                 system = (self.codec or {}).get("default_system_prompt")
             self.messages = [{"role": "system", "content": system}] if system else []
+            self.image_identity = None
 
-    def generate(self, epoch, text):
+    def generate(self, epoch, text, reference=None):
         with self.lock:
+            if epoch != self.epoch:
+                return
             if self.active_mode != "chat":
                 raise DesktopError("Choose Chat mode and run a model before sending a message.")
-            candidate = [*self.messages, {"role": "user", "content": text}]
-        reply = self.infer(candidate, self.maximum, epoch=epoch, thinking=self.thinking)
+            attachments = self.attachments
+            previous_image = self.image_identity
+            if reference is not None and (
+                attachments is None or self.worker is None or not getattr(self.worker, "images", False)
+            ):
+                raise DesktopError("The loaded model is not qualified for image attachments.")
+            if previous_image is not None and reference is None:
+                raise DesktopError("Resupply the conversation image or start a new chat.")
+            history = list(self.messages)
+            maximum, thinking = self.maximum, self.thinking
+        image = None
+        identity = None
+        try:
+            if reference is not None:
+                self.emit("image_progress", epoch, phase="preparing")
+                image = attachments.claim(reference)
+                identity = (image.media_type, hashlib.sha256(image.data).digest())
+                if previous_image is not None and identity != previous_image:
+                    raise DesktopError("Start a new chat to use a different image.")
+            content = (
+                [{"type": "text", "text": text}, {"type": "image"}]
+                if image is not None and previous_image is None
+                else text
+            )
+            candidate = [*history, {"role": "user", "content": content}]
+            if image is not None:
+                self.emit("image_progress", epoch, phase="generating")
+            reply = self.infer(candidate, maximum, epoch=epoch, thinking=thinking, image=image)
+        except (MediaError, ChatImageError) as error:
+            raise DesktopError(str(error)) from None
         with self.lock:
             if epoch != self.epoch:
                 return
             self.messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+            self.image_identity = identity
             fields = metrics(reply)
             self.emit("metrics", epoch, **fields)
             self.emit("reply", epoch, text=reply["text"], finish_reason=reply.get("finish_reason"), **fields)
@@ -1002,8 +1069,19 @@ class Desktop:
                     payload["source"].strip(),
                     artifact_mode,
                 )
-        elif command == "generate" and isinstance(payload.get("text"), str) and payload["text"].strip():
-            self.start(self.generate, "generating", "Generating…", payload["text"])
+        elif (
+            command == "generate"
+            and isinstance(payload.get("text"), str)
+            and (payload["text"].strip() or "image" in payload)
+        ):
+            if set(payload) not in ({"command", "text"}, {"command", "text", "image"}):
+                raise DesktopError("Invalid app command.")
+            if "image" in payload:
+                if not isinstance(payload["image"], dict):
+                    raise DesktopError("Invalid image attachment.")
+                self.start(self.generate, "generating", "Generating…", payload["text"], payload["image"])
+            else:
+                self.start(self.generate, "generating", "Generating…", payload["text"])
         elif command == "decide":
             try:
                 answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))
@@ -1064,6 +1142,7 @@ def main(argv=None):
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--score-worker", type=Path)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--attachment-root", type=Path)
     args = parser.parse_args(argv)
     desktop = None
 
@@ -1073,7 +1152,9 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        desktop = Desktop(args.worker, args.data_dir, score_executable=args.score_worker)
+        desktop = Desktop(
+            args.worker, args.data_dir, score_executable=args.score_worker, attachment_root=args.attachment_root
+        )
         serve(desktop)
         return 0
     except (KeyboardInterrupt, BrokenPipeError):
@@ -1093,9 +1174,17 @@ def main(argv=None):
         if desktop is not None:
             with desktop.lock:
                 desktop.api_closing = True
-            desktop.stop(quiet=True)
-            if desktop.api is not None:
-                desktop.api.close()
+            # Every resource gets a cleanup attempt even if an earlier one fails.
+            # Exceptions here must not bypass main's content-free error boundary.
+            for cleanup in (
+                lambda: desktop.stop(quiet=True),
+                lambda: desktop.api.close() if desktop.api is not None else None,
+                lambda: desktop.attachments.close() if desktop.attachments is not None else None,
+            ):
+                try:
+                    cleanup()
+                except BaseException:
+                    desktop.emit("error", message="Cannot finish cleanup. Quit and reopen Stark.")
 
 
 if __name__ == "__main__":

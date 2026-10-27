@@ -1,5 +1,149 @@
 import AppKit
+import Darwin
+import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
+
+enum ImageAttachmentError: Error {
+    case invalid, tooLarge, unavailable
+
+    var message: String {
+        switch self {
+        case .invalid: return "Choose one PNG or JPEG image."
+        case .tooLarge: return "Images must be 4 MiB or smaller."
+        case .unavailable: return "The image could not be read. Choose it again."
+        }
+    }
+}
+
+struct ImageAttachment {
+    static let maximumBytes = 4 * 1024 * 1024
+    let bytes: Data
+    let mediaType: String
+
+    init(bytes: Data) throws {
+        guard !bytes.isEmpty else { throw ImageAttachmentError.invalid }
+        guard bytes.count <= Self.maximumBytes else { throw ImageAttachmentError.tooLarge }
+        if bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) { mediaType = "image/png" }
+        else if bytes.starts(with: [255, 216, 255]), bytes.suffix(2) == Data([255, 217]) { mediaType = "image/jpeg" }
+        else { throw ImageAttachmentError.invalid }
+        self.bytes = bytes
+    }
+
+    static func read(_ url: URL) throws -> ImageAttachment {
+        guard url.isFileURL else { throw ImageAttachmentError.invalid }
+        let descriptor = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else { throw ImageAttachmentError.unavailable }
+        defer { Darwin.close(descriptor) }
+        var before = stat()
+        guard fstat(descriptor, &before) == 0, before.st_mode & S_IFMT == S_IFREG,
+              before.st_size > 0 else { throw ImageAttachmentError.invalid }
+        guard before.st_size <= maximumBytes else { throw ImageAttachmentError.tooLarge }
+        var data = Data(count: Int(before.st_size))
+        let expected = data.count
+        let readCount = data.withUnsafeMutableBytes { buffer -> Int in
+            var offset = 0
+            while offset < expected {
+                let amount = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: offset), expected - offset)
+                if amount < 0 && errno == EINTR { continue }
+                guard amount > 0 else { return -1 }
+                offset += amount
+            }
+            return offset
+        }
+        var after = stat()
+        guard readCount == expected, fstat(descriptor, &after) == 0,
+              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec else {
+            throw ImageAttachmentError.unavailable
+        }
+        return try ImageAttachment(bytes: data)
+    }
+
+    var thumbnail: NSImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard let source = CGImageSourceCreateWithData(bytes as CFData, sourceOptions),
+              CGImageSourceGetCount(source) == 1,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width > 0, height > 0, width <= 16_384, height <= 16_384,
+              Int64(width) * Int64(height) <= 32_000_000 else { return nil }
+        let options = [kCGImageSourceCreateThumbnailFromImageAlways: true,
+                       kCGImageSourceCreateThumbnailWithTransform: true,
+                       kCGImageSourceThumbnailMaxPixelSize: 256,
+                       kCGImageSourceShouldCacheImmediately: false] as CFDictionary
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else { return nil }
+        return NSImage(cgImage: image, size: .zero)
+    }
+}
+
+final class AttachmentStaging {
+    let root: URL
+    private let descriptor: Int32
+    private var entries = Set<String>()
+
+    init() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("stark-attachments-" + UUID().uuidString.lowercased(), isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                               attributes: [.posixPermissions: 0o700])
+        guard let path = Darwin.realpath(directory.path, nil) else {
+            try? FileManager.default.removeItem(at: directory)
+            throw ImageAttachmentError.unavailable
+        }
+        defer { free(path) }
+        root = URL(fileURLWithPath: String(cString: path), isDirectory: true)
+        descriptor = Darwin.open(root.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0, fchmod(descriptor, 0o700) == 0 else {
+            if descriptor >= 0 { Darwin.close(descriptor) }
+            try? FileManager.default.removeItem(at: root)
+            throw ImageAttachmentError.unavailable
+        }
+    }
+
+    func stage(_ image: ImageAttachment) throws -> [String: Any] {
+        let identifier = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let file = Darwin.openat(descriptor, identifier, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard file >= 0 else { throw ImageAttachmentError.unavailable }
+        var complete = false
+        defer { Darwin.close(file); if !complete { Darwin.unlinkat(descriptor, identifier, 0) } }
+        guard fchmod(file, 0o600) == 0 else { throw ImageAttachmentError.unavailable }
+        let written = image.bytes.withUnsafeBytes { buffer -> Bool in
+            var offset = 0
+            while offset < buffer.count {
+                let amount = Darwin.write(file, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+                if amount < 0 && errno == EINTR { continue }
+                guard amount > 0 else { return false }
+                offset += amount
+            }
+            return true
+        }
+        guard written else { throw ImageAttachmentError.unavailable }
+        complete = true
+        entries.insert(identifier)
+        return ["id": identifier, "media_type": image.mediaType, "byte_length": image.bytes.count]
+    }
+
+    func clear() {
+        for entry in entries { Darwin.unlinkat(descriptor, entry, 0) }
+        entries.removeAll()
+    }
+
+    deinit {
+        clear()
+        var pinned = stat(), current = stat()
+        if fstat(descriptor, &pinned) == 0, lstat(root.path, &current) == 0,
+           pinned.st_dev == current.st_dev, pinned.st_ino == current.st_ino {
+            Darwin.rmdir(root.path)
+        }
+        Darwin.close(descriptor)
+    }
+}
 
 struct InstalledModel: Identifiable, Equatable {
     let id: String
@@ -12,6 +156,7 @@ struct ChatMessage: Identifiable {
     let id = UUID()
     let text: String
     let isUser: Bool
+    var image: ImageAttachment? = nil
 }
 
 enum PlaygroundMode: String, CaseIterable, Identifiable {
@@ -75,6 +220,11 @@ final class EngineController: ObservableObject {
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
     @Published var draft = ""
+    @Published private(set) var draftImage: ImageAttachment?
+    @Published private(set) var conversationImage: ImageAttachment?
+    @Published private(set) var supportsImages = false
+    @Published private(set) var imageProgress = ""
+    @Published private(set) var attachmentLoading = false
     @Published private(set) var mode = PlaygroundMode(rawValue: UserDefaults.standard.string(forKey: "playgroundMode") ?? "") ?? .chat
     @Published private(set) var loadedMode: PlaygroundMode?
     @Published var decisionText = ""
@@ -101,28 +251,39 @@ final class EngineController: ObservableObject {
     private var pendingMessageID: UUID?
     private var pendingOptions: ChatOptions?
     private var pendingDecisionAnswers: [String]?
+    private var attachmentStaging: AttachmentStaging?
+    private var attachmentSelection = UUID()
 
     var busy: Bool { ["loading", "generating", "deciding", "installing", "stopping", "configuring"].contains(state) }
     var modelReady: Bool { state == "ready" && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
+    var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
+    var hasConversation: Bool { !messages.isEmpty || draftImage != nil || conversationImage != nil }
+    var canSendMessage: Bool {
+        modelReady && !attachmentLoading &&
+            (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draftImage != nil)
+    }
     var statusColor: Color {
         if state == "error" { return .red }
         if state == "ready" { return .green }
         return busy ? .orange : .secondary
     }
 
-    func start() {
-        guard process == nil, let resources = Bundle.main.resourceURL else { return }
+    func start(resourceURL: URL? = Bundle.main.resourceURL, dataDirectory: URL? = nil) {
+        guard process == nil, let resources = resourceURL else { return }
         let runtime = resources.appendingPathComponent("runtime")
         let python = runtime.appendingPathComponent("libexec/python/bin/python3.13")
-        let data = FileManager.default.homeDirectoryForCurrentUser
+        let data = dataDirectory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/Stark", isDirectory: true)
+        do { attachmentStaging = try AttachmentStaging() }
+        catch { state = "error"; message = "Cannot prepare private image storage. Quit and reopen Stark."; return }
         let child = Process()
         child.executableURL = python
         child.arguments = ["-I", "-B", "-m", "stark_convert.desktop", "--worker",
                            runtime.appendingPathComponent("libexec/stark-generate").path,
                            "--score-worker", runtime.appendingPathComponent("libexec/stark-score").path,
-                           "--data-dir", data.path]
+                           "--data-dir", data.path,
+                           "--attachment-root", attachmentStaging!.root.path]
         let incoming = Pipe()
         let outgoing = Pipe()
         child.standardInput = incoming
@@ -144,11 +305,13 @@ final class EngineController: ObservableObject {
                 self.apiKey = ""
                 self.apiMessage = "Stark stopped. Reopen the app to reconnect."
                 self.loadedMode = nil
+                self.supportsImages = false
                 self.pendingOptions = nil
                 self.input = nil
                 self.discardPendingMessage()
                 self.clearConversation()
                 self.clearDecision()
+                self.attachmentStaging = nil
             }
         }
         output = outgoing.fileHandleForReading
@@ -166,6 +329,7 @@ final class EngineController: ObservableObject {
             output?.readabilityHandler = nil
             state = "error"
             message = "Cannot start the bundled runtime. Reinstall Stark."
+            attachmentStaging = nil
         }
     }
 
@@ -206,6 +370,7 @@ final class EngineController: ObservableObject {
                 discardPendingMessage()
                 clearConversation()
                 clearDecision()
+                supportsImages = false
             }
         case "ready":
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
@@ -215,6 +380,7 @@ final class EngineController: ObservableObject {
             apiMaxNewTokens = event["max_output_tokens"] as? Int ?? 0
             loadedMode = readyMode
             applyLimits(event)
+            applyImageCapabilities(event)
             state = "ready"
             message = "Ready"
         case "configured":
@@ -222,6 +388,7 @@ final class EngineController: ObservableObject {
             options = configured
             pendingOptions = nil
             applyLimits(event)
+            applyImageCapabilities(event)
             if state == "configuring" {
                 clearConversation()
                 state = "ready"
@@ -237,11 +404,20 @@ final class EngineController: ObservableObject {
             guard mode == .chat, loadedMode == .chat, pendingMessageID != nil,
                   let text = event["text"] as? String else { return }
             messages.append(ChatMessage(text: text, isUser: false))
+            if conversationImage == nil, let id = pendingMessageID {
+                conversationImage = messages.first { $0.id == id }?.image
+            }
             pendingMessageID = nil
+            imageProgress = ""
+            attachmentStaging?.clear()
             finishReason = event["finish_reason"] as? String ?? ""
             applyMetrics(event)
         case "metrics":
             applyMetrics(event)
+        case "image_progress":
+            guard state == "generating", pendingMessageID != nil else { return }
+            if event["phase"] as? String == "preparing" { imageProgress = "Preparing image…" }
+            if event["phase"] as? String == "generating" { imageProgress = "Generating reply…" }
         case "decision":
             guard mode == .decision, loadedMode == .decision, state == "deciding",
                   let expected = pendingDecisionAnswers else { return }
@@ -300,6 +476,89 @@ final class EngineController: ObservableObject {
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
     }
 
+    private func applyImageCapabilities(_ event: [String: Any]) {
+        supportsImages = mode == .chat && event["images"] as? Bool == true &&
+            event["image_attachment_transport"] as? String == "private-file-v1" &&
+            event["max_image_bytes"] as? Int == ImageAttachment.maximumBytes
+        if !supportsImages {
+            draftImage = nil; conversationImage = nil; attachmentSelection = UUID(); attachmentLoading = false
+        }
+    }
+
+    func selectImage() {
+        guard canAttachImage else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if panel.runModal() == .OK, let url = panel.url { attachImage(url) }
+    }
+
+    func attachImage(_ url: URL) {
+        guard canAttachImage else { return }
+        do { try attachImage(bytes: ImageAttachment.read(url).bytes) }
+        catch { imageError(error) }
+    }
+
+    func attachImage(bytes: Data) throws {
+        guard canAttachImage else { throw ImageAttachmentError.unavailable }
+        let image = try ImageAttachment(bytes: bytes)
+        attachmentSelection = UUID()
+        attachmentLoading = false
+        draftImage = image
+        errorMessage = nil
+    }
+
+    func removeImage() {
+        guard canAttachImage else { return }
+        attachmentSelection = UUID()
+        attachmentLoading = false
+        draftImage = nil
+    }
+
+    @discardableResult
+    func acceptImageProviders(_ providers: [NSItemProvider]) -> Bool {
+        guard canAttachImage else { return false }
+        guard providers.count == 1, let provider = providers.first else {
+            errorMessage = "Attach one image per conversation."
+            return false
+        }
+        let selection = UUID()
+        attachmentSelection = selection
+        attachmentLoading = true
+        let receive: (Result<ImageAttachment, Error>) -> Void = { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self, self.attachmentSelection == selection, self.canAttachImage else { return }
+                self.attachmentLoading = false
+                do { self.draftImage = try result.get(); self.errorMessage = nil }
+                catch { self.imageError(error) }
+            }
+        }
+        if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
+            provider.loadDataRepresentation(forTypeIdentifier: UTType.fileURL.identifier) { data, _ in
+                guard let data = data, let url = URL(dataRepresentation: data, relativeTo: nil) else {
+                    receive(.failure(ImageAttachmentError.unavailable)); return
+                }
+                receive(Result { try ImageAttachment.read(url) })
+            }
+            return true
+        }
+        for type in [UTType.png, .jpeg] where provider.hasItemConformingToTypeIdentifier(type.identifier) {
+            provider.loadFileRepresentation(forTypeIdentifier: type.identifier) { url, _ in
+                guard let url = url else { receive(.failure(ImageAttachmentError.unavailable)); return }
+                receive(Result { try ImageAttachment.read(url) })
+            }
+            return true
+        }
+        errorMessage = "Choose one PNG or JPEG image."
+        attachmentLoading = false
+        return false
+    }
+
+    private func imageError(_ error: Error) {
+        errorMessage = (error as? ImageAttachmentError)?.message ?? ImageAttachmentError.unavailable.message
+    }
+
     @discardableResult
     func configure(_ updated: ChatOptions) -> Bool {
         guard modelReady, mode == .chat else { return false }
@@ -340,6 +599,7 @@ final class EngineController: ObservableObject {
         clearConversation()
         clearDecision()
         loadedMode = nil
+        supportsImages = false
         state = "loading"; message = "Loading model…"
         send(["command": "run", "model_id": selectedID, "mode": mode.rawValue])
     }
@@ -355,25 +615,41 @@ final class EngineController: ObservableObject {
         if reload { run() }
     }
 
-    func install(source: String, kind: String) {
+    func install(source: String, kind: String, artifactMode: String? = nil) {
         errorMessage = nil
         resetInstallProgress(kind: kind)
         if kind == "huggingface" { downloadProgress.state = "running" }
         state = "installing"; message = kind == "local" ? "Installing local model…" : "Downloading and converting model…"
-        if !send(["command": "install", "source": source, "kind": kind]) { endInstallProgress("failed") }
+        var payload: [String: Any] = ["command": "install", "source": source, "kind": kind]
+        if let artifactMode = artifactMode { payload["artifact_mode"] = artifactMode }
+        if !send(payload) { endInstallProgress("failed") }
     }
 
     func generate() {
         let text = draft
-        guard modelReady, mode == .chat,
-              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard canSendMessage, mode == .chat else { return }
+        attachmentSelection = UUID()
+        let image = conversationImage ?? draftImage
+        if image != nil && !supportsImages { errorMessage = "The running model does not support image attachments."; return }
         errorMessage = nil
+        var payload: [String: Any] = ["command": "generate", "text": text]
+        if let image = image {
+            imageProgress = "Preparing image…"
+            do {
+                guard let storage = attachmentStaging else { throw ImageAttachmentError.unavailable }
+                payload["image"] = try storage.stage(image)
+            } catch { imageProgress = ""; imageError(error); return }
+        }
         state = "generating"; message = "Generating…"; finishReason = ""
-        if send(["command": "generate", "text": text]) {
-            let entry = ChatMessage(text: text, isUser: true)
+        if send(payload) {
+            let entry = ChatMessage(text: text, isUser: true, image: conversationImage == nil ? draftImage : nil)
             messages.append(entry)
             pendingMessageID = entry.id
             draft = ""
+            draftImage = nil
+        } else {
+            attachmentStaging?.clear()
+            imageProgress = ""
         }
     }
 
@@ -425,6 +701,7 @@ final class EngineController: ObservableObject {
         discardPendingMessage()
         clearConversation()
         clearDecision()
+        supportsImages = false
         state = "stopping"; message = "Stopping…"
         send(["command": "stop"])
     }
@@ -441,8 +718,10 @@ final class EngineController: ObservableObject {
     }
 
     private func discardPendingMessage() {
+        imageProgress = ""
+        attachmentStaging?.clear()
         guard let id = pendingMessageID else { return }
-        if let entry = messages.first(where: { $0.id == id }) { draft = entry.text }
+        if let entry = messages.first(where: { $0.id == id }) { draft = entry.text; draftImage = entry.image }
         messages.removeAll { $0.id == id }
         pendingMessageID = nil
     }
@@ -451,6 +730,10 @@ final class EngineController: ObservableObject {
         messages.removeAll(); pendingMessageID = nil
         finishReason = ""; inputSpeed = nil; outputSpeed = nil
         inputTokens = 0; outputTokens = 0
+        draftImage = nil; conversationImage = nil; imageProgress = ""
+        attachmentLoading = false
+        attachmentSelection = UUID()
+        attachmentStaging?.clear()
     }
 
     func shutdown() {
@@ -464,6 +747,9 @@ final class EngineController: ObservableObject {
             if child.isRunning { child.terminate() }
         }
         process = nil
+        clearConversation()
+        supportsImages = false
+        attachmentStaging = nil
     }
 }
 
@@ -593,6 +879,7 @@ struct InstallView: View {
     @ObservedObject var engine: EngineController
     @State private var kind = "local"
     @State private var source = ""
+    @State private var visionConversion = false
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Install a model").font(.title2.weight(.semibold))
@@ -619,6 +906,11 @@ struct InstallView: View {
                 Text("Downloads and converts a supported model. Gated repositories use your existing Hugging Face sign-in.")
                     .font(.callout).foregroundStyle(.secondary)
             }
+            VStack(alignment: .leading, spacing: 5) {
+                Toggle("Enable image input when converting", isOn: $visionConversion).disabled(engine.busy)
+                Text("Vision conversion currently supports Qwen/Qwen3.5-0.8B in BF16. Converted local models retain their existing input support.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
             VStack(spacing: 14) {
@@ -633,11 +925,14 @@ struct InstallView: View {
             HStack {
                 if engine.state == "installing" { Button("Cancel Installation", action: engine.stop) }
                 Spacer()
-                Button("Install") { engine.install(source: source.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind) }
+                Button("Install") {
+                    engine.install(source: source.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind,
+                                   artifactMode: visionConversion ? "vision-language" : nil)
+                }
                     .buttonStyle(.borderedProminent).disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
                     .keyboardShortcut(.defaultAction)
             }
-        }.padding(24).frame(width: 470, height: 500)
+        }.padding(24).frame(width: 470, height: 580)
             .onAppear { engine.resetInstallProgress(kind: kind) }
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
     }
@@ -650,6 +945,7 @@ struct ChatBubble: View {
             if message.isUser { Spacer(minLength: 40) }
             VStack(alignment: .leading, spacing: 6) {
                 Text(message.isUser ? "You" : "Stark").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                if let image = message.image { AttachmentPreview(image: image) }
                 Text(message.text).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
             }
             .padding(12)
@@ -657,6 +953,25 @@ struct ChatBubble: View {
                         in: RoundedRectangle(cornerRadius: 12))
             if !message.isUser { Spacer(minLength: 40) }
         }.frame(maxWidth: .infinity, alignment: message.isUser ? .trailing : .leading)
+    }
+}
+
+struct AttachmentPreview: View {
+    let image: ImageAttachment
+    var body: some View {
+        HStack(spacing: 10) {
+            if let thumbnail = image.thumbnail {
+                Image(nsImage: thumbnail).resizable().scaledToFit().frame(width: 72, height: 72)
+                    .clipShape(RoundedRectangle(cornerRadius: 6)).accessibilityLabel("Attached image preview")
+            } else {
+                Image(systemName: "photo").frame(width: 72, height: 72).accessibilityLabel("Attached image")
+            }
+            VStack(alignment: .leading, spacing: 3) {
+                Text(image.mediaType == "image/png" ? "PNG image" : "JPEG image").font(.callout)
+                Text(ByteCountFormatter.string(fromByteCount: Int64(image.bytes.count), countStyle: .file))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
     }
 }
 
@@ -852,7 +1167,7 @@ struct ChatContentView: View {
                     .help("Run a model to adjust its chat options.")
                 Spacer()
                 Button("New Chat") { engine.reset(); composerFocused = true }
-                    .disabled(engine.busy || engine.messages.isEmpty || engine.loadedID != engine.selectedID)
+                    .disabled(engine.busy || !engine.hasConversation || engine.loadedID != engine.selectedID)
             }
             SpeedView(engine: engine)
             ScrollViewReader { scroll in
@@ -870,7 +1185,9 @@ struct ChatContentView: View {
                         if engine.state == "generating" {
                             HStack(spacing: 8) {
                                 ProgressView().controlSize(.small)
-                                Text("Stark is thinking…").font(.callout).foregroundStyle(.secondary)
+                                Text(engine.imageProgress.isEmpty ? "Stark is thinking…" : engine.imageProgress)
+                                    .font(.callout).foregroundStyle(.secondary)
+                                Button("Cancel", action: engine.stop)
                             }.padding(.horizontal, 4)
                         }
                         Color.clear.frame(height: 1).id("latest")
@@ -882,19 +1199,41 @@ struct ChatContentView: View {
             if ["length", "context"].contains(engine.finishReason) {
                 Text("Reply reached the token limit. Clear the conversation to start fresh.").font(.caption).foregroundStyle(.orange)
             }
+            if let image = engine.draftImage {
+                HStack {
+                    AttachmentPreview(image: image)
+                    Spacer()
+                    Button("Remove Image", action: engine.removeImage).disabled(engine.busy)
+                }.padding(10).background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
+            } else if engine.conversationImage != nil {
+                Text("Image included with each turn. Start a new chat to change it.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if engine.attachmentLoading {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text("Loading image…").font(.caption).foregroundStyle(.secondary)
+                    Button("Cancel") { engine.removeImage() }
+                }
+            }
             ZStack(alignment: .topLeading) {
                 if engine.draft.isEmpty { Text("Message the model…").font(.body).foregroundStyle(.tertiary).padding(.horizontal, 9).padding(.top, 4).allowsHitTesting(false) }
                 TextEditor(text: $engine.draft).font(.body).scrollContentBackground(.hidden).frame(height: 70).padding(4)
                     .focused($composerFocused).disabled(engine.busy).accessibilityLabel("Message")
             }.overlay(RoundedRectangle(cornerRadius: 8).stroke(.quaternary))
             HStack {
+                Button("Attach Image…", action: engine.selectImage)
+                    .disabled(!engine.canAttachImage)
+                    .help(engine.supportsImages ? "Attach one PNG or JPEG image, up to 4 MiB." : "Run a qualified vision model to attach an image.")
                 Text("Conversation stays in memory").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Send") { engine.generate(); composerFocused = true }
                     .buttonStyle(.borderedProminent).keyboardShortcut(.return, modifiers: .command)
-                    .disabled(!engine.modelReady || engine.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(!engine.canSendMessage)
             }
         }
+            .onDrop(of: [UTType.fileURL, .png, .jpeg], isTargeted: nil, perform: engine.acceptImageProviders)
+            .onPasteCommand(of: [.png, .jpeg]) { _ = engine.acceptImageProviders($0) }
             .sheet(isPresented: $advancedOptions) { AdvancedOptionsView(engine: engine) }
             .onAppear { composerFocused = true }
             .onChange(of: engine.state) { if engine.state == "ready" { composerFocused = true } }

@@ -191,6 +191,37 @@ def verify_worker(worker: Path, kind: str = "generation") -> None:
         raise BuildError(f"{kind}_worker_self_check_failed") from None
 
 
+def install_native_notices(embedded: Path, temporary: Path) -> dict:
+    """Refresh notices for current workers instead of inheriting an old CLI set."""
+    distribution = runpy.run_path(str(ROOT / "scripts/build_distribution.py"))
+    cargo_name = shutil.which("cargo")
+    cargo = Path(cargo_name) if cargo_name else Path.home() / ".cargo/bin/cargo"
+    if not cargo.is_file():
+        raise BuildError("cargo_required_for_current_native_notices")
+    environment = distribution["clean_environment"]()
+    environment["PATH"] = str(cargo.parent) + os.pathsep + environment.get("PATH", "")
+    overlay = temporary / "native-notice-overlay"
+    (overlay / "share/stark").mkdir(parents=True)
+    try:
+        distribution["dependency_licenses"](overlay, str(cargo), environment)
+    except distribution["BuildError"]:
+        raise BuildError("native_dependency_license_collection_failed") from None
+    hashes = {
+        path.relative_to(overlay).as_posix(): sha256(path)
+        for path in sorted(overlay.rglob("*"))
+        if path.is_file()
+    }
+    if not hashes:
+        raise BuildError("native_dependency_notices_missing")
+    shutil.copytree(overlay, embedded, dirs_exist_ok=True)
+    return {
+        "rust_version": distribution["RUST_VERSION"],
+        "cargo_lock_sha256": sha256(ROOT / "Cargo.lock"),
+        "scope": "current workers' locked normal dependency metadata and source adaptations; may include unused optional code",
+        "files_sha256": hashes,
+    }
+
+
 def verify_worker_build_record(record_path: Path, worker: Path, error: str) -> None:
     try:
         record = json.loads(record_path.read_text())
@@ -689,6 +720,7 @@ def build(options: argparse.Namespace) -> Path:
         )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
         shutil.copy2(score_worker, embedded / "libexec/stark-score")
+        native_notices = install_native_notices(embedded, temporary)
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
         shutil.copy2(artwork, resources / "Stark.jpg")
@@ -723,6 +755,7 @@ def build(options: argparse.Namespace) -> Path:
         )
         inspection = (
             "import inspect,json; import stark_convert.desktop,stark_convert.chat,stark_convert.decision,jinja2; "
+            "import stark_convert.desktop_media,stark_convert.media,stark_convert.vision_runtime; "
             "from stark_convert import cli,progress; "
             "from stark_convert.provenance import toolchain_provenance; "
             "assert 'progress' in inspect.signature(cli.convert).parameters; "
@@ -752,6 +785,7 @@ def build(options: argparse.Namespace) -> Path:
             "--worker" not in response
             or "--score-worker" not in response
             or "--data-dir" not in response
+            or "--attachment-root" not in response
         ):
             raise BuildError("desktop_entrypoint_contract_failed")
         manifest = {
@@ -771,12 +805,18 @@ def build(options: argparse.Namespace) -> Path:
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
                 "libexec/stark-score": sha256(embedded / "libexec/stark-score"),
+                **native_notices["files_sha256"],
                 **converter_package["files_sha256"],
                 **desktop_dependencies["files_sha256"],
             },
             "converter_package": {
                 key: value
                 for key, value in converter_package.items()
+                if key != "files_sha256"
+            },
+            "native_license_notices": {
+                key: value
+                for key, value in native_notices.items()
                 if key != "files_sha256"
             },
             "desktop_python_dependencies": {
@@ -800,10 +840,12 @@ def build(options: argparse.Namespace) -> Path:
                 "base_runtime_hashes": "passed",
                 "worker_invalid_arguments": "passed",
                 "score_worker_invalid_arguments": "passed",
+                "current_native_dependency_and_adaptation_notices": "passed",
                 "python_imports": "passed",
                 "converter_progress_api": "passed",
                 "converter_toolchain_provenance": "passed",
                 "desktop_entrypoint": "passed",
+                "image_attachment_imports_and_entrypoint": "passed",
                 "model_loaded": False,
             },
             "signature": "local ad-hoc; no Developer ID signature or notarization",

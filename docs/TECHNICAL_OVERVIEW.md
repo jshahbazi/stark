@@ -80,15 +80,29 @@ Two Python projects exist: `tools/converter/pyproject.toml` is the product packa
 | Command | Fields | Effect |
 | --- | --- | --- |
 | `list` | | Re-emit the model library |
-| `install` | `source`, `kind` | Register a converted folder, convert a local checkpoint, or download and convert a repository; progress is reported while it runs |
+| `install` | `source`, `kind`, optional `artifact_mode` | Register a converted folder, convert a local checkpoint, or download and convert a repository; opt into `vision-language` conversion explicitly |
 | `run` | `model_id` | Load the model into a worker for the current mode |
 | `stop`, `quit` | | Unload the worker; `quit` also stops the API and exits |
-| `generate` | `text` | One chat turn against the loaded conversation |
+| `generate` | `text`, optional `image` | One chat turn; the image is an opaque private-file reference, resupplied on every image-conversation turn |
 | `decide` | context, question, choices | Score the choices with the scoring worker |
 | `reset` | | Clear the conversation while keeping the model loaded |
 | `configure` | `context_tokens`, `max_new_tokens`, `system_prompt`, `thinking` | Apply chat settings and start a new conversation |
 
 Events to the app: `models` (the library), `status` (`state` and `message`), `progress` (download and conversion bytes), `installed`, `ready` (worker limits after `run`), `configured`, `reply`, `decision`, `connection` (the API base URL and key), and `error` with a fixed message. The backend fences every command and request with an epoch that changes when a model is stopped or replaced, so a late reply from a previous worker is discarded. Chat and API requests share one FIFO queue in front of the single worker.
+
+Operation-completion events are published after their job releases the admission
+slot. A client receiving Ready can immediately submit its next command. Buffered
+completion events retain the original epoch and are discarded after Stop.
+
+The Swift process also supplies an initially empty private `--attachment-root`.
+The optional image object contains exactly `id` (32 lowercase hex characters),
+`media_type` (`image/png` or `image/jpeg`), and `byte_length` (1 to 4 MiB). Python
+claims a descriptor-relative private regular file and unlinks it before decoding;
+paths and encoded bytes never enter this control protocol. `ready`/`configured`
+negotiate `images`, `image_attachment_transport: private-file-v1`, and
+`max_image_bytes: 4194304`. `image_progress` reports `preparing` or `generating`;
+these are phases, not measured percentages. Native validation remains
+authoritative. See [native image support](MULTIMODAL_IMPLEMENTATION.md).
 
 ## Where validation lives
 

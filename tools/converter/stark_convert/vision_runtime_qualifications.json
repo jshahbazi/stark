@@ -21,6 +21,27 @@
       "os_version": "26.7.1",
       "passed": true,
       "evidence_sha256": "933380b5f7fd2d3db3c2198a4f52a81dd4da08431f71dec0a25ee07ed4521f3b"
+    },
+    {
+      "repo": "Qwen/Qwen3.5-0.8B",
+      "revision": "2fc06364715b967f1860aea9cf38778875588b17",
+      "artifact_sha256": "7c5960e7225b3b36844fa397a85c5e20d281d732e382475062f552c0737c79d4",
+      "config_sha256": "3f0cecb7cb3633bc271eabf69b06ac9f74b377b9ec17b441f5ceac331a71f42a",
+      "tokenizer_sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4",
+      "processor_sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "template_sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
+      "worker_sha256": "741a3ea7b39a80fcd9c9a6fe9deb0cee1d1b383bd40618479ec49a8a58d91ede",
+      "transport": "owner-private-file-v1",
+      "runtime_identity": {
+        "backend": "metal",
+        "device_name": "Apple M5 Max",
+        "apple_gpu_family": 1010,
+        "gpu_core_count": 40,
+        "supports_mxu": true
+      },
+      "os_version": "26.7.1",
+      "passed": true,
+      "evidence_sha256": "b38a1f27b3b7b2af8ab9447cc6d65a3091260391ab6d70da0f4f34fb088d1b1f"
     }
   ]
 }
