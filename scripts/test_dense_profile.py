@@ -68,7 +68,9 @@ class DenseProfileTests(unittest.TestCase):
             {"filename": "model-a.safetensors", "bytes": 16, "sha256": "a" * 64},
         ]
         identity = weights_digest(records)
-        self.assertEqual(identity, "6e71b27b56cfdeda6a0c9537533e859386a7d3e7a1bc4a2ade7d95a945c37b0e")
+        self.assertEqual(
+            identity, "6e71b27b56cfdeda6a0c9537533e859386a7d3e7a1bc4a2ade7d95a945c37b0e"
+        )
         self.assertEqual(identity, weights_digest(list(reversed(records))))
         changed_size = [records[0], {**records[1], "bytes": 17}]
         changed_hash = [records[0], {**records[1], "sha256": "c" * 64}]

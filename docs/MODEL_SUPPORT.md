@@ -25,11 +25,12 @@ Gemma 4 text coverage is bounded to dense PLE E2B/E4B layouts. A separate
 schema-4 image artifact supports only the official E2B BF16 checkpoint, with a
 Gemma-specific processor, vision tower and native execution path. Its CLI,
 terminal chat, desktop and runtime family gates are wired. The canonical HF CPU
-feature comparison passes the 2% gate on three images; full worker end-to-end
-validation and performance measurement remain pending. Audio, video, E4B
+feature comparison passes the 2% gate on three images. Bounded generation-worker
+lifecycle checks and local cold/cached chat-client checks pass. Installed
+desktop UI execution and image performance are unmeasured. Audio, video, E4B
 images, 31B, 26B MoE and unified 12B are unsupported. Exact checkpoint
 execution and numerical evidence remain tied to their reference profiles and
-engine builds.
+engine builds. See the [dated validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md).
 
 ## Browsing and removing models
 

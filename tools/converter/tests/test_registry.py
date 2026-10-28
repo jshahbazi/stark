@@ -82,12 +82,8 @@ def test_extensions_are_separate_from_builtin_inventory():
 
 def test_olmo3_and_gemma4_text_extensions_bind_pinned_source_without_reasoning_defaults():
     expected = {
-        "allenai/Olmo-3-7B-Instruct": (
-            "olmo3", "HFOlmo3Config", "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"
-        ),
-        "google/gemma-4-E2B-it": (
-            "gemma4_text", "HFGemma4TextConfig", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"
-        ),
+        "allenai/Olmo-3-7B-Instruct": ("olmo3", "HFOlmo3Config", "6e5971d9eba42665f5bd5a0fcf047f299ce1dccc"),
+        "google/gemma-4-E2B-it": ("gemma4_text", "HFGemma4TextConfig", "3e22461f65e89153144f8adb70e3b8c2cc9845a7"),
     }
     for repo, (adapter, config_class, revision) in expected.items():
         entry = get_model(repo)
@@ -97,7 +93,11 @@ def test_olmo3_and_gemma4_text_extensions_bind_pinned_source_without_reasoning_d
         assert entry["config_class"] == config_class
         assert entry["profile_source"]["revision"] == revision
         expected_files = {
-            "config.json", "generation_config.json", "tokenizer_config.json", "tokenizer.json", "chat_template.jinja"
+            "config.json",
+            "generation_config.json",
+            "tokenizer_config.json",
+            "tokenizer.json",
+            "chat_template.jinja",
         }
         if adapter == "gemma4_text":
             expected_files.add("processor_config.json")

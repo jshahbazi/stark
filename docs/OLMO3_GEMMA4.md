@@ -1,6 +1,6 @@
 # OLMo 3 and Gemma 4 support
 
-Stark has native dense text paths for OLMo 3 and Gemma 4, plus a separate BF16 image artifact for the official Gemma 4 E2B checkpoint. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission; full worker end-to-end validation and performance measurement remain pending.
+Stark has native dense text paths for OLMo 3 and Gemma 4, plus a separate BF16 image artifact for the official Gemma 4 E2B checkpoint. Conversion support, native execution paths, and exact checkpoint qualification are separate states. The Gemma image implementation is wired through the converter, worker, CLI, desktop family handling and schema-4 artifact admission. Canonical HF image-feature comparison, bounded generation-worker lifecycle checks, and local cold/cached chat-client checks pass. The installed desktop UI path and image performance have not been measured.
 
 ## Convert the pinned official checkpoints
 
@@ -45,7 +45,7 @@ The converter emits a `Gemma4VisionLanguageModelConfig` with artifact-contract s
 
 The runtime accepts one bounded PNG or JPEG image per request. CPU preprocessing decodes RGB, resizes by the aspect-ratio patch budget, and produces no more than 2,520 16-by-16 patches before 3-by-3 pooling to at most 280 soft tokens. The Rust/Metal path runs the learned vision encoder and projection. Image features enter the decoder after text embedding scaling; image PLE IDs are zero and image positions use the model's sequential RoPE behavior. Gemma 4 uses its own processor, token and artifact contract alongside the Qwen3.5 image path.
 
-Conversion and runtime code implement this path, and the CLI, terminal chat, desktop host and schema-4 family admission are wired. These facts do not establish complete production validation. The canonical Hugging Face CPU image feature comparison passes its 2% error gate on three fixtures. Full generation-worker/desktop end-to-end validation and benchmarking remain pending; no image latency or throughput claim is made here.
+Conversion and runtime code implement this path, and the CLI, terminal chat, desktop host and schema-4 family admission are wired. The canonical Hugging Face CPU image-feature comparison passes its 2% relative-RMS gate on three fixtures, and bounded generation-worker and local chat-client cold/cached checks pass. Installed desktop UI execution and performance benchmarking remain unmeasured; no image latency or throughput claim is made here. See the [2026-10-28 validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md) for parity, image, worker and quantized-path results and limits.
 
 The canonical HF reference is `scripts/gemma4_image_hf_reference.py`, using the official checkpoint, its Transformers image processor and vision implementation on CPU with Torch 2.14.1 and Transformers 5.15.1. `scripts/gemma4_image_reference.py` is a separate comparison against pinned MLX-VLM commit `53ebd1647cb83549b482a031ea70ba9d9ea60a04`; it uses MLX 0.32.4 and Transformers 5.14.0. The MLX profile's documented preprocessing and precision differences remain distinct from the canonical HF profile.
 
@@ -57,4 +57,4 @@ Gemma 4 BF16 exports set `reference_bf16` on the per-layer embedding producer an
 
 These precision choices have model-bound evidence only within the references and fixtures named by their validation records. They do not establish every output configuration, quantized checkpoint, device, or end-to-end chat path.
 
-External Mac engine measurements and methodology are summarized in the [OLMo 3 and Gemma 4 benchmark report](benchmarks/OLMO3_GEMMA4_MAC_ENGINES.md). Those published results are not Stark performance results.
+The [dated validation record](archive/runs/2026-10-28-olmo3-gemma4-native.md) records the qualified BF16 checkpoints and the remaining Q4 numerical failures. [Matched diagnostic Q4 timings](benchmarks/OLMO3_GEMMA4_NATIVE_MATCHED.md) compare Stark with pinned MLX on this Mac. External measurements and licensing are in the [Mac engine evidence](benchmarks/OLMO3_GEMMA4_MAC_ENGINES.md).

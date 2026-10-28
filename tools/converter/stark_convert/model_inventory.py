@@ -252,8 +252,7 @@ def model_display(model):
         receipt = _json(_small_file(root, "conversion.json"))
         if (
             not isinstance(parsed, dict)
-            or parsed.get("type")
-            not in {"LanguageModelConfig", "ClassifierModelConfig", *VISION_MODEL_TYPES}
+            or parsed.get("type") not in {"LanguageModelConfig", "ClassifierModelConfig", *VISION_MODEL_TYPES}
             or not isinstance(receipt, dict)
         ):
             return result

@@ -27,6 +27,7 @@ and kernel measurements remain historical records for their named builds.
 | [Benchmark brief](STARK_BENCHMARK_BRIEF_2026_10_21.md) | 2026-10-21 | Summary of the 7.36% result; superseded |
 | [Inference comparison evidence inventory](INFERENCE_COMPARISON_EVIDENCE.md) | rolling | Inventory of every recorded engine, reference and conversion result up to 2026-10-21 |
 | [OLMo 3 and Gemma 4 Mac engine evidence](OLMO3_GEMMA4_MAC_ENGINES.md) | 2026-10-28 | Published benchmark evidence, comparison limits, source licensing and native implementation techniques |
+| [Matched native OLMo 3 and Gemma 4 comparison](OLMO3_GEMMA4_NATIVE_MATCHED.md) | 2026-10-28 | Diagnostic Q4 timings against pinned MLX: Stark rate ratios 0.8600 and 0.9757; numerical qualification incomplete; no earlier study superseded |
 
 ## Optimization records
 
