@@ -14,8 +14,9 @@ authority for live API and image capabilities.
 ## Browsing and removing models
 
 The app's **Manage Models** window lists application model families. Its buttons
-beside the menu/Playground model dropdown and in the install dialog open it
-explicitly; opening Install Model does not open it. Search filters the
+in the menu, Playground and install dialog open it explicitly; the menu and
+Playground use it to select and run models instead of model dropdowns. Opening
+Install Model does not open management. Search filters the
 current view immediately and does not trigger another Hugging Face request.
 Search text is transient; sort choices persist independently for **On this Mac**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
@@ -68,10 +69,15 @@ a candidate. Offline and failed discovery have fixed messages and can be retried
 **On this Mac** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
 standalone entry with its stored name. Compact rows place the saved name,
-quantization, stored weight-file size, repo link, Run and removal controls on one line.
-Run resolves the current saved private ID, selects it and opens the Playground in
-the current app mode. Busy or stale rows cannot start a run. A model already
-ready in that mode is reused. Closing the management window cancels catalogue
+quantization, stored weight-file size, repo link, Run/Stop and removal controls on
+one line. Run resolves the current saved private ID and loads it in the current
+app mode while leaving management open. Stop identifies the active model and
+moves when another model starts. It can cancel loading or an active request;
+row controls reject stale IDs and unrelated busy operations. The active version
+is pinned in a separate section above other models. Search filters both sections;
+the chosen sort applies to remaining groups after excluding the active version.
+Closing the
+management window cancels catalogue
 browsing without stopping the loaded model.
 Multiple versions retain a shared model heading. Row help retains the family,
 image support and full source revision when known; removal confirmations also

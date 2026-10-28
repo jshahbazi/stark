@@ -1,6 +1,6 @@
 # Stark menu bar app
 
-A native macOS menu bar application for installing, running and chatting with converted models. Click the cat icon to install a model, choose a model and **Run**, or **Stop** the loaded worker. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the dropdown and the playground window.
+A native macOS menu bar application for installing, running and chatting with converted models. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
 ## Build and install
 
@@ -39,8 +39,9 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
 
-**Manage Models**, beside the model dropdown in the menu and Playground, opens
-the model browser in its own window. The same button appears in the install
+**Manage Models** in the menu and Playground opens the model browser in its own
+window. These views show the running model's name and use management to choose
+and run a model. The same button appears in the install
 dialog. **Install Model** opens only the install dialog, without opening model
 management. Search and sort settings are separate for
 **On this Mac**, the family overview and a family's detail view. Search filters
@@ -50,10 +51,15 @@ current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
 **On this Mac** shows compact rows with the saved name, quantization, file size,
-repo link, **Run** and removal button on one line. **Run** selects that exact saved
-version, loads it in the current Chat or Decision mode and opens the Playground.
-An already-running model in that mode opens without reloading or clearing its
-conversation. Run is unavailable while another app operation is busy. Multiple
+repo link, **Run** or **Stop**, and removal button on one line. **Run** selects
+that exact saved version and loads it in the current Chat or Decision mode while
+keeping management open. The active model's button becomes **Stop**; starting a
+different model moves Stop to that row. Loading and stopping progress appears
+in management. Run is unavailable while another app operation is busy. Stop can
+cancel a model load or request; it cannot cancel an unrelated installation or
+removal from a model row. The active model stays at the top in a separate
+**Running** section; the remaining models follow your chosen sort order. Search
+filters both sections. Multiple
 saved variants keep a shared model heading. Hover a row for its family, source
 version and image support when
 available. Sort by model name A–Z or Z–A, or total disk

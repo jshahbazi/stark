@@ -777,6 +777,8 @@ struct ModelsInventory {
     }
     let models: [Model]
     let groups: [Group]
+    let runningGroup: Group?
+    let otherGroups: [Group]
     let families: [Family]?
 
     init(models: [InstalledModel], loadedID: String, registry: ModelFamilyRegistry?,
@@ -799,6 +801,12 @@ struct ModelsInventory {
             return [Group(id: key, name: first.display?.groupName ?? first.name,
                           family: first.display?.familyID.flatMap(ModelFamily.displayName(for:)), models: rows)]
         }
+        func groupOrder(_ first: Group, _ second: Group) -> Bool {
+            let firstName = first.models.count == 1 ? first.models[0].name : first.name
+            let secondName = second.models.count == 1 ? second.models[0].name : second.name
+            return sort.precedes(firstName, id: first.id, size: first.totalBytes,
+                                 secondName, id: second.id, size: second.totalBytes)
+        }
         groups = allGroups.compactMap { group in
             var visible = group.models.filter { model in
                 ModelBrowserSearch.matches(query, fields: [group.name, group.family ?? "", model.name, model.sourceName,
@@ -812,12 +820,15 @@ struct ModelsInventory {
                 }
             }
             return visible.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: visible)
-        }.sorted { first, second in
-            let firstName = first.models.count == 1 ? first.models[0].name : first.name
-            let secondName = second.models.count == 1 ? second.models[0].name : second.name
-            return sort.precedes(firstName, id: first.id, size: first.totalBytes,
-                                 secondName, id: second.id, size: second.totalBytes)
-        }
+        }.sorted(by: groupOrder)
+        runningGroup = groups.compactMap { group -> Group? in
+            guard let active = group.models.first(where: \.isRunning) else { return nil }
+            return Group(id: group.id, name: group.name, family: group.family, models: [active])
+        }.first
+        otherGroups = groups.compactMap { group -> Group? in
+            let remaining = group.models.filter { !$0.isRunning }
+            return remaining.isEmpty ? nil : Group(id: group.id, name: group.name, family: group.family, models: remaining)
+        }.sorted(by: groupOrder)
         let visibleIDs = Set(groups.flatMap { $0.models.map(\.id) })
         self.models = allModels.filter { visibleIDs.contains($0.id) }
         families = registry?.families.filter { family in ModelSupportMode.allCases.contains(where: family.hasAppMode) }
@@ -958,6 +969,10 @@ final class EngineController: ObservableObject {
             catalogInstallation != nil || removingModelID != nil
     }
     var modelReady: Bool { state == "ready" && !busy && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
+    var modelControlID: String {
+        if loadedMode == nil && (state == "loading" || state == "stopping") { return selectedID }
+        return loadedID
+    }
     var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
     var imageVerificationNote: String {
@@ -1410,6 +1425,17 @@ final class EngineController: ObservableObject {
         return run()
     }
 
+    func canStopModel(id: String) -> Bool {
+        !id.isEmpty && id == modelControlID && models.contains(where: { $0.id == id }) &&
+            state != "stopping" && state != "installing" && state != "removing" &&
+            catalogInstallation == nil && removingModelID == nil
+    }
+
+    func stopModel(id: String) {
+        guard canStopModel(id: id) else { return }
+        stop()
+    }
+
     func changeMode(_ updated: PlaygroundMode) {
         guard !busy, updated != mode else { return }
         let reload = !loadedID.isEmpty
@@ -1692,7 +1718,6 @@ struct MenuView: View {
     @ObservedObject var updater: AppUpdateController
     let install: () -> Void
     let manage: () -> Void
-    let run: () -> Void
     let console: () -> Void
     let connection: () -> Void
     var body: some View {
@@ -1709,13 +1734,7 @@ struct MenuView: View {
             }
             StatusLine(engine: engine)
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            HStack(spacing: 8) {
-                Picker("Model", selection: $engine.selectedID) {
-                    if engine.models.isEmpty { Text("Install a model to begin").tag("") }
-                    ForEach(engine.models) { Text($0.name).tag($0.id) }
-                }.disabled(engine.busy).frame(maxWidth: .infinity)
-                Button("Manage Models", action: manage).controlSize(.small).fixedSize()
-            }
+            Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
             if engine.mode == .chat {
                 SpeedView(engine: engine)
                 Text("Last request").font(.caption2).foregroundStyle(.secondary)
@@ -1728,8 +1747,6 @@ struct MenuView: View {
                 if engine.busy || !engine.loadedID.isEmpty {
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
                 }
-                Button("Run", action: run).buttonStyle(.borderedProminent)
-                    .disabled(engine.selectedID.isEmpty || engine.busy)
             }
             Divider()
             Button("Connection Details…", action: connection)
@@ -1795,7 +1812,7 @@ struct ModelsView: View {
     @State private var catalogSort = ModelBrowserPreferences.load(.catalog)
 
     private var inventory: ModelsInventory {
-        ModelsInventory(models: engine.models, loadedID: engine.loadedID, registry: engine.modelFamilies,
+        ModelsInventory(models: engine.models, loadedID: engine.modelControlID, registry: engine.modelFamilies,
                         query: savedQuery, sort: savedSort)
     }
 
@@ -1887,8 +1904,17 @@ struct ModelsView: View {
                     if engine.models.isEmpty { emptyState(tab) }
                     else if inventory.groups.isEmpty { noSearchResults("No matching models") }
                     else {
-                        LazyVStack(spacing: 4) {
-                            ForEach(inventory.groups) { group in modelGroup(group) }
+                        LazyVStack(alignment: .leading, spacing: 4) {
+                            if let active = inventory.runningGroup {
+                                Text(engine.state == "loading" ? "Starting" : (engine.state == "stopping" ? "Stopping" : "Running"))
+                                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
+                                modelGroup(active)
+                                if !inventory.otherGroups.isEmpty {
+                                    Divider().padding(.vertical, 10)
+                                    Text("Other models").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
+                                }
+                            }
+                            ForEach(inventory.otherGroups) { group in modelGroup(group) }
                         }
                     }
                 } else if let families = inventory.families {
@@ -1932,7 +1958,7 @@ struct ModelsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            if engine.state == "error" { StatusLine(engine: engine) }
+            if engine.catalogInstallation == nil && (engine.busy || engine.state == "error") { StatusLine(engine: engine) }
             HStack { Spacer(); Button("Done", action: onDone).keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 640, height: 580)
             .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
@@ -1988,14 +2014,20 @@ struct ModelsView: View {
         HStack(spacing: 10) {
             Text(model.name).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
                 .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
-            if model.isRunning { Text("Running").font(.caption).foregroundStyle(.secondary).fixedSize() }
             Text(model.quantization ?? "—").font(.caption).foregroundStyle(.secondary)
                 .lineLimit(1).minimumScaleFactor(0.8).frame(width: 68, alignment: .leading)
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
             modelRepositoryLink(model).frame(width: 28, alignment: .leading)
-            Button("Run") { onRun(model.id) }.controlSize(.small).frame(width: 44)
-                .disabled(engine.busy).accessibilityLabel("Run " + model.name)
+            Group {
+                if model.id == engine.modelControlID {
+                    Button("Stop") { engine.stopModel(id: model.id) }
+                        .disabled(!engine.canStopModel(id: model.id)).accessibilityLabel("Stop " + model.name)
+                } else {
+                    Button("Run") { onRun(model.id) }
+                        .disabled(engine.busy).accessibilityLabel("Run " + model.name)
+                }
+            }.controlSize(.small).frame(width: 44)
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
@@ -2350,20 +2382,12 @@ struct PlaygroundView: View {
             }
             StatusLine(engine: engine)
             HStack {
-                Picker("Model", selection: $engine.selectedID) {
-                    if engine.models.isEmpty { Text("Install a model to begin").tag("") }
-                    ForEach(engine.models) { Text($0.name).tag($0.id) }
-                }.disabled(engine.busy).frame(maxWidth: .infinity)
+                Text(engine.activeName).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                Spacer(minLength: 0)
                 Button("Manage Models", action: manage).controlSize(.small).fixedSize()
-                if engine.loadedID != engine.selectedID || engine.loadedID.isEmpty || engine.loadedMode != engine.mode {
-                    Button("Run") { engine.run() }.disabled(engine.selectedID.isEmpty || engine.busy)
-                }
                 if !engine.loadedID.isEmpty || engine.busy {
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
                 }
-            }
-            if !engine.loadedID.isEmpty && engine.loadedID != engine.selectedID {
-                Text("Select Run to load the chosen model.").font(.caption).foregroundStyle(.secondary)
             }
             if let error = engine.errorMessage {
                 Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true)
@@ -2452,7 +2476,7 @@ struct ChatContentView: View {
                             VStack(spacing: 10) {
                                 Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 28)).foregroundStyle(.secondary)
                                 Text("Try a conversation").font(.headline)
-                                Text("Choose a model, select Run, and send a message.")
+                                Text("Run a model in Manage Models, then send a message.")
                                     .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                             }.frame(maxWidth: .infinity).padding(.vertical, 36)
                         }
@@ -2585,7 +2609,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
             engine: engine, updater: updater, install: { [weak self] in self?.showInstall() },
             manage: { [weak self] in self?.showModels() },
-            run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() },
+            console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
             .onChange(of: updater.message) { [weak self] _, _ in
                 DispatchQueue.main.async { self?.resizeMenuForUpdate() }
@@ -2688,9 +2712,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func runSavedModel(_ identifier: String) {
-        guard engine.runModel(id: identifier) else { return }
-        modelsWindow?.close()
-        showPrompt()
+        engine.runModel(id: identifier)
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -2718,11 +2740,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             connectionWindow?.contentViewController = NSHostingController(rootView: ConnectionDetailsView(engine: engine))
         }
         present(connectionWindow)
-    }
-
-    private func run() {
-        if !engine.modelReady { engine.run() }
-        showPrompt()
     }
 
     private func window<V: View>(title: String, view: V, resizable: Bool) -> NSWindow {

@@ -357,6 +357,94 @@ extension EngineController {
             engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")]
             engine.input = nil
             return !engine.runModel(id: "other") && engine.state == "error" && !engine.modelReady && noCommandSent()
+        case "saved-row-control-switch":
+            engine.models = [
+                InstalledModel(id: "fixture-model", name: "Same name", path: "/private/current", apiID: "owner/Same"),
+                InstalledModel(id: "other", name: "Same name", path: "/private/other", apiID: "owner/Same")
+            ]
+            guard engine.modelControlID == "fixture-model", engine.canStopModel(id: "fixture-model"),
+                  !engine.canStopModel(id: "other"), engine.runModel(id: "other") else { return false }
+            let request = command()
+            guard request["command"] as? String == "run", request["model_id"] as? String == "other",
+                  engine.modelControlID == "other", engine.canStopModel(id: "other"),
+                  !engine.canStopModel(id: "fixture-model"), engine.busy else { return false }
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "fixture-model"])
+            guard engine.state == "loading", engine.modelControlID == "other" else { return false }
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "other"])
+            guard engine.modelReady, engine.modelControlID == "other", engine.canStopModel(id: "other"),
+                  !engine.canStopModel(id: "fixture-model") else { return false }
+            engine.stopModel(id: "other")
+            guard command()["command"] as? String == "stop", engine.state == "stopping",
+                  !engine.canStopModel(id: "other") else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return engine.modelControlID.isEmpty && !engine.canStopModel(id: "other")
+        case "saved-row-control-cancel-load":
+            engine.models = [
+                InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
+                InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")
+            ]
+            guard engine.runModel(id: "other") else { return false }
+            _ = command()
+            engine.stopModel(id: "other")
+            guard command()["command"] as? String == "stop", engine.state == "stopping",
+                  engine.modelControlID == "other", !engine.canStopModel(id: "other") else { return false }
+            engine.stopModel(id: "other")
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "other"])
+            guard engine.state == "stopping", !engine.modelReady, engine.modelControlID == "other",
+                  noCommandSent() else { return false }
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return engine.modelControlID.isEmpty && engine.loadedID.isEmpty
+        case "saved-row-control-identity-guards":
+            let current = InstalledModel(id: "fixture-model", name: "Same name", path: "/private/current", apiID: "owner/Same")
+            let other = InstalledModel(id: "other", name: "Same name", path: "/private/other", apiID: "owner/Same")
+            engine.models = [current, other]
+            engine.selectedID = "other"
+            guard engine.modelControlID == current.id, engine.canStopModel(id: current.id),
+                  !engine.canStopModel(id: other.id), !engine.canStopModel(id: "missing"),
+                  !engine.canStopModel(id: "") else { return false }
+            engine.stopModel(id: other.id); engine.stopModel(id: "missing"); engine.stopModel(id: "")
+            guard engine.state == "ready", engine.loadedID == current.id, noCommandSent() else { return false }
+            engine.models = [other]
+            engine.stopModel(id: current.id)
+            return !engine.canStopModel(id: current.id) && engine.state == "ready" &&
+                engine.loadedID == current.id && noCommandSent()
+        case "saved-row-control-stop-generation":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.models = [InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current")]
+            engine.state = "generating"
+            engine.messages = [ChatMessage(text: "synthetic retained turn", isUser: true)]
+            guard engine.busy, engine.canStopModel(id: "fixture-model") else { return false }
+            engine.stopModel(id: "fixture-model")
+            return command()["command"] as? String == "stop" && engine.state == "stopping" &&
+                engine.messages.isEmpty && !engine.canStopModel(id: "fixture-model")
+        case "saved-row-control-unrelated-operation":
+            engine.models = [
+                InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
+                InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other",
+                               removal: InstalledModelRemoval(removal()))
+            ]
+            for state in ["installing", "removing"] {
+                engine.state = state
+                engine.stopModel(id: "fixture-model")
+                guard !engine.canStopModel(id: "fixture-model"), engine.state == state,
+                      noCommandSent() else { return false }
+            }
+            engine.state = "ready"
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            _ = command()
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.stopModel(id: "fixture-model")
+            guard engine.catalogInstallation != nil, !engine.canStopModel(id: "fixture-model"),
+                  engine.state == "ready", noCommandSent() else { return false }
+            engine.catalogInstallation = nil; engine.activeInstallRequestID = nil
+            engine.removeModel(id: "other", expectedAction: .trash)
+            _ = command()
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            engine.stopModel(id: "fixture-model")
+            return engine.removingModelID == "other" && !engine.canStopModel(id: "fixture-model") &&
+                engine.state == "ready" && engine.loadedID == "fixture-model" && noCommandSent()
         case "models-artifact-mode-label":
             let descriptor = InstalledModelDisplay(modelDisplay())
             let models = [
@@ -390,6 +478,57 @@ extension EngineController {
             let filtered = ModelsInventory(models: grouped, loadedID: "", registry: nil, query: "4-bit")
             return all.groups.map(\.name) == ["Alpha", "Zulu"] &&
                 filtered.groups.flatMap({ $0.models.map(\.id) }) == ["beta", "zeta"]
+        case "models-running-version-extracted":
+            var compact = modelDisplay("repo:example/base"); compact["quantization"] = "4-bit"
+            let saved = InstalledModel(id: "active", name: "Active saved name", path: "/private/active", apiID: "same-public-name",
+                                       display: InstalledModelDisplay(modelDisplay("repo:example/base")),
+                                       artifactMode: .visionLanguage, removal: InstalledModelRemoval(removal()))
+            let models = [saved, variant("compact", name: "Compact", display: compact),
+                          variant("other", name: "Other", display: modelDisplay("repo:example/other", name: "Other"))]
+            let inventory = ModelsInventory(models: models, loadedID: saved.id, registry: nil)
+            guard let running = inventory.runningGroup, running.id == "source:repo:example/base",
+                  running.name == "Base", running.family == "Qwen3", running.models.count == 1,
+                  let row = running.models.first, row.id == saved.id, row.isRunning,
+                  row.name == saved.name, row.quantization == "BF16", row.weightBytes == Int64(1_190_000_000),
+                  row.sourceRevision == String(repeating: "a", count: 40), row.artifactMode == .visionLanguage,
+                  row.removal?.action == .trash, row.repositoryURL?.absoluteString == "https://huggingface.co/example/base"
+            else { return false }
+            let visible = running.models + inventory.otherGroups.flatMap(\.models)
+            return inventory.groups.count == 2 && inventory.models.count == 3 && visible.count == 3 &&
+                Set(visible.map(\.id)) == Set(models.map(\.id)) &&
+                !inventory.otherGroups.flatMap(\.models).contains(where: { $0.id == saved.id }) &&
+                inventory.otherGroups.first(where: { $0.id == running.id })?.models.map(\.id) == ["compact"]
+        case "models-running-extraction-resorts-remaining":
+            var huge = modelDisplay("repo:example/base", name: "Alpha"); huge["weight_bytes"] = Int64(1_000)
+            var compact = huge; compact["weight_bytes"] = Int64(100); compact["quantization"] = "4-bit"
+            var beta = modelDisplay("repo:example/other", name: "Beta"); beta["weight_bytes"] = Int64(500)
+            let models = [variant("active", name: "Active", display: huge), variant("zulu", name: "Zulu", display: compact),
+                          variant("beta", name: "Beta", display: beta)]
+            let sizeAscending = ModelsInventory(models: models, loadedID: "active", registry: nil, sort: .sizeAscending)
+            let sizeDescending = ModelsInventory(models: models, loadedID: "active", registry: nil, sort: .sizeDescending)
+            let nameAscending = ModelsInventory(models: models, loadedID: "active", registry: nil, sort: .nameAscending)
+            let nameDescending = ModelsInventory(models: models, loadedID: "active", registry: nil, sort: .nameDescending)
+            return sizeAscending.otherGroups.flatMap({ $0.models.map(\.id) }) == ["zulu", "beta"] &&
+                sizeDescending.otherGroups.flatMap({ $0.models.map(\.id) }) == ["beta", "zulu"] &&
+                nameAscending.otherGroups.flatMap({ $0.models.map(\.id) }) == ["beta", "zulu"] &&
+                nameDescending.otherGroups.flatMap({ $0.models.map(\.id) }) == ["zulu", "beta"] &&
+                [sizeAscending, sizeDescending, nameAscending, nameDescending].allSatisfy {
+                    $0.runningGroup?.models.map(\.id) == ["active"]
+                }
+        case "models-running-extraction-search-and-idle":
+            var compact = modelDisplay(); compact["quantization"] = "4-bit"
+            let models = [variant("active", name: "Active", display: modelDisplay()),
+                          variant("compact", name: "Compact", display: compact)]
+            let filtered = ModelsInventory(models: models, loadedID: "active", registry: nil, query: "4-bit")
+            let activeOnly = ModelsInventory(models: models, loadedID: "active", registry: nil, query: "Running")
+            let idle = ModelsInventory(models: models, loadedID: "", registry: nil)
+            let missing = ModelsInventory(models: models, loadedID: "missing", registry: nil)
+            return filtered.runningGroup == nil && filtered.otherGroups.flatMap({ $0.models.map(\.id) }) == ["compact"] &&
+                activeOnly.runningGroup?.models.map(\.id) == ["active"] && activeOnly.otherGroups.isEmpty &&
+                idle.runningGroup == nil && idle.otherGroups.map(\.id) == idle.groups.map(\.id) &&
+                idle.otherGroups.flatMap({ $0.models.map(\.id) }) == idle.groups.flatMap({ $0.models.map(\.id) }) &&
+                missing.runningGroup == nil && missing.otherGroups.flatMap({ $0.models.map(\.id) }) ==
+                    idle.otherGroups.flatMap({ $0.models.map(\.id) })
         case "image-catalog-stale-family":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -1403,6 +1542,15 @@ class ControllerLifecycleTests(unittest.TestCase):
     def test_saved_name_sort_matches_visible_rows_after_group_filtering(self):
         self.exercise("models-visible-row-name-sort")
 
+    def test_running_version_is_extracted_once_with_source_and_control_identity(self):
+        self.exercise("models-running-version-extracted")
+
+    def test_remaining_groups_resort_by_their_own_sizes_and_visible_names(self):
+        self.exercise("models-running-extraction-resorts-remaining")
+
+    def test_running_section_respects_search_and_is_absent_without_active_model(self):
+        self.exercise("models-running-extraction-search-and-idle")
+
     def test_saved_row_run_uses_private_id_for_duplicate_names_and_loads_that_model(
         self,
     ):
@@ -1423,6 +1571,21 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_saved_row_run_reports_send_failure_without_becoming_ready(self):
         self.exercise("saved-row-run-unavailable-runtime")
+
+    def test_saved_row_controls_follow_switch_and_stop_lifecycle(self):
+        self.exercise("saved-row-control-switch")
+
+    def test_saved_row_stop_cancels_pending_load_and_rejects_late_ready(self):
+        self.exercise("saved-row-control-cancel-load")
+
+    def test_saved_row_stop_rejects_wrong_duplicate_name_or_removed_identity(self):
+        self.exercise("saved-row-control-identity-guards")
+
+    def test_saved_row_stop_can_cancel_active_generation(self):
+        self.exercise("saved-row-control-stop-generation")
+
+    def test_saved_row_stop_cannot_cancel_unrelated_installation_or_removal(self):
+        self.exercise("saved-row-control-unrelated-operation")
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")

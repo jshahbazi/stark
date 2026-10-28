@@ -110,11 +110,16 @@ for the saved-model list, family overview and family detail. Typing in a search
 field does not issue another catalogue request.
 
 The app delegate owns the independent Manage Models window. Explicit management
-buttons open it; Install Model has no management-sheet binding. Saved-row Run
-uses a live private-ID lookup before selecting the model and sending the existing
-`run` command. It inherits the current app mode, rejects busy/stale rows, and
-reuses a matching ready worker. Successful admission closes management and opens
-the Playground; failed runtime sends remain visible as errors. Closing management
+buttons open it; Install Model has no management-sheet binding. The menu and
+Playground show the running name and open management instead of model pickers.
+Saved-row Run uses a live private-ID lookup before selecting the model and
+sending the existing `run` command. It inherits the current app mode, rejects
+busy/stale rows and keeps management open. Stop follows the worker or pending
+load's private ID and rejects unrelated installation/removal operations.
+The filtered active version is extracted into a separate first section. Remaining
+versions retain their source groups and are sorted again without the active
+version's size. A search can hide the active section.
+Loading, stopping and runtime errors remain visible in management. Closing management
 cancels only catalogue browsing, including when using the native close button.
 
 Library entries can include an optional `display` object with schema version 1:
