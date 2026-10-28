@@ -1,0 +1,32 @@
+{
+  "format": 1,
+  "git_head": "9e786991885d69506f5d4740c8af11535844c7de",
+  "patch_sha256": "34f15cff06fc596f14f40fa43e2c08b16669fcd150c14c7921a61c9c066cf92d",
+  "files": {
+    "crates/stark-engine/src/engine/hybrid/decode_graph.rs": {
+      "experimental_sha256": "56a377bd2fa9d4a6157d6d957d95238683e5eb05bc9cb699fa89d115b9bea83c",
+      "removed_sha256": "681f12fa664242f963fc3a4459ed775422c821e886765ee3874c4cce6ac38eeb"
+    },
+    "crates/stark-engine/src/engine/hybrid/qwen_graph.rs": {
+      "experimental_sha256": "f222594a9e9bbb0970904d72301c66db6315c4468fbd801193a6d19a7f326ce3",
+      "removed_sha256": "4a7e49bab7bbf78487912b4009c08e26ed8791b443d7a61c81d43a37aa941a5d"
+    },
+    "crates/stark-engine/src/engine/hybrid/weight_metal.rs": {
+      "experimental_sha256": "a15c83849db3ef7524c4602a6ce8522162bbb832e255b5134da57174a435b8db",
+      "removed_sha256": "ab18bf30335dbb2db72600e17a743fbf1dca81c7d1432805a80dd6e8e2f7c559"
+    },
+    "crates/stark-engine/src/engine/hybrid/weights.rs": {
+      "experimental_sha256": "a3adf1c0f52b074152a754903440513c797f8ea39e0518df4102c6156f3ef783",
+      "removed_sha256": "6e9e4bd65518978648b8d5687452060fe04ec74eea31839eff1fa40ec3ba765d"
+    },
+    "crates/stark-engine/src/engine/hybrid/qwen_hc.metal": {
+      "experimental_sha256": "acf2ed740eed078f356da65c79c4d5d37c14564ceb4042257da0a96f95dd699e",
+      "removed_sha256": null
+    },
+    "crates/stark-engine/src/engine/hybrid/qwen_hc_tests.rs": {
+      "experimental_sha256": "ae568d42fec299ef328460437914b5c58c9ed720c0a7b60dff309abb1c73119d",
+      "removed_sha256": null
+    }
+  },
+  "test_log_sha256": "c1b355336d6753232b5413364c476714b76665fe00c581ecc20e584f89dcfbf7"
+}

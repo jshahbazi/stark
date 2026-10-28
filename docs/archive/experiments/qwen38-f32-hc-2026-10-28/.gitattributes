@@ -1,0 +1,2 @@
+# A unified diff represents a blank context line with one literal space.
+reapply.patch -whitespace

@@ -1,0 +1,874 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/decode_graph.rs b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+--- a/crates/stark-engine/src/engine/hybrid/decode_graph.rs
++++ b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+@@ -775,6 +775,270 @@
+         Ok(output)
+     }
+ 
++    pub fn qwen_hc_fused(
++        &mut self,
++        down: &MappedMatrix,
++        up: &MappedMatrix,
++        format: MatrixFormat,
++        injection: Option<(&MappedMatrix, u32)>,
++        input: &DeviceVector,
++        norm: &DeviceVector,
++        streams: usize,
++        latent: usize,
++        eps: f32,
++    ) -> Result<Option<(DeviceVector, DeviceVector)>> {
++        if executor()?.ordered_rms
++            || streams == 0
++            || streams > 4
++            || !matches!(
++                format,
++                MatrixFormat::Affine {
++                    bits: 4 | 8,
++                    ..
++                }
++            )
++        {
++            return Ok(None);
++        }
++        input.validate()?;
++        norm.validate()?;
++        if !input.len.is_multiple_of(streams)
++            || ![input.len, input.len / streams].contains(&norm.len)
++            || !eps.is_finite()
++            || eps <= 0.0
++            || self.projection_level
++        {
++            return Err(Error::Invalid("fused hyperconnection normalization geometry"));
++        }
++        MappedOperation {
++            matrices: vec![down.clone()],
++            inputs: &[],
++            rows: latent,
++            columns: input.len,
++            rows_per_batch: 0,
++            format,
++        }
++        .parameters_for_input(input.len)?;
++        MappedOperation {
++            matrices: vec![up.clone()],
++            inputs: &[],
++            rows: input.len,
++            columns: latent,
++            rows_per_batch: 0,
++            format,
++        }
++        .parameters_for_input(latent)?;
++        if let Some((matrix, kind)) = injection {
++            if !matches!(kind, 0 | 1 | 30) {
++                return Ok(None);
++            }
++            MappedOperation {
++                matrices: vec![matrix.clone()],
++                inputs: &[],
++                rows: streams,
++                columns: input.len,
++                rows_per_batch: 0,
++                format: MatrixFormat::Packed(kind),
++            }
++            .parameters_for_input(input.len)?;
++        }
++        let controls = self.scratch(
++            latent
++                .checked_add(
++                    streams
++                        * if injection.is_some() {
++                            2
++                        } else {
++                            1
++                        },
++                )
++                .ok_or(Error::Invalid("fused hyperconnection controls overflow"))?,
++        )?;
++        let executor = executor()?;
++        let pipeline = executor.cached_pipeline(format, "qwen_graph_hc_down", &executor.hc_down_pipelines)?;
++        let (scales, biases) = down.planes.as_ref().ok_or(Error::Invalid("fused hyperconnection planes"))?;
++        let injection_matrix = injection.map_or(down, |(matrix, _)| matrix);
++        let offsets = [
++            down.codes.offset as u32,
++            scales.offset as u32,
++            biases.offset as u32,
++            injection_matrix.codes.offset as u32,
++        ];
++        let parameters = [
++            (input.len / streams) as u32,
++            streams as u32,
++            latent as u32,
++            eps.to_bits(),
++            norm.len as u32,
++            injection.map_or(0, |(_, kind)| kind),
++            u32::from(injection.is_some()),
++        ];
++        let e = &self.encoding;
++        e.set_compute_pipeline_state(&pipeline);
++        for (index, (buffer, offset)) in [
++            (&down.codes.buffer, 0),
++            (&input.buffer, input.offset),
++            (&norm.buffer, norm.offset),
++            (&controls.buffer, controls.offset),
++            (&scales.buffer, 0),
++            (&biases.buffer, 0),
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            e.set_buffer(Some(buffer), offset, index);
++        }
++        e.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
++        e.set_buffer(Some(&injection_matrix.codes.buffer), 0, 7);
++        e.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 8);
++        e.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
++        self.order_dispatch();
++        e.dispatch_threadgroups(
++            MTLSize {
++                width: (latent
++                    + if injection.is_some() {
++                        streams
++                    } else {
++                        0
++                    })
++                .div_ceil(8),
++                height: 1,
++                depth: 1,
++            },
++            MTLSize {
++                width: 256,
++                height: 1,
++                depth: 1,
++            },
++        );
++        self.resources.extend([
++            down.codes.buffer.clone(),
++            scales.buffer.clone(),
++            biases.buffer.clone(),
++            injection_matrix.codes.buffer.clone(),
++            input.buffer.clone(),
++            norm.buffer.clone(),
++            controls.buffer.clone(),
++        ]);
++        let output = self.qwen_hc_up_mix(up, format, input, norm, &controls, streams, latent, injection.is_some())?;
++        profile::record("native.metal.graph.fused_hc", 0.0, 0);
++        let dim = input.len / streams;
++        let gates = if injection.is_some() {
++            output.slice(dim, streams)?
++        } else {
++            Self::zeros(1)?
++        };
++        Ok(Some((output.slice(0, dim)?, gates)))
++    }
++
++    fn qwen_hc_up_mix(
++        &mut self,
++        matrix: &MappedMatrix,
++        format: MatrixFormat,
++        input: &DeviceVector,
++        norm: &DeviceVector,
++        controls: &DeviceVector,
++        streams: usize,
++        latent: usize,
++        injection: bool,
++    ) -> Result<DeviceVector> {
++        input.validate()?;
++        norm.validate()?;
++        controls.validate()?;
++        if streams == 0
++            || streams > 4
++            || !input.len.is_multiple_of(streams)
++            || ![input.len, input.len / streams].contains(&norm.len)
++            || controls.len
++                != latent
++                    + streams
++                        * if injection {
++                            2
++                        } else {
++                            1
++                        }
++            || !matches!(
++                format,
++                MatrixFormat::Affine {
++                    bits: 4 | 8,
++                    ..
++                }
++            )
++        {
++            return Err(Error::Invalid("fused hyperconnection up geometry"));
++        }
++        MappedOperation {
++            matrices: vec![matrix.clone()],
++            inputs: &[],
++            rows: input.len,
++            columns: latent,
++            rows_per_batch: 0,
++            format,
++        }
++        .parameters_for_input(latent)?;
++        let dim = input.len / streams;
++        let output = self.scratch(
++            dim + if injection {
++                streams
++            } else {
++                0
++            },
++        )?;
++        let executor = executor()?;
++        let pipeline = executor.cached_pipeline(format, "qwen_graph_hc_up_mix", &executor.hc_up_pipelines)?;
++        let (scales, biases) = matrix.planes.as_ref().ok_or(Error::Invalid("fused hyperconnection planes"))?;
++        let offsets = [matrix.codes.offset as u32, scales.offset as u32, biases.offset as u32, 0];
++        let parameters = [dim as u32, streams as u32, latent as u32, norm.len as u32, u32::from(injection)];
++        let e = &self.encoding;
++        e.set_compute_pipeline_state(&pipeline);
++        for (index, (buffer, offset)) in [
++            (&matrix.codes.buffer, 0),
++            (&controls.buffer, controls.offset),
++            (&input.buffer, input.offset),
++            (&output.buffer, output.offset),
++            (&scales.buffer, 0),
++            (&biases.buffer, 0),
++        ]
++        .into_iter()
++        .enumerate()
++        {
++            e.set_buffer(Some(buffer), offset, index);
++        }
++        e.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
++        e.set_buffer(Some(&norm.buffer), norm.offset, 7);
++        e.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 8);
++        e.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
++        self.order_dispatch();
++        e.dispatch_threadgroups(
++            MTLSize {
++                width: dim
++                    .max(if injection {
++                        streams
++                    } else {
++                        0
++                    })
++                    .div_ceil(8),
++                height: 1,
++                depth: 1,
++            },
++            MTLSize {
++                width: 256,
++                height: 1,
++                depth: 1,
++            },
++        );
++        self.resources.extend([
++            matrix.codes.buffer.clone(),
++            scales.buffer.clone(),
++            biases.buffer.clone(),
++            controls.buffer.clone(),
++            input.buffer.clone(),
++            norm.buffer.clone(),
++            output.buffer.clone(),
++        ]);
++        Ok(output)
++    }
++
+     pub fn qwen_hyperconnection(
+         &mut self,
+         weights: &weights::Weights,
+@@ -1064,6 +1328,10 @@
+ #[cfg(test)]
+ #[path = "decode_graph_factored_tests.rs"]
+ mod factored_tests;
++
++#[cfg(test)]
++#[path = "qwen_hc_tests.rs"]
++mod hc_tests;
+ 
+ #[cfg(test)]
+ mod tests {
+diff --git a/crates/stark-engine/src/engine/hybrid/qwen_graph.rs b/crates/stark-engine/src/engine/hybrid/qwen_graph.rs
+--- a/crates/stark-engine/src/engine/hybrid/qwen_graph.rs
++++ b/crates/stark-engine/src/engine/hybrid/qwen_graph.rs
+@@ -541,6 +541,20 @@
+     g: &Geometry,
+ ) -> Result<(DeviceVector, DeviceVector)> {
+     let inject = hyper.combine.then(|| format!("{}.block_inject_weight.weight", hyper.prefix));
++    if std::env::var_os("STARK_QWEN38_FUSED_HC").is_some_and(|value| value == "1")
++        && let Some(output) = weights.encode_fused_qwen_hc(
++            graph,
++            &format!("{}.input_mix_weight_down.weight", hyper.prefix),
++            &format!("{}.input_mix_weight_up.weight", hyper.prefix),
++            inject.as_deref(),
++            input,
++            norm,
++            g.streams,
++            g.eps,
++        )?
++    {
++        return Ok(output);
++    }
+     let normalized = graph.rms_norm(input, norm, g.dim, g.eps)?;
+     graph.qwen_hyperconnection(
+         weights,
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -44,6 +44,8 @@
+     uint4_indexed_pipelines: PipelineCache,
+     factored_matrix_pipelines: PipelineCache,
+     factored_indexed_pipelines: PipelineCache,
++    hc_down_pipelines: PipelineCache,
++    hc_up_pipelines: PipelineCache,
+     ordered_rms: bool,
+     #[cfg(test)]
+     tiled_pipelines: PipelineCache,
+@@ -475,6 +477,7 @@
+             source.push_str(include_str!("affine_uint_matvec.metal"));
+             source.push_str(include_str!("affine_chunk32_matvec.metal"));
+             source.push_str(include_str!("qwen_graph.metal"));
++            source.push_str(include_str!("qwen_hc.metal"));
+             source.push_str(include_str!("qwen_attention.metal"));
+             #[cfg(test)]
+             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
+@@ -504,6 +507,8 @@
+                 uint4_indexed_pipelines: Mutex::new(HashMap::new()),
+                 factored_matrix_pipelines: Mutex::new(HashMap::new()),
+                 factored_indexed_pipelines: Mutex::new(HashMap::new()),
++                hc_down_pipelines: Mutex::new(HashMap::new()),
++                hc_up_pipelines: Mutex::new(HashMap::new()),
+                 ordered_rms: std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1"),
+                 #[cfg(test)]
+                 tiled_pipelines: Mutex::new(HashMap::new()),
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -919,6 +919,70 @@
+     #[cfg(feature = "metal")]
+     pub(super) fn indexed_banks_admitted(&self) -> bool {
+         self.bank_views.lock().is_ok_and(|cache| cache.limit > 0) && self.indexed_bank_geometry_admitted
++    }
++
++    #[cfg(feature = "metal")]
++    pub(super) fn encode_fused_qwen_hc(
++        &self,
++        graph: &mut super::weight_metal::DecodeGraph,
++        down_name: &str,
++        up_name: &str,
++        inject_name: Option<&str>,
++        input: &super::weight_metal::DeviceVector,
++        norm: &super::weight_metal::DeviceVector,
++        streams: usize,
++        eps: f32,
++    ) -> Result<Option<(super::weight_metal::DeviceVector, super::weight_metal::DeviceVector)>> {
++        use super::weight_metal::MatrixFormat;
++
++        if streams == 0 || streams > 4 || !input.len.is_multiple_of(streams) {
++            return Ok(None);
++        }
++        let down = self.tensor(down_name)?;
++        let up = self.tensor(up_name)?;
++        if down.shape.len() != 2
++            || up.shape.len() != 2
++            || down.shape[1] != input.len
++            || up.shape[0] != input.len
++            || up.shape[1] != down.shape[0]
++            || down.shape.iter().chain(&up.shape).any(|&n| n > MAX_VECTOR)
++        {
++            return Err(Error::Invalid("fused hyperconnection matrix shape"));
++        }
++        let format = self.matrix_format(down)?;
++        if !matches!(
++            format,
++            MatrixFormat::Affine {
++                bits: 4 | 8,
++                ..
++            }
++        ) || self.matrix_format(up)? != format
++        {
++            return Ok(None);
++        }
++        let injection = if let Some(name) = inject_name {
++            let tensor = self.tensor(name)?;
++            if tensor.shape != [streams, input.len] {
++                return Err(Error::Invalid("fused hyperconnection injection shape"));
++            }
++            let MatrixFormat::Packed(kind @ (0 | 1 | 30)) = self.matrix_format(tensor)? else {
++                return Ok(None);
++            };
++            Some((self.mapped_matrix(tensor, 0, streams, input.len, true)?, kind))
++        } else {
++            None
++        };
++        graph.qwen_hc_fused(
++            &self.mapped_matrix(down, 0, down.shape[0], down.shape[1], true)?,
++            &self.mapped_matrix(up, 0, up.shape[0], up.shape[1], true)?,
++            format,
++            injection.as_ref().map(|(matrix, kind)| (matrix, *kind)),
++            input,
++            norm,
++            streams,
++            down.shape[0],
++            eps,
++        )
+     }
+ 
+     #[cfg(feature = "metal")]
+diff --git a/crates/stark-engine/src/engine/hybrid/qwen_hc.metal b/crates/stark-engine/src/engine/hybrid/qwen_hc.metal
+new file mode 100644
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/qwen_hc.metal
+@@ -0,0 +1,144 @@
++// SPDX-License-Identifier: Apache-2.0
++// Original Stark two-stage hyperconnections. The first stage recomputes the
++// existing 256-thread F32 RMS tree per row tile, then streams the normalized
++// inputs directly into affine down and floating injection projections. The
++// second stage shares the latent input across each output channel's streams.
++
++kernel void qwen_graph_hc_down(device const uchar *codes_base [[buffer(0)]],
++    device const float *input [[buffer(1)]], device const float *norm [[buffer(2)]],
++    device float *controls [[buffer(3)]], device const uchar *scales_base [[buffer(4)]],
++    device const uchar *biases_base [[buffer(5)]], constant uint4 &offsets [[buffer(6)]],
++    device const uchar *inject_base [[buffer(7)]], constant uint *p [[buffer(8)]],
++    device atomic_uint *failure [[buffer(30)]], uint tile [[threadgroup_position_in_grid]],
++    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
++    uint sg [[simdgroup_index_in_threadgroup]]) {
++    uint dim = p[0], streams = p[1], latent = p[2], norm_len = p[4];
++    uint columns = dim * streams;
++    threadgroup float partial[8], rms[4];
++    for (uint stream = 0; stream < streams; ++stream) {
++        float sum = 0.0f;
++        for (uint d = tid; d < dim; d += 256) {
++            float value = input[stream * dim + d];
++            if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            sum += value * value;
++        }
++        sum = simd_sum(sum);
++        if (!lane) partial[sg] = sum;
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if (sg == 0) {
++            sum = simd_sum(lane < 8 ? partial[lane] : 0.0f);
++            if (!lane) {
++                rms[stream] = 1.0f / sqrt(sum / float(dim) + as_type<float>(p[3]));
++                if (!tile) controls[latent + stream] = rms[stream];
++            }
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++    }
++    uint row = tile * 8 + sg;
++    if (row >= latent + (p[6] ? streams : 0)) return;
++    if (row < latent) {
++        uint item = hybrid_affine_scale_kind == 0 ? 4 : 2;
++        uint packed_shift = hybrid_affine_bits == 4 ? 1 : 0;
++        uint group_shift = hybrid_affine_group == 128 ? 7 : (hybrid_affine_group == 64 ? 6 : 5);
++        ulong element = ulong(row) * columns;
++        device const uchar *codes = codes_base + offsets.x + (element >> packed_shift);
++        device const uchar *scales = scales_base + offsets.y;
++        device const uchar *biases = biases_base + offsets.z;
++        float sum = 0.0f;
++        for (uint col = lane * 8; col < columns; col += 256) {
++            ulong group = (element + col) >> group_shift;
++            float scale = hybrid_float(scales + group * item, hybrid_affine_scale_kind);
++            float bias = hybrid_float(biases + group * item, hybrid_affine_scale_kind);
++            device const uchar *packed = codes + (col >> packed_shift);
++            uint low = hybrid_u32(packed), high = hybrid_affine_bits == 8 ? hybrid_u32(packed + 4) : 0;
++            #pragma clang loop unroll(full)
++            for (uint j = 0; j < 8; ++j) {
++                uint at = col + j;
++                float x = input[at] * rms[at / dim] * norm[norm_len == dim ? at % dim : at];
++                uint word = hybrid_affine_bits == 4 || j < 4 ? low : high;
++                uint shift = hybrid_affine_bits == 4 ? j * 4 : (j & 3) * 8;
++                float weight = scale * float((word >> shift) & ((1u << hybrid_affine_bits) - 1)) + bias;
++                sum += weight * x;
++            }
++        }
++        float total = simd_sum(sum);
++        if (!lane) {
++            if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            float x = total / float(streams);
++            controls[row] = x * hybrid_ffn_sigmoid(x);
++        }
++    } else {
++        uint injection = row - latent;
++        uint item = p[5] == 0 ? 4 : 2;
++        device const uchar *weights = inject_base + offsets.w + ulong(injection) * columns * item;
++        float sum = 0.0f;
++        for (uint col = lane; col < columns; col += 32) {
++            float x = input[col] * rms[col / dim] * norm[norm_len == dim ? col % dim : col];
++            sum += hybrid_float(weights + ulong(col) * item, p[5]) * x;
++        }
++        float total = simd_sum(sum);
++        if (!lane) {
++            if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            controls[latent + streams + injection] = 2.0f * hybrid_ffn_sigmoid(total / float(streams));
++        }
++    }
++}
++
++kernel void qwen_graph_hc_up_mix(device const uchar *codes_base [[buffer(0)]],
++    device const float *controls [[buffer(1)]], device const float *input [[buffer(2)]],
++    device float *output [[buffer(3)]], device const uchar *scales_base [[buffer(4)]],
++    device const uchar *biases_base [[buffer(5)]], constant uint4 &offsets [[buffer(6)]],
++    device const float *norm [[buffer(7)]], constant uint *p [[buffer(8)]],
++    device atomic_uint *failure [[buffer(30)]], uint tile [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
++    uint dim = p[0], streams = p[1], columns = p[2], norm_len = p[3];
++    uint channel = tile * 8 + sg;
++    if (p[4] && channel < streams && !lane) {
++        float gate = controls[columns + streams + channel];
++        if (!isfinite(gate)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        output[dim + channel] = gate;
++    }
++    if (channel >= dim) return;
++    uint item = hybrid_affine_scale_kind == 0 ? 4 : 2;
++    uint packed_shift = hybrid_affine_bits == 4 ? 1 : 0;
++    uint group_shift = hybrid_affine_group == 128 ? 7 : (hybrid_affine_group == 64 ? 6 : 5);
++    device const uchar *codes = codes_base + offsets.x;
++    device const uchar *scales = scales_base + offsets.y;
++    device const uchar *biases = biases_base + offsets.z;
++    float sums[4] = {0.0f, 0.0f, 0.0f, 0.0f};
++    for (uint col = lane * 8; col < columns; col += 256) {
++        #pragma clang loop unroll(full)
++        for (uint stream = 0; stream < 4; ++stream) {
++            if (stream >= streams) continue;
++            ulong element = ulong(stream * dim + channel) * columns;
++            ulong group = (element + col) >> group_shift;
++            float scale = hybrid_float(scales + group * item, hybrid_affine_scale_kind);
++            float bias = hybrid_float(biases + group * item, hybrid_affine_scale_kind);
++            device const uchar *packed = codes + ((element + col) >> packed_shift);
++            uint low = hybrid_u32(packed), high = hybrid_affine_bits == 8 ? hybrid_u32(packed + 4) : 0;
++            #pragma clang loop unroll(full)
++            for (uint j = 0; j < 8; ++j) {
++                uint word = hybrid_affine_bits == 4 || j < 4 ? low : high;
++                uint shift = hybrid_affine_bits == 4 ? j * 4 : (j & 3) * 8;
++                float weight = scale * float((word >> shift) & ((1u << hybrid_affine_bits) - 1)) + bias;
++                sums[stream] += weight * controls[col + j];
++            }
++        }
++    }
++    float value = 0.0f;
++    #pragma clang loop unroll(full)
++    for (uint stream = 0; stream < 4; ++stream) {
++        if (stream >= streams) continue;
++        float total = simd_sum(sums[stream]);
++        if (!lane) {
++            uint at = stream * dim + channel;
++            float x = input[at] * controls[columns + stream] * norm[norm_len == dim ? channel : at];
++            if (!isfinite(total) || !isfinite(x)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            value += (hybrid_ffn_sigmoid(total) * x) / float(streams);
++        }
++    }
++    if (!lane) {
++        if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        output[channel] = value;
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/qwen_hc_tests.rs b/crates/stark-engine/src/engine/hybrid/qwen_hc_tests.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/qwen_hc_tests.rs
+@@ -0,0 +1,308 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Original and fused F32 hyperconnection comparisons; model values stay private.
++
++use std::time::Instant;
++
++use stark_engine_macros::stark_test;
++
++use super::*;
++
++fn plane(
++    values: impl Iterator<Item = f32>,
++    dtype: u32,
++) -> Vec<u8> {
++    values
++        .flat_map(|value| match dtype {
++            0 => value.to_le_bytes().to_vec(),
++            1 => half::f16::from_f32(value).to_bits().to_le_bytes().to_vec(),
++            30 => half::bf16::from_f32(value).to_bits().to_le_bytes().to_vec(),
++            _ => unreachable!(),
++        })
++        .collect()
++}
++
++fn view(
++    bytes: &[u8],
++    offset: usize,
++) -> MappedSlice {
++    let mut storage = vec![0u8; offset];
++    storage.extend_from_slice(bytes);
++    MappedSlice {
++        buffer: buffer(executor().unwrap(), &storage).unwrap(),
++        offset,
++        length: bytes.len(),
++        registered_length: storage.len(),
++    }
++}
++
++fn affine(
++    rows: usize,
++    columns: usize,
++    format: MatrixFormat,
++    offsets: [usize; 3],
++) -> MappedMatrix {
++    let MatrixFormat::Affine {
++        scale_dtype,
++        bits,
++        group,
++    } = format
++    else {
++        unreachable!()
++    };
++    let scales = (0..rows * columns / group).map(|i| ((i % 5 + 1) as f32) * 0.00390625);
++    let biases = scales.clone().map(|value| -value * ((1usize << bits) - 1) as f32 * 0.5);
++    let codes = (0..rows * columns * bits / 8).map(|i| (i * 13 + 41) as u8).collect::<Vec<_>>();
++    MappedMatrix {
++        codes: view(&codes, offsets[0]),
++        planes: Some((view(&plane(scales, scale_dtype), offsets[1]), view(&plane(biases, scale_dtype), offsets[2]))),
++    }
++}
++
++fn projection(
++    graph: &mut DecodeGraph,
++    matrix: &MappedMatrix,
++    rows: usize,
++    columns: usize,
++    format: MatrixFormat,
++    input: &DeviceVector,
++) -> DeviceVector {
++    graph
++        .mapped(
++            &MappedOperation {
++                matrices: vec![matrix.clone()],
++                inputs: &[],
++                rows,
++                columns,
++                rows_per_batch: 0,
++                format,
++            },
++            input,
++        )
++        .unwrap()
++}
++
++fn reference(
++    graph: &mut DecodeGraph,
++    down: &MappedMatrix,
++    up: &MappedMatrix,
++    format: MatrixFormat,
++    injection: Option<(&MappedMatrix, u32)>,
++    input: &DeviceVector,
++    norm: &DeviceVector,
++    streams: usize,
++    latent: usize,
++    eps: f32,
++) -> DeviceVector {
++    graph.vector8 = true;
++    graph.byte_loads = true;
++    let dim = input.len / streams;
++    let normalized = graph.rms_norm(input, norm, dim, eps).unwrap();
++    let down = projection(graph, down, latent, input.len, format, &normalized);
++    graph.kernel("hybrid_graph_qwen_hc_activate", &[&down], &[latent as u32, streams as u32], latent, 256).unwrap();
++    let up = projection(graph, up, input.len, latent, format, &down);
++    let inject = injection.map_or_else(
++        || DecodeGraph::zeros(1).unwrap(),
++        |(matrix, kind)| projection(graph, matrix, streams, input.len, MatrixFormat::Packed(kind), &normalized),
++    );
++    let output = graph
++        .scratch(
++            dim + if injection.is_some() {
++                streams
++            } else {
++                0
++            },
++        )
++        .unwrap();
++    graph
++        .kernel(
++            "hybrid_graph_qwen_hc_mix",
++            &[&up, &normalized, &inject, &output],
++            &[dim as u32, streams as u32, u32::from(injection.is_some())],
++            dim.max(streams),
++            256,
++        )
++        .unwrap();
++    output
++}
++
++#[stark_test]
++fn qwen_fused_hc_preserves_vector8_hidden_bits_and_bounded_injection_error() {
++    for (streams, dim, latent, bits, group, dtype, inject_kind, offsets) in [
++        (1usize, 32usize, 64usize, 4usize, 32usize, 0u32, 0u32, [0, 0, 0]),
++        (4, 16, 64, 8, 64, 30, 30, [1, 3, 1]),
++        (4, 64, 128, 4, 128, 1, 1, [3, 1, 3]),
++        (1, 256, 128, 8, 128, 1, 0, [1, 1, 1]),
++        (4, 2560, 320, 8, 64, 30, 30, [7, 3, 1]),
++    ] {
++        let format = MatrixFormat::Affine {
++            scale_dtype: dtype,
++            bits,
++            group,
++        };
++        let width = streams * dim;
++        let down = affine(latent, width, format, offsets);
++        let up = affine(width, latent, format, offsets);
++        let inject_values = (0..streams * width).map(|i| ((i * 17 % 71) as f32 - 35.0) / 1024.0);
++        let inject = MappedMatrix {
++            codes: view(&plane(inject_values, inject_kind), 1),
++            planes: None,
++        };
++        for per_stream_norm in [false, true] {
++            let input =
++                DecodeGraph::upload(&(0..width).map(|i| ((i * 13 % 97) as f32 - 48.0) / 83.0).collect::<Vec<_>>())
++                    .unwrap();
++            let norm = DecodeGraph::upload(
++                &(0..if per_stream_norm {
++                    width
++                } else {
++                    dim
++                })
++                    .map(|i| 0.7 + (i % 23) as f32 * 0.013)
++                    .collect::<Vec<_>>(),
++            )
++            .unwrap();
++            for with_inject in [false, true] {
++                let injection = with_inject.then_some((&inject, inject_kind));
++                let mut graph = DecodeGraph::new().unwrap();
++                let expected =
++                    reference(&mut graph, &down, &up, format, injection, &input, &norm, streams, latent, 1e-6);
++                let (hidden, gates) = graph
++                    .qwen_hc_fused(&down, &up, format, injection, &input, &norm, streams, latent, 1e-6)
++                    .unwrap()
++                    .unwrap();
++                let mut outputs = vec![expected, hidden];
++                if with_inject {
++                    outputs.push(gates);
++                }
++                let actual = graph.finish(&outputs).unwrap();
++                assert!(
++                    actual[0][..dim].iter().zip(&actual[1]).all(|(&a, &b)| a.to_bits() == b.to_bits()),
++                    "fused HC changed ordered hidden arithmetic"
++                );
++                if with_inject {
++                    assert!(
++                        actual[0][dim..].iter().zip(&actual[2]).all(|(&a, &b)| (a - b).abs() <= 2e-5),
++                        "fused HC injection exceeds unchanged gate"
++                    );
++                }
++            }
++        }
++    }
++}
++
++#[stark_test]
++fn qwen_fused_hc_up_copies_all_injection_gates_when_dim_is_smaller_than_streams() {
++    let (streams, dim, latent) = (4usize, 1usize, 32usize);
++    let format = MatrixFormat::Affine {
++        scale_dtype: 30,
++        bits: 4,
++        group: 32,
++    };
++    let up = affine(dim * streams, latent, format, [1, 1, 1]);
++    let input = DecodeGraph::upload(&[0.1, -0.2, 0.3, -0.4]).unwrap();
++    let norm = DecodeGraph::upload(&[1.0]).unwrap();
++    let mut values = vec![0.0; latent + 2 * streams];
++    values[latent..latent + streams].fill(1.0);
++    values[latent + streams..].copy_from_slice(&[0.25, 0.5, 0.75, 1.0]);
++    let controls = DecodeGraph::upload(&values).unwrap();
++    let mut graph = DecodeGraph::new().unwrap();
++    let output = graph.qwen_hc_up_mix(&up, format, &input, &norm, &controls, streams, latent, true).unwrap();
++    assert_eq!(&graph.finish(&[output]).unwrap()[0][dim..], &[0.25, 0.5, 0.75, 1.0]);
++}
++
++#[stark_test]
++fn qwen_fused_hc_rejects_nonfinite_values_before_saturating_activations() {
++    let (streams, dim, latent) = (4usize, 32usize, 32usize);
++    let format = MatrixFormat::Affine {
++        scale_dtype: 0,
++        bits: 4,
++        group: 32,
++    };
++    let down = affine(latent, streams * dim, format, [1, 1, 1]);
++    let up = affine(streams * dim, latent, format, [1, 1, 1]);
++    let norm = DecodeGraph::upload(&vec![1.0; dim]).unwrap();
++    for poison_norm in [false, true] {
++        let input = DecodeGraph::zeros(streams * dim).unwrap();
++        let norm = if poison_norm {
++            DecodeGraph::zeros(dim).unwrap()
++        } else {
++            norm.clone()
++        };
++        // Exclusive test storage has no submitted users. Poison one operand
++        // directly so host upload validation does not conceal shader checks.
++        let poisoned = if poison_norm {
++            &norm
++        } else {
++            &input
++        };
++        unsafe { poisoned.buffer.contents().as_ptr().cast::<f32>().write(f32::NAN) };
++        let mut graph = DecodeGraph::new().unwrap();
++        graph.qwen_hc_fused(&down, &up, format, None, &input, &norm, streams, latent, 1e-6).unwrap().unwrap();
++        assert!(graph.finish(&[]).is_err());
++    }
++    let input = DecodeGraph::upload(&vec![0.25; streams * dim]).unwrap();
++    let norm = DecodeGraph::upload(&vec![1.0; dim]).unwrap();
++    let mut controls = vec![0.0; latent + streams];
++    controls[..latent].fill(f32::MAX);
++    controls[latent..].fill(1.0);
++    let overflow_up = MappedMatrix {
++        codes: view(&vec![0xff; streams * dim * latent / 2], 1),
++        planes: Some((
++            view(bytemuck::cast_slice(&vec![0.5f32; streams * dim]), 1),
++            view(bytemuck::cast_slice(&vec![0.0f32; streams * dim]), 1),
++        )),
++    };
++    let mut graph = DecodeGraph::new().unwrap();
++    graph
++        .qwen_hc_up_mix(
++            &overflow_up,
++            format,
++            &input,
++            &norm,
++            &DecodeGraph::upload(&controls).unwrap(),
++            streams,
++            latent,
++            false,
++        )
++        .unwrap();
++    assert!(graph.finish(&[]).is_err(), "sigmoid concealed an overflowed up projection");
++}
++
++#[stark_test]
++#[ignore]
++fn qwen_fused_hc_microbenchmark() {
++    let (streams, dim, latent) = (4usize, 2560usize, 320usize);
++    let format = MatrixFormat::Affine {
++        scale_dtype: 30,
++        bits: 8,
++        group: 64,
++    };
++    let down = affine(latent, streams * dim, format, [7, 1, 3]);
++    let up = affine(streams * dim, latent, format, [7, 1, 3]);
++    let input =
++        DecodeGraph::upload(&(0..streams * dim).map(|i| ((i % 37) as f32 - 18.0) / 31.0).collect::<Vec<_>>()).unwrap();
++    let norm = DecodeGraph::upload(&vec![1.0; dim]).unwrap();
++    for _ in 0..3 {
++        let mut samples = Vec::new();
++        for fused in [false, true] {
++            let mut graph = DecodeGraph::new().unwrap();
++            let mut output = None;
++            for _ in 0..16 {
++                output = Some(if fused {
++                    graph
++                        .qwen_hc_fused(&down, &up, format, None, &input, &norm, streams, latent, 1e-6)
++                        .unwrap()
++                        .unwrap()
++                        .0
++                } else {
++                    reference(&mut graph, &down, &up, format, None, &input, &norm, streams, latent, 1e-6)
++                });
++            }
++            let started = Instant::now();
++            let values = graph.finish(&[output.unwrap()]).unwrap().remove(0);
++            samples.push((started.elapsed().as_secs_f64() / 16.0, values));
++        }
++        assert!(samples[0].1.iter().zip(&samples[1].1).all(|(&a, &b)| a.to_bits() == b.to_bits()));
++        eprintln!("qwen_hc_completion_us vector8={:.3} fused={:.3}", samples[0].0 * 1e6, samples[1].0 * 1e6);
++    }
++}

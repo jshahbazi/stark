@@ -52,6 +52,7 @@ metal = [
     "dep:blake3",
     "dep:xxhash-rust",
     "dep:metal",
+    "dep:stark_lily_core",
 ]
 
 grammar = ["dep:xgrammar", "dep:schemars"]
@@ -110,6 +111,9 @@ objc2 = { workspace = true, optional = true }
 obfstr = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
 metal = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+stark_lily_core = { path = "../../vendor/lily-core", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 xgrammar = { workspace = true, optional = true }

@@ -34,9 +34,182 @@ pub(super) struct Gdn {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr::NonNull;
+
+    use metal::{
+        MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
+        MTLComputeCommandEncoder, MTLComputePipelineState, MTLLibraryExt, MTLSize,
+    };
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    struct RecurrenceHarness {
+        device: Retained<ProtocolObject<dyn MTLDevice>>,
+        queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        staged: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        fused: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    }
+
+    impl RecurrenceHarness {
+        fn new() -> Self {
+            let device = <dyn MTLDevice>::system_default().unwrap();
+            let queue = device.new_command_queue().unwrap();
+            let source = format!(
+                "#include <metal_stdlib>\nusing namespace metal;\n{}\n{}",
+                include_str!("feed_forward.metal"),
+                include_str!("qwen_gdn.metal"),
+            );
+            let options = metal::MTLCompileOptions::new();
+            options.set_math_mode(metal::MTLMathMode::Safe);
+            let library = device.new_library_with_source(&source, Some(&options)).unwrap();
+            let pipeline = |name| {
+                device.new_compute_pipeline_state_with_function(&library.new_function_with_name(name).unwrap()).unwrap()
+            };
+            let staged = pipeline("hybrid_qwen_gdn_recurrent");
+            let fused = pipeline("hybrid_qwen_gdn_recurrent_fused");
+            Self {
+                device,
+                queue,
+                staged,
+                fused,
+            }
+        }
+
+        fn run(
+            &self,
+            state: &mut Gdn,
+            fused: bool,
+            seed: usize,
+            repeats: usize,
+        ) -> (Vec<f32>, Vec<f32>, f64) {
+            let g = &state.geometry;
+            let data = |count: usize, salt: usize| {
+                (0..count).map(|i| (((i * 19 + seed * 7 + salt) % 67) as f32 - 33.0) * 0.017).collect::<Vec<_>>()
+            };
+            let upload = |values: &[f32]| {
+                self.device
+                    .new_buffer_with_data(bytemuck::cast_slice(values), MTLResourceOptions::STORAGE_MODE_SHARED)
+                    .unwrap()
+            };
+            let width = 2 * g.key_heads * g.key_dim + g.value_heads * g.value_dim;
+            let mixed = upload(&data(width, 3));
+            let z = upload(&data(g.value_heads * g.value_dim, 5));
+            let a = upload(&data(g.value_heads, 7));
+            let b = upload(&data(g.value_heads, 11));
+            let failure = upload(&[0.0]);
+            let command = self.queue.command_buffer().unwrap();
+            let encoder = command.compute_command_encoder().unwrap();
+            encoder.set_compute_pipeline_state(if fused {
+                &self.fused
+            } else {
+                &self.staged
+            });
+            for (index, buffer) in
+                [&mixed, &z, &a, &b, &state.controls, &state.recurrent, &failure, &state.result].into_iter().enumerate()
+            {
+                encoder.set_buffer(Some(buffer), 0, index);
+            }
+            encoder.set_bytes(NonNull::from(&state.parameters).cast(), std::mem::size_of_val(&state.parameters), 8);
+            for _ in 0..repeats {
+                encoder.dispatch_threadgroups(
+                    MTLSize {
+                        width: g.value_heads,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: g.key_dim.max(g.value_dim).next_power_of_two(),
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+            }
+            encoder.end_encoding();
+            command.commit();
+            command.wait_until_completed();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+            let read = |buffer: &Buffer, count| unsafe {
+                std::slice::from_raw_parts(buffer.contents().as_ptr().cast::<f32>(), count).to_vec()
+            };
+            (
+                read(&state.result, g.value_heads * g.value_dim),
+                read(&state.recurrent, state.recurrent_count),
+                command.gpu_end_time() - command.gpu_start_time(),
+            )
+        }
+    }
+
+    fn recurrence_state(
+        key_dim: usize,
+        value_dim: usize,
+        value_heads: usize,
+        sigmoid_output: bool,
+    ) -> Gdn {
+        let geometry = Geometry {
+            key_heads: value_heads / 3,
+            key_dim,
+            value_heads,
+            value_dim,
+            conv_kernel: 4,
+            eps: 1e-6,
+            sigmoid_output,
+        };
+        let width = 2 * geometry.key_heads * key_dim + value_heads * value_dim;
+        Gdn::new(
+            geometry,
+            &vec![0.02; width * 4],
+            &vec![-0.3; value_heads],
+            &vec![0.1; value_heads],
+            &vec![1.1; value_dim],
+        )
+        .unwrap()
+    }
+
+    #[stark_test]
+    fn qwen_gdn_blocked_recurrence_matches_staged_state_and_output_over_multiple_steps() {
+        let harness = RecurrenceHarness::new();
+        for (key_dim, value_dim, value_heads) in [(7, 13, 6), (128, 128, 48)] {
+            for sigmoid_output in [false, true] {
+                let mut staged = recurrence_state(key_dim, value_dim, value_heads, sigmoid_output);
+                let mut fused = recurrence_state(key_dim, value_dim, value_heads, sigmoid_output);
+                for step in 0..8 {
+                    let expected = harness.run(&mut staged, false, step, 1);
+                    let actual = harness.run(&mut fused, true, step, 1);
+                    assert!(actual.0 == expected.0, "blocked GDN output changed ordered arithmetic");
+                    assert!(actual.1 == expected.1, "blocked GDN recurrent state changed ordered arithmetic");
+                }
+                staged.reset();
+                fused.reset();
+                let expected = harness.run(&mut staged, false, 0, 1);
+                let actual = harness.run(&mut fused, true, 0, 1);
+                assert!(actual.0 == expected.0, "blocked GDN output differs after reset");
+                assert!(actual.1 == expected.1, "blocked GDN state differs after reset");
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn qwen_gdn_blocked_recurrence_microbenchmark() {
+        let harness = RecurrenceHarness::new();
+        let mut staged = recurrence_state(128, 128, 48, true);
+        let mut fused = recurrence_state(128, 128, 48, true);
+        for _ in 0..3 {
+            staged.reset();
+            fused.reset();
+            let expected = harness.run(&mut staged, false, 1, 256);
+            let actual = harness.run(&mut fused, true, 1, 256);
+            assert!(actual.0 == expected.0, "blocked GDN benchmark output differs");
+            assert!(actual.1 == expected.1, "blocked GDN benchmark state differs");
+            eprintln!(
+                "qwen_gdn_recurrence_gpu_us staged={:.3} blocked={:.3}",
+                expected.2 * 1e6 / 256.0,
+                actual.2 * 1e6 / 256.0
+            );
+        }
+    }
 
     #[stark_test]
     fn qwen_gdn_state_initializes_and_clears_all_recurrent_history() {
