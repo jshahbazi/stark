@@ -30,7 +30,7 @@ Use an **Apple silicon Mac with macOS 26.4 or newer** in a native arm64 terminal
 
 ### Install the app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. In the menu bar, choose **Install Model**, select a supported local folder or Hugging Face repository, then **Run** to open the chat. [Menu bar guide](apps/menu-bar/README.md)
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. Click the cat icon and choose **Manage Models**. Use **Model Catalog** or **Add from Source** to add a model, choose **Run** in **Installed**, then **Open Playground** to chat. [Menu bar guide](apps/menu-bar/README.md)
 
 ### Install the app and terminal tools
 

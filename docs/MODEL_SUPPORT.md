@@ -1,7 +1,7 @@
 # Model-family support and installation preflight
 
 Stark uses one family registry for conversion coverage, intended application
-modes and early installation checks. The converter CLI and **Download**
+modes and early installation checks. The converter CLI and **Model Catalog**
 tab in the menu bar app's **Manage Models** window consume that registry. A family
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
@@ -13,9 +13,9 @@ authority for live API and image capabilities.
 
 ## Browsing and removing models
 
-The app's **Manage Models** window has **Installed**, **Download** and
-**Install Model** tabs. Buttons in the menu and Playground open it to select and
-run models; Command-I selects Install Model in the same window. The install form
+The app's **Manage Models** window has **Installed**, **Model Catalog** and
+**Add from Source** tabs. Buttons in the menu and Playground open it to select and
+run models; Command-I selects Add from Source in the same window. The install form
 keeps its source and options when switching tabs. Active progress and cancellation
 remain accessible, and completion stays in management. Search filters the
 current view immediately and does not trigger another Hugging Face request.

@@ -34,9 +34,9 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 ## Models and requests
 
-**Manage Models** contains three tabs: **Installed**, **Download** and
-**Install Model**. Installed lists saved versions; Download browses model families;
-Install Model accepts a local folder or a Hugging Face repository name or URL
+**Manage Models** contains three tabs: **Installed**, **Model Catalog** and
+**Add from Source**. Installed lists saved versions; Model Catalog browses model
+families; Add from Source accepts a local folder or a Hugging Face repository name or URL
 such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model
 is registered in place; a supported local checkpoint is converted offline; a
 Hugging Face checkpoint is downloaded and converted. Supported models are
@@ -55,7 +55,7 @@ the third tab. Entered source and image options remain in memory when switching
 tabs or reopening the window. Switching tabs preserves an active installation;
 its progress and cancellation remain accessible. Completion stays in management.
 Search and sort settings are separate for
-**Installed**, the Download family overview and a family's detail view. Search filters
+**Installed**, the Model Catalog family overview and a family's detail view. Search filters
 the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
@@ -77,7 +77,7 @@ available. Sort by model name A–Z or Z–A, or total disk
 size ascending or descending. Saved versions with a recorded source repository
 also have a **link** beside the file size; local imports can use their conversion
 receipt to identify that source. Models without a known repository omit the link.
-In **Download**, model cards group size and
+In **Model Catalog**, model cards group size and
 quantization choices into compact rows. Choose a family, filter its model cards,
 then choose a row and **Download**.
 Inside a family, the tabs at the top switch between **All models** and each

@@ -733,8 +733,8 @@ enum ModelsSheetTab: String, CaseIterable {
     func title(modelCount: Int) -> String {
         switch self {
         case .installed: return "Installed (\(modelCount))"
-        case .download: return "Download"
-        case .installModel: return "Install Model"
+        case .download: return "Model Catalog"
+        case .installModel: return "Add from Source"
         }
     }
 
@@ -2621,7 +2621,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let showMenu = NSMenuItem(title: "Show Stark Menu", action: #selector(toggle), keyEquivalent: "")
         showMenu.target = self
         applicationMenu.addItem(showMenu)
-        let installMenu = NSMenuItem(title: "Install Model…", action: #selector(showInstall), keyEquivalent: "i")
+        let installMenu = NSMenuItem(title: "Add from Source…", action: #selector(showInstall), keyEquivalent: "i")
         installMenu.target = self
         applicationMenu.addItem(installMenu)
         let modelsMenu = NSMenuItem(title: "Manage Models", action: #selector(showModels), keyEquivalent: "")

@@ -214,8 +214,8 @@ extension EngineController {
                   ModelsSheetTab.initial == .installed,
                   ModelsSheetTab.allCases == [.installed, .download, .installModel],
                   ModelsSheetTab.installed.title(modelCount: 0) == "Installed (0)",
-                  ModelsSheetTab.download.title(modelCount: 0) == "Download",
-                  ModelsSheetTab.installModel.title(modelCount: 0) == "Install Model",
+                  ModelsSheetTab.download.title(modelCount: 0) == "Model Catalog",
+                  ModelsSheetTab.installModel.title(modelCount: 0) == "Add from Source",
                   ModelsSheetTab.installed.emptyTitle == "No models yet",
                   ModelsSheetTab.installed.emptyMessage == "Install a model to add it here." else { return false }
             var registry = familyRegistry()

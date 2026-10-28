@@ -110,7 +110,7 @@ for the saved-model list, family overview and family detail. Typing in a search
 field does not issue another catalogue request.
 
 The app delegate owns the shared Manage Models window and its navigation/install
-draft state. Installed, Download and Install Model share this window; Command-I
+draft state. Installed, Model Catalog and Add from Source share this window; Command-I
 selects its install tab. Tab changes retain the form and active installation
 without resetting progress. Completion does not navigate to the Playground.
 Explicit management buttons open the window. The menu and
