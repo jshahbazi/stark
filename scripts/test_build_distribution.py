@@ -559,8 +559,14 @@ class BundleConstructionTests(unittest.TestCase):
                 (bundle / "share/stark/licenses/pytorch-LICENSE").read_text(),
                 "scripts/licenses/distribution/pytorch-LICENSE\n",
             )
-            for name in ("LICENSE.ggml-hybrid", "LICENSE.qwen38-reference", "LICENSE.flint-reference"):
-                self.assertEqual((bundle / "share/stark/licenses" / name).read_text(), f"{name}\n")
+            for name in (
+                "LICENSE.ggml-hybrid",
+                "LICENSE.qwen38-reference",
+                "LICENSE.flint-reference",
+            ):
+                self.assertEqual(
+                    (bundle / "share/stark/licenses" / name).read_text(), f"{name}\n"
+                )
             self.assertEqual(
                 (bundle / "share/stark/licenses/ggml-LICENSE").read_text(),
                 "scripts/licenses/distribution/ggml-LICENSE\n",
