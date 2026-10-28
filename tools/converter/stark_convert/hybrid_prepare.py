@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import shutil
+import struct
 import sys
 from pathlib import Path
 
@@ -51,6 +52,25 @@ SOURCES = {
         "weight_bytes": 106_195_031_237,
         "quantization": "MLX mixed 4/8-bit",
     },
+    "qwen38-lily-q4-xl": {
+        "architecture": "qwen4_exp",
+        "weights_repo": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "weights_revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "weights_patterns": [
+            "model-*-of-*.safetensors",
+            "model.safetensors.index.json",
+            "README.md",
+            "LICENSE",
+            "vocab.json",
+            "merges.txt",
+        ],
+        "metadata_repo": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "metadata_revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "weight_bytes": 106_905_155_192,
+        "weight_shards": 55,
+        "quantization": "Lily q4-xl (Q4 GDN; Q8 attn/shared/head/embed)",
+        "required_files": ["LICENSE", "README.md"],
+    },
 }
 _METADATA = [
     "config.json",
@@ -66,7 +86,10 @@ _METADATA = [
 def _json(path: Path, limit: int = 1024 * 1024):
     if path.is_symlink() or not path.is_file() or path.stat().st_size > limit:
         raise ValueError("invalid metadata file")
-    return json.loads(path.read_bytes())
+    try:
+        return json.loads(path.read_bytes())
+    except RecursionError as error:
+        raise ValueError("metadata JSON nesting exceeds limit") from error
 
 
 def _ids(value):
@@ -138,6 +161,114 @@ def finish_metadata(directory: Path, choice: str) -> dict:
     return receipt
 
 
+def _sha256_text(value) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value)
+
+
+def _aligned_storage_identity(directory: Path, receipt: dict, source: dict, files: list[Path], size: int) -> bool:
+    """Check bounded container provenance; payload hashes remain recorded claims.
+
+    This enables the native loader to inspect a losslessly repacked artifact.
+    It does not rehash model payloads or qualify native loading or execution.
+    """
+    extension = receipt.get("storage_alignment")
+    if not isinstance(extension, dict) or extension.get("schema_version") != 1:
+        return False
+    if (
+        extension.get("receipt") != "alignment-receipt.json"
+        or extension.get("original_receipt") != "native-source.original.json"
+        or any(path.suffix != ".safetensors" for path in files)
+    ):
+        return False
+    alignment_path = directory / "alignment-receipt.json"
+    alignment = _json(alignment_path, 4 * 1024 * 1024)
+    if extension.get("receipt_sha256") != hashlib.sha256(alignment_path.read_bytes()).hexdigest():
+        return False
+    original_path = directory / "native-source.original.json"
+    original = _json(original_path)
+    original_sha256 = hashlib.sha256(original_path.read_bytes()).hexdigest()
+    if (
+        extension.get("original_receipt_sha256") != original_sha256
+        or alignment.get("original_native_source") != {"file": original_path.name, "sha256": original_sha256}
+        or type(original.get("weight_bytes")) is not int
+        or original.get("weight_bytes") != source["weight_bytes"]
+        or "storage_alignment" in original
+        or any(receipt.get(field) != "unverified" for field in ("native_loading", "execution"))
+        or {
+            key: value for key, value in original.items() if key not in {"weight_bytes", "native_loading", "execution"}
+        }
+        != {
+            key: value
+            for key, value in receipt.items()
+            if key not in {"weight_bytes", "storage_alignment", "native_loading", "execution"}
+        }
+        or alignment.get("schema_version") != 1
+        or alignment.get("operation") != "safetensors_header_padding_only"
+        or alignment.get("payload_alignment_bytes") != 16
+        or alignment.get("tensor_payload_bytes_unchanged") is not True
+        or alignment.get("data_offsets_unchanged") is not True
+        or alignment.get("native_source_receipt_preserved") is not True
+    ):
+        return False
+    shards = alignment.get("shards")
+    if not isinstance(shards, list) or len(shards) != len(files):
+        return False
+    by_name = {path.name: path for path in files}
+    seen = set()
+    original_size = 0
+    derived_size = 0
+    for shard in shards:
+        if not isinstance(shard, dict) or shard.get("file") not in by_name or shard["file"] in seen:
+            return False
+        seen.add(shard["file"])
+        fields = ("original_header_bytes", "derived_header_bytes", "padding_bytes", "payload_bytes", "tensor_count")
+        if any(type(shard.get(field)) is not int for field in fields):
+            return False
+        old_header, new_header, padding, payload, tensor_count = (shard[field] for field in fields)
+        if (
+            not 0 < old_header <= 64 * 1024 * 1024
+            or not 0 <= padding <= 15
+            or new_header != old_header + padding
+            or padding != (-(8 + old_header)) % 16
+            or payload < 0
+            or tensor_count <= 0
+            or shard.get("data_offsets_unchanged") is not True
+            or any(
+                not _sha256_text(shard.get(field))
+                for field in (
+                    "original_file_sha256",
+                    "derived_file_sha256",
+                    "payload_sha256",
+                    "original_header_sha256",
+                    "derived_header_sha256",
+                )
+            )
+        ):
+            return False
+        path = by_name[shard["file"]]
+        if path.stat().st_size != 8 + new_header + payload:
+            return False
+        with path.open("rb") as stream:
+            prefix = stream.read(8)
+            if len(prefix) != 8 or struct.unpack("<Q", prefix)[0] != new_header:
+                return False
+            header = stream.read(new_header)
+        if len(header) != new_header or (padding and header[-padding:] != b" " * padding):
+            return False
+        original_header = header[:old_header]
+        if (
+            hashlib.sha256(header).hexdigest() != shard["derived_header_sha256"]
+            or hashlib.sha256(original_header).hexdigest() != shard["original_header_sha256"]
+        ):
+            return False
+        inventory = json.loads(original_header)
+        if not isinstance(inventory, dict) or sum(name != "__metadata__" for name in inventory) != tensor_count:
+            return False
+        original_size += 8 + old_header + payload
+        derived_size += 8 + new_header + payload
+    return original_size == source["weight_bytes"] and derived_size == size
+
+
 def prepared_identity(directory: Path) -> dict | None:
     """Recognize a prepared local folder; the native loader checks tensors.
 
@@ -180,8 +311,16 @@ def prepared_identity(directory: Path) -> dict | None:
             return None
         if "weight_shards" in source and len(files) != source["weight_shards"]:
             return None
+        required_files = source.get("required_files", [])
+        if any(not (directory / name).is_file() or (directory / name).is_symlink() for name in required_files):
+            return None
         size = sum(path.stat().st_size for path in files)
-        if size != source["weight_bytes"] or receipt.get("weight_bytes") != size:
+        if receipt.get("weight_bytes") != size:
+            return None
+        if "storage_alignment" in receipt:
+            if not _aligned_storage_identity(directory, receipt, source, files, size):
+                return None
+        elif size != source["weight_bytes"]:
             return None
         if not (directory / "tokenizer.json").is_file():
             return None
@@ -192,7 +331,7 @@ def prepared_identity(directory: Path) -> dict | None:
             "weight_bytes": size,
             "quantization": source["quantization"],
         }
-    except (OSError, ValueError, TypeError, AttributeError):
+    except (OSError, ValueError, TypeError, AttributeError, RecursionError):
         return None
 
 

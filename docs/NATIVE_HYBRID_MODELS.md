@@ -14,6 +14,7 @@ The preparation command pins these sources:
 | --- | --- | --- |
 | `glm53-q2` | `unsloth/GLM-5.3-Flash-GGUF`, `UD-Q2_K_XL`, revision `a38483c8cd5df544f53d70fb281afe97369d5ab6` | 108,720,071,552 bytes, 101.25 GiB |
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
+| `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
 
 See [Recursive Flint](FLINT.md) for its architecture, installation command,
@@ -33,6 +34,7 @@ Run from the source checkout:
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare glm53-q2 --output models/glm53-q2
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-mixed --output models/qwen38-mixed
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-lily-q4-xl --output models/qwen38-lily-q4-xl
 cargo +1.98.1 build --release --locked -p stark-generate
 cargo +1.98.1 build --release --locked -p stark-score --features optimized
 ./scripts/stark chat --model-path models/glm53-q2
@@ -43,6 +45,20 @@ Each output directory must be new. Interrupted downloads remain under the
 adjacent `.native-download` directory and can be resumed with the same command.
 `--offline` restricts preparation to existing Hugging Face downloads. Publication
 uses an atomic rename that refuses an existing output directory.
+
+Some Safetensors exports place compressed matrices at unaligned addresses.
+Create a separate aligned artifact to enable the wider Metal loads:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python scripts/align_native_safetensors.py --model models/qwen38-mixed --output models/qwen38-mixed-aligned
+```
+
+This copies the checkpoint and pads JSON headers. Tensor offsets within the
+payload, tensor bytes, quantization, configuration and tokenizer remain the
+same. The tool verifies payload hashes, preserves the original source receipt,
+and writes a separate alignment receipt. It needs space for another checkpoint.
+Import the aligned folder or pass it to the worker as the model path. Its
+preparation provenance does not itself qualify native execution or answer quality.
 
 Preparation downloads metadata and weights without repository Python or draft
 assistants. It adds the source chat template and the union of checkpoint EOS
@@ -96,7 +112,34 @@ until completion. Dropping the loaded model releases its retained weight views.
 This cache contains immutable weights; request state and score-cache rules below
 are unchanged.
 
-This implementation uses F32 forward arithmetic. Deferred Metal commands keep
+Mixed-precision inference is permitted. Activation, accumulation, recurrent-state
+and weight precision are separate choices, selected through numerical validation
+and measured performance. Existing F32 results remain source-bound reference
+evidence; a new precision path is checked against a matching reference and gets
+its own validation record. F32 execution is not required for production.
+
+The Lily-format Qwen checkpoint selects an in-process native Metal 4 backend
+extracted from Lily revision `e22d58fa7cc488493fb1b5d810a198bd29730aeb`.
+Selection requires both `model_type=qwen4_exp` and
+`lily.format=qwen4_exp-affine-v1`; other Qwen exports retain the F32 graph below.
+This backend uses BF16 activations, F32 reductions, logits and GDN recurrent
+state, and explicitly selected Q8 attention K/V caches. The q4-xl weights use
+Q4 GDN projections and Q8 attention, shared-expert, readout and embedding groups.
+Experts remain resident; the large n-gram embedding table is mapped read-only
+and paged. Batched prefill processes the current request, and greedy decoding
+reads back one GPU-selected token per step. Scoring and stochastic generation
+read the complete F32 logits and use Stark's existing scoring and sampling.
+Greedy requests overlap future CPU command encoding with the current GPU step.
+The future pass remains unsubmitted until its input token is validated; no draft
+model or speculative token is used. An early stop drains at most one submitted
+ordinary step before state reset, and completion feedback errors fence the
+request before a successful result can be returned.
+Every request resets logical state. GPU execution failures require model reload.
+This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
+and executes neither MTP nor vision. Source modifications and licenses are
+recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
+
+The existing native graph uses F32 forward arithmetic. Deferred Metal commands keep
 dependent device vectors alive through completion and use a sticky failure
 status to reject invalid intermediates, including values later hidden by
 clipping. Existing CPU controls remain available in the staged execution path.
@@ -110,6 +153,11 @@ across SIMD groups; their reduction schedule differs from the scalar oracle and
 is checked against the existing numerical gates. GPU RMS uses an F32 SIMD
 reduction, qualified with wide F64 oracles and the unchanged source-model gates.
 Its sum order differs from the staged scalar path; it does not narrow activations.
+Affine matrix products combine reduction and nonfinite checks in the vector
+kernel. A typed unsigned-word load path is selected only when every mapped code,
+scale and bias plane meets its alignment requirements; other layouts use the
+checked byte/vector path. Both preserve the packed affine decoding and F32
+reduction contract.
 
 Qwen's graph keeps hyperconnection normalization and mixing, GDN, QSA caches and
 attention, sparse routing, selected expert products, PLE control and convolution,
@@ -123,6 +171,28 @@ and indexed-shape checks and the model selects at most 64 experts. Other
 inventories use the staged path with bounded selected mappings. A graph error
 fails the request and clears state.
 
+Independent QSA, GDN, PLE and MoE projections are encoded in dependency levels.
+Each level uses concurrent dispatch for independent projections, then a buffer
+barrier makes their results visible before dependent work. Affine vector
+reductions report nonfinite results through the sticky graph failure status;
+misaligned affine planes fall back from typed unsigned-word loads to the checked
+vector path. QSA preparation parallelizes query, key and value normalization,
+rotation and cache writes. Completed pooled index keys are normalized and
+rotated once, retained in the attention cache, and reused for later query scores.
+Sparse block selection uses an exact 64-bit radix threshold key: its score word
+preserves F32 `total_cmp` order and its ID word preserves ascending block IDs on
+ties. PLE normalization and QSA query/key normalization use F32 SIMD reductions,
+qualified against the existing source gates. Router selection is parallel;
+its selected-score softmax retains the established scalar F32 order.
+At prefixes of at least 256 tokens, QSA attention computes partial softmax/value
+results over 256-token splits and combines them with the output gate. Smaller
+prefixes and geometries exceeding the bounded workspace retain the scalar
+attention path. The split reductions use F32 and are checked against F64
+references and the source-model gates.
+GDN's fused recurrent kernel uses a two-pass blocked state update, retaining
+ordered F32 prediction and output accumulations while reducing recurrent-state
+traffic. The staged recurrent kernel remains available as a diagnostic path.
+
 GLM's graph keeps mHC projection and Sinkhorn mixing, normalization, KDA, pooled
 index selection, absorbed MLA attention, shared and selected expert products,
 residual streams and readout on Metal. Router logits cross a completion boundary
@@ -134,7 +204,7 @@ in total. The graph uploads those controls once and releases the production CPU
 copy; larger layouts keep staged execution, whose bounded control cache uses
 CPU NEON arithmetic on Apple silicon.
 
-For the pinned production checkpoints, the code schedules one command completion
+For the pinned original-format checkpoints, the code schedules one command completion
 per token for Qwen and 43 for GLM: one for each of its 42 routed layers and one
 final completion. Three four-step release profiles confirm these counts;
 the counters and throughput measurements are recorded in the
@@ -150,11 +220,39 @@ inside the same command. `STARK_HYBRID_ORDERED_RMS=1` selects the slower ordered
 GPU RMS diagnostic; this choice is captured once when the process initializes
 the native Metal executor. Both paths clear request state on failure and reset.
 
-Prefill processes tokens sequentially and projects vocabulary logits only for
+The following opt-in environment flags select diagnostic variants before the
+worker loads a model:
+
+| Flag | Effect |
+| --- | --- |
+| `STARK_QWEN38_SERIAL_LEVELS=1` | Serializes otherwise independent Qwen projection levels. |
+| `STARK_HYBRID_BYTE_LOADS=1` | Disables aligned typed unsigned-word affine loads and uses the checked vector-load path. |
+| `STARK_HYBRID_VECTOR8=1` | Uses eight values per lane instead of the aligned 32-value affine schedule. |
+| `STARK_HYBRID_SCALAR_UINT_LOADS=1` | Uses scalar unsigned-word loads instead of aligned `uint4` loads. |
+| `STARK_HYBRID_SEPARATE_FINITE=1` | Uses separate finite-value scans instead of fused affine reduction checks. |
+| `STARK_HYBRID_FACTORED_AFFINE=1` | Experimental group-factored affine reduction; disabled by default and separately tested against F64 controls. |
+| `STARK_QWEN38_SINGLE_ENCODER=1` | Experimental single concurrent compute encoder with explicit dependency barriers. |
+| `STARK_HYBRID_SCALAR_SHORT_MATVEC=1` | Uses the generic floating matrix schedule for short-column projections. |
+| `STARK_QWEN38_SCALAR_QSA_PREPARE=1` | Selects scalar QSA query/key/value preparation. |
+| `STARK_QWEN38_SCALAR_QSA_SELECTION=1` | Selects the scalar QSA visibility and top-k path. |
+| `STARK_QWEN38_SCALAR_ATTENTION=1` | Selects scalar QSA attention at all prefix lengths. |
+| `STARK_QWEN38_SCALAR_PLE=1` | Selects scalar PLE projection activation. |
+| `STARK_QWEN38_SCALAR_ROUTER=1` | Selects scalar MoE router top-k. |
+| `STARK_QWEN38_STAGED_GDN=1` | Selects the staged recurrent GDN kernel. |
+| `STARK_QWEN38_PHASE_TIMING=1` | Adds per-phase GPU timings by ending, committing and waiting on commands between phases; synchronization changes execution and these timings are not throughput measurements. |
+| `STARK_QWEN38_ENCODER_TIMING=1` | Samples GPU timestamps at encoder boundaries while retaining one command completion per token; diagnostic overhead still affects throughput. |
+
+These switches support numerical and kernel diagnostics; benchmark comparisons
+must record their values and use the production defaults unless the diagnostic
+variant itself is under study.
+
+The F32 graph's prefill processes tokens sequentially and projects vocabulary logits only for
 the final input token. Performance must be measured on the exact checkpoint and
 host. Published Sushi or MLX throughput does not qualify Stark's throughput.
 The earlier [GPU stage and kernel benchmark](benchmarks/GLM_QWEN_NATIVE_GRAPH_2026_10_28.md)
 records the execution path before the deferred graph.
+The [Qwen mixed-precision benchmark](benchmarks/QWEN38_MIXED_PRECISION_2026_10_28.md)
+records the later F32 improvements, Lily-format qualification and 4K throughput.
 The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
 and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
 record the remaining graph, kernel and prefill opportunities with source and

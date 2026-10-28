@@ -30,6 +30,8 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | Path | Contents |
 | --- | --- |
 | `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (loads classifiers produced by the converter's ModernBERT path; no worker runs one) |
+| `src/engine/hybrid/` | Native GLM, Qwen3.8 and Flint loading, execution and request state; explicit Lily-format Qwen checkpoints select the in-process mixed-precision adapter |
+| `vendor/lily-core/` | Pinned Lily Rust/Metal 4 Qwen core, with server, persistence and diagnostics removed; speculative execution disabled; licenses and patch provenance retained |
 | `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
 | `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |
 | `src/backends/cpu/` | CPU reference kernels used by the unit tests (`cpu` feature); not used by the workers |
@@ -40,6 +42,13 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | `unit/` | The engine unit and benchmark suite; see [Contributing](../CONTRIBUTING.md#engine-tests) |
 
 A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No state outlives a request in either worker.
+
+Mixed-precision inference is permitted by [repository policy](../AGENTS.md).
+Activation, accumulation, recurrent-state, cache and weight precision are chosen
+through numerical validation and measured speed. Existing F32 validation remains
+reference evidence; new precision profiles require matching reference checks and
+separate records. Native hybrid implementations and their precision profiles are
+described in [native hybrid models](NATIVE_HYBRID_MODELS.md).
 
 ### Engine feature flags
 

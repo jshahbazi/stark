@@ -72,6 +72,7 @@ jobs:
             --no-call-analysis=go --no-call-analysis=rust \
             --all-packages --all-vulns --format=json --output-file "$report" \
             -L Cargo.lock \
+            -L vendor/lily-core/Cargo.lock \
             -L tools/uv.lock \
             -L tools/converter/uv.lock \
             -L tools/stock_benchmark/mlx/uv.lock \
@@ -88,6 +89,7 @@ jobs:
           fi
           uv run --no-project --python 3.12.13 python scripts/ci/check_osv_report.py "$report" \
             --lockfile Cargo.lock \
+            --lockfile vendor/lily-core/Cargo.lock \
             --lockfile tools/uv.lock \
             --lockfile tools/converter/uv.lock \
             --lockfile tools/stock_benchmark/mlx/uv.lock \

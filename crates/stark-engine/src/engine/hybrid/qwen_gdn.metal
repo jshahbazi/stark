@@ -103,3 +103,105 @@ kernel void hybrid_qwen_gdn_recurrent(device const float *mixed [[buffer(0)]],
         output[index] = value;
     }
 }
+
+// Original Stark blocked recurrence. Retain eight decayed coordinates at a
+// time so prediction and output keep their ordered F32 sums while state needs
+// two reads and one write instead of four reads and two writes. The independent
+// staged kernel above remains available for numerical and performance replay.
+kernel void hybrid_qwen_gdn_recurrent_fused(device const float *mixed [[buffer(0)]],
+    device const float *z [[buffer(1)]], device const float *a [[buffer(2)]],
+    device const float *b [[buffer(3)]], device const float *controls [[buffer(4)]],
+    device float *state [[buffer(5)]], device atomic_uint *failure [[buffer(6)]],
+    device float *output [[buffer(7)]], constant QwenGdnParameters &p [[buffer(8)]],
+    uint head [[threadgroup_position_in_grid]], uint lane [[thread_index_in_threadgroup]]) {
+    threadgroup float q[1024];
+    threadgroup float k[1024];
+    threadgroup float values[1024];
+    threadgroup float scales[5];
+    uint key_width = p.key_heads * p.key_dim;
+    uint key_head = head / (p.value_heads / p.key_heads);
+    if (lane < p.key_dim) {
+        q[lane] = mixed[key_head * p.key_dim + lane];
+        k[lane] = mixed[key_width + key_head * p.key_dim + lane];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+        float q_sum = 0.0f;
+        float k_sum = 0.0f;
+        for (uint i = 0; i < p.key_dim; ++i) {
+            q_sum += q[i] * q[i];
+            k_sum += k[i] * k[i];
+        }
+        scales[0] = (1.0f / sqrt(float(p.key_dim))) / sqrt(q_sum + 1e-6f);
+        scales[1] = 1.0f / sqrt(k_sum + 1e-6f);
+        uint control_offset = p.width * p.conv_width;
+        float argument = a[head] + controls[control_offset + p.value_heads + head];
+        float softplus = max(argument, 0.0f) + hybrid_qwen_log1p(exp(-abs(argument)));
+        scales[2] = exp(-exp(controls[control_offset + head]) * softplus);
+        scales[3] = hybrid_ffn_sigmoid(b[head]);
+        if (!isfinite(a[head]) || !isfinite(b[head]) || !isfinite(scales[2])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < p.key_dim) {
+        q[lane] *= scales[0];
+        k[lane] *= scales[1];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < p.value_dim) {
+        uint index = head * p.value_dim + lane;
+        // Value channels are adjacent in physical storage. Neighboring lanes
+        // access neighboring floats at each key coordinate while every row's
+        // scalar accumulation order stays unchanged.
+        device float *row = state + head * p.value_dim * p.key_dim + lane;
+        float prediction = 0.0f;
+        for (uint start = 0; start < p.key_dim; start += 8) {
+            float prefetched[8];
+            #pragma clang loop unroll(full)
+            for (uint j = 0; j < 8; ++j) {
+                uint i = start + j;
+                prefetched[j] = i < p.key_dim ? row[i * p.value_dim] * scales[2] : 0.0f;
+            }
+            #pragma clang loop unroll(full)
+            for (uint j = 0; j < 8; ++j) {
+                uint i = start + j;
+                if (i < p.key_dim) prediction += prefetched[j] * k[i];
+            }
+        }
+        float delta = (mixed[2 * key_width + index] - prediction) * scales[3];
+        float value = 0.0f;
+        for (uint start = 0; start < p.key_dim; start += 8) {
+            float prefetched[8];
+            #pragma clang loop unroll(full)
+            for (uint j = 0; j < 8; ++j) {
+                uint i = start + j;
+                prefetched[j] = i < p.key_dim ? row[i * p.value_dim] * scales[2] : 0.0f;
+            }
+            #pragma clang loop unroll(full)
+            for (uint j = 0; j < 8; ++j) {
+                uint i = start + j;
+                if (i < p.key_dim) {
+                    float updated = prefetched[j] + k[i] * delta;
+                    row[i * p.value_dim] = updated;
+                    value += updated * q[i];
+                }
+            }
+        }
+        values[lane] = value;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0) {
+        float square_sum = 0.0f;
+        for (uint i = 0; i < p.value_dim; ++i) square_sum += values[i] * values[i];
+        scales[4] = 1.0f / sqrt(square_sum / float(p.value_dim) + as_type<float>(p.eps_bits));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < p.value_dim) {
+        uint index = head * p.value_dim + lane;
+        uint norm_offset = p.width * p.conv_width + 2 * p.value_heads;
+        float gate = hybrid_ffn_sigmoid(z[index]);
+        if (!p.sigmoid_output) gate *= z[index];
+        float value = ((values[lane] * scales[4]) * controls[norm_offset + lane]) * gate;
+        if (!isfinite(z[index]) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        output[index] = value;
+    }
+}

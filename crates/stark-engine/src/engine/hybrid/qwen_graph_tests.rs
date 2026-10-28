@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Focused Metal control-kernel checks; full Qwen graph parity lives in qwen.rs.
 
+use metal::MTLBuffer;
 use stark_engine_macros::stark_test;
 
 use super::*;
@@ -19,6 +20,61 @@ fn qwen_graph_router_preserves_total_order_ties_and_original_softmax_scores() {
     let expected =
         crate::engine::hybrid::math::softmax(&[scores[4], scores[0], scores[1], scores[3], scores[2]]).unwrap();
     assert!(values[1].iter().zip(expected).all(|(&actual, expected)| (actual - expected).abs() < 1e-6));
+}
+
+#[stark_test]
+fn qwen_graph_parallel_router_matches_scalar_ids_and_probability_bits() {
+    for experts in [1usize, 7, 255, 256, 257, 512, 513] {
+        let scores = (0..experts)
+            .map(|i| match i % 13 {
+                0 => -0.0,
+                1 => 0.0,
+                2..=4 => 1.0,
+                _ => ((i * 31 % 173) as f32 - 86.0) * 0.027,
+            })
+            .collect::<Vec<_>>();
+        for k in [1, 10.min(experts), experts.min(32)] {
+            let mut expected = None;
+            for (name, threads) in [("qwen_graph_router", 1), ("qwen_graph_router_parallel", 256)] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let input = graph.upload_into(&scores).unwrap();
+                let ids = graph.scratch(k).unwrap();
+                let probabilities = graph.scratch(k).unwrap();
+                graph
+                    .kernel(name, &[&input, &ids, &probabilities], &[experts as u32, k as u32], threads, threads)
+                    .unwrap();
+                let actual = graph
+                    .finish(&[ids, probabilities])
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.into_iter().map(f32::to_bits).collect::<Vec<_>>())
+                    .collect::<Vec<_>>();
+                if let Some(expected) = &expected {
+                    assert_eq!(&actual, expected, "parallel router changed selection or softmax arithmetic");
+                } else {
+                    expected = Some(actual);
+                }
+            }
+        }
+    }
+}
+
+#[stark_test]
+fn qwen_graph_parallel_router_invalid_input_leaves_invalid_gather_indices() {
+    for poison in [f32::NAN, f32::from_bits(0xffc0_0001)] {
+        for poison_index in [0usize, 255, 256, 511] {
+            let mut graph = DecodeGraph::new().unwrap();
+            let input = DecodeGraph::zeros(512).unwrap();
+            let ids = DecodeGraph::zeros(10).unwrap();
+            let probabilities = DecodeGraph::zeros(10).unwrap();
+            // Test input bypasses the finite host-upload contract deliberately.
+            unsafe { input.buffer.contents().as_ptr().cast::<f32>().add(poison_index).write(poison) };
+            graph.kernel("qwen_graph_router_parallel", &[&input, &ids, &probabilities], &[512, 10], 256, 256).unwrap();
+            assert!(graph.finish(&[]).is_err());
+            let actual = unsafe { std::slice::from_raw_parts(ids.buffer.contents().as_ptr().cast::<u32>(), 10) };
+            assert!(actual.iter().all(|&id| id == u32::MAX));
+        }
+    }
 }
 
 #[stark_test]
@@ -48,6 +104,246 @@ fn qwen_graph_qsa_pool_selection_keeps_complete_block_and_current_partial_tail()
         .unwrap();
     let actual = graph.finish(&[visible]).unwrap().remove(0);
     assert_eq!(actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(), [1, 1, 0, 0, 1]);
+}
+
+fn qwen_graph_qsa_selection_case(
+    parameters: [u32; 9],
+    tied: bool,
+    scalar: bool,
+) -> (Vec<Vec<f32>>, f64) {
+    let [count, heads, dim, _, _, _, _, ratio, budget] = parameters;
+    let data = |len: usize, salt: usize| {
+        (0..len)
+            .map(|i| {
+                if tied {
+                    0.0
+                } else {
+                    (((i * 17 + salt) % 41) as f32 - 20.0) * 0.031
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let index = DecodeGraph::upload(&data(((heads + 1) * dim) as usize, 3)).unwrap();
+    let keys = DecodeGraph::upload(&data((count * dim) as usize, 5)).unwrap();
+    let q_norm = DecodeGraph::upload(&vec![1.1; dim as usize]).unwrap();
+    let k_norm = DecodeGraph::upload(&vec![0.9; dim as usize]).unwrap();
+    let visible = DecodeGraph::zeros(count as usize).unwrap();
+    let blocks = (count / ratio) as usize;
+    let scores = DecodeGraph::zeros(blocks.max(1)).unwrap();
+    let ids = DecodeGraph::zeros((budget / ratio) as usize).unwrap();
+    let top_scores = DecodeGraph::zeros((budget / ratio) as usize).unwrap();
+    let queries = DecodeGraph::zeros((heads * dim) as usize).unwrap();
+    let pooled_keys = DecodeGraph::zeros(blocks.max(1) * dim as usize).unwrap();
+    if !scalar && count > budget {
+        // Cache construction is prefix work. Ordinary decode below updates
+        // only the current query, just as a partial block does at runtime.
+        let mut preparation = DecodeGraph::new().unwrap();
+        let mut preparation_parameters = parameters.to_vec();
+        preparation_parameters.extend([0, blocks as u32]);
+        preparation
+            .kernel(
+                "qwen_graph_qsa_index_prepare",
+                &[&index, &keys, &q_norm, &k_norm, &queries, &pooled_keys],
+                &preparation_parameters,
+                heads as usize + blocks,
+                1,
+            )
+            .unwrap();
+        preparation.finish(&[]).unwrap();
+    }
+    let mut graph = DecodeGraph::new().unwrap();
+    if scalar {
+        graph
+            .kernel(
+                "qwen_graph_qsa_visible",
+                &[&index, &keys, &q_norm, &k_norm, &visible, &scores, &ids, &top_scores],
+                &parameters,
+                1,
+                1,
+            )
+            .unwrap();
+    } else {
+        if count > budget {
+            let mut preparation_parameters = parameters.to_vec();
+            preparation_parameters.extend([0, 0]);
+            graph
+                .kernel(
+                    "qwen_graph_qsa_index_prepare",
+                    &[&index, &keys, &q_norm, &k_norm, &queries, &pooled_keys],
+                    &preparation_parameters,
+                    heads as usize,
+                    1,
+                )
+                .unwrap();
+            graph
+                .kernel(
+                    "qwen_graph_qsa_index_cached_scores",
+                    &[&queries, &pooled_keys, &scores],
+                    &[blocks as u32, heads, dim],
+                    blocks,
+                    64,
+                )
+                .unwrap();
+            graph
+                .kernel(
+                    "qwen_graph_qsa_index_threshold",
+                    &[&scores, &ids, &top_scores],
+                    &[blocks as u32, (budget / ratio).min(blocks as u32)],
+                    256,
+                    256,
+                )
+                .unwrap();
+        }
+        graph
+            .kernel(
+                "qwen_graph_qsa_index_mask",
+                &[&scores, &ids, &top_scores, &visible],
+                &[count, ratio, budget],
+                count as usize,
+                256,
+            )
+            .unwrap();
+    }
+    let started = std::time::Instant::now();
+    let result = graph.finish(&[visible, scores]).unwrap();
+    (result, started.elapsed().as_secs_f64())
+}
+
+#[stark_test]
+fn qwen_graph_parallel_sparse_selection_matches_scalar_scores_masks_ties_and_tails() {
+    for (count, heads, dim, rotary, ratio, budget) in [
+        (3, 1, 8, 4, 4, 16),
+        (16, 2, 8, 4, 4, 16),
+        (17, 2, 8, 4, 4, 16),
+        (63, 4, 8, 4, 4, 16),
+        (67, 4, 8, 4, 4, 16),
+        (9, 2, 8, 4, 1, 4),
+        (129, 4, 128, 32, 4, 64),
+    ] {
+        let parameters =
+            [count, heads, dim, rotary, count - 1, 1e-6f32.to_bits(), 10_000_000.0f32.to_bits(), ratio, budget];
+        for tied in [false, true] {
+            let expected = qwen_graph_qsa_selection_case(parameters, tied, true).0;
+            let actual = qwen_graph_qsa_selection_case(parameters, tied, false).0;
+            assert!(actual[0] == expected[0], "parallel sparse selection changed the visible mask");
+            assert!(actual[1] == expected[1], "parallel sparse selection changed block scores");
+        }
+    }
+}
+
+#[stark_test]
+fn qwen_graph_pooled_index_keys_append_only_on_complete_blocks_and_survive_growth() {
+    let dim = 8usize;
+    let heads = 2usize;
+    let index = DecodeGraph::upload(&(0..24).map(|i| (i as f32 - 11.0) * 0.07).collect::<Vec<_>>()).unwrap();
+    let keys = DecodeGraph::upload(&(0..72).map(|i| ((i % 17) as f32 - 8.0) * 0.03).collect::<Vec<_>>()).unwrap();
+    let norm = DecodeGraph::upload(&vec![1.1; dim]).unwrap();
+    let query = DecodeGraph::zeros(heads * dim).unwrap();
+    let prepare = |graph: &mut DecodeGraph,
+                   pooled: &DeviceVector,
+                   query: &DeviceVector,
+                   count: usize,
+                   first: usize,
+                   blocks: usize| {
+        graph
+            .kernel(
+                "qwen_graph_qsa_index_prepare",
+                &[&index, &keys, &norm, &norm, query, pooled],
+                &[
+                    count as u32,
+                    heads as u32,
+                    dim as u32,
+                    4,
+                    (count - 1) as u32,
+                    1e-6f32.to_bits(),
+                    10_000_000.0f32.to_bits(),
+                    4,
+                    4,
+                    first as u32,
+                    blocks as u32,
+                ],
+                heads + blocks,
+                1,
+            )
+            .unwrap();
+    };
+    let initial = DecodeGraph::zeros(dim).unwrap();
+    let mut first = DecodeGraph::new().unwrap();
+    prepare(&mut first, &initial, &query, 4, 0, 1);
+    let first_key = first.finish(&[initial.clone()]).unwrap().remove(0);
+    let mut partial = DecodeGraph::new().unwrap();
+    prepare(&mut partial, &initial, &query, 5, 0, 0);
+    assert!(
+        partial.finish(&[initial.clone()]).unwrap().remove(0) == first_key,
+        "partial sparse block changed a completed pooled key"
+    );
+    let grown = DecodeGraph::zeros(dim * 4).unwrap();
+    let mut growth = DecodeGraph::new().unwrap();
+    growth.copy_into(&initial, &grown.slice(0, dim).unwrap()).unwrap();
+    prepare(&mut growth, &grown, &query, 8, 1, 1);
+    prepare(&mut growth, &grown, &query, 9, 0, 0);
+    let actual = growth.finish(&[grown.slice(0, dim * 2).unwrap(), query.clone()]).unwrap();
+    let batch = DecodeGraph::zeros(dim * 2).unwrap();
+    let batch_query = DecodeGraph::zeros(heads * dim).unwrap();
+    let mut expected_graph = DecodeGraph::new().unwrap();
+    prepare(&mut expected_graph, &batch, &batch_query, 9, 0, 2);
+    let expected = expected_graph.finish(&[batch, batch_query]).unwrap();
+    assert!(actual == expected, "incremental pooled index state differs after cache growth");
+    assert!(actual[0][..dim] == first_key, "appending the next pooled key changed its predecessor");
+    let reset = DecodeGraph::zeros(dim).unwrap();
+    let reset_query = DecodeGraph::zeros(heads * dim).unwrap();
+    let mut fresh = DecodeGraph::new().unwrap();
+    prepare(&mut fresh, &reset, &reset_query, 4, 0, 1);
+    assert!(fresh.finish(&[reset]).unwrap().remove(0) == first_key, "fresh pooled state differs after reset");
+}
+
+#[stark_test]
+fn qwen_graph_radix_selection_preserves_total_order_and_ascending_block_ties() {
+    let scores = [0.0, -0.0, 1.0, 1.0, -3.0, 3.0, f32::from_bits(1.0f32.to_bits() + 1), 0.0];
+    for keep in 1..scores.len() {
+        let mut graph = DecodeGraph::new().unwrap();
+        let input = DecodeGraph::upload(&scores).unwrap();
+        let ids = DecodeGraph::zeros(1).unwrap();
+        let threshold = DecodeGraph::zeros(1).unwrap();
+        let visible = DecodeGraph::zeros(scores.len()).unwrap();
+        graph
+            .kernel(
+                "qwen_graph_qsa_index_threshold",
+                &[&input, &ids, &threshold],
+                &[scores.len() as u32, keep as u32],
+                256,
+                256,
+            )
+            .unwrap();
+        graph
+            .kernel(
+                "qwen_graph_qsa_index_mask",
+                &[&input, &ids, &threshold, &visible],
+                &[scores.len() as u32, 1, keep as u32],
+                scores.len(),
+                256,
+            )
+            .unwrap();
+        let actual = graph.finish(&[visible]).unwrap().remove(0);
+        let mut order = (0..scores.len()).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| scores[b].total_cmp(&scores[a]).then(a.cmp(&b)));
+        assert!(
+            actual.iter().enumerate().all(|(i, value)| value.to_bits() == u32::from(order[..keep].contains(&i))),
+            "radix top-k differs from total_cmp"
+        );
+    }
+}
+
+#[stark_test]
+#[ignore]
+fn qwen_graph_parallel_sparse_selection_microbenchmark() {
+    let parameters = [4099, 4, 128, 32, 4098, 1e-6f32.to_bits(), 10_000_000.0f32.to_bits(), 4, 2048];
+    for _ in 0..3 {
+        let expected = qwen_graph_qsa_selection_case(parameters, false, true);
+        let actual = qwen_graph_qsa_selection_case(parameters, false, false);
+        assert!(actual.0 == expected.0, "sparse selection benchmark changed values");
+        eprintln!("qwen_qsa_selection_4k_wall_ms scalar={:.3} parallel={:.3}", expected.1 * 1e3, actual.1 * 1e3);
+    }
 }
 
 #[stark_test]
@@ -243,6 +539,62 @@ fn qwen_graph_ple_multistep_history_and_fresh_reset_replay_match() {
     let fresh_history = DecodeGraph::zeros(history_len).unwrap();
     for ((key, value, query), expected) in inputs.into_iter().zip(outputs) {
         assert_eq!(qwen_graph_ple_step(&fresh_history, key, value, query), expected);
+    }
+}
+
+#[stark_test]
+fn qwen_graph_parallel_ple_matches_scalar_across_wide_tails_and_history() {
+    for (streams, dim) in [(2usize, 2usize), (4, 33), (4, 2560)] {
+        let width = streams * dim;
+        let parameters = [streams as u32, dim as u32, 3, 2, 1e-6f32.to_bits()];
+        let history = [DecodeGraph::zeros(width * 4).unwrap(), DecodeGraph::zeros(width * 4).unwrap()];
+        let values = |len: usize, seed: usize| {
+            (0..len).map(|i| (((i * 13 + seed * 7) % 47) as f32 - 23.0) / 29.0).collect::<Vec<_>>()
+        };
+        let norm = DecodeGraph::upload(&values(width, 4)).unwrap();
+        let conv = DecodeGraph::upload(&values(width * 3, 5)).unwrap();
+        for step in 0..6 {
+            let key = DecodeGraph::upload(&values(width, step)).unwrap();
+            let value = DecodeGraph::upload(&values(dim, step + 1)).unwrap();
+            let query = DecodeGraph::upload(&values(width, step + 2)).unwrap();
+            let mut results = Vec::new();
+            for (index, name) in ["qwen_graph_ple", "qwen_graph_ple_parallel"].into_iter().enumerate() {
+                let mut graph = DecodeGraph::new().unwrap();
+                let output = graph.scratch(width).unwrap();
+                let scratch = graph.scratch(width).unwrap();
+                graph
+                    .kernel(
+                        name,
+                        &[&key, &value, &query, &norm, &norm, &norm, &conv, &history[index], &output, &scratch],
+                        &parameters,
+                        streams
+                            * if index == 0 {
+                                1
+                            } else {
+                                256
+                            },
+                        if index == 0 {
+                            1
+                        } else {
+                            256
+                        },
+                    )
+                    .unwrap();
+                graph
+                    .kernel(
+                        "qwen_graph_ple_convolve",
+                        &[&conv, &history[index], &output, &scratch],
+                        &parameters[..4],
+                        width,
+                        256,
+                    )
+                    .unwrap();
+                results.push(graph.finish(&[output, scratch, history[index].clone()]).unwrap());
+            }
+            for (scalar, parallel) in results[0].iter().zip(&results[1]) {
+                assert!(scalar.iter().zip(parallel).all(|(&a, &b)| (a - b).abs() < 2e-5));
+            }
+        }
     }
 }
 

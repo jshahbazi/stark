@@ -9,11 +9,14 @@ Measured results, each bound to the source revision, build and host named inside
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
 **Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
-GPU decode graphs measured Qwen at 22.94 tok/s versus 11.21 staged, and GLM at
-9.04 versus 8.13, on Apple M5 Max. Five fresh requests per mode use the same
-binary and retain matching completion hashes. See the
-[decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md). Earlier stage-chaining
-and kernel measurements remain historical records for their named builds.
+Qwen's mixed-precision Lily-format path measures 77.18 tok/s warm decode at 4K
+input and 256 outputs, with speculation disabled. The original Pipe checkpoint
+improves from 23.16 to 43.70 tok/s on its matched short F32 workload. See the
+[mixed-precision study](QWEN38_MIXED_PRECISION_2026_10_28.md) for distinct artifacts,
+precision policies and source validation. GLM's current 9.04 versus 8.13 tok/s
+result remains in the [decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md).
+Earlier Qwen throughput and kernel measurements remain historical records for
+their named builds.
 
 ## Engine comparison history
 
@@ -31,7 +34,8 @@ and kernel measurements remain historical records for their named builds.
 
 | Study | Outcome |
 | --- | --- |
-| [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current original-format checkpoint results: Qwen 2.05x, GLM 11.1% faster warm decode on the short matched workload |
+| [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Current Qwen: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |
+| [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current GLM result; earlier Qwen throughput superseded, source-bound validation retained |
 | [Native GLM and Qwen graph and kernels](GLM_QWEN_NATIVE_GRAPH_2026_10_28.md) | Earlier stage-chaining study; superseded throughput, source-bound validation retained |
 | [Native GLM and Qwen optimization](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md) | Initial no-copy and batching study; build identities and validation remain source-bound historical evidence |
 | [MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) | Two decode changes accepted after bitwise validation; the throughput they produced is included in the current result |

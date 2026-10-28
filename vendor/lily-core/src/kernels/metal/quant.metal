@@ -1,0 +1,496 @@
+// Affine Q4/Q8 kernels with BF16 activations and FP32 accumulation.
+// Q4 codes pack eight low-nibble-first values per u32; w = scale*q + bias.
+// Portions use MLX affine quantization and qdot constructions; see NOTICE.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// Affine-dequantized dot product for one Q4 code word.
+static inline float dot_word_q4(uint word, float s, float b,
+                                device const bfloat4* xv, uint w) {
+    float4 xlo = float4(xv[2 * w]);
+    float4 xhi = float4(xv[2 * w + 1]);
+    float4 qlo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
+                        float((word >> 8) & 0xF), float((word >> 12) & 0xF));
+    float4 qhi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
+                        float((word >> 24) & 0xF), float((word >> 28) & 0xF));
+    float qx = dot(qlo, xlo) + dot(qhi, xhi);
+    float xs = dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
+    return s * qx + b * xs;
+}
+
+// Q4 GEMV uses one simdgroup per row; GS must be divisible by 64.
+#define GEMV_Q4_BODY(OUT_STORE)                                                \
+    const uint words = K / 8;                                                  \
+    const uint blocks = words / 4;                                             \
+    const uint bpg = GS / 32;                                                  \
+    const uint groups = K / GS;                                                \
+    device const uint4* wrow = (device const uint4*)(codes + (ulong)row * words); \
+    device const bfloat4* xv = (device const bfloat4*)x;                       \
+    float sum = 0.0f;                                                          \
+    for (uint i = lane; i < blocks; i += 32) {                                 \
+        uint g = i / bpg;                                                      \
+        float s = float(scales[row * groups + g]);                             \
+        float b = float(biases[row * groups + g]);                             \
+        uint4 w4 = wrow[i];                                                    \
+        sum += dot_word_q4(w4.x, s, b, xv, 4 * i)                              \
+            + dot_word_q4(w4.y, s, b, xv, 4 * i + 1)                           \
+            + dot_word_q4(w4.z, s, b, xv, 4 * i + 2)                           \
+            + dot_word_q4(w4.w, s, b, xv, 4 * i + 3);                          \
+    }                                                                          \
+    sum = simd_sum(sum);                                                       \
+    if (lane == 0) { OUT_STORE; }
+
+kernel void gemv_q4_bf16(device const uint*   codes  [[buffer(0)]],
+                         device const bfloat* scales [[buffer(1)]],
+                         device const bfloat* biases [[buffer(2)]],
+                         device const bfloat* x      [[buffer(3)]],
+                         device bfloat*       y      [[buffer(4)]],
+                         constant uint&       K      [[buffer(5)]],
+                         constant uint&       GS     [[buffer(6)]],
+                         uint row  [[threadgroup_position_in_grid]],
+                         uint lane [[thread_index_in_threadgroup]]) {
+    GEMV_Q4_BODY(y[row] = bfloat(sum))
+}
+
+kernel void gemv_q4_bf16_f32out(device const uint*   codes  [[buffer(0)]],
+                                device const bfloat* scales [[buffer(1)]],
+                                device const bfloat* biases [[buffer(2)]],
+                                device const bfloat* x      [[buffer(3)]],
+                                device float*        y      [[buffer(4)]],
+                                constant uint&       K      [[buffer(5)]],
+                                constant uint&       GS     [[buffer(6)]],
+                                uint row  [[threadgroup_position_in_grid]],
+                                uint lane [[thread_index_in_threadgroup]]) {
+    GEMV_Q4_BODY(y[row] = sum)
+}
+
+template <uint ROWS>
+static inline float gemv_q4_packed_sum(device const uint* codes,
+                                       device const bfloat* scales,
+                                       device const bfloat* biases,
+                                       device const bfloat* x,
+                                       uint row, uint sublane,
+                                       uint K, uint GS) {
+    constexpr uint LANES = 32 / ROWS;
+    const uint words = K / 8;
+    const uint blocks = words / 4;
+    const uint bpg = GS / 32;
+    const uint groups = K / GS;
+    device const uint4* wrow =
+        (device const uint4*)(codes + (ulong)row * words);
+    device const bfloat4* xv = (device const bfloat4*)x;
+    float sum = 0.0f;
+    for (uint i = sublane; i < blocks; i += LANES) {
+        uint g = i / bpg;
+        float s = float(scales[row * groups + g]);
+        float b = float(biases[row * groups + g]);
+        uint4 w4 = wrow[i];
+        sum += dot_word_q4(w4.x, s, b, xv, 4 * i)
+            + dot_word_q4(w4.y, s, b, xv, 4 * i + 1)
+            + dot_word_q4(w4.z, s, b, xv, 4 * i + 2)
+            + dot_word_q4(w4.w, s, b, xv, 4 * i + 3);
+    }
+    for (uint off = LANES / 2; off > 0; off >>= 1) {
+        sum += simd_shuffle_down(sum, off);
+    }
+    return sum;
+}
+
+#define GEMV_Q4_PACKED_KERNEL(NAME, ROWS)                                     \
+    kernel void NAME(device const uint*   codes  [[buffer(0)]],               \
+                     device const bfloat* scales [[buffer(1)]],               \
+                     device const bfloat* biases [[buffer(2)]],               \
+                     device const bfloat* x      [[buffer(3)]],               \
+                     device bfloat*       y      [[buffer(4)]],               \
+                     constant uint&       K      [[buffer(5)]],               \
+                     constant uint&       GS     [[buffer(6)]],               \
+                     uint group [[threadgroup_position_in_grid]],             \
+                     uint lane  [[thread_index_in_threadgroup]]) {            \
+        constexpr uint LANES = 32 / ROWS;                                     \
+        const uint sublane = lane % LANES;                                    \
+        const uint row = group * ROWS + lane / LANES;                         \
+        const float sum = gemv_q4_packed_sum<ROWS>(                            \
+            codes, scales, biases, x, row, sublane, K, GS);                   \
+        if (sublane == 0) {                                                    \
+            y[row] = bfloat(sum);                                              \
+        }                                                                      \
+    }
+
+GEMV_Q4_PACKED_KERNEL(gemv_q4_bf16_2row, 2)
+
+
+// 8-bit variant: one code word holds 4 elements (low byte first).
+static inline float dot_word_q8(uint word, float s, float b,
+                                device const bfloat4* xv, uint w) {
+    float4 x = float4(xv[w]);
+    float4 q = float4(float(word & 0xFF), float((word >> 8) & 0xFF),
+                      float((word >> 16) & 0xFF), float((word >> 24) & 0xFF));
+    return s * dot(q, x) + b * dot(x, float4(1.0f));
+}
+
+// Q8 GEMV uses uint4 blocks of 16 elements; GS must be divisible by 16.
+#define GEMV_Q8_BODY(OUT_STORE)                                                \
+    const uint words = K / 4;                                                  \
+    const uint blocks = words / 4;                                             \
+    const uint bpg = GS / 16;                                                  \
+    const uint groups = K / GS;                                                \
+    device const uint4* wrow = (device const uint4*)(codes + (ulong)row * words); \
+    device const bfloat4* xv = (device const bfloat4*)x;                       \
+    float sum = 0.0f;                                                          \
+    for (uint i = lane; i < blocks; i += 32) {                                 \
+        uint g = i / bpg;                                                      \
+        float s = float(scales[row * groups + g]);                             \
+        float b = float(biases[row * groups + g]);                             \
+        uint4 w4 = wrow[i];                                                    \
+        sum += dot_word_q8(w4.x, s, b, xv, 4 * i)                              \
+            + dot_word_q8(w4.y, s, b, xv, 4 * i + 1)                           \
+            + dot_word_q8(w4.z, s, b, xv, 4 * i + 2)                           \
+            + dot_word_q8(w4.w, s, b, xv, 4 * i + 3);                          \
+    }                                                                          \
+    sum = simd_sum(sum);                                                       \
+    if (lane == 0) { OUT_STORE; }
+
+kernel void gemv_q8_bf16(device const uint*   codes  [[buffer(0)]],
+                         device const bfloat* scales [[buffer(1)]],
+                         device const bfloat* biases [[buffer(2)]],
+                         device const bfloat* x      [[buffer(3)]],
+                         device bfloat*       y      [[buffer(4)]],
+                         constant uint&       K      [[buffer(5)]],
+                         constant uint&       GS     [[buffer(6)]],
+                         uint row  [[threadgroup_position_in_grid]],
+                         uint lane [[thread_index_in_threadgroup]]) {
+    GEMV_Q8_BODY(y[row] = bfloat(sum))
+}
+
+kernel void gemv_q8_bf16_f32out(device const uint*   codes  [[buffer(0)]],
+                                device const bfloat* scales [[buffer(1)]],
+                                device const bfloat* biases [[buffer(2)]],
+                                device const bfloat* x      [[buffer(3)]],
+                                device float*        y      [[buffer(4)]],
+                                constant uint&       K      [[buffer(5)]],
+                                constant uint&       GS     [[buffer(6)]],
+                                uint row  [[threadgroup_position_in_grid]],
+                                uint lane [[thread_index_in_threadgroup]]) {
+    GEMV_Q8_BODY(y[row] = sum)
+}
+
+// Materializes Q8 weights with one thread per code word.
+kernel void dequant_q8_bf16(device const uint*   codes  [[buffer(0)]],
+                            device const bfloat* scales [[buffer(1)]],
+                            device const bfloat* biases [[buffer(2)]],
+                            device bfloat*       out    [[buffer(3)]],
+                            constant uint&       K      [[buffer(4)]],
+                            constant uint&       GS     [[buffer(5)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    const uint words = K / 4;
+    const uint w = gid.x;
+    const uint row = gid.y;
+    if (w >= words) {
+        return;
+    }
+    const uint groups = K / GS;
+    uint g = w / (GS / 4);
+    float s = float(scales[row * groups + g]);
+    float b = float(biases[row * groups + g]);
+    uint word = codes[(ulong)row * words + w];
+    float4 q = float4(float(word & 0xFF), float((word >> 8) & 0xFF),
+                      float((word >> 16) & 0xFF), float((word >> 24) & 0xFF));
+    ((device bfloat4*)(out + (ulong)row * K))[w] = bfloat4(q * s + b);
+}
+
+// Dequantizes one Q4 code word to eight BF16 values.
+static inline void store_word_q4(uint word, float s, float b,
+                                 device bfloat4* out, uint w) {
+    float4 lo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
+                       float((word >> 8) & 0xF), float((word >> 12) & 0xF));
+    float4 hi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
+                       float((word >> 24) & 0xF), float((word >> 28) & 0xF));
+    out[2 * w] = bfloat4(lo * s + b);
+    out[2 * w + 1] = bfloat4(hi * s + b);
+}
+
+// Materializes Q4 weights with one thread per code word.
+kernel void dequant_q4_bf16(device const uint*   codes  [[buffer(0)]],
+                            device const bfloat* scales [[buffer(1)]],
+                            device const bfloat* biases [[buffer(2)]],
+                            device bfloat*       out    [[buffer(3)]],
+                            constant uint&       K      [[buffer(4)]],
+                            constant uint&       GS     [[buffer(5)]],
+                            uint2 gid [[thread_position_in_grid]]) {
+    const uint words = K / 8;
+    const uint w = gid.x;
+    const uint row = gid.y;
+    if (w >= words) {
+        return;
+    }
+    const uint groups = K / GS;
+    uint g = w / (GS / 8);
+    float s = float(scales[row * groups + g]);
+    float b = float(biases[row * groups + g]);
+    uint word = codes[(ulong)row * words + w];
+    store_word_q4(word, s, b, (device bfloat4*)(out + (ulong)row * K), w);
+}
+
+// Gathers and dequantizes embedding rows.
+kernel void gather_rows_q4_bf16(device const uint*   codes  [[buffer(0)]],
+                                device const bfloat* scales [[buffer(1)]],
+                                device const bfloat* biases [[buffer(2)]],
+                                device const uint*   ids    [[buffer(3)]],
+                                device bfloat*       out    [[buffer(4)]],
+                                constant uint&       K      [[buffer(5)]],
+                                constant uint&       GS     [[buffer(6)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    const uint words = K / 8;
+    const uint w = gid.x;
+    if (w >= words) {
+        return;
+    }
+    const uint row = ids[gid.y];
+    const uint groups = K / GS;
+    uint g = w / (GS / 8);
+    float s = float(scales[row * groups + g]);
+    float b = float(biases[row * groups + g]);
+    uint word = codes[(ulong)row * words + w];
+    store_word_q4(word, s, b, (device bfloat4*)(out + (ulong)gid.y * K), w);
+}
+
+// 8-bit embedding gather (`--q8-embed` checkpoints): one thread per code
+// word of four elements, the dequant of `dequant_q8_bf16`.
+kernel void gather_rows_q8_bf16(device const uint*   codes  [[buffer(0)]],
+                                device const bfloat* scales [[buffer(1)]],
+                                device const bfloat* biases [[buffer(2)]],
+                                device const uint*   ids    [[buffer(3)]],
+                                device bfloat*       out    [[buffer(4)]],
+                                constant uint&       K      [[buffer(5)]],
+                                constant uint&       GS     [[buffer(6)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    const uint words = K / 4;
+    const uint w = gid.x;
+    if (w >= words) {
+        return;
+    }
+    const uint row = ids[gid.y];
+    const uint groups = K / GS;
+    uint g = w / (GS / 4);
+    float s = float(scales[row * groups + g]);
+    float b = float(biases[row * groups + g]);
+    uint word = codes[(ulong)row * words + w];
+    float4 q = float4(float(word & 0xFF), float((word >> 8) & 0xFF),
+                      float((word >> 16) & 0xFF), float((word >> 24) & 0xFF));
+    ((device bfloat4*)(out + (ulong)gid.y * K))[w] = bfloat4(q * s + b);
+}
+
+// Dequantizes one Q4 word into a threadgroup B tile.
+static inline void store_word_q4_tg(uint word, float s, float b,
+                                    threadgroup bfloat4* out, uint w) {
+    float4 lo = float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
+                       float((word >> 8) & 0xF), float((word >> 12) & 0xF));
+    float4 hi = float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
+                       float((word >> 24) & 0xF), float((word >> 28) & 0xF));
+    out[2 * w] = bfloat4(lo * s + b);
+    out[2 * w + 1] = bfloat4(hi * s + b);
+}
+
+#if __METAL_VERSION__ >= 400
+#include <metal_tensor>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+
+
+// Grouped Q4 GEMM: per K step the threadgroup dequantizes its expert's
+// 64-row B tile into threadgroup memory and accumulates the product of the
+// block's A rows with it in FP32.
+//
+// - K steps are 128 deep (one 64-deep step closes a K that is an odd
+//   multiple of 64): each weight row is read 64 contiguous bytes per step.
+// - Each thread reads whole 32-code runs (one uint4) of a row with one
+//   scale and one bias, instead of single code words.
+// - The B tile's rows are padded by 8 elements (144 / 272 bytes instead of
+//   128 / 256), so a column of the tile does not fall on one bank.
+//
+// The dequantization (`store_word_q4_tg`) and the tensor-op product per
+// output element are those of the 64-deep, word-per-thread kernel this
+// replaced, and the results are bit-identical to it (asserted in the
+// tests against the previous kernel, kept in tests/metal/quant_test.metal).
+constant constexpr uint QNAX_BN = 64;
+constant constexpr uint QNAX_BK = 128;
+constant constexpr uint QNAX_PAD = 8;
+constant constexpr uint QNAX_LDT = QNAX_BK + QNAX_PAD;
+
+// Loads BK-deep runs of a 64-row B tile (32 codes per uint4, one scale and
+// bias each; GS must be a multiple of 32) and dequantizes them into the
+// padded threadgroup tile.
+template <uint BK, uint SG>
+struct Q4TileLoader {
+    static constant constexpr uint RUNS = BK / 32;  // uint4 runs per row
+    static constant constexpr uint PER_THREAD = QNAX_BN * RUNS / (32 * SG);
+    static_assert(PER_THREAD * 32 * SG == QNAX_BN * RUNS, "loader split");
+    uint4 w[PER_THREAD];
+    float s[PER_THREAD];
+    float b[PER_THREAD];
+
+    inline void load(device const uint* codes, device const bfloat* scales,
+                     device const bfloat* biases, uint words, uint groups, uint GS,
+                     uint b_row0, uint k0, uint tid) {
+        for (uint j = 0; j < PER_THREAD; ++j) {
+            const uint i = tid + j * 32 * SG;
+            const uint r = i / RUNS, u = i % RUNS;
+            const uint k = k0 + u * 32;
+            const ulong row = b_row0 + r;
+            w[j] = *(device const uint4*)(codes + row * words + k / 8);
+            const uint g = k / GS;
+            s[j] = float(scales[row * groups + g]);
+            b[j] = float(biases[row * groups + g]);
+        }
+    }
+
+    inline void store(threadgroup bfloat* tile, uint tid) {
+        for (uint j = 0; j < PER_THREAD; ++j) {
+            const uint i = tid + j * 32 * SG;
+            const uint r = i / RUNS, u = i % RUNS;
+            threadgroup bfloat4* out =
+                (threadgroup bfloat4*)(tile + r * QNAX_LDT + u * 32);
+            for (uint q = 0; q < 4; ++q) {
+                store_word_q4_tg(w[j][q], s[j], b[j], out, q);
+            }
+        }
+    }
+};
+
+using QnaxTile =
+    metal::tensor<threadgroup bfloat, metal::dextents<int32_t, 2>, metal::tensor_inline>;
+
+// One K step of BK: dequantize the B tile, then accumulate its product.
+template <uint BM, int SG, uint BK, typename AT, typename ACC>
+static inline void gemm_q4_grouped_step(device const uint* codes,
+                                        device const bfloat* scales,
+                                        device const bfloat* biases,
+                                        thread AT& ta, thread ACC& acc,
+                                        uint words, uint groups, uint GS,
+                                        uint m0, uint b_row0, uint k0,
+                                        threadgroup bfloat* b_tile, uint tid) {
+    using namespace mpp::tensor_ops;
+    constexpr auto desc = matmul2d_descriptor(
+        BM, QNAX_BN, BK, /*transpose_left=*/false,
+        /*transpose_right=*/true, /*relaxed_precision=*/false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc, metal::execution_simdgroups<SG>> op;
+    Q4TileLoader<BK, SG> loader;
+    loader.load(codes, scales, biases, words, groups, GS, b_row0, k0, tid);
+    loader.store(b_tile, tid);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    QnaxTile tb(b_tile, metal::dextents<int32_t, 2>(BK, QNAX_BN),
+                metal::array<int32_t, 2>{1, int(QNAX_LDT)});
+    auto a_slice = ta.slice(int(k0), int(m0));
+    op.run(a_slice, tb, acc);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// One block of the grouped GEMM at row-tile height BM.
+template <uint BM, int SG, typename AT>
+static void gemm_q4_nt_nax_grouped_rows(device const uint* codes,
+                                        device const bfloat* scales,
+                                        device const bfloat* biases,
+                                        thread AT& ta,
+                                        device bfloat* c,
+                                        uint K, uint N, uint GS,
+                                        uint m0, uint b_row0, uint n0, uint m_end,
+                                        threadgroup bfloat* b_tile,
+                                        uint tid) {
+    using namespace mpp::tensor_ops;
+    const uint words = K / 8;
+    const uint groups = K / GS;
+    constexpr auto desc = matmul2d_descriptor(
+        BM, QNAX_BN, QNAX_BK, /*transpose_left=*/false,
+        /*transpose_right=*/true, /*relaxed_precision=*/false,
+        matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc, metal::execution_simdgroups<SG>> op;
+
+    using ASlice = decltype(ta.slice(0, 0));
+    auto acc = op.template get_destination_cooperative_tensor<ASlice, QnaxTile, float>();
+    for (uint16_t i = 0; i < acc.get_capacity(); ++i) {
+        if (acc.is_valid_element(i)) {
+            acc[i] = 0.0f;
+        }
+    }
+
+    const uint k_full = K - K % QNAX_BK;
+    for (uint k0 = 0; k0 < k_full; k0 += QNAX_BK) {
+        gemm_q4_grouped_step<BM, SG, QNAX_BK>(codes, scales, biases, ta, acc, words,
+                                              groups, GS, m0, b_row0, k0, b_tile, tid);
+    }
+    if (k_full < K) {
+        gemm_q4_grouped_step<BM, SG, QNAX_BK / 2>(codes, scales, biases, ta, acc,
+                                                  words, groups, GS, m0, b_row0,
+                                                  k_full, b_tile, tid);
+    }
+
+    for (uint16_t i = 0; i < acc.get_capacity(); ++i) {
+        if (acc.is_valid_element(i)) {
+            auto ix = acc.get_multidimensional_index(i);
+            uint row = m0 + uint(ix[1]);
+            uint col = n0 + uint(ix[0]);
+            if (row < m_end) {
+                c[(ulong)row * N + col] = bfloat(acc[i]);
+            }
+        }
+    }
+}
+
+// BM must match the block-map row tile. An expert's last tile usually
+// holds fewer rows than BM (about 80 routed rows per expert per 4 096-token
+// chunk against 64-row tiles); such a block runs the product at the
+// smallest height of BM, BM/2 and BM/4 that covers its rows instead of
+// paying tensor work on padding.
+template <uint BM, int SG>
+static void gemm_q4_nt_nax_grouped_body(device const uint* codes,
+                                        device const bfloat* scales,
+                                        device const bfloat* biases,
+                                        device bfloat* a,
+                                        device bfloat* c,
+                                        device const uint4* blocks,
+                                        uint K, uint N, uint GS,
+                                        threadgroup bfloat* b_tile,
+                                        uint bid, uint tid) {
+    const uint4 blk = blocks[bid];
+    if (blk.x >= blk.w) {
+        return;  // sentinel entry from the GPU-built block map
+    }
+    const uint m0 = blk.x, b_row0 = blk.y, n0 = blk.z, m_end = blk.w;
+    const uint rows = m_end - m0;
+
+    auto ta = metal::tensor(a, metal::dextents<int32_t, 2>(K, int(m_end)));
+    if (rows <= BM / 4) {
+        gemm_q4_nt_nax_grouped_rows<BM / 4, SG>(codes, scales, biases, ta, c, K, N, GS,
+                                                m0, b_row0, n0, m_end, b_tile, tid);
+    } else if (rows <= BM / 2) {
+        gemm_q4_nt_nax_grouped_rows<BM / 2, SG>(codes, scales, biases, ta, c, K, N, GS,
+                                                m0, b_row0, n0, m_end, b_tile, tid);
+    } else {
+        gemm_q4_nt_nax_grouped_rows<BM, SG>(codes, scales, biases, ta, c, K, N, GS,
+                                            m0, b_row0, n0, m_end, b_tile, tid);
+    }
+}
+
+#define GEMM_Q4_NT_NAX_GROUPED(NAME, BM, SG)                                   \
+    kernel void NAME(device const uint*   codes  [[buffer(0)]],                \
+                     device const bfloat* scales [[buffer(1)]],                \
+                     device const bfloat* biases [[buffer(2)]],                \
+                     device bfloat*       a      [[buffer(3)]],                \
+                     device bfloat*       c      [[buffer(4)]],                \
+                     device const uint4*  blocks [[buffer(5)]],                \
+                     constant uint&       K      [[buffer(6)]],                \
+                     constant uint&       N      [[buffer(7)]],                \
+                     constant uint&       GS     [[buffer(8)]],                \
+                     uint bid [[threadgroup_position_in_grid]],                \
+                     uint tid [[thread_index_in_threadgroup]]) {               \
+        threadgroup bfloat b_tile[QNAX_BN * QNAX_LDT];                         \
+        gemm_q4_nt_nax_grouped_body<BM, SG>(codes, scales, biases, a, c,       \
+                                            blocks, K, N, GS, b_tile, bid,     \
+                                            tid);                              \
+    }
+
+// Dispatch instantiated tiles with 32*SG threads.
+GEMM_Q4_NT_NAX_GROUPED(gemm_q4_nt_nax_grouped_t32x4, 32, 4)
+GEMM_Q4_NT_NAX_GROUPED(gemm_q4_nt_nax_grouped_t64x4, 64, 4)
+#endif

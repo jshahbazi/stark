@@ -8,6 +8,7 @@ use crate::{
     cancel::CancelSignal,
     generation::{
         GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
+        native_result_after_cleanup,
     },
     text_stop::StopFilter,
 };
@@ -38,6 +39,7 @@ impl HybridBackend {
         let started = Instant::now();
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
+        let gpu_greedy = matches!(options.sampling, Sampling::Greedy {}) && self.model.supports_greedy_readout();
         let cancellation = &mut self.cancellation;
         let mut cancelled = || match cancellation.as_mut() {
             Some(signal) => signal.check(options.request_id),
@@ -47,12 +49,17 @@ impl HybridBackend {
             return Err("invalid_generation_request");
         }
         let mut logits = Vec::new();
+        let mut greedy_token = None;
         for (index, &token) in input.iter().enumerate() {
             if cancelled()? {
                 return Err("generation_cancelled");
             }
             if index + 1 == input.len() {
-                logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+                if gpu_greedy {
+                    greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
+                } else {
+                    logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+                }
             } else {
                 self.model.ingest(token).map_err(|_| "native_generation_failed")?;
             }
@@ -60,25 +67,35 @@ impl HybridBackend {
         let model = &mut self.model;
         let mut previous = None;
         let mut rng = options.seed;
-        let tokens = std::iter::from_fn(|| {
-            if let Some(token) = previous {
-                match model.step(token) {
-                    Ok(next) => logits = next,
-                    Err(_) => return Some(Err("native_generation_failed")),
+        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if gpu_greedy {
+            let first = greedy_token.take().ok_or("native_generation_failed")?;
+            let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
+            let tail = model
+                .greedy_decode(first, budget.saturating_sub(1))
+                .map_err(|_| "native_generation_failed")?
+                .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
+            Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
+        } else {
+            Box::new(std::iter::from_fn(|| {
+                if let Some(token) = previous {
+                    match model.step(token) {
+                        Ok(next) => logits = next,
+                        Err(_) => return Some(Err("native_generation_failed")),
+                    }
                 }
-            }
-            let token = match sample(&logits, &options.sampling, &mut rng) {
-                Ok(token) => token,
-                Err(error) => return Some(Err(error)),
-            };
-            previous = Some(token);
-            Some(Ok(token as u64))
-        });
+                let token = match sample(&logits, &options.sampling, &mut rng) {
+                    Ok(token) => token,
+                    Err(error) => return Some(Err(error)),
+                };
+                previous = Some(token);
+                Some(Ok(u64::from(token)))
+            }))
+        };
         let mut decoder = tokenizer.decode_stream(false);
         let mut filter = StopFilter::new(options.stop.clone());
         let mut raw = String::new();
         let needs_text = on_text.is_some() || !options.stop.is_empty();
-        let mut result = collect_tokens_controlled(
+        let result = collect_tokens_controlled(
             tokens,
             input.len(),
             options,
@@ -96,7 +113,10 @@ impl HybridBackend {
                 Ok(true)
             },
             &mut cancelled,
-        )?;
+        );
+        // The collector has dropped its iterator and drained any submitted
+        // lookahead, including EOS, cancellation and callback-error exits.
+        let mut result = native_result_after_cleanup(result, self.model.is_fenced())?;
         if needs_text {
             let full = tokenizer.decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
             let suffix = full.strip_prefix(&raw).ok_or("decoding_failed")?;

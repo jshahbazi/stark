@@ -35,6 +35,15 @@ struct Executor {
     gdn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     graph_pipelines: Mutex<HashMap<&'static str, PipelineState>>,
     indexed_pipelines: PipelineCache,
+    checked_matrix_pipelines: PipelineCache,
+    typed_matrix_pipelines: PipelineCache,
+    typed_indexed_pipelines: PipelineCache,
+    chunk32_matrix_pipelines: PipelineCache,
+    chunk32_indexed_pipelines: PipelineCache,
+    uint4_matrix_pipelines: PipelineCache,
+    uint4_indexed_pipelines: PipelineCache,
+    factored_matrix_pipelines: PipelineCache,
+    factored_indexed_pipelines: PipelineCache,
     ordered_rms: bool,
     #[cfg(test)]
     tiled_pipelines: PipelineCache,
@@ -82,6 +91,30 @@ impl MappedSlice {
 pub(super) struct MappedMatrix {
     pub codes: MappedSlice,
     pub planes: Option<(MappedSlice, MappedSlice)>,
+}
+
+impl MappedMatrix {
+    fn aligned_affine_loads(
+        &self,
+        format: MatrixFormat,
+    ) -> bool {
+        let MatrixFormat::Affine {
+            scale_dtype,
+            ..
+        } = format
+        else {
+            return false;
+        };
+        let alignment = match scale_dtype {
+            0 => 4,
+            1 | 30 => 2,
+            _ => return false,
+        };
+        self.codes.offset.is_multiple_of(4)
+            && self.planes.as_ref().is_some_and(|(scales, biases)| {
+                scales.offset.is_multiple_of(alignment) && biases.offset.is_multiple_of(alignment)
+            })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -439,7 +472,10 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
+            source.push_str(include_str!("affine_uint_matvec.metal"));
+            source.push_str(include_str!("affine_chunk32_matvec.metal"));
             source.push_str(include_str!("qwen_graph.metal"));
+            source.push_str(include_str!("qwen_attention.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
             #[cfg(test)]
@@ -459,6 +495,15 @@ fn executor() -> Result<&'static Executor> {
                 gdn_pipelines: Mutex::new(None),
                 graph_pipelines: Mutex::new(HashMap::new()),
                 indexed_pipelines: Mutex::new(HashMap::new()),
+                checked_matrix_pipelines: Mutex::new(HashMap::new()),
+                typed_matrix_pipelines: Mutex::new(HashMap::new()),
+                typed_indexed_pipelines: Mutex::new(HashMap::new()),
+                chunk32_matrix_pipelines: Mutex::new(HashMap::new()),
+                chunk32_indexed_pipelines: Mutex::new(HashMap::new()),
+                uint4_matrix_pipelines: Mutex::new(HashMap::new()),
+                uint4_indexed_pipelines: Mutex::new(HashMap::new()),
+                factored_matrix_pipelines: Mutex::new(HashMap::new()),
+                factored_indexed_pipelines: Mutex::new(HashMap::new()),
                 ordered_rms: std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1"),
                 #[cfg(test)]
                 tiled_pipelines: Mutex::new(HashMap::new()),
@@ -604,7 +649,12 @@ impl Executor {
                 .new_compute_pipeline_state_with_function(&function)
                 .map_err(|_| Error::Invalid("Metal GDN pipeline failed"))
         };
-        let result = (make("hybrid_qwen_gdn_convolve")?, make("hybrid_qwen_gdn_recurrent")?);
+        let recurrent = if std::env::var_os("STARK_QWEN38_STAGED_GDN").is_some_and(|value| value == "1") {
+            "hybrid_qwen_gdn_recurrent"
+        } else {
+            "hybrid_qwen_gdn_recurrent_fused"
+        };
+        let result = (make("hybrid_qwen_gdn_convolve")?, make(recurrent)?);
         *pipelines = Some(result.clone());
         Ok(result)
     }
