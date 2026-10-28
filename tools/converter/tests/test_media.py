@@ -149,6 +149,7 @@ def test_private_store_unlinks_after_consumer_failure():
 
 def test_private_store_removes_partial_file_after_write_failure(monkeypatch):
     with PrivateMediaStore() as store:
+
         def fail_write(*_args):
             raise OSError("private path detail")
 

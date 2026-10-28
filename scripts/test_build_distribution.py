@@ -463,10 +463,20 @@ class BundleConstructionTests(unittest.TestCase):
                 path.write_text(f"{name}\n")
             license_path = root / "scripts/licenses/distribution/pytorch-LICENSE"
             ggml_license_path = root / "scripts/licenses/distribution/ggml-LICENSE"
-            sleef_license_path = root / "scripts/licenses/distribution/sleef-LICENSE.txt"
-            sleef_attribution_path = root / "scripts/licenses/distribution/sleef-ATTRIBUTION.txt"
-            arm_license_path = root / "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt"
-            arm_attribution_path = root / "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt"
+            sleef_license_path = (
+                root / "scripts/licenses/distribution/sleef-LICENSE.txt"
+            )
+            sleef_attribution_path = (
+                root / "scripts/licenses/distribution/sleef-ATTRIBUTION.txt"
+            )
+            arm_license_path = (
+                root
+                / "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt"
+            )
+            arm_attribution_path = (
+                root
+                / "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt"
+            )
             manifest_path = root / "scripts/licenses/distribution/manifest.json"
             manifest = {
                 "source_adaptations": {
@@ -476,15 +486,21 @@ class BundleConstructionTests(unittest.TestCase):
                         "additional_notices": [
                             {
                                 "license_file": "ggml-LICENSE",
-                                "license_sha256": distribution.sha256(ggml_license_path),
+                                "license_sha256": distribution.sha256(
+                                    ggml_license_path
+                                ),
                             },
                             {
                                 "license_file": "sleef-LICENSE.txt",
-                                "license_sha256": distribution.sha256(sleef_license_path),
+                                "license_sha256": distribution.sha256(
+                                    sleef_license_path
+                                ),
                             },
                             {
                                 "license_file": "sleef-ATTRIBUTION.txt",
-                                "license_sha256": distribution.sha256(sleef_attribution_path),
+                                "license_sha256": distribution.sha256(
+                                    sleef_attribution_path
+                                ),
                             },
                             {
                                 "license_file": "arm-optimized-routines-LICENSE.txt",
@@ -492,7 +508,9 @@ class BundleConstructionTests(unittest.TestCase):
                             },
                             {
                                 "license_file": "arm-optimized-routines-ATTRIBUTION.txt",
-                                "license_sha256": distribution.sha256(arm_attribution_path),
+                                "license_sha256": distribution.sha256(
+                                    arm_attribution_path
+                                ),
                             },
                         ],
                     }
@@ -551,11 +569,16 @@ class BundleConstructionTests(unittest.TestCase):
                 "scripts/licenses/distribution/sleef-ATTRIBUTION.txt\n",
             )
             self.assertEqual(
-                (bundle / "share/stark/licenses/arm-optimized-routines-LICENSE.txt").read_text(),
+                (
+                    bundle / "share/stark/licenses/arm-optimized-routines-LICENSE.txt"
+                ).read_text(),
                 "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt\n",
             )
             self.assertEqual(
-                (bundle / "share/stark/licenses/arm-optimized-routines-ATTRIBUTION.txt").read_text(),
+                (
+                    bundle
+                    / "share/stark/licenses/arm-optimized-routines-ATTRIBUTION.txt"
+                ).read_text(),
                 "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt\n",
             )
             manifest["source_adaptations"]["pytorch-bf16-vision-layernorm-moments"][

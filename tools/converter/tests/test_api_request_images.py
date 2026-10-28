@@ -68,7 +68,7 @@ def test_text_only_list_still_normalizes_to_string():
 @pytest.mark.parametrize("role", ["assistant", "system"])
 def test_image_parts_are_supported_only_on_user_messages(role):
     with pytest.raises(APIError) as error:
-        parse([{ "role": role, "content": [image_part()] }])
+        parse([{"role": role, "content": [image_part()]}])
     assert error.value.status == 400
     assert error.value.code == "images_unsupported"
     assert "data:image" not in str(error.value)

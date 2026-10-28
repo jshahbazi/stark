@@ -47,11 +47,7 @@ def post_bytes(info, port, body):
 def body_for_image_bytes(data):
     url = "data:image/png;base64," + base64.b64encode(data).decode("ascii")
     return json.dumps(
-        {
-            "messages": [
-                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}
-            ]
-        },
+        {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": url}}]}]},
         separators=(",", ":"),
     ).encode("ascii")
 
@@ -132,9 +128,7 @@ def test_text_body_above_one_mib_is_rejected_even_when_images_are_enabled(images
 def test_over_cap_content_length_is_rejected_before_body_read(images):
     called = []
     api, info, port = start_api(lambda *_args: called.append(True) or {"choices": []}, images=images)
-    expected_limit = (
-        local_api_module.MAX_IMAGE_BODY_BYTES if images else local_api_module.MAX_TEXT_BODY_BYTES
-    )
+    expected_limit = local_api_module.MAX_IMAGE_BODY_BYTES if images else local_api_module.MAX_TEXT_BODY_BYTES
     connection = None
     try:
         connection = send_headers(port, info["api_key"], expected_limit + 1)

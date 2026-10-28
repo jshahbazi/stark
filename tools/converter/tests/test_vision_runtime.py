@@ -151,9 +151,7 @@ def test_worker_hash_must_still_match_launch_snapshot(monkeypatch, tmp_path):
     # The two-argument compatibility form continues to match the current file;
     # a worker that launched the earlier bytes must fail closed.
     assert vision_runtime.qualified_image_worker(contract(), candidate) is True
-    assert vision_runtime.qualified_image_worker(
-        contract(), candidate, expected_worker_sha256=original_hash
-    ) is False
+    assert vision_runtime.qualified_image_worker(contract(), candidate, expected_worker_sha256=original_hash) is False
 
 
 @pytest.mark.parametrize(
