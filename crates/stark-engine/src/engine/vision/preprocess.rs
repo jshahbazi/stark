@@ -346,12 +346,12 @@ fn jpeg_header(data: &[u8]) -> Result<(u32, u32, u8), InvalidInput> {
         let end = cursor.checked_add(length).ok_or(InvalidInput("JPEG segment overflow"))?;
         let payload = data.get(start..end).ok_or(InvalidInput("truncated JPEG segment"))?;
         match marker {
-            0xc0 | 0xc1 | 0xc2 => {
+            0xc0..=0xc2 => {
                 if shape.is_some() || payload.len() < 6 || payload[0] != 8 || ![1, 3].contains(&payload[5]) {
                     return Err(InvalidInput("unsupported JPEG frame or color format"));
                 }
                 if payload.len() != 6 + usize::from(payload[5]) * 3
-                    || payload[6..].chunks_exact(3).any(|component| {
+                    || payload[6..].as_chunks::<3>().0.iter().any(|component| {
                         !(1..=4).contains(&(component[1] >> 4)) || !(1..=4).contains(&(component[1] & 15))
                     })
                 {
@@ -406,7 +406,7 @@ fn decode_jpeg_rgb(
         jpeg_decoder::PixelFormat::RGB24 if pixels.len() == rgb_bytes(width, height)? => Ok(pixels),
         jpeg_decoder::PixelFormat::L8 if pixels.len() == rgb_bytes(width, height)? / 3 => {
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, gray) in rgb.chunks_exact_mut(3).zip(pixels) {
+            for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(pixels) {
                 pixel.fill(gray);
             }
             Ok(rgb)
@@ -455,21 +455,21 @@ pub(crate) fn decode_image(
         DynamicImage::ImageRgb8(image) => image.into_raw(),
         DynamicImage::ImageLuma8(image) => {
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, gray) in rgb.chunks_exact_mut(3).zip(image.into_raw()) {
+            for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw()) {
                 pixel.fill(gray);
             }
             rgb
         },
         DynamicImage::ImageLumaA8(image) => {
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, gray) in rgb.chunks_exact_mut(3).zip(image.into_raw().chunks_exact(2)) {
+            for (pixel, gray) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<2>().0.iter()) {
                 pixel.fill(composite_white(gray[0], gray[1]));
             }
             rgb
         },
         DynamicImage::ImageRgba8(image) => {
             let mut rgb = zeroed_bytes(rgb_bytes(width, height)?)?;
-            for (pixel, rgba) in rgb.chunks_exact_mut(3).zip(image.into_raw().chunks_exact(4)) {
+            for (pixel, rgba) in rgb.as_chunks_mut::<3>().0.iter_mut().zip(image.into_raw().as_chunks::<4>().0.iter()) {
                 for channel in 0..3 {
                     pixel[channel] = composite_white(rgba[channel], rgba[3]);
                 }

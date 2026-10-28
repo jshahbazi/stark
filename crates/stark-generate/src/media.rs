@@ -188,7 +188,7 @@ impl Drop for MediaStore {
 }
 
 fn directory_names(directory_fd: libc::c_int) -> std::io::Result<Vec<Vec<u8>>> {
-    let dot = CStr::from_bytes_with_nul(b".\0").expect("static directory entry");
+    let dot = c".";
     let duplicate = unsafe {
         libc::openat(
             directory_fd,

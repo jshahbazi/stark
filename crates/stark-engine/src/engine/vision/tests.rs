@@ -117,19 +117,18 @@ fn native_vision_prepared_image_exposes_actual_grid_and_token_count() {
 #[stark_test]
 fn native_vision_prompt_expands_one_placeholder_and_reserves_output_room() {
     let template = || vec![100, 248053, 248056, 248054, 101].into_boxed_slice();
-    let (expanded, start) = expand_image_placeholder(template(), 64, 69, 248056).unwrap();
+    let (expanded, start) = expand_image_placeholder(&template(), 64, 69, 248056).unwrap();
     assert_eq!(start, 2);
     assert_eq!(expanded.len(), 68);
     assert!(expanded[2..66].iter().all(|&token| token == 248056));
     assert_eq!(&expanded[..2], &[100, 248053]);
     assert_eq!(&expanded[66..], &[248054, 101]);
-    assert!(expand_image_placeholder(template(), 64, 68, 248056).is_err());
-    assert!(expand_image_placeholder(template(), 0, 128, 248056).is_err());
-    assert!(expand_image_placeholder(template(), 1025, 2048, 248056).is_err());
-    assert!(expand_image_placeholder(vec![100, 101].into_boxed_slice(), 64, 128, 248056).is_err());
-    assert!(expand_image_placeholder(vec![248056, 248056].into_boxed_slice(), 64, 128, 248056).is_err());
-    let (changed, start) =
-        expand_image_placeholder(vec![100, 200, 300, 400, 101].into_boxed_slice(), 2, 9, 300).unwrap();
+    assert!(expand_image_placeholder(&template(), 64, 68, 248056).is_err());
+    assert!(expand_image_placeholder(&template(), 0, 128, 248056).is_err());
+    assert!(expand_image_placeholder(&template(), 1025, 2048, 248056).is_err());
+    assert!(expand_image_placeholder(&[100, 101], 64, 128, 248056).is_err());
+    assert!(expand_image_placeholder(&[248056, 248056], 64, 128, 248056).is_err());
+    let (changed, start) = expand_image_placeholder(&[100, 200, 300, 400, 101], 2, 9, 300).unwrap();
     assert_eq!(start, 2);
     assert_eq!(&changed[..], &[100, 200, 300, 300, 400, 101]);
 }

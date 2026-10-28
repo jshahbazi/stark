@@ -245,7 +245,7 @@ impl PreparedVisionImage {
 }
 
 fn expand_image_placeholder(
-    tokens: Box<[u64]>,
+    tokens: &[u64],
     image_token_count: u32,
     context_capacity: u32,
     image_token: u64,
@@ -666,7 +666,8 @@ impl<B: Backend> VisionLanguageModel<B> {
     ) -> Result<(Box<[u64]>, usize), NativeVisionError<B>> {
         self.validate_prepared_identity(image)?;
         let (expanded, start) =
-            expand_image_placeholder(tokens, image.image_token_count, context_capacity, self.image_tokens.image)?;
+            expand_image_placeholder(&tokens, image.image_token_count, context_capacity, self.image_tokens.image)?;
+        drop(tokens);
         let input = self.preflight_prepared_prefill(expanded, image, start, context_capacity)?;
         Ok((input.tokens, start))
     }

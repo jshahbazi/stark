@@ -147,6 +147,7 @@ fn remainder_quarter(x: f32) -> (f32, i32) {
     (x - y * 0.25, (y - x.round_ties_even() * 4.0) as i32)
 }
 
+#[expect(clippy::excessive_precision, reason = "Preserve coefficient spellings from the pinned SLEEF source.")]
 fn remainder_pi(x: f32) -> (F32Pair, i32) {
     // All admitted coordinates are below 4096, so SLEEF's exponent-indexed
     // Payne-Hanek table always selects its first four source constants.
@@ -186,6 +187,7 @@ fn remainder_pi(x: f32) -> (F32Pair, i32) {
     }
 }
 
+#[expect(clippy::excessive_precision, reason = "Preserve coefficient spellings from the pinned SLEEF source.")]
 fn polynomial(t: F32Pair) -> f32 {
     let square = t.square();
     let u = 2.6083159809786593541503e-6f32.mul_add(square.hi, -0.0001981069071916863322258);
@@ -194,6 +196,7 @@ fn polynomial(t: F32Pair) -> f32 {
     t.mul_to_f(F32Pair::f_add(1.0, x))
 }
 
+#[expect(clippy::excessive_precision, reason = "Preserve coefficient spellings from the pinned SLEEF source.")]
 fn trig_lane(
     d: f32,
     large: bool,
@@ -291,6 +294,12 @@ pub(crate) fn vision_sin_cos(angles: &[f32]) -> (Vec<f32>, Vec<f32>) {
 // SLEEF expf_u10, revision 5a1d179df9cf652951b59010a2d2075372d67f68.
 // Copyright Naoki Shibata and contributors, Boost Software License 1.0;
 // see scripts/licenses/distribution/sleef-LICENSE.txt.
+#[cfg(any(feature = "cpu", test))]
+#[expect(
+    clippy::excessive_precision,
+    clippy::approx_constant,
+    reason = "Preserve coefficient spellings from the pinned SLEEF source."
+)]
 pub(crate) fn vision_exp(x: f32) -> f32 {
     if x < -104.0 {
         return 0.0;

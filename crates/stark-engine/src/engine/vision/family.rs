@@ -167,10 +167,10 @@ fn vision_semantics(value: &Value) -> bool {
     let Some(mut actual) = value.as_object().cloned() else {
         return false;
     };
-    if let Some(initializer) = actual.remove("initializer_range") {
-        if !initializer.as_f64().is_some_and(|number| number.is_finite() && number >= 0.0) {
-            return false;
-        }
+    if let Some(initializer) = actual.remove("initializer_range")
+        && !initializer.as_f64().is_some_and(|number| number.is_finite() && number >= 0.0)
+    {
+        return false;
     }
     let mut expected = vision_profile().as_object().cloned().expect("profile is an object");
     expected.remove("initializer_range");
@@ -490,10 +490,11 @@ fn validate_tensor_header(
             return Err(invalid());
         }
         spans.push((begin, end));
-        if let Some(prefix) = name.strip_suffix(".weights") {
-            if *dtype == "BF16" && prefix.starts_with("decoder.") {
-                specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}));
-            }
+        if let Some(prefix) = name.strip_suffix(".weights")
+            && *dtype == "BF16"
+            && prefix.starts_with("decoder.")
+        {
+            specs.insert(format!("{prefix}.spec"), json!({"type":"FullPrecisionSpec","layout":if matches!(prefix, "decoder.embedding.embedding" | "decoder.embedding.input_embedding") {"input_output"} else {"output_input"}}));
         }
     }
     if metadata.len() != specs.len() {

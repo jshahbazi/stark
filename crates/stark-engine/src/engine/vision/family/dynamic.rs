@@ -147,10 +147,10 @@ pub(super) fn geometry(
 
     let mut expected_vision = vision_profile();
     let mut actual_vision = vision.clone();
-    if let Some(initializer) = actual_vision.as_object_mut().ok_or_else(invalid)?.remove("initializer_range") {
-        if !initializer.as_f64().is_some_and(|number| number.is_finite() && number >= 0.0) {
-            return Err(invalid());
-        }
+    if let Some(initializer) = actual_vision.as_object_mut().ok_or_else(invalid)?.remove("initializer_range")
+        && !initializer.as_f64().is_some_and(|number| number.is_finite() && number >= 0.0)
+    {
+        return Err(invalid());
     }
     expected_vision.as_object_mut().unwrap().remove("initializer_range");
     let depth = number(&vision["depth"], 64, 1)?;
