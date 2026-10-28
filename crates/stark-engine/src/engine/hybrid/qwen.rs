@@ -248,35 +248,49 @@ impl HyperConnection {
     ) -> Result<(Vec<f32>, Vec<f32>)> {
         let _profile = Scope::new("qwen.mhc");
         let normalized = grouped_norm(input, &self.norm, g.dim, g.eps)?;
-        let mut reduced = project(weights, &format!("{}.input_mix_weight_down", self.prefix), &normalized)?;
-        for value in &mut reduced {
-            *value = silu(*value / g.streams as f32);
+        #[cfg(feature = "metal")]
+        {
+            let inject = self.combine.then(|| format!("{}.block_inject_weight.weight", self.prefix));
+            weights.qwen_hyperconnection(
+                &format!("{}.input_mix_weight_down.weight", self.prefix),
+                &format!("{}.input_mix_weight_up.weight", self.prefix),
+                inject.as_deref(),
+                &normalized,
+                g.streams,
+            )
         }
-        let (gates, inject) = if self.combine {
-            let [gates, mut values] = projects(
-                weights,
-                &self.prefix,
-                [("input_mix_weight_up", &reduced), ("block_inject_weight", &normalized)],
-            )?;
-            if values.len() != g.streams {
-                return Err(Error::Invalid("Qwen3.8 write gate dimensions"));
+        #[cfg(not(feature = "metal"))]
+        {
+            let mut reduced = project(weights, &format!("{}.input_mix_weight_down", self.prefix), &normalized)?;
+            for value in &mut reduced {
+                *value = silu(*value / g.streams as f32);
             }
-            values.iter_mut().for_each(|value| *value = 2.0 * sigmoid(*value / g.streams as f32));
-            (gates, values)
-        } else {
-            (project(weights, &format!("{}.input_mix_weight_up", self.prefix), &reduced)?, Vec::new())
-        };
-        if gates.len() != input.len() {
-            return Err(Error::Invalid("Qwen3.8 read gate dimensions"));
-        }
-        let mut mixed = vec![0.0; g.dim];
-        for stream in 0..g.streams {
-            for channel in 0..g.dim {
-                let index = stream * g.dim + channel;
-                mixed[channel] += sigmoid(gates[index]) * normalized[index] / g.streams as f32;
+            let (gates, inject) = if self.combine {
+                let [gates, mut values] = projects(
+                    weights,
+                    &self.prefix,
+                    [("input_mix_weight_up", &reduced), ("block_inject_weight", &normalized)],
+                )?;
+                if values.len() != g.streams {
+                    return Err(Error::Invalid("Qwen3.8 write gate dimensions"));
+                }
+                values.iter_mut().for_each(|value| *value = 2.0 * sigmoid(*value / g.streams as f32));
+                (gates, values)
+            } else {
+                (project(weights, &format!("{}.input_mix_weight_up", self.prefix), &reduced)?, Vec::new())
+            };
+            if gates.len() != input.len() {
+                return Err(Error::Invalid("Qwen3.8 read gate dimensions"));
             }
+            let mut mixed = vec![0.0; g.dim];
+            for stream in 0..g.streams {
+                for channel in 0..g.dim {
+                    let index = stream * g.dim + channel;
+                    mixed[channel] += sigmoid(gates[index]) * normalized[index] / g.streams as f32;
+                }
+            }
+            Ok((mixed, inject))
         }
-        Ok((mixed, inject))
     }
 }
 
@@ -303,7 +317,11 @@ struct DeltaNet {
     a_log: Vec<f32>,
     dt_bias: Vec<f32>,
     norm: Vec<f32>,
+    #[cfg(feature = "metal")]
+    metal: Option<super::weight_metal::QwenGdnState>,
+    #[cfg(not(feature = "metal"))]
     conv_state: ConvState,
+    #[cfg(not(feature = "metal"))]
     state: Vec<f32>,
 }
 
@@ -332,14 +350,25 @@ impl DeltaNet {
             dt_bias: vector(weights, &format!("{prefix}.dt_bias"), g.value_heads)?,
             norm: vector(weights, &format!("{prefix}.norm.weight"), g.value_dim)?,
             prefix,
+            #[cfg(feature = "metal")]
+            metal: None,
+            #[cfg(not(feature = "metal"))]
             conv_state: ConvState::default(),
+            #[cfg(not(feature = "metal"))]
             state: Vec::new(),
         })
     }
 
     fn reset(&mut self) {
-        self.conv_state.clear();
-        self.state.clear();
+        #[cfg(feature = "metal")]
+        if let Some(state) = &mut self.metal {
+            state.reset();
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            self.conv_state.clear();
+            self.state.clear();
+        }
     }
 
     fn step(
@@ -349,54 +378,83 @@ impl DeltaNet {
         g: &Geometry,
     ) -> Result<Vec<f32>> {
         let _profile = Scope::new("qwen.gdn");
-        let [mixed, z, a, b] = projects(
-            weights,
-            &self.prefix,
-            [("in_proj_qkv", input), ("in_proj_z", input), ("in_proj_a", input), ("in_proj_b", input)],
-        )?;
-        let convolved = self.conv_state.step(&mixed, &self.convolution, g.conv_kernel, 1)?;
-        let key_width = g.key_heads * g.key_dim;
-        let (q, remainder) = convolved.split_at(key_width);
-        let (k, v) = remainder.split_at(key_width);
-        let recurrent_profile = Scope::new("qwen.gdn.recurrent");
-        let mut q = q.to_vec();
-        let mut k = k.to_vec();
-        normalize_l2(&mut q, g.key_dim, (g.key_dim as f32).sqrt().recip());
-        normalize_l2(&mut k, g.key_dim, 1.0);
-        let count = g.value_heads * g.value_dim * g.key_dim;
-        if self.state.is_empty() {
-            self.state.resize(count, 0.0);
-        }
-        let mut result = vec![0.0; g.value_heads * g.value_dim];
-        for head in 0..g.value_heads {
-            let key_head = head / (g.value_heads / g.key_heads);
-            let q = &q[key_head * g.key_dim..(key_head + 1) * g.key_dim];
-            let k = &k[key_head * g.key_dim..(key_head + 1) * g.key_dim];
-            let softplus_arg = a[head] + self.dt_bias[head];
-            let softplus = softplus_arg.max(0.0) + (-softplus_arg.abs()).exp().ln_1p();
-            let decay = (-self.a_log[head].exp() * softplus).exp();
-            let beta = sigmoid(b[head]);
-            for channel in 0..g.value_dim {
-                let index = head * g.value_dim + channel;
-                let state = &mut self.state[index * g.key_dim..(index + 1) * g.key_dim];
-                result[index] = delta_row(state, q, k, v[index], decay, beta);
+        #[cfg(feature = "metal")]
+        {
+            if self.metal.is_none() {
+                self.metal = Some(super::weight_metal::QwenGdnState::new(
+                    super::weight_metal::QwenGdnGeometry {
+                        key_heads: g.key_heads,
+                        key_dim: g.key_dim,
+                        value_heads: g.value_heads,
+                        value_dim: g.value_dim,
+                        conv_kernel: g.conv_kernel,
+                        eps: g.eps,
+                        sigmoid_output: g.sigmoid_output,
+                    },
+                    &self.convolution,
+                    &self.a_log,
+                    &self.dt_bias,
+                    &self.norm,
+                )?);
             }
-            let normalized = rms_norm(&result[head * g.value_dim..(head + 1) * g.value_dim], &self.norm, g.eps)?;
-            for (channel, value) in normalized.into_iter().enumerate() {
-                let index = head * g.value_dim + channel;
-                result[index] = value
-                    * if g.sigmoid_output {
-                        sigmoid(z[index])
-                    } else {
-                        silu(z[index])
-                    };
-            }
+            weights.qwen_gdn(
+                &self.prefix,
+                input,
+                self.metal.as_mut().ok_or(Error::Invalid("Qwen GDN state unavailable"))?,
+            )
         }
-        drop(recurrent_profile);
-        project(weights, &format!("{}.out_proj", self.prefix), &result)
+        #[cfg(not(feature = "metal"))]
+        {
+            let [mixed, z, a, b] = projects(
+                weights,
+                &self.prefix,
+                [("in_proj_qkv", input), ("in_proj_z", input), ("in_proj_a", input), ("in_proj_b", input)],
+            )?;
+            let convolved = self.conv_state.step(&mixed, &self.convolution, g.conv_kernel, 1)?;
+            let key_width = g.key_heads * g.key_dim;
+            let (q, remainder) = convolved.split_at(key_width);
+            let (k, v) = remainder.split_at(key_width);
+            let recurrent_profile = Scope::new("qwen.gdn.recurrent");
+            let mut q = q.to_vec();
+            let mut k = k.to_vec();
+            normalize_l2(&mut q, g.key_dim, (g.key_dim as f32).sqrt().recip());
+            normalize_l2(&mut k, g.key_dim, 1.0);
+            let count = g.value_heads * g.value_dim * g.key_dim;
+            if self.state.is_empty() {
+                self.state.resize(count, 0.0);
+            }
+            let mut result = vec![0.0; g.value_heads * g.value_dim];
+            for head in 0..g.value_heads {
+                let key_head = head / (g.value_heads / g.key_heads);
+                let q = &q[key_head * g.key_dim..(key_head + 1) * g.key_dim];
+                let k = &k[key_head * g.key_dim..(key_head + 1) * g.key_dim];
+                let softplus_arg = a[head] + self.dt_bias[head];
+                let softplus = softplus_arg.max(0.0) + (-softplus_arg.abs()).exp().ln_1p();
+                let decay = (-self.a_log[head].exp() * softplus).exp();
+                let beta = sigmoid(b[head]);
+                for channel in 0..g.value_dim {
+                    let index = head * g.value_dim + channel;
+                    let state = &mut self.state[index * g.key_dim..(index + 1) * g.key_dim];
+                    result[index] = delta_row(state, q, k, v[index], decay, beta);
+                }
+                let normalized = rms_norm(&result[head * g.value_dim..(head + 1) * g.value_dim], &self.norm, g.eps)?;
+                for (channel, value) in normalized.into_iter().enumerate() {
+                    let index = head * g.value_dim + channel;
+                    result[index] = value
+                        * if g.sigmoid_output {
+                            sigmoid(z[index])
+                        } else {
+                            silu(z[index])
+                        };
+                }
+            }
+            drop(recurrent_profile);
+            project(weights, &format!("{}.out_proj", self.prefix), &result)
+        }
     }
 }
 
+#[cfg(any(not(feature = "metal"), test))]
 fn normalize_l2(
     input: &mut [f32],
     dim: usize,
@@ -408,6 +466,7 @@ fn normalize_l2(
     }
 }
 
+#[cfg(any(not(feature = "metal"), test))]
 fn delta_row(
     state: &mut [f32],
     q: &[f32],
@@ -745,7 +804,7 @@ fn moe(
     g: &Geometry,
 ) -> Result<Vec<f32>> {
     let _profile = Scope::new("qwen.ffn");
-    let [scores, shared_gate, mut shared_values, shared_up] = projects(
+    let [scores, shared_gate, shared_values, shared_up] = projects(
         weights,
         prefix,
         [
@@ -757,29 +816,50 @@ fn moe(
     )?;
     let selected = topk(&scores, g.active_experts)?;
     let probabilities = softmax(&selected.iter().map(|&expert| scores[expert]).collect::<Vec<_>>())?;
-    let repeated_input = input.repeat(selected.len());
-    let mut gate =
-        weights.selected_matvec(&format!("{prefix}.switch_mlp.gate_proj.weight"), &selected, &repeated_input)?;
-    let up = weights.selected_matvec(&format!("{prefix}.switch_mlp.up_proj.weight"), &selected, &repeated_input)?;
-    for (value, up) in gate.iter_mut().zip(up) {
-        *value = silu(*value) * up;
+    #[cfg(feature = "metal")]
+    {
+        weights.selected_ffn(
+            &format!("{prefix}.switch_mlp.gate_proj.weight"),
+            &format!("{prefix}.switch_mlp.up_proj.weight"),
+            &format!("{prefix}.switch_mlp.down_proj.weight"),
+            &format!("{prefix}.shared_expert.down_proj.weight"),
+            &selected,
+            input,
+            &probabilities,
+            sigmoid(shared_gate[0]),
+            &shared_values,
+            &shared_up,
+            None,
+        )
     }
-    let expert_outputs = weights.selected_matvec(&format!("{prefix}.switch_mlp.down_proj.weight"), &selected, &gate)?;
-    let mut result = vec![0.0; g.dim];
-    for (output, probability) in expert_outputs.chunks_exact(g.dim).zip(probabilities) {
-        for (value, &expert) in result.iter_mut().zip(output) {
-            *value += probability * expert;
+    #[cfg(not(feature = "metal"))]
+    {
+        let repeated_input = input.repeat(selected.len());
+        let mut gate =
+            weights.selected_matvec(&format!("{prefix}.switch_mlp.gate_proj.weight"), &selected, &repeated_input)?;
+        let up = weights.selected_matvec(&format!("{prefix}.switch_mlp.up_proj.weight"), &selected, &repeated_input)?;
+        for (value, up) in gate.iter_mut().zip(up) {
+            *value = silu(*value) * up;
         }
+        let expert_outputs =
+            weights.selected_matvec(&format!("{prefix}.switch_mlp.down_proj.weight"), &selected, &gate)?;
+        let mut result = vec![0.0; g.dim];
+        for (output, probability) in expert_outputs.chunks_exact(g.dim).zip(probabilities) {
+            for (value, &expert) in result.iter_mut().zip(output) {
+                *value += probability * expert;
+            }
+        }
+        let shared_gate = sigmoid(shared_gate[0]);
+        let mut shared_values = shared_values;
+        for (value, up) in shared_values.iter_mut().zip(shared_up) {
+            *value = silu(*value) * up;
+        }
+        let shared = project(weights, &format!("{prefix}.shared_expert.down_proj"), &shared_values)?;
+        for (value, shared) in result.iter_mut().zip(shared) {
+            *value += shared_gate * shared;
+        }
+        Ok(result)
     }
-    let shared_gate = sigmoid(shared_gate[0]);
-    for (value, up) in shared_values.iter_mut().zip(shared_up) {
-        *value = silu(*value) * up;
-    }
-    let shared = project(weights, &format!("{prefix}.shared_expert.down_proj"), &shared_values)?;
-    for (value, shared) in result.iter_mut().zip(shared) {
-        *value += shared_gate * shared;
-    }
-    Ok(result)
 }
 
 enum Mixer {

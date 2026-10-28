@@ -207,28 +207,50 @@ impl Config {
 }
 
 struct KdaState {
+    #[cfg(not(feature = "metal"))]
     q_conv: Vec<f32>,
+    #[cfg(not(feature = "metal"))]
     k_conv: Vec<f32>,
+    #[cfg(not(feature = "metal"))]
     v_conv: Vec<f32>,
+    #[cfg(not(feature = "metal"))]
     matrix: Vec<f32>,
+    #[cfg(feature = "metal")]
+    metal: Option<super::glm_metal::Kda>,
 }
 
 impl KdaState {
     fn new(c: &Config) -> Self {
+        #[cfg(feature = "metal")]
+        let _ = c;
+        #[cfg(not(feature = "metal"))]
         let history_size = c.kda_heads * c.kda_dim * (c.conv_kernel - 1);
         Self {
+            #[cfg(not(feature = "metal"))]
             q_conv: vec![0.0; history_size],
+            #[cfg(not(feature = "metal"))]
             k_conv: vec![0.0; history_size],
+            #[cfg(not(feature = "metal"))]
             v_conv: vec![0.0; history_size],
+            #[cfg(not(feature = "metal"))]
             matrix: vec![0.0; c.kda_heads * c.kda_dim * c.kda_dim],
+            #[cfg(feature = "metal")]
+            metal: None,
         }
     }
 
     fn reset(&mut self) {
-        self.q_conv.fill(0.0);
-        self.k_conv.fill(0.0);
-        self.v_conv.fill(0.0);
-        self.matrix.fill(0.0);
+        #[cfg(not(feature = "metal"))]
+        {
+            self.q_conv.fill(0.0);
+            self.k_conv.fill(0.0);
+            self.v_conv.fill(0.0);
+            self.matrix.fill(0.0);
+        }
+        #[cfg(feature = "metal")]
+        if let Some(metal) = &mut self.metal {
+            metal.reset();
+        }
     }
 }
 
@@ -249,13 +271,14 @@ enum LayerState {
 
 /// A complete autoregressive GLM text trunk over the original GGUF weights.
 ///
-/// Small vector operations use the CPU reference arithmetic; matrix products
-/// use the weight store's native implementation. Callers serialize whole
-/// requests and call `reset` between unrelated requests.
+/// Hyperconnection control projections stay on the CPU; large packed matrix
+/// products and KDA state updates use Metal when enabled. Callers serialize
+/// whole requests and call `reset` between unrelated requests.
 pub struct GlmModel {
     weights: Weights,
     config: Config,
     states: Vec<LayerState>,
+    hyper_connections: Option<Vec<[HcProjection; 2]>>,
     position: usize,
     #[cfg(test)]
     layer_trace: Vec<Vec<f32>>,
@@ -280,10 +303,35 @@ impl GlmModel {
                 }
             })
             .collect();
+        // These 24-row control projections otherwise each impose a blocking
+        // GPU submission. Bound their decoded immutable weights independently
+        // of the large compressed projection/expert stores.
+        let control_cells = (2 + config.hc) * config.hc * config.hc * config.hidden;
+        let control_bytes = config
+            .layer_types
+            .len()
+            .checked_mul(2 * control_cells * 4)
+            .ok_or(Error::Invalid("glm_hyper_connection_inventory"))?;
+        let hyper_connections = if control_bytes <= 256 * 1024 * 1024 && control_cells <= 8_000_000 {
+            Some(
+                (0..config.layer_types.len())
+                    .map(|layer| {
+                        let prefix = format!("blk.{layer}");
+                        Ok([
+                            HcProjection::new(&weights, &prefix, "attn")?,
+                            HcProjection::new(&weights, &prefix, "ffn")?,
+                        ])
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             weights,
             config,
             states,
+            hyper_connections,
             position: 0,
             #[cfg(test)]
             layer_trace: Vec::new(),
@@ -363,7 +411,14 @@ impl GlmModel {
         let mut streams = embedding.repeat(c.hc);
         for (layer, state) in self.states.iter_mut().enumerate() {
             let prefix = format!("blk.{layer}");
-            let attn_mix = hc_pre(&self.weights, c, &streams, &prefix, "attn")?;
+            let attn_mix = hc_pre(
+                &self.weights,
+                c,
+                &streams,
+                &prefix,
+                "attn",
+                self.hyper_connections.as_ref().map(|controls| &controls[layer][0]),
+            )?;
             let norm =
                 rms_norm(&attn_mix.input, &self.weights.vector(&format!("{prefix}.attn_norm.weight"))?, c.rms_eps)?;
             let attention = match state {
@@ -371,7 +426,14 @@ impl GlmModel {
                 LayerState::Attention(s) => mla(&self.weights, c, &norm, &prefix, s)?,
             };
             streams = hc_post(&streams, &attention, &attn_mix, c.hidden, c.hc)?;
-            let ffn_mix = hc_pre(&self.weights, c, &streams, &prefix, "ffn")?;
+            let ffn_mix = hc_pre(
+                &self.weights,
+                c,
+                &streams,
+                &prefix,
+                "ffn",
+                self.hyper_connections.as_ref().map(|controls| &controls[layer][1]),
+            )?;
             let norm =
                 rms_norm(&ffn_mix.input, &self.weights.vector(&format!("{prefix}.ffn_norm.weight"))?, c.rms_eps)?;
             let ffn = if layer < c.dense_layers {
@@ -601,6 +663,82 @@ struct HcMix {
     comb: Vec<f32>,
 }
 
+struct HcProjection {
+    weights: Vec<f32>,
+    base: Vec<f32>,
+    scale: Vec<f32>,
+    columns: usize,
+}
+
+impl HcProjection {
+    fn new(
+        w: &Weights,
+        prefix: &str,
+        part: &str,
+    ) -> Result<Self> {
+        let name = format!("{prefix}.hc_{part}_fn.weight");
+        let shape = w.shape(&name)?;
+        let result = Self {
+            weights: w.vector(&name)?,
+            base: w.vector(&format!("{prefix}.hc_{part}_base.weight"))?,
+            scale: w.vector(&format!("{prefix}.hc_{part}_scale.weight"))?,
+            columns: shape[1],
+        };
+        if result.weights.iter().chain(&result.base).chain(&result.scale).any(|v| !v.is_finite()) {
+            return Err(Error::Invalid("glm_hyper_connection_weights"));
+        }
+        Ok(result)
+    }
+
+    fn project(
+        &self,
+        input: &[f32],
+    ) -> Result<Vec<f32>> {
+        if input.len() != self.columns || input.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Invalid("glm_hyper_connection_input"));
+        }
+        let output: Vec<_> = self.weights.chunks_exact(self.columns).map(|row| control_dot(row, input)).collect();
+        if output.iter().any(|v| !v.is_finite()) {
+            return Err(Error::Invalid("glm_hyper_connection_nonfinite_projection"));
+        }
+        Ok(output)
+    }
+}
+
+fn control_dot(
+    a: &[f32],
+    b: &[f32],
+) -> f32 {
+    assert_eq!(a.len(), b.len(), "GLM control projection dimension mismatch");
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::{vaddq_f32, vaddvq_f32, vdupq_n_f32, vld1q_f32, vmulq_f32};
+        // Apple silicon provides NEON. Four independent F32 accumulators keep
+        // this tiny CPU control projection below a GPU submission boundary.
+        // There is no reduced-precision multiplication or fused multiply-add.
+        unsafe {
+            let mut s0 = vdupq_n_f32(0.0);
+            let mut s1 = vdupq_n_f32(0.0);
+            let mut s2 = vdupq_n_f32(0.0);
+            let mut s3 = vdupq_n_f32(0.0);
+            let end = a.len() / 16 * 16;
+            for i in (0..end).step_by(16) {
+                s0 = vaddq_f32(s0, vmulq_f32(vld1q_f32(a.as_ptr().add(i)), vld1q_f32(b.as_ptr().add(i))));
+                s1 = vaddq_f32(s1, vmulq_f32(vld1q_f32(a.as_ptr().add(i + 4)), vld1q_f32(b.as_ptr().add(i + 4))));
+                s2 = vaddq_f32(s2, vmulq_f32(vld1q_f32(a.as_ptr().add(i + 8)), vld1q_f32(b.as_ptr().add(i + 8))));
+                s3 = vaddq_f32(s3, vmulq_f32(vld1q_f32(a.as_ptr().add(i + 12)), vld1q_f32(b.as_ptr().add(i + 12))));
+            }
+            let mut sum = vaddvq_f32(vaddq_f32(vaddq_f32(s0, s1), vaddq_f32(s2, s3)));
+            for i in end..a.len() {
+                sum += a[i] * b[i];
+            }
+            sum
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    a.iter().zip(b).map(|(&a, &b)| a * b).sum()
+}
+
 fn sinkhorn(
     logits: &[f32],
     count: usize,
@@ -639,13 +777,20 @@ fn hc_pre(
     streams: &[f32],
     p: &str,
     part: &str,
+    projection: Option<&HcProjection>,
 ) -> Result<HcMix> {
     let _scope = super::profile::Scope::new("glm.mhc.pre");
     let ones = vec![1.0; streams.len()];
     let norm = rms_norm(streams, &ones, c.rms_eps)?;
-    let mix = w.matvec(&format!("{p}.hc_{part}_fn.weight"), &norm)?;
-    let base = w.vector(&format!("{p}.hc_{part}_base.weight"))?;
-    let scale = w.vector(&format!("{p}.hc_{part}_scale.weight"))?;
+    let (mix, base, scale) = if let Some(projection) = projection {
+        (projection.project(&norm)?, projection.base.clone(), projection.scale.clone())
+    } else {
+        (
+            w.matvec(&format!("{p}.hc_{part}_fn.weight"), &norm)?,
+            w.vector(&format!("{p}.hc_{part}_base.weight"))?,
+            w.vector(&format!("{p}.hc_{part}_scale.weight"))?,
+        )
+    };
     if mix.len() != (2 + c.hc) * c.hc || base.len() != mix.len() || scale.len() != 3 {
         return Err(Error::Invalid("glm_hyper_connection_shape"));
     }
@@ -690,6 +835,7 @@ fn hc_post(
     Ok(next)
 }
 
+#[cfg(any(test, not(feature = "metal")))]
 fn convolve(
     input: &[f32],
     history: &mut [f32],
@@ -714,6 +860,7 @@ fn convolve(
 
 /// The state is [value, key] within each head, matching GGML's transposed
 /// storage. Forget gates are per key channel, rather than per value channel.
+#[cfg(any(test, not(feature = "metal")))]
 fn kda_recur(
     state: &mut [f32],
     q: &[f32],
@@ -745,6 +892,7 @@ fn kda_recur(
     Ok(output)
 }
 
+#[cfg(any(test, not(feature = "metal")))]
 fn l2_normalize(x: &mut [f32]) {
     let denominator = (x.iter().map(|v| v * v).sum::<f32>() + 1e-6).sqrt();
     for v in x {
@@ -760,48 +908,74 @@ fn kda(
     state: &mut KdaState,
 ) -> Result<Vec<f32>> {
     let _scope = super::profile::Scope::new("glm.kda");
-    // These projections share an immutable input. Submit their unchanged
-    // kernels together before consuming any output on the CPU.
-    let [q_projection, k_projection, v_projection, f_a, g_a, beta] = project_many(
-        w,
-        [
-            (&format!("{p}.attn_q.weight"), x),
-            (&format!("{p}.attn_k.weight"), x),
-            (&format!("{p}.attn_v.weight"), x),
-            (&format!("{p}.ssm_f_a.weight"), x),
-            (&format!("{p}.ssm_g_a.weight"), x),
-            (&format!("{p}.ssm_beta.weight"), x),
-        ],
-    )?;
-    let mut q =
-        convolve(&q_projection, &mut state.q_conv, &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?, c.conv_kernel)?;
-    let mut k =
-        convolve(&k_projection, &mut state.k_conv, &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?, c.conv_kernel)?;
-    let v = convolve(&v_projection, &mut state.v_conv, &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?, c.conv_kernel)?;
-    let [forget, gate] =
-        project_many(w, [(&format!("{p}.ssm_f_b.weight"), &f_a), (&format!("{p}.ssm_g_b.weight"), &g_a)])?;
-    let a = w.vector(&format!("{p}.ssm_a"))?;
-    let dt = w.vector(&format!("{p}.ssm_dt.bias"))?;
-    let norm_weight = w.vector(&format!("{p}.ssm_norm.weight"))?;
-    let mut gated = Vec::with_capacity(q.len());
-    for head in 0..c.kda_heads {
-        let start = head * c.kda_dim;
-        let end = start + c.kda_dim;
-        l2_normalize(&mut q[start..end]);
-        l2_normalize(&mut k[start..end]);
-        let g: Vec<_> = (start..end).map(|i| c.decay_lower_bound * sigmoid(-a[head] * (forget[i] + dt[i]))).collect();
-        let output = kda_recur(
-            &mut state.matrix[head * c.kda_dim * c.kda_dim..(head + 1) * c.kda_dim * c.kda_dim],
-            &q[start..end],
-            &k[start..end],
-            &v[start..end],
-            &g,
-            sigmoid(beta[head]),
-        )?;
-        let norm = rms_norm(&output, &norm_weight, c.rms_eps)?;
-        gated.extend(norm.iter().zip(&gate[start..end]).map(|(&value, &g)| value * sigmoid(g)));
+    #[cfg(feature = "metal")]
+    {
+        if state.metal.is_none() {
+            state.metal = Some(super::glm_metal::Kda::new(
+                super::glm_metal::Geometry {
+                    heads: c.kda_heads,
+                    dim: c.kda_dim,
+                    kernel: c.conv_kernel,
+                    rms_eps: c.rms_eps,
+                    lower_bound: c.decay_lower_bound,
+                },
+                [
+                    &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?,
+                    &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?,
+                    &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?,
+                ],
+                &w.vector(&format!("{p}.ssm_dt.bias"))?,
+                &w.vector(&format!("{p}.ssm_norm.weight"))?,
+                &w.vector(&format!("{p}.ssm_a"))?,
+            )?);
+        }
+        w.glm_kda(p, x, state.metal.as_mut().ok_or(Error::Invalid("glm_metal_kda_state"))?)
     }
-    w.matvec(&format!("{p}.attn_output.weight"), &gated)
+    #[cfg(not(feature = "metal"))]
+    {
+        let [q_projection, k_projection, v_projection, f_a, g_a, beta] = project_many(
+            w,
+            [
+                (&format!("{p}.attn_q.weight"), x),
+                (&format!("{p}.attn_k.weight"), x),
+                (&format!("{p}.attn_v.weight"), x),
+                (&format!("{p}.ssm_f_a.weight"), x),
+                (&format!("{p}.ssm_g_a.weight"), x),
+                (&format!("{p}.ssm_beta.weight"), x),
+            ],
+        )?;
+        let [forget, gate] =
+            project_many(w, [(&format!("{p}.ssm_f_b.weight"), &f_a), (&format!("{p}.ssm_g_b.weight"), &g_a)])?;
+        let mut q =
+            convolve(&q_projection, &mut state.q_conv, &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?, c.conv_kernel)?;
+        let mut k =
+            convolve(&k_projection, &mut state.k_conv, &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?, c.conv_kernel)?;
+        let v =
+            convolve(&v_projection, &mut state.v_conv, &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?, c.conv_kernel)?;
+        let a = w.vector(&format!("{p}.ssm_a"))?;
+        let dt = w.vector(&format!("{p}.ssm_dt.bias"))?;
+        let norm_weight = w.vector(&format!("{p}.ssm_norm.weight"))?;
+        let mut gated = Vec::with_capacity(q.len());
+        for head in 0..c.kda_heads {
+            let start = head * c.kda_dim;
+            let end = start + c.kda_dim;
+            l2_normalize(&mut q[start..end]);
+            l2_normalize(&mut k[start..end]);
+            let g: Vec<_> =
+                (start..end).map(|i| c.decay_lower_bound * sigmoid(-a[head] * (forget[i] + dt[i]))).collect();
+            let output = kda_recur(
+                &mut state.matrix[head * c.kda_dim * c.kda_dim..(head + 1) * c.kda_dim * c.kda_dim],
+                &q[start..end],
+                &k[start..end],
+                &v[start..end],
+                &g,
+                sigmoid(beta[head]),
+            )?;
+            let norm = rms_norm(&output, &norm_weight, c.rms_eps)?;
+            gated.extend(norm.iter().zip(&gate[start..end]).map(|(&value, &g)| value * sigmoid(g)));
+        }
+        w.matvec(&format!("{p}.attn_output.weight"), &gated)
+    }
 }
 
 fn layer_norm(
@@ -1014,28 +1188,49 @@ fn moe(
     let bias = w.vector(&format!("{p}.exp_probs_b.bias"))?;
     let selected = route(&logits, &bias, c.active_experts, c.routed_scale)?;
     let experts: Vec<_> = selected.iter().map(|&(index, _)| index).collect();
-    let inputs = x.repeat(experts.len());
-    let gate = w.selected_matvec(&format!("{p}.ffn_gate_exps.weight"), &experts, &inputs)?;
-    let up = w.selected_matvec(&format!("{p}.ffn_up_exps.weight"), &experts, &inputs)?;
-    let expert_outputs =
-        w.selected_matvec(&format!("{p}.ffn_down_exps.weight"), &experts, &swiglu(&gate, &up, c.swiglu_limit)?)?;
-    if expert_outputs.len() != c.hidden * selected.len() {
-        return Err(Error::Invalid("glm_expert_output_shape"));
+    #[cfg(feature = "metal")]
+    {
+        let probabilities: Vec<_> = selected.iter().map(|&(_, probability)| probability).collect();
+        w.selected_ffn(
+            &format!("{p}.ffn_gate_exps.weight"),
+            &format!("{p}.ffn_up_exps.weight"),
+            &format!("{p}.ffn_down_exps.weight"),
+            &format!("{p}.ffn_down_shexp.weight"),
+            &experts,
+            x,
+            &probabilities,
+            1.0,
+            &shared_gate,
+            &shared_up,
+            Some((c.swiglu_limit, c.swiglu_limit)),
+        )
     }
-    let mut output = vec![0.0; c.hidden];
-    for ((_, probability), expert_output) in selected.iter().zip(expert_outputs.chunks_exact(c.hidden)) {
-        for (dst, &src) in output.iter_mut().zip(expert_output) {
-            *dst += probability * src;
+    #[cfg(not(feature = "metal"))]
+    {
+        let inputs = x.repeat(experts.len());
+        let gate = w.selected_matvec(&format!("{p}.ffn_gate_exps.weight"), &experts, &inputs)?;
+        let up = w.selected_matvec(&format!("{p}.ffn_up_exps.weight"), &experts, &inputs)?;
+        let expert_outputs =
+            w.selected_matvec(&format!("{p}.ffn_down_exps.weight"), &experts, &swiglu(&gate, &up, c.swiglu_limit)?)?;
+        if expert_outputs.len() != c.hidden * selected.len() {
+            return Err(Error::Invalid("glm_expert_output_shape"));
         }
+        let mut output = vec![0.0; c.hidden];
+        for ((_, probability), expert_output) in selected.iter().zip(expert_outputs.chunks_exact(c.hidden)) {
+            for (dst, &src) in output.iter_mut().zip(expert_output) {
+                *dst += probability * src;
+            }
+        }
+        let shared =
+            w.matvec(&format!("{p}.ffn_down_shexp.weight"), &swiglu(&shared_gate, &shared_up, c.swiglu_limit)?)?;
+        if shared.len() != output.len() {
+            return Err(Error::Invalid("glm_shared_expert_shape"));
+        }
+        for (dst, &src) in output.iter_mut().zip(&shared) {
+            *dst += src;
+        }
+        Ok(output)
     }
-    let shared = w.matvec(&format!("{p}.ffn_down_shexp.weight"), &swiglu(&shared_gate, &shared_up, c.swiglu_limit)?)?;
-    if shared.len() != output.len() {
-        return Err(Error::Invalid("glm_shared_expert_shape"));
-    }
-    for (dst, &src) in output.iter_mut().zip(&shared) {
-        *dst += src;
-    }
-    Ok(output)
 }
 
 #[cfg(test)]
@@ -1054,12 +1249,166 @@ mod tests {
     }
 
     #[stark_test]
+    fn control_projection_keeps_f32_accuracy_and_checks_values() {
+        for length in [1, 7, 16, 31, 128, 16_384] {
+            let a: Vec<_> = (0..length).map(|i| (i % 53) as f32 * 0.001 - 0.026).collect();
+            let b: Vec<_> = (0..length).map(|i| ((i * 7) % 47) as f32 * 0.002 - 0.046).collect();
+            let reference = a.iter().zip(&b).map(|(&a, &b)| f64::from(a) * f64::from(b)).sum::<f64>();
+            assert!((f64::from(control_dot(&a, &b)) - reference).abs() < 1e-6);
+        }
+        let projection = HcProjection {
+            weights: vec![1.0, 2.0, 3.0, 4.0],
+            base: vec![],
+            scale: vec![],
+            columns: 2,
+        };
+        assert_eq!(projection.project(&[2.0, 3.0]).unwrap(), [8.0, 18.0]);
+        assert!(projection.project(&[]).is_err());
+        assert!(projection.project(&[f32::NAN, 0.0]).is_err());
+        assert!(projection.project(&[f32::MAX, f32::MAX]).is_err());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn glm_mhc_cpu_projection_experiment() {
+        use std::{hint::black_box, time::Instant};
+        let path = std::env::var_os("STARK_GLM_CONTROL_EXPERIMENT_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("GLM control experiment path is required"));
+        let weights = Weights::open(&path).unwrap_or_else(|_| panic!("GLM control experiment admission failed"));
+        let names: Vec<_> = weights
+            .names()
+            .into_iter()
+            .filter(|name| name.ends_with(".hc_attn_fn.weight") || name.ends_with(".hc_ffn_fn.weight"))
+            .collect();
+        let matrices: Vec<_> = names.iter().map(|name| weights.vector(name).unwrap()).collect();
+        let columns = weights.shape(&names[0]).unwrap()[1];
+        let inputs: Vec<_> = (0..columns).map(|i| (i % 127) as f32 * 0.001 - 0.063).collect();
+        let mut maximum_difference = 0.0f32;
+        for (name, matrix) in names.iter().zip(&matrices) {
+            let gpu = weights.matvec(name, &inputs).unwrap();
+            let cpu: Vec<_> = matrix.chunks_exact(columns).map(|row| control_dot(row, &inputs)).collect();
+            for (a, b) in cpu.iter().zip(gpu) {
+                maximum_difference = maximum_difference.max((a - b).abs());
+            }
+        }
+        let repetitions = 20;
+        let started = Instant::now();
+        for _ in 0..repetitions {
+            for matrix in &matrices {
+                for row in matrix.chunks_exact(columns) {
+                    black_box(control_dot(black_box(row), black_box(&inputs)));
+                }
+            }
+        }
+        let cpu_seconds = started.elapsed().as_secs_f64();
+        let started = Instant::now();
+        for _ in 0..repetitions {
+            for name in &names {
+                black_box(weights.matvec(name, &inputs).unwrap());
+            }
+        }
+        let gpu_seconds = started.elapsed().as_secs_f64();
+        println!(
+            "{}",
+            serde_json::json!({"matrices":names.len(),"columns":columns,"repetitions":repetitions,"cpu_seconds":cpu_seconds,"gpu_seconds":gpu_seconds,"maximum_absolute_difference":maximum_difference,"decoded_weight_bytes":matrices.iter().map(|v| v.len()*4).sum::<usize>()})
+        );
+    }
+
+    #[stark_test]
     fn kda_decays_key_channels_before_delta_update() {
         let mut state = vec![1.0, 2.0, 3.0, 4.0];
         let result =
             kda_recur(&mut state, &[1.0, 0.0], &[0.0, 1.0], &[2.0, 4.0], &[0.5f32.ln(), 0.25f32.ln()], 0.5).unwrap();
         close(&state, &[0.5, 1.25, 1.5, 2.5], 1e-6);
         close(&result, &[0.5 / 2f32.sqrt(), 1.5 / 2f32.sqrt()], 1e-6);
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn metal_kda_matches_scalar_multistep_and_reset() {
+        // Two heads and a non-SIMD-sized dimension exercise the channel/head
+        // distinction. The production dimension is also checked below.
+        for dim in [7, 128] {
+            let heads = 2;
+            let kernel = 4;
+            let inner = heads * dim;
+            let generate = |len: usize, offset: usize| -> Vec<f32> {
+                (0..len).map(|i| (((i * 13 + offset * 7) % 41) as f32 - 20.0) * 0.015).collect()
+            };
+            let conv = [generate(inner * kernel, 1), generate(inner * kernel, 2), generate(inner * kernel, 3)];
+            let dt = generate(inner, 4);
+            let norm: Vec<_> = generate(dim, 5).into_iter().map(|v| v + 1.0).collect();
+            let a = vec![-1.25; heads];
+            let eps = 1e-5;
+            let lower = -5.0;
+            let mut metal = super::super::glm_metal::Kda::new(
+                super::super::glm_metal::Geometry {
+                    heads,
+                    dim,
+                    kernel,
+                    rms_eps: eps,
+                    lower_bound: lower,
+                },
+                [&conv[0], &conv[1], &conv[2]],
+                &dt,
+                &norm,
+                &a,
+            )
+            .unwrap();
+            let mut first = None;
+            for _ in 0..2 {
+                metal.reset();
+                let mut history =
+                    [vec![0.0; inner * (kernel - 1)], vec![0.0; inner * (kernel - 1)], vec![0.0; inner * (kernel - 1)]];
+                let mut matrix = vec![0.0; heads * dim * dim];
+                for step in 0..9 {
+                    let inputs = [
+                        generate(inner, step + 6),
+                        generate(inner, step + 9),
+                        generate(inner, step + 12),
+                        generate(inner, step + 15),
+                        generate(inner, step + 18),
+                    ];
+                    let beta = generate(heads, step + 21);
+                    let mut q = convolve(&inputs[0], &mut history[0], &conv[0], kernel).unwrap();
+                    let mut k = convolve(&inputs[1], &mut history[1], &conv[1], kernel).unwrap();
+                    let v = convolve(&inputs[2], &mut history[2], &conv[2], kernel).unwrap();
+                    let mut expected = Vec::with_capacity(inner);
+                    for head in 0..heads {
+                        let range = head * dim..(head + 1) * dim;
+                        l2_normalize(&mut q[range.clone()]);
+                        l2_normalize(&mut k[range.clone()]);
+                        let g: Vec<_> =
+                            range.clone().map(|i| lower * sigmoid(-a[head] * (inputs[3][i] + dt[i]))).collect();
+                        let output = kda_recur(
+                            &mut matrix[head * dim * dim..(head + 1) * dim * dim],
+                            &q[range.clone()],
+                            &k[range.clone()],
+                            &v[range.clone()],
+                            &g,
+                            sigmoid(beta[head]),
+                        )
+                        .unwrap();
+                        let normalized = rms_norm(&output, &norm, eps).unwrap();
+                        expected.extend(normalized.iter().zip(&inputs[4][range]).map(|(&v, &g)| v * sigmoid(g)));
+                    }
+                    let actual =
+                        metal.step([&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4]], &beta).unwrap();
+                    close(&actual, &expected, 2e-6);
+                    if step == 0 {
+                        if let Some(first) = &first {
+                            assert_eq!(&actual, first);
+                        } else {
+                            first = Some(actual);
+                        }
+                    }
+                }
+            }
+            assert!(metal.step([&[]; 5], &[]).is_err());
+            assert!(metal.step([&vec![0.0; inner]; 5], &[f32::NAN; 2]).is_err());
+        }
     }
 
     #[stark_test]

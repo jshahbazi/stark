@@ -9,12 +9,13 @@ use std::{
 };
 
 use metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLDataType, MTLDevice, MTLDeviceExt, MTLFunctionConstantValues,
-    MTLLibrary, MTLLibraryExt, MTLResourceOptions, MTLSize,
+    MTLBarrierScope, MTLBuffer, MTLCommandBuffer, MTLCommandBufferExt, MTLCommandBufferStatus, MTLCommandEncoder,
+    MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDataType, MTLDevice, MTLDeviceExt,
+    MTLDispatchType, MTLFunctionConstantValues, MTLLibrary, MTLLibraryExt, MTLResourceOptions, MTLSize,
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
+pub(super) use super::qwen_metal::{Gdn as QwenGdnState, Geometry as QwenGdnGeometry};
 use super::{Error, Result, profile, weights};
 
 type PipelineState = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
@@ -25,8 +26,13 @@ struct Executor {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     library: Retained<ProtocolObject<dyn MTLLibrary>>,
     pipelines: PipelineCache,
+    ffn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
+    hc_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
+    gdn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     #[cfg(test)]
     tiled_pipelines: PipelineCache,
+    #[cfg(test)]
+    scalar_pipelines: PipelineCache,
 }
 
 static EXECUTOR: OnceLock<std::result::Result<Executor, &'static str>> = OnceLock::new();
@@ -46,8 +52,26 @@ impl MappedSlice {
     pub(super) fn registered_bytes(&self) -> usize {
         self.registered_length
     }
+
+    pub(super) fn subslice(
+        &self,
+        start: usize,
+        length: usize,
+    ) -> Result<Self> {
+        let offset = self.offset.checked_add(start).ok_or(Error::Invalid("mapped subview offset overflow"))?;
+        if length == 0 || start.checked_add(length).is_none_or(|end| end > self.length) || offset > u32::MAX as usize {
+            return Err(Error::Invalid("invalid mapped subview span"));
+        }
+        Ok(Self {
+            buffer: self.buffer.clone(),
+            offset,
+            length,
+            registered_length: self.registered_length,
+        })
+    }
 }
 
+#[derive(Clone)]
 pub(super) struct MappedMatrix {
     pub codes: MappedSlice,
     pub planes: Option<(MappedSlice, MappedSlice)>,
@@ -216,10 +240,147 @@ pub(super) fn mapped_many(operations: &[MappedOperation<'_>]) -> Result<Vec<Vec<
     objc2::rc::autoreleasepool(|_| executor()?.run_mapped(operations, &parameters))
 }
 
+/// Keep routed gate/up projections, activation, down projections and mixture
+/// reduction on the GPU until one final readout. Routing remains on the CPU;
+/// the expert order and accumulation order are unchanged. The down-operation
+/// inputs describe geometry only and are never uploaded or used.
+pub(super) fn mapped_ffn(
+    operations: &[MappedOperation<'_>; 4],
+    probabilities: &[f32],
+    shared_gate: f32,
+    shared_values: &[f32],
+    shared_up: &[f32],
+    clamp: Option<(f32, f32)>,
+) -> Result<Vec<f32>> {
+    let parameters = operations.iter().map(MappedOperation::parameters).collect::<Result<Vec<_>>>()?;
+    let [gate, up, down, shared] = operations;
+    let experts = probabilities.len();
+    if experts == 0
+        || experts > 256
+        || gate.matrices.len() != experts
+        || up.matrices.len() != experts
+        || down.matrices.len() != experts
+        || shared.matrices.len() != 1
+        || operations.iter().any(|operation| operation.rows_per_batch != 0)
+        || gate.rows != up.rows
+        || gate.columns != up.columns
+        || gate.rows != down.columns
+        || gate.columns != down.rows
+        || shared.rows != down.rows
+        || shared.columns != shared_values.len()
+        || shared_values.len() != shared_up.len()
+        || gate.inputs != up.inputs
+        || probabilities.iter().any(|value| !value.is_finite() || *value < 0.0)
+        || !shared_gate.is_finite()
+        || shared_values.iter().chain(shared_up).any(|value| !value.is_finite())
+        || clamp.is_some_and(|(routed, shared)| {
+            !routed.is_finite() || routed <= 0.0 || !shared.is_finite() || shared <= 0.0
+        })
+    {
+        return Err(Error::Invalid("invalid mapped feed-forward dimensions"));
+    }
+    objc2::rc::autoreleasepool(|_| {
+        executor()?.run_ffn(operations, &parameters, probabilities, shared_gate, shared_values, shared_up, clamp)
+    })
+}
+
+/// Native Qwen hyperconnection's dependent low-rank projections and read/write
+/// gates, encoded with one completion boundary. Normalization remains on the
+/// CPU so the established grouped F32 sum order is preserved.
+pub(super) fn mapped_qwen_hyperconnection(
+    operations: &[MappedOperation<'_>],
+    normalized: &[f32],
+    streams: usize,
+) -> Result<(Vec<f32>, Vec<f32>)> {
+    if !(2..=3).contains(&operations.len())
+        || streams == 0
+        || streams > 16
+        || normalized.is_empty()
+        || !normalized.len().is_multiple_of(streams)
+    {
+        return Err(Error::Invalid("invalid Qwen hyperconnection geometry"));
+    }
+    let parameters = operations.iter().map(MappedOperation::parameters).collect::<Result<Vec<_>>>()?;
+    let down = &operations[0];
+    let up = &operations[1];
+    if operations.iter().any(|operation| operation.matrices.len() != 1 || operation.rows_per_batch != 0)
+        || down.columns != normalized.len()
+        || down.inputs != normalized
+        || up.columns != down.rows
+        || up.rows != normalized.len()
+        || operations.get(2).is_some_and(|inject| {
+            inject.rows != streams || inject.columns != normalized.len() || inject.inputs != normalized
+        })
+    {
+        return Err(Error::Invalid("invalid Qwen hyperconnection projections"));
+    }
+    objc2::rc::autoreleasepool(|_| executor()?.run_qwen_hyperconnection(operations, &parameters, normalized, streams))
+}
+
+pub(super) fn mapped_qwen_gdn(
+    operations: &[MappedOperation<'_>; 5],
+    state: &mut QwenGdnState,
+) -> Result<Vec<f32>> {
+    let parameters = operations.iter().map(MappedOperation::parameters).collect::<Result<Vec<_>>>()?;
+    let g = &state.geometry;
+    let value_width = g.value_heads * g.value_dim;
+    let widths = [2 * g.key_heads * g.key_dim + value_width, value_width, g.value_heads, g.value_heads];
+    let input = operations[0].inputs;
+    if operations.iter().any(|operation| operation.matrices.len() != 1 || operation.rows_per_batch != 0)
+        || operations[..4].iter().zip(widths).any(|(operation, width)| {
+            operation.rows != width || operation.columns != input.len() || operation.inputs != input
+        })
+        || operations[4].rows != input.len()
+        || operations[4].columns != value_width
+    {
+        return Err(Error::Invalid("invalid Qwen GDN projection geometry"));
+    }
+    let result = objc2::rc::autoreleasepool(|_| executor()?.run_qwen_gdn(operations, &parameters, state));
+    if result.is_err() {
+        state.reset();
+    }
+    result
+}
+
+pub(super) fn mapped_glm_kda(
+    operations: &[MappedOperation<'_>; 9],
+    state: &mut super::glm_metal::Kda,
+) -> Result<Vec<f32>> {
+    let parameters = operations.iter().map(MappedOperation::parameters).collect::<Result<Vec<_>>>()?;
+    let input = operations[0].inputs;
+    let inner = state.inner();
+    let rank = state.dim();
+    let heads = state.heads();
+    let widths = [inner, inner, inner, rank, rank, heads];
+    if operations.iter().any(|operation| operation.matrices.len() != 1 || operation.rows_per_batch != 0)
+        || operations[..6].iter().zip(widths).any(|(operation, width)| {
+            operation.rows != width || operation.columns != input.len() || operation.inputs != input
+        })
+        || operations[6..8].iter().any(|operation| operation.rows != inner || operation.columns != rank)
+        || operations[8].rows != input.len()
+        || operations[8].columns != inner
+    {
+        return Err(Error::Invalid("invalid GLM KDA projection geometry"));
+    }
+    let result = objc2::rc::autoreleasepool(|_| executor()?.run_glm_kda(operations, &parameters, state));
+    if result.is_err() {
+        state.reset();
+    }
+    result
+}
+
 pub(super) fn initialize() -> Result<()> {
     // Establish a usable reduction pipeline before model readiness. Other
     // storage-specialized pipelines compile lazily on their first use.
     executor()?.pipeline(MatrixFormat::Packed(0)).map(|_| ())
+}
+
+pub(super) fn recommended_working_set() -> Result<usize> {
+    Ok(executor()?.device.recommended_max_working_set_size() as usize)
+}
+
+pub(super) fn max_buffer_length() -> Result<usize> {
+    Ok(executor()?.device.max_buffer_length())
 }
 
 #[cfg(test)]
@@ -257,6 +418,10 @@ fn executor() -> Result<&'static Executor> {
             }
             source.push_str("};\n");
             source.push_str(include_str!("packed_matvec.metal"));
+            source.push_str(include_str!("packed_vector_matvec.metal"));
+            source.push_str(include_str!("packed_block_matvec.metal"));
+            source.push_str(include_str!("feed_forward.metal"));
+            source.push_str(include_str!("qwen_gdn.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
             let options = metal::MTLCompileOptions::new();
@@ -269,8 +434,13 @@ fn executor() -> Result<&'static Executor> {
                 queue,
                 library,
                 pipelines: Mutex::new(HashMap::new()),
+                ffn_pipelines: Mutex::new(None),
+                hc_pipelines: Mutex::new(None),
+                gdn_pipelines: Mutex::new(None),
                 #[cfg(test)]
                 tiled_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                scalar_pipelines: Mutex::new(HashMap::new()),
             })
         })
         .as_ref()
@@ -287,16 +457,597 @@ fn buffer(
         .ok_or(Error::Invalid("Metal matrix buffer allocation failed"))
 }
 
+/// Keep pipeline selection and grid geometry paired at every encoding site.
+/// SIMD-row schedules use two or eight 32-lane groups per threadgroup.
+fn matrix_groups(
+    format: MatrixFormat,
+    rows: usize,
+) -> usize {
+    match format {
+        MatrixFormat::Packed(13 | 14) => rows.div_ceil(2),
+        MatrixFormat::Packed(17 | 18)
+        | MatrixFormat::Affine {
+            ..
+        } => rows.div_ceil(8),
+        _ => rows,
+    }
+}
+
+fn matrix_threads(format: MatrixFormat) -> usize {
+    match format {
+        MatrixFormat::Packed(13 | 14) => 64,
+        _ => 256,
+    }
+}
+
 impl Executor {
+    fn run_glm_kda(
+        &self,
+        operations: &[MappedOperation<'_>; 9],
+        parameters: &[[u32; 8]],
+        state: &mut super::glm_metal::Kda,
+    ) -> Result<Vec<f32>> {
+        let pipelines =
+            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let inner = state.inner();
+        let rank = state.dim();
+        let dim = operations[8].rows;
+        let allocate = |elements: usize| {
+            self.device
+                .new_buffer(elements * 4, MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("Metal KDA projection allocation failed"))
+        };
+        let upload = profile::Scope::bytes("native.metal.upload", operations[0].inputs.len() * 4);
+        let input = buffer(self, bytemuck::cast_slice(operations[0].inputs))?;
+        let f_a = allocate(rank)?;
+        let g_a = allocate(rank)?;
+        let output = allocate(dim)?;
+        drop(upload);
+        profile::record("native.metal.allocated_bytes", 0.0, self.device.current_allocated_size());
+        let execute = profile::Scope::new("native.metal.execute");
+        let encode = profile::Scope::new("native.metal.encode");
+        let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal KDA graph command allocation failed"))?;
+        let encoding =
+            command.compute_command_encoder().ok_or(Error::Invalid("Metal KDA graph encoder allocation failed"))?;
+        for (index, offset) in [(0, 0), (1, inner), (2, 2 * inner), (5, 5 * inner)] {
+            Self::encode_matrix_at(
+                &encoding,
+                &operations[index],
+                &parameters[index],
+                &pipelines[index],
+                (&input, 0),
+                (state.input_buffer(), offset * 4),
+            );
+        }
+        Self::encode_ffn_matrix(&encoding, &operations[3], &parameters[3], &pipelines[3], &input, &f_a);
+        Self::encode_ffn_matrix(&encoding, &operations[4], &parameters[4], &pipelines[4], &input, &g_a);
+        Self::encode_matrix_at(
+            &encoding,
+            &operations[6],
+            &parameters[6],
+            &pipelines[6],
+            (&f_a, 0),
+            (state.input_buffer(), 3 * inner * 4),
+        );
+        Self::encode_matrix_at(
+            &encoding,
+            &operations[7],
+            &parameters[7],
+            &pipelines[7],
+            (&g_a, 0),
+            (state.input_buffer(), 4 * inner * 4),
+        );
+        state.encode(&encoding)?;
+        Self::encode_ffn_matrix(
+            &encoding,
+            &operations[8],
+            &parameters[8],
+            &pipelines[8],
+            state.output_buffer(),
+            &output,
+        );
+        encoding.end_encoding();
+        drop(encode);
+        let submit = profile::Scope::new("native.metal.submit");
+        command.commit();
+        drop(submit);
+        let wait = profile::Scope::new("native.metal.wait");
+        command.wait_until_completed();
+        drop(wait);
+        if command.status() != MTLCommandBufferStatus::Completed {
+            return Err(Error::Invalid("Metal GLM KDA graph execution failed"));
+        }
+        drop(execute);
+        profile::record("native.metal.gpu", command.gpu_end_time() - command.gpu_start_time(), 0);
+        state.check_completed()?;
+        let _readback = profile::Scope::bytes("native.metal.readback", dim * 4);
+        // SAFETY: the dim-sized owned shared output's writer has completed.
+        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), dim) }.to_vec();
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("nonfinite GLM KDA graph output"));
+        }
+        Ok(values)
+    }
+
+    fn gdn_pipelines(&self) -> Result<(PipelineState, PipelineState)> {
+        let mut pipelines = self.gdn_pipelines.lock().map_err(|_| Error::Invalid("Metal GDN pipeline cache failed"))?;
+        if let Some(pipelines) = &*pipelines {
+            return Ok(pipelines.clone());
+        }
+        let make = |name| {
+            let function =
+                self.library.new_function_with_name(name).ok_or(Error::Invalid("Metal GDN function failed"))?;
+            self.device
+                .new_compute_pipeline_state_with_function(&function)
+                .map_err(|_| Error::Invalid("Metal GDN pipeline failed"))
+        };
+        let result = (make("hybrid_qwen_gdn_convolve")?, make("hybrid_qwen_gdn_recurrent")?);
+        *pipelines = Some(result.clone());
+        Ok(result)
+    }
+
+    fn run_qwen_gdn(
+        &self,
+        operations: &[MappedOperation<'_>; 5],
+        parameters: &[[u32; 8]],
+        state: &mut QwenGdnState,
+    ) -> Result<Vec<f32>> {
+        let pipelines =
+            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let (conv_pipeline, recurrent_pipeline) = self.gdn_pipelines()?;
+        let g = &state.geometry;
+        let threads = g.key_dim.max(g.value_dim).next_power_of_two();
+        if recurrent_pipeline.max_total_threads_per_threadgroup() < threads {
+            return Err(Error::Unsupported("Metal Qwen GDN execution width"));
+        }
+        let dim = operations[4].rows;
+        let allocate = |elements: usize| {
+            self.device
+                .new_buffer(elements * 4, MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("Metal GDN projection allocation failed"))
+        };
+        let upload = profile::Scope::bytes("native.metal.upload", operations[0].inputs.len() * 4);
+        let input = buffer(self, bytemuck::cast_slice(operations[0].inputs))?;
+        let projections =
+            operations[..4].iter().map(|operation| allocate(operation.rows)).collect::<Result<Vec<_>>>()?;
+        let output = allocate(dim)?;
+        let failure = buffer(self, bytemuck::bytes_of(&0u32))?;
+        drop(upload);
+        profile::record("native.metal.allocated_bytes", 0.0, self.device.current_allocated_size());
+        let execute = profile::Scope::new("native.metal.execute");
+        let encode = profile::Scope::new("native.metal.encode");
+        let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal GDN command allocation failed"))?;
+        let encoding =
+            command.compute_command_encoder().ok_or(Error::Invalid("Metal GDN encoder allocation failed"))?;
+        for index in 0..4 {
+            Self::encode_ffn_matrix(
+                &encoding,
+                &operations[index],
+                &parameters[index],
+                &pipelines[index],
+                &input,
+                &projections[index],
+            );
+        }
+        encoding.set_compute_pipeline_state(&conv_pipeline);
+        for (index, buffer) in
+            [&projections[0], &state.controls, &state.history, &state.convolved].into_iter().enumerate()
+        {
+            encoding.set_buffer(Some(buffer), 0, index);
+        }
+        encoding.set_bytes(NonNull::from(&state.parameters).cast(), std::mem::size_of_val(&state.parameters), 4);
+        encoding.set_buffer(Some(&failure), 0, 6);
+        encoding.dispatch_threads(
+            MTLSize {
+                width: state.parameters[7] as usize,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoding.set_compute_pipeline_state(&recurrent_pipeline);
+        for (index, buffer) in [
+            &state.convolved,
+            &projections[1],
+            &projections[2],
+            &projections[3],
+            &state.controls,
+            &state.recurrent,
+            &failure,
+            &state.result,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            encoding.set_buffer(Some(buffer), 0, index);
+        }
+        encoding.set_bytes(NonNull::from(&state.parameters).cast(), std::mem::size_of_val(&state.parameters), 8);
+        encoding.dispatch_threadgroups(
+            MTLSize {
+                width: g.value_heads,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: threads,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Self::encode_ffn_matrix(&encoding, &operations[4], &parameters[4], &pipelines[4], &state.result, &output);
+        encoding.end_encoding();
+        drop(encode);
+        let submit = profile::Scope::new("native.metal.submit");
+        command.commit();
+        drop(submit);
+        let wait = profile::Scope::new("native.metal.wait");
+        command.wait_until_completed();
+        drop(wait);
+        if command.status() != MTLCommandBufferStatus::Completed {
+            return Err(Error::Invalid("Metal Qwen GDN execution failed"));
+        }
+        drop(execute);
+        profile::record("native.metal.gpu", command.gpu_end_time() - command.gpu_start_time(), 0);
+        let _readback = profile::Scope::bytes("native.metal.readback", dim * 4);
+        // SAFETY: all GPU writes have completed and owned shared buffers have
+        // the checked output/status lengths. Recurrent state never leaves GPU
+        // buffers during inference and is zeroed on reset and failures.
+        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), dim) }.to_vec();
+        if values.iter().any(|value| !value.is_finite()) || unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0 {
+            return Err(Error::Invalid("nonfinite Metal Qwen GDN result"));
+        }
+        Ok(values)
+    }
+
+    fn hc_pipelines(&self) -> Result<(PipelineState, PipelineState)> {
+        let mut pipelines = self.hc_pipelines.lock().map_err(|_| Error::Invalid("Metal HC pipeline cache failed"))?;
+        if let Some(pipelines) = &*pipelines {
+            return Ok(pipelines.clone());
+        }
+        let make = |name| {
+            let function =
+                self.library.new_function_with_name(name).ok_or(Error::Invalid("Metal HC function failed"))?;
+            self.device
+                .new_compute_pipeline_state_with_function(&function)
+                .map_err(|_| Error::Invalid("Metal HC pipeline failed"))
+        };
+        let result = (make("hybrid_qwen_hc_activate")?, make("hybrid_qwen_hc_mix")?);
+        *pipelines = Some(result.clone());
+        Ok(result)
+    }
+
+    fn run_qwen_hyperconnection(
+        &self,
+        operations: &[MappedOperation<'_>],
+        parameters: &[[u32; 8]],
+        normalized: &[f32],
+        streams: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let pipelines =
+            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let (activation_pipeline, mix_pipeline) = self.hc_pipelines()?;
+        let dim = normalized.len() / streams;
+        let low_rank = operations[0].rows;
+        let combine = operations.len() == 3;
+        let allocate = |elements: usize| {
+            self.device
+                .new_buffer(elements * 4, MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("Metal HC allocation failed"))
+        };
+        let upload = profile::Scope::bytes("native.metal.upload", normalized.len() * 4);
+        let input = buffer(self, bytemuck::cast_slice(normalized))?;
+        let reduced = allocate(low_rank)?;
+        let gates = allocate(normalized.len())?;
+        let inject = allocate(streams)?;
+        let output = allocate(
+            dim + if combine {
+                streams
+            } else {
+                0
+            },
+        )?;
+        let failure = buffer(self, bytemuck::bytes_of(&0u32))?;
+        drop(upload);
+        profile::record("native.metal.allocated_bytes", 0.0, self.device.current_allocated_size());
+        let execute = profile::Scope::new("native.metal.execute");
+        let encode = profile::Scope::new("native.metal.encode");
+        let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal HC command allocation failed"))?;
+        let encoding = command.compute_command_encoder().ok_or(Error::Invalid("Metal HC encoder allocation failed"))?;
+        Self::encode_ffn_matrix(&encoding, &operations[0], &parameters[0], &pipelines[0], &input, &reduced);
+        encoding.set_compute_pipeline_state(&activation_pipeline);
+        encoding.set_buffer(Some(&reduced), 0, 0);
+        let sizes = [low_rank as u32, streams as u32];
+        encoding.set_bytes(NonNull::from(&sizes).cast(), std::mem::size_of_val(&sizes), 1);
+        encoding.set_buffer(Some(&failure), 0, 6);
+        encoding.dispatch_threads(
+            MTLSize {
+                width: low_rank,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        Self::encode_ffn_matrix(&encoding, &operations[1], &parameters[1], &pipelines[1], &reduced, &gates);
+        if combine {
+            Self::encode_ffn_matrix(&encoding, &operations[2], &parameters[2], &pipelines[2], &input, &inject);
+        }
+        encoding.set_compute_pipeline_state(&mix_pipeline);
+        for (index, value) in [&gates, &input, &inject, &output].into_iter().enumerate() {
+            encoding.set_buffer(Some(value), 0, index);
+        }
+        let sizes = [dim as u32, streams as u32, u32::from(combine), 0];
+        encoding.set_bytes(NonNull::from(&sizes).cast(), std::mem::size_of_val(&sizes), 4);
+        encoding.set_buffer(Some(&failure), 0, 6);
+        encoding.dispatch_threads(
+            MTLSize {
+                width: dim.max(streams),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoding.end_encoding();
+        drop(encode);
+        let submit = profile::Scope::new("native.metal.submit");
+        command.commit();
+        drop(submit);
+        let wait = profile::Scope::new("native.metal.wait");
+        command.wait_until_completed();
+        drop(wait);
+        if command.status() != MTLCommandBufferStatus::Completed {
+            return Err(Error::Invalid("Metal HC execution failed"));
+        }
+        drop(execute);
+        profile::record("native.metal.gpu", command.gpu_end_time() - command.gpu_start_time(), 0);
+        let count = dim
+            + if combine {
+                streams
+            } else {
+                0
+            };
+        let _readback = profile::Scope::bytes("native.metal.readback", count * 4);
+        // SAFETY: checked shared buffers remain owned through GPU completion.
+        let mut values =
+            unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), count) }.to_vec();
+        if values.iter().any(|value| !value.is_finite()) || unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0 {
+            return Err(Error::Invalid("nonfinite Metal HC output"));
+        }
+        let inject = values.split_off(dim);
+        Ok((values, inject))
+    }
+
+    fn ffn_pipelines(&self) -> Result<(PipelineState, PipelineState)> {
+        let mut pipelines = self.ffn_pipelines.lock().map_err(|_| Error::Invalid("Metal FFN pipeline cache failed"))?;
+        if let Some(pipelines) = &*pipelines {
+            return Ok(pipelines.clone());
+        }
+        let make = |name| {
+            let function =
+                self.library.new_function_with_name(name).ok_or(Error::Invalid("Metal FFN function failed"))?;
+            self.device
+                .new_compute_pipeline_state_with_function(&function)
+                .map_err(|_| Error::Invalid("Metal FFN pipeline failed"))
+        };
+        let result = (make("hybrid_ffn_activate")?, make("hybrid_ffn_reduce")?);
+        *pipelines = Some(result.clone());
+        Ok(result)
+    }
+
+    /// Encode the existing matrix kernel against resident intermediates. The
+    /// same format-specific row geometry is used by standalone mapped GEMV.
+    fn encode_ffn_matrix(
+        encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        operation: &MappedOperation<'_>,
+        parameters: &[u32; 8],
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+        input: &ProtocolObject<dyn MTLBuffer>,
+        output: &ProtocolObject<dyn MTLBuffer>,
+    ) {
+        Self::encode_matrix_at(encoding, operation, parameters, pipeline, (input, 0), (output, 0));
+    }
+
+    fn encode_matrix_at(
+        encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        operation: &MappedOperation<'_>,
+        parameters: &[u32; 8],
+        pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+        input: (&ProtocolObject<dyn MTLBuffer>, usize),
+        output: (&ProtocolObject<dyn MTLBuffer>, usize),
+    ) {
+        encoding.set_compute_pipeline_state(pipeline);
+        encoding.set_bytes(NonNull::from(parameters).cast(), std::mem::size_of_val(parameters), 3);
+        for (index, matrix) in operation.matrices.iter().enumerate() {
+            encoding.set_buffer(Some(&matrix.codes.buffer), 0, 0);
+            encoding.set_buffer(Some(input.0), input.1 + index * operation.columns * 4, 1);
+            encoding.set_buffer(Some(output.0), output.1 + index * operation.rows * 4, 2);
+            let mut offsets = [matrix.codes.offset as u32, 0, 0, 0];
+            if let Some((scales, biases)) = &matrix.planes {
+                encoding.set_buffer(Some(&scales.buffer), 0, 4);
+                encoding.set_buffer(Some(&biases.buffer), 0, 5);
+                offsets[1] = scales.offset as u32;
+                offsets[2] = biases.offset as u32;
+            }
+            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+            encoding.dispatch_threadgroups(
+                MTLSize {
+                    width: matrix_groups(operation.format, operation.rows),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: matrix_threads(operation.format),
+                    height: 1,
+                    depth: 1,
+                },
+            );
+        }
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "source-bound FFN operands are separate checked buffers")]
+    fn run_ffn(
+        &self,
+        operations: &[MappedOperation<'_>; 4],
+        parameters: &[[u32; 8]],
+        probabilities: &[f32],
+        shared_gate: f32,
+        shared_values: &[f32],
+        shared_up: &[f32],
+        clamp: Option<(f32, f32)>,
+    ) -> Result<Vec<f32>> {
+        let pipelines =
+            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let (activation_pipeline, reduction_pipeline) = self.ffn_pipelines()?;
+        let experts = probabilities.len();
+        let hidden = operations[0].rows;
+        let dim = operations[2].rows;
+        let shared_dim = shared_values.len();
+        let allocate = |elements: usize| {
+            self.device
+                .new_buffer(elements * 4, MTLResourceOptions::STORAGE_MODE_SHARED)
+                .ok_or(Error::Invalid("Metal FFN allocation failed"))
+        };
+        let _upload = profile::Scope::bytes(
+            "native.metal.upload",
+            (operations[0].inputs.len() + shared_values.len() + shared_up.len() + probabilities.len()) * 4,
+        );
+        let input = buffer(self, bytemuck::cast_slice(operations[0].inputs))?;
+        let gate = allocate(experts * hidden)?;
+        let up = allocate(experts * hidden)?;
+        let down = allocate(experts * dim)?;
+        let shared_values = buffer(self, bytemuck::cast_slice(shared_values))?;
+        let shared_up = buffer(self, bytemuck::cast_slice(shared_up))?;
+        let shared_down = allocate(dim)?;
+        let probabilities_buffer = buffer(self, bytemuck::cast_slice(probabilities))?;
+        let output = allocate(dim)?;
+        let failure = buffer(self, bytemuck::bytes_of(&0u32))?;
+        drop(_upload);
+        profile::record("native.metal.allocated_bytes", 0.0, self.device.current_allocated_size());
+        let execute = profile::Scope::new("native.metal.execute");
+        let encode = profile::Scope::new("native.metal.encode");
+        let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal FFN command allocation failed"))?;
+        let concurrent = std::env::var_os("STARK_HYBRID_CONCURRENT_FFN").is_none_or(|value| value != "0");
+        let encoding = command
+            .compute_command_encoder_with_dispatch_type(if concurrent {
+                MTLDispatchType::CONCURRENT
+            } else {
+                MTLDispatchType::SERIAL
+            })
+            .ok_or(Error::Invalid("Metal FFN encoder allocation failed"))?;
+        if concurrent {
+            profile::record("native.metal.ffn.concurrent", 0.0, 0);
+        }
+        Self::encode_ffn_matrix(&encoding, &operations[0], &parameters[0], &pipelines[0], &input, &gate);
+        Self::encode_ffn_matrix(&encoding, &operations[1], &parameters[1], &pipelines[1], &input, &up);
+        // Every projection reads only immutable weights/inputs and writes a
+        // disjoint expert range. Activation consumes all gate/up outputs.
+        if concurrent {
+            encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        }
+        encoding.set_compute_pipeline_state(&activation_pipeline);
+        for (index, value) in [&gate, &up, &shared_values, &shared_up].into_iter().enumerate() {
+            encoding.set_buffer(Some(value), 0, index);
+        }
+        let sizes = [(experts * hidden) as u32, shared_dim as u32, 0, 0];
+        let limits = clamp.map_or([0.0, 0.0], |(routed, shared)| [routed, shared]);
+        encoding.set_bytes(NonNull::from(&sizes).cast(), std::mem::size_of_val(&sizes), 4);
+        encoding.set_bytes(NonNull::from(&limits).cast(), std::mem::size_of_val(&limits), 5);
+        encoding.set_buffer(Some(&failure), 0, 6);
+        encoding.dispatch_threads(
+            MTLSize {
+                width: (experts * hidden).max(shared_dim),
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        // Activation writes gate/shared_values in place; both down paths read
+        // those buffers. Expert and shared down projections are independent.
+        if concurrent {
+            encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        }
+        Self::encode_ffn_matrix(&encoding, &operations[2], &parameters[2], &pipelines[2], &gate, &down);
+        Self::encode_ffn_matrix(&encoding, &operations[3], &parameters[3], &pipelines[3], &shared_values, &shared_down);
+        // The ordered mixture must see every routed/shared down result. The
+        // status buffer uses atomics and is read by the host after completion.
+        if concurrent {
+            encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        }
+        encoding.set_compute_pipeline_state(&reduction_pipeline);
+        for (index, value) in [&down, &shared_down, &probabilities_buffer, &output].into_iter().enumerate() {
+            encoding.set_buffer(Some(value), 0, index);
+        }
+        let sizes = [dim as u32, experts as u32];
+        encoding.set_bytes(NonNull::from(&sizes).cast(), std::mem::size_of_val(&sizes), 4);
+        encoding.set_bytes(NonNull::from(&shared_gate).cast(), std::mem::size_of_val(&shared_gate), 5);
+        encoding.set_buffer(Some(&failure), 0, 6);
+        encoding.dispatch_threads(
+            MTLSize {
+                width: dim,
+                height: 1,
+                depth: 1,
+            },
+            MTLSize {
+                width: 256,
+                height: 1,
+                depth: 1,
+            },
+        );
+        encoding.end_encoding();
+        drop(encode);
+        let submit = profile::Scope::new("native.metal.submit");
+        command.commit();
+        drop(submit);
+        let wait = profile::Scope::new("native.metal.wait");
+        command.wait_until_completed();
+        drop(wait);
+        if command.status() != MTLCommandBufferStatus::Completed {
+            return Err(Error::Invalid("Metal FFN execution failed"));
+        }
+        drop(execute);
+        profile::record("native.metal.gpu", command.gpu_end_time() - command.gpu_start_time(), 0);
+        let _readback = profile::Scope::bytes("native.metal.readback", dim * 4);
+        // SAFETY: the checked dim-sized shared output has completed its sole
+        // writer. All intermediate and mapped buffers remain owned above.
+        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), dim) }.to_vec();
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("nonfinite Metal FFN output"));
+        }
+        // SAFETY: this initialized atomic status is read only after all GPU
+        // writers complete. Preserve intermediate failure checks even where
+        // clipping could otherwise conceal an overflowed projection.
+        if unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0 {
+            return Err(Error::Invalid("nonfinite Metal FFN intermediate"));
+        }
+        Ok(values)
+    }
+
     fn pipeline(
         &self,
         format: MatrixFormat,
     ) -> Result<PipelineState> {
         let name = match format {
+            MatrixFormat::Packed(13 | 14) => "hybrid_packed_block_matvec",
+            MatrixFormat::Packed(17 | 18) => "hybrid_iq_matvec_vector8",
             MatrixFormat::Packed(_) => "hybrid_packed_matvec",
             MatrixFormat::Affine {
                 ..
-            } => "hybrid_affine_matvec",
+            } => "hybrid_affine_matvec_vector8",
         };
         self.cached_pipeline(format, name, &self.pipelines)
     }
@@ -307,16 +1058,23 @@ impl Executor {
         format: MatrixFormat,
         tiled: bool,
     ) -> Result<PipelineState> {
-        if !tiled {
-            return self.pipeline(format);
-        }
-        let name = match format {
-            MatrixFormat::Packed(_) => "hybrid_packed_matvec_tiled",
-            MatrixFormat::Affine {
-                ..
-            } => "hybrid_affine_matvec_tiled",
+        let (name, cache) = match (format, tiled) {
+            (MatrixFormat::Packed(_), false) => ("hybrid_packed_matvec", &self.scalar_pipelines),
+            (
+                MatrixFormat::Affine {
+                    ..
+                },
+                false,
+            ) => ("hybrid_affine_matvec", &self.scalar_pipelines),
+            (MatrixFormat::Packed(_), true) => ("hybrid_packed_matvec_tiled", &self.tiled_pipelines),
+            (
+                MatrixFormat::Affine {
+                    ..
+                },
+                true,
+            ) => ("hybrid_affine_matvec_tiled", &self.tiled_pipelines),
         };
-        self.cached_pipeline(format, name, &self.tiled_pipelines)
+        self.cached_pipeline(format, name, cache)
     }
 
     fn cached_pipeline(
@@ -362,7 +1120,8 @@ impl Executor {
             .device
             .new_compute_pipeline_state_with_function(&function)
             .map_err(|_| Error::Invalid("Metal specialized pipeline failed"))?;
-        // The unchanged reduction requires eight 32-lane SIMD groups.
+        // Retain the common 256-thread capability admission; block/lane GEMV
+        // submits 64 threads while the other schedules submit 256.
         if pipeline.thread_execution_width() != 32 || pipeline.max_total_threads_per_threadgroup() < 256 {
             return Err(Error::Unsupported("Metal matrix execution width is unsupported"));
         }
@@ -416,12 +1175,12 @@ impl Executor {
                 encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
                 encoding.dispatch_threadgroups(
                     MTLSize {
-                        width: operation.rows,
+                        width: matrix_groups(operation.format, operation.rows),
                         height: 1,
                         depth: 1,
                     },
                     MTLSize {
-                        width: 256,
+                        width: matrix_threads(operation.format),
                         height: 1,
                         depth: 1,
                     },
@@ -471,7 +1230,7 @@ impl Executor {
         parameters: [u32; 8],
         affine: Option<(&[u8], &[u8])>,
     ) -> Result<Vec<f32>> {
-        self.run_with_tiling(codes, input, parameters, affine, false)
+        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, false, true))
     }
 
     #[cfg(test)]
@@ -483,7 +1242,7 @@ impl Executor {
         affine: Option<(&[u8], &[u8])>,
         tiled: bool,
     ) -> Result<Vec<f32>> {
-        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, tiled))
+        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, tiled, false))
     }
 
     #[cfg(test)]
@@ -494,6 +1253,7 @@ impl Executor {
         parameters: [u32; 8],
         affine: Option<(&[u8], &[u8])>,
         tiled: bool,
+        production: bool,
     ) -> Result<Vec<f32>> {
         // These bounded uploads retain compressed storage and are released only
         // after GPU completion. No unowned mmap page or rounded Rust allocation
@@ -526,7 +1286,11 @@ impl Executor {
         } else {
             MatrixFormat::Packed(parameters[2])
         };
-        let pipeline = self.pipeline_with_tiling(format, tiled)?;
+        let pipeline = if production {
+            self.pipeline(format)?
+        } else {
+            self.pipeline_with_tiling(format, tiled)?
+        };
         let execute = profile::Scope::new("native.metal.execute");
         let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal command allocation failed"))?;
         let encoding = command.compute_command_encoder().ok_or(Error::Invalid("Metal encoder allocation failed"))?;
@@ -542,7 +1306,9 @@ impl Executor {
         encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
         encoding.dispatch_threadgroups(
             MTLSize {
-                width: if tiled {
+                width: if production {
+                    matrix_groups(format, parameters[0] as usize)
+                } else if tiled {
                     (parameters[0] as usize).div_ceil(4)
                 } else {
                     parameters[0] as usize
@@ -551,7 +1317,11 @@ impl Executor {
                 depth: 1,
             },
             MTLSize {
-                width: 256,
+                width: if production {
+                    matrix_threads(format)
+                } else {
+                    256
+                },
                 height: 1,
                 depth: 1,
             },
@@ -741,6 +1511,179 @@ mod tests {
 
     use super::*;
 
+    fn ffn_test_matrix(
+        rows: usize,
+        columns: usize,
+        seed: usize,
+    ) -> MappedMatrix {
+        let values: Vec<f32> =
+            (0..rows * columns).map(|index| ((index * 17 + seed * 31) as f32 * 0.073).sin() * 0.5).collect();
+        let bytes = bytemuck::cast_slice(&values);
+        MappedMatrix {
+            codes: MappedSlice {
+                buffer: buffer(executor().unwrap(), bytes).unwrap(),
+                offset: 0,
+                length: bytes.len(),
+                registered_length: bytes.len(),
+            },
+            planes: None,
+        }
+    }
+
+    #[stark_test]
+    fn native_ffn_keeps_projection_and_ordered_mixture_numerics() {
+        let experts = 3;
+        let dim = 64;
+        let hidden = 32;
+        let shared = 32;
+        let input: Vec<f32> = (0..dim).map(|index| (index as f32 * 0.11).cos()).collect();
+        let inputs = input.repeat(experts);
+        let down_inputs = vec![0.0; experts * hidden];
+        let shared_inputs = vec![0.0; shared];
+        let shared_values: Vec<f32> = (0..shared).map(|index| (index as f32 * 0.3).sin() * 3.0).collect();
+        let shared_up: Vec<f32> = (0..shared).map(|index| (index as f32 * 0.17).cos() * 2.0).collect();
+        let make = |rows, columns, count: usize, seed, inputs| MappedOperation {
+            matrices: (0..count).map(|expert| ffn_test_matrix(rows, columns, seed + expert)).collect(),
+            inputs,
+            rows,
+            columns,
+            rows_per_batch: 0,
+            format: MatrixFormat::Packed(0),
+        };
+        let mut operations = [
+            make(hidden, dim, experts, 0, inputs.as_slice()),
+            make(hidden, dim, experts, 3, inputs.as_slice()),
+            make(dim, hidden, experts, 6, down_inputs.as_slice()),
+            make(dim, shared, 1, 9, shared_inputs.as_slice()),
+        ];
+        let probabilities = [0.7, 0.1, 0.2];
+        for clamp in [None, Some((0.25f32, 0.4f32))] {
+            let actual = mapped_ffn(&operations, &probabilities, 0.63, &shared_values, &shared_up, clamp).unwrap();
+            let projections = mapped_many(&operations[..2]).unwrap();
+            let activate = |gate: f32, up: f32, limit: Option<f32>| {
+                let (gate, up) = limit.map_or((gate, up), |limit| (gate.min(limit), up.clamp(-limit, limit)));
+                super::super::math::silu(gate) * up
+            };
+            let activated: Vec<f32> = projections[0]
+                .iter()
+                .zip(&projections[1])
+                .map(|(&gate, &up)| activate(gate, up, clamp.map(|limits| limits.0)))
+                .collect();
+            let shared_activated: Vec<f32> = shared_values
+                .iter()
+                .zip(&shared_up)
+                .map(|(&gate, &up)| activate(gate, up, clamp.map(|limits| limits.1)))
+                .collect();
+            let down_operation = MappedOperation {
+                matrices: operations[2].matrices.clone(),
+                inputs: &activated,
+                rows: dim,
+                columns: hidden,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(0),
+            };
+            let shared_operation = MappedOperation {
+                matrices: operations[3].matrices.clone(),
+                inputs: &shared_activated,
+                rows: dim,
+                columns: shared,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(0),
+            };
+            let projected = mapped_many(&[down_operation, shared_operation]).unwrap();
+            for (channel, &value) in actual.iter().enumerate() {
+                let mut expected = 0.0;
+                for (expert, probability) in probabilities.iter().enumerate() {
+                    expected += probability * projected[0][expert * dim + channel];
+                }
+                expected += 0.63 * projected[1][channel];
+                assert!((value - expected).abs() < 2e-5, "native FFN exceeded numerical tolerance");
+            }
+        }
+        assert!(mapped_ffn(&operations, &[0.5, 0.5], 0.63, &shared_values, &shared_up, None).is_err());
+        assert!(mapped_ffn(&operations, &probabilities, f32::NAN, &shared_values, &shared_up, None).is_err());
+        assert!(mapped_ffn(&operations, &probabilities, 0.63, &shared_values, &shared_up, Some((0.0, 1.0))).is_err());
+        // Overflowed projections must fail even when clipping could otherwise
+        // conceal their nonfinite raw gates before the final readout.
+        let overflow = vec![f32::MAX; hidden * dim];
+        operations[0].matrices[0].codes.buffer = buffer(executor().unwrap(), bytemuck::cast_slice(&overflow)).unwrap();
+        assert!(mapped_ffn(&operations, &probabilities, 0.63, &shared_values, &shared_up, Some((0.25, 0.4))).is_err());
+    }
+
+    #[stark_test]
+    fn native_qwen_hyperconnection_matches_separate_projections() {
+        let (dim, streams, rank) = (16, 4, 8);
+        let normalized: Vec<f32> = (0..dim * streams).map(|index| (index as f32 * 0.31).sin() * 2.0).collect();
+        let placeholder = vec![0.0; rank];
+        for combine in [false, true] {
+            let mut operations = vec![
+                MappedOperation {
+                    matrices: vec![ffn_test_matrix(rank, dim * streams, 13)],
+                    inputs: &normalized,
+                    rows: rank,
+                    columns: dim * streams,
+                    rows_per_batch: 0,
+                    format: MatrixFormat::Packed(0),
+                },
+                MappedOperation {
+                    matrices: vec![ffn_test_matrix(dim * streams, rank, 19)],
+                    inputs: &placeholder,
+                    rows: dim * streams,
+                    columns: rank,
+                    rows_per_batch: 0,
+                    format: MatrixFormat::Packed(0),
+                },
+            ];
+            if combine {
+                operations.push(MappedOperation {
+                    matrices: vec![ffn_test_matrix(streams, dim * streams, 23)],
+                    inputs: &normalized,
+                    rows: streams,
+                    columns: dim * streams,
+                    rows_per_batch: 0,
+                    format: MatrixFormat::Packed(0),
+                });
+            }
+            let (actual, actual_inject) = mapped_qwen_hyperconnection(&operations, &normalized, streams).unwrap();
+            let reduced: Vec<f32> = mapped_many(&operations[..1])
+                .unwrap()
+                .remove(0)
+                .iter()
+                .map(|value| super::super::math::silu(*value / streams as f32))
+                .collect();
+            let up = MappedOperation {
+                matrices: operations[1].matrices.clone(),
+                inputs: &reduced,
+                rows: dim * streams,
+                columns: rank,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(0),
+            };
+            let gates = mapped_many(&[up]).unwrap().remove(0);
+            for channel in 0..dim {
+                let mut expected = 0.0;
+                for stream in 0..streams {
+                    let index = stream * dim + channel;
+                    expected += super::super::math::sigmoid(gates[index]) * normalized[index] / streams as f32;
+                }
+                assert!(
+                    (actual[channel] - expected).abs() < 2e-6,
+                    "native hyperconnection exceeded numerical tolerance"
+                );
+            }
+            if combine {
+                let injected = mapped_many(&operations[2..]).unwrap().remove(0);
+                let expected: Vec<f32> =
+                    injected.iter().map(|value| 2.0 * super::super::math::sigmoid(*value / streams as f32)).collect();
+                assert!(actual_inject.iter().zip(expected).all(|(actual, expected)| (actual - expected).abs() < 2e-6));
+            } else {
+                assert!(actual_inject.is_empty());
+            }
+            assert!(mapped_qwen_hyperconnection(&operations, &normalized, 0).is_err());
+            assert!(mapped_qwen_hyperconnection(&operations, &normalized[..normalized.len() - 1], streams).is_err());
+        }
+    }
+
     #[stark_test]
     fn power_of_two_shader_addresses_preserve_wide_row_offsets() {
         // Exercise the address algebra independently of any allocation. Large
@@ -847,7 +1790,17 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            assert_eq!(tiled, actual, "tiled packed tail kind={kind}");
+            let scalar = executor()
+                .unwrap()
+                .run_with_tiling(
+                    &bytes,
+                    &input,
+                    [3, columns as u32, kind, block as u32, size as u32, 0, 0, 0],
+                    None,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(tiled, scalar, "tiled packed tail kind={kind}");
             let factors = [1.0f32, -0.5, 2.0];
             let batch_inputs: Vec<f32> =
                 factors.iter().flat_map(|factor| input.iter().map(move |x| factor * x)).collect();
@@ -864,7 +1817,17 @@ mod tests {
                     true,
                 )
                 .unwrap();
-            assert_eq!(tiled_nine, batched_nine, "tiled packed batch crossing kind={kind}");
+            let scalar_nine = executor()
+                .unwrap()
+                .run_with_tiling(
+                    &repeated_codes,
+                    &batch_inputs,
+                    [9, columns as u32, kind, block as u32, size as u32, 0, 3, 0],
+                    None,
+                    false,
+                )
+                .unwrap();
+            assert_eq!(tiled_nine, scalar_nine, "tiled packed batch crossing kind={kind}");
             let row_size = bytes.len() / 3;
             for row in 0..3 {
                 let mut expected = 0.0f64;
@@ -886,6 +1849,13 @@ mod tests {
                         <= 2e-5 * (absolute * f64::from(factors[row]).abs()).max(1.0),
                     "batched format {kind}"
                 );
+                for batch in 0..3 {
+                    assert!(
+                        (f64::from(batched_nine[batch * 3 + row]) - expected * f64::from(factors[batch])).abs()
+                            <= 2e-5 * (absolute * f64::from(factors[batch]).abs()).max(1.0),
+                        "crossing batch format {kind}"
+                    );
+                }
             }
         }
     }
@@ -1066,7 +2036,17 @@ mod tests {
                             true,
                         )
                         .unwrap();
-                    assert_eq!(tiled, actual, "tiled affine tail bits={bits} group={group} dtype={dtype}");
+                    let scalar = executor()
+                        .unwrap()
+                        .run_with_tiling(
+                            &codes,
+                            &input,
+                            [rows as u32, columns as u32, 0, 0, 0, bits as u32, group as u32, dtype],
+                            Some((&scales, &biases)),
+                            false,
+                        )
+                        .unwrap();
+                    assert_eq!(tiled, scalar, "tiled affine tail bits={bits} group={group} dtype={dtype}");
                     let factors = [1.0f32, -0.5, 2.0];
                     let batch_inputs: Vec<f32> =
                         factors.iter().flat_map(|factor| input.iter().map(move |x| factor * x)).collect();
@@ -1099,8 +2079,18 @@ mod tests {
                             true,
                         )
                         .unwrap();
+                    let scalar_nine = executor()
+                        .unwrap()
+                        .run_with_tiling(
+                            &repeated_codes,
+                            &batch_inputs,
+                            [9, columns as u32, 0, 3, 0, bits as u32, group as u32, dtype],
+                            Some((&repeated_scales, &repeated_biases)),
+                            false,
+                        )
+                        .unwrap();
                     assert_eq!(
-                        tiled_nine, batched_nine,
+                        tiled_nine, scalar_nine,
                         "tiled affine batch crossing bits={bits} group={group} dtype={dtype}"
                     );
                     for row in 0..rows {
@@ -1120,6 +2110,13 @@ mod tests {
                                 <= 2e-5 * (absolute * f64::from(factors[row]).abs()).max(1.0),
                             "batched affine bits={bits} group={group} dtype={dtype}"
                         );
+                        for batch in 0..3 {
+                            assert!(
+                                (f64::from(batched_nine[batch * 3 + row]) - expected * f64::from(factors[batch])).abs()
+                                    <= 2e-5 * (absolute * f64::from(factors[batch]).abs()).max(1.0),
+                                "crossing batch affine bits={bits} group={group} dtype={dtype}"
+                            );
+                        }
                     }
                 }
             }

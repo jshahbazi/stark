@@ -198,13 +198,14 @@ impl StaticViewCache {
     fn reserve(
         &mut self,
         bytes: usize,
+        eviction_label: &'static str,
     ) {
         while self.registered_bytes > self.limit - bytes {
             let key = self.order.pop_front().unwrap();
             let old = self.entries.remove(&key).unwrap();
             let released = old.registered_bytes();
             self.registered_bytes -= released;
-            super::profile::record("native.metal.static_cache.eviction", 0.0, released);
+            super::profile::record(eviction_label, 0.0, released);
         }
     }
 }
@@ -215,6 +216,8 @@ pub struct Weights {
     metadata: BTreeMap<String, Value>,
     #[cfg(feature = "metal")]
     static_views: Mutex<StaticViewCache>,
+    #[cfg(feature = "metal")]
+    bank_views: Mutex<StaticViewCache>,
 }
 
 impl Weights {
@@ -239,6 +242,8 @@ impl Weights {
             metadata: BTreeMap::new(),
             #[cfg(feature = "metal")]
             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
+            #[cfg(feature = "metal")]
+            bank_views: Mutex::new(StaticViewCache::new(0)),
         };
         let mut splits = BTreeMap::new();
         for path in &paths {
@@ -289,7 +294,46 @@ impl Weights {
             let config: Value = serde_json::from_reader(BufReader::new(config_file))?;
             result.configure_affine(&config)?;
         }
+        #[cfg(feature = "metal")]
+        result.configure_bank_views()?;
         Ok(result)
+    }
+
+    /// Retain complete rank-three weight-bank views only when the entire
+    /// inventory fits below three quarters of Metal's recommended working set,
+    /// including the separate static-view allowance. PLE/embedding tables stay
+    /// CPU-mapped. These are immutable buffer wrappers, not a page-lock promise.
+    #[cfg(feature = "metal")]
+    fn configure_bank_views(&mut self) -> Result<()> {
+        let mut spans = HashMap::new();
+        for tensor in self.tensors.values().filter(|tensor| tensor.shape.len() == 3) {
+            let mut banks = vec![tensor];
+            if let Some(affine) = &tensor.affine {
+                banks.push(self.tensor(&affine.scales)?);
+                banks.push(self.tensor(&affine.biases)?);
+            }
+            for bank in banks {
+                let key = StaticViewKey {
+                    file: bank.file,
+                    offset: bank.offset,
+                    length: bank.size,
+                };
+                spans.insert(key, self.files[bank.file].metal_span(bank.offset, bank.size)?.1);
+            }
+        }
+        let bytes = spans
+            .values()
+            .try_fold(0usize, |total, &bytes| total.checked_add(bytes))
+            .ok_or(Error::Invalid("Metal bank inventory overflow"))?;
+        let budget = (super::weight_metal::recommended_working_set()? / 4 * 3).saturating_sub(MAX_STATIC_VIEW_BYTES);
+        // Kernel view offsets are u32 even on devices whose buffer length
+        // limit is larger. Larger banks keep the per-selected-range path.
+        let max_buffer_length = super::weight_metal::max_buffer_length()?.min(u32::MAX as usize);
+        if bytes <= budget && spans.values().all(|&bytes| bytes <= max_buffer_length) {
+            let cache = self.bank_views.get_mut().map_err(|_| Error::Invalid("Metal bank view cache failed"))?;
+            cache.limit = bytes;
+        }
+        Ok(())
     }
 
     pub fn metadata(&self) -> &BTreeMap<String, Value> {
@@ -590,13 +634,52 @@ impl Weights {
         }
         // Evict before allocation; creating while holding the mutex also
         // prevents duplicate FIFO keys and accounting races across callers.
-        cache.reserve(registered);
+        cache.reserve(registered, "native.metal.static_cache.eviction");
         let view = mapping.metal_slice(offset, length)?;
         cache.registered_bytes += view.registered_bytes();
         cache.order.push_back(key);
         cache.entries.insert(key, view.clone());
         super::profile::record("native.metal.static_cache.registered_bytes", 0.0, cache.registered_bytes);
         Ok(view)
+    }
+
+    #[cfg(feature = "metal")]
+    fn bank_view(
+        &self,
+        tensor: &Tensor,
+        start: usize,
+        length: usize,
+    ) -> Result<super::weight_metal::MappedSlice> {
+        let mut cache = self.bank_views.lock().map_err(|_| Error::Invalid("Metal bank view cache failed"))?;
+        if cache.limit == 0 {
+            drop(cache);
+            return self.metal_view(tensor.file, tensor.offset + start, length, false);
+        }
+        let key = StaticViewKey {
+            file: tensor.file,
+            offset: tensor.offset,
+            length: tensor.size,
+        };
+        if let Some(view) = cache.entries.get(&key) {
+            let result = view.subslice(start, length)?;
+            super::profile::record("native.metal.bank_cache.hit", 0.0, 0);
+            return Ok(result);
+        }
+        let mapping = &self.files[tensor.file];
+        let registered = mapping.metal_span(tensor.offset, tensor.size)?.1;
+        if registered > cache.limit {
+            drop(cache);
+            return self.metal_view(tensor.file, tensor.offset + start, length, false);
+        }
+        cache.reserve(registered, "native.metal.bank_cache.eviction");
+        let view = mapping.metal_slice(tensor.offset, tensor.size)?;
+        let result = view.subslice(start, length)?;
+        cache.registered_bytes += registered;
+        cache.order.push_back(key);
+        cache.entries.insert(key, view);
+        super::profile::record("native.metal.bank_cache.miss", 0.0, registered);
+        super::profile::record("native.metal.bank_cache.registered_bytes", 0.0, cache.registered_bytes);
+        Ok(result)
     }
 
     #[cfg(feature = "metal")]
@@ -618,7 +701,12 @@ impl Weights {
         if start.checked_add(matrix_bytes).is_none_or(|end| end > tensor.size) {
             return Err(Error::Invalid("mapped matrix exceeds tensor span"));
         }
-        let codes = self.metal_view(tensor.file, tensor.offset + start, matrix_bytes, cacheable)?;
+        let bank = tensor.shape.len() == 3 && !cacheable;
+        let codes = if bank {
+            self.bank_view(tensor, start, matrix_bytes)?
+        } else {
+            self.metal_view(tensor.file, tensor.offset + start, matrix_bytes, cacheable)?
+        };
         let planes = if let Some(affine) = &tensor.affine {
             let scales = self.tensor(&affine.scales)?;
             let biases = self.tensor(&affine.biases)?;
@@ -631,10 +719,14 @@ impl Weights {
             if start.checked_add(plane_bytes).is_none_or(|end| end > scales.size || end > biases.size) {
                 return Err(Error::Invalid("mapped affine plane exceeds tensor span"));
             }
-            Some((
-                self.metal_view(scales.file, scales.offset + start, plane_bytes, cacheable)?,
-                self.metal_view(biases.file, biases.offset + start, plane_bytes, cacheable)?,
-            ))
+            Some(if bank {
+                (self.bank_view(scales, start, plane_bytes)?, self.bank_view(biases, start, plane_bytes)?)
+            } else {
+                (
+                    self.metal_view(scales.file, scales.offset + start, plane_bytes, cacheable)?,
+                    self.metal_view(biases.file, biases.offset + start, plane_bytes, cacheable)?,
+                )
+            })
         } else {
             None
         };
@@ -792,6 +884,269 @@ impl Weights {
             }
             Ok(output)
         }
+    }
+
+    /// GLM KDA projections, recurrence and readout share one submission.
+    #[cfg(feature = "metal")]
+    pub(super) fn glm_kda(
+        &self,
+        prefix: &str,
+        input: &[f32],
+        state: &mut super::glm_metal::Kda,
+    ) -> Result<Vec<f32>> {
+        let names =
+            ["attn_q", "attn_k", "attn_v", "ssm_f_a", "ssm_g_a", "ssm_beta", "ssm_f_b", "ssm_g_b", "attn_output"]
+                .map(|suffix| format!("{prefix}.{suffix}.weight"));
+        let tensors = names.each_ref().map(|name| self.tensor(name)).into_iter().collect::<Result<Vec<_>>>()?;
+        if input.is_empty()
+            || input.len() > MAX_VECTOR
+            || input.iter().any(|v| !v.is_finite())
+            || tensors.iter().any(|tensor| tensor.shape.len() != 2 || tensor.shape.iter().any(|&n| n > MAX_VECTOR))
+            || tensors[..6].iter().any(|tensor| tensor.shape[1] != input.len())
+            || tensors[6].shape[1] != tensors[3].shape[0]
+            || tensors[7].shape[1] != tensors[4].shape[0]
+            || tensors[8].shape[1] != tensors[0].shape[0]
+            || tensors[8].shape[0] != input.len()
+        {
+            return Err(Error::Invalid("invalid GLM KDA projection geometry"));
+        }
+        let placeholders = tensors[6..].iter().map(|tensor| vec![0.0; tensor.shape[1]]).collect::<Vec<_>>();
+        let operations = tensors
+            .iter()
+            .enumerate()
+            .map(|(index, tensor)| {
+                Ok(super::weight_metal::MappedOperation {
+                    matrices: vec![self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+                    inputs: if index < 6 {
+                        input
+                    } else {
+                        &placeholders[index - 6]
+                    },
+                    rows: tensor.shape[0],
+                    columns: tensor.shape[1],
+                    rows_per_batch: 0,
+                    format: self.matrix_format(tensor)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let operations = operations.try_into().map_err(|_| Error::Invalid("invalid GLM KDA projection count"))?;
+        super::weight_metal::mapped_glm_kda(&operations, state)
+    }
+
+    /// Qwen DeltaNet's projections, recurrent update and output projection
+    /// share one submission and keep the recurrent matrix on the GPU.
+    #[cfg(feature = "metal")]
+    pub(super) fn qwen_gdn(
+        &self,
+        prefix: &str,
+        input: &[f32],
+        state: &mut super::weight_metal::QwenGdnState,
+    ) -> Result<Vec<f32>> {
+        let names = ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b", "out_proj"]
+            .map(|suffix| format!("{prefix}.{suffix}.weight"));
+        let tensors = names.each_ref().map(|name| self.tensor(name));
+        let tensors = tensors.into_iter().collect::<Result<Vec<_>>>()?;
+        if input.is_empty()
+            || input.len() > MAX_VECTOR
+            || input.iter().any(|v| !v.is_finite())
+            || tensors.iter().any(|tensor| tensor.shape.len() != 2 || tensor.shape.iter().any(|&n| n > MAX_VECTOR))
+            || tensors[..4].iter().any(|tensor| tensor.shape[1] != input.len())
+            || tensors[4].shape[0] != input.len()
+        {
+            return Err(Error::Invalid("invalid Qwen DeltaNet projection geometry"));
+        }
+        let output_input = vec![0.0; tensors[4].shape[1]];
+        let operations = tensors
+            .iter()
+            .enumerate()
+            .map(|(index, tensor)| {
+                Ok(super::weight_metal::MappedOperation {
+                    matrices: vec![self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+                    inputs: if index < 4 {
+                        input
+                    } else {
+                        &output_input
+                    },
+                    rows: tensor.shape[0],
+                    columns: tensor.shape[1],
+                    rows_per_batch: 0,
+                    format: self.matrix_format(tensor)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let operations = operations.try_into().map_err(|_| Error::Invalid("invalid Qwen DeltaNet projection count"))?;
+        super::weight_metal::mapped_qwen_gdn(&operations, state)
+    }
+
+    /// Qwen hyperconnection's dependent projections and stream mixture share
+    /// one submission. Normalization stays in the source scalar path.
+    #[cfg(feature = "metal")]
+    pub(super) fn qwen_hyperconnection(
+        &self,
+        down_name: &str,
+        up_name: &str,
+        inject_name: Option<&str>,
+        normalized: &[f32],
+        streams: usize,
+    ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let down = self.tensor(down_name)?;
+        let up = self.tensor(up_name)?;
+        let inject = inject_name.map(|name| self.tensor(name)).transpose()?;
+        if streams == 0
+            || streams > 64
+            || !normalized.len().is_multiple_of(streams)
+            || down.shape.len() != 2
+            || up.shape.len() != 2
+            || down.shape[1] != normalized.len()
+            || up.shape[1] != down.shape[0]
+            || up.shape[0] != normalized.len()
+            || normalized.len() > MAX_VECTOR
+            || down.shape[0] > MAX_VECTOR
+            || normalized.iter().any(|v| !v.is_finite())
+            || inject.is_some_and(|tensor| tensor.shape != [streams, normalized.len()])
+        {
+            return Err(Error::Invalid("invalid Qwen hyperconnection projection geometry"));
+        }
+        let up_input = vec![0.0; down.shape[0]];
+        let mut operations = vec![
+            super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(down, 0, down.shape[0], down.shape[1], true)?],
+                inputs: normalized,
+                rows: down.shape[0],
+                columns: down.shape[1],
+                rows_per_batch: 0,
+                format: self.matrix_format(down)?,
+            },
+            super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(up, 0, up.shape[0], up.shape[1], true)?],
+                inputs: &up_input,
+                rows: up.shape[0],
+                columns: up.shape[1],
+                rows_per_batch: 0,
+                format: self.matrix_format(up)?,
+            },
+        ];
+        if let Some(tensor) = inject {
+            operations.push(super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+                inputs: normalized,
+                rows: tensor.shape[0],
+                columns: tensor.shape[1],
+                rows_per_batch: 0,
+                format: self.matrix_format(tensor)?,
+            });
+        }
+        super::weight_metal::mapped_qwen_hyperconnection(&operations, normalized, streams)
+    }
+
+    /// Feed-forward projections, activations and ordered expert reduction in
+    /// one Metal submission after CPU routing. Temporary storage contains only
+    /// activation vectors; compressed weights stay in immutable mapped views.
+    #[cfg(feature = "metal")]
+    #[expect(clippy::too_many_arguments, reason = "explicit tensor names and independent routed/shared FFN inputs")]
+    pub(super) fn selected_ffn(
+        &self,
+        gate_name: &str,
+        up_name: &str,
+        down_name: &str,
+        shared_down_name: &str,
+        experts: &[usize],
+        input: &[f32],
+        probabilities: &[f32],
+        shared_gate: f32,
+        shared_values: &[f32],
+        shared_up: &[f32],
+        clamp: Option<(f32, f32)>,
+    ) -> Result<Vec<f32>> {
+        let gate = self.tensor(gate_name)?;
+        let up = self.tensor(up_name)?;
+        let down = self.tensor(down_name)?;
+        let shared = self.tensor(shared_down_name)?;
+        if gate.shape.len() != 3
+            || gate.shape != up.shape
+            || down.shape.len() != 3
+            || shared.shape.len() != 2
+            || gate.shape[0] != down.shape[0]
+            || gate.shape[1] != down.shape[2]
+            || gate.shape[2] != down.shape[1]
+            || gate.shape[2] != input.len()
+            || shared.shape[0] != down.shape[1]
+            || shared.shape[1] != shared_values.len()
+            || shared_values.len() != shared_up.len()
+            || experts.is_empty()
+            || experts.len() > 64
+            || experts.iter().any(|&expert| expert >= gate.shape[0])
+            || probabilities.len() != experts.len()
+            || !shared_gate.is_finite()
+            || probabilities.iter().any(|v| !v.is_finite() || *v < 0.0)
+            || [input, shared_values, shared_up].iter().any(|v| v.iter().any(|x| !x.is_finite()))
+            || clamp.is_some_and(|(r, s)| !r.is_finite() || !s.is_finite() || r <= 0.0 || s <= 0.0)
+        {
+            return Err(Error::Invalid("invalid fused feed-forward geometry or values"));
+        }
+        for tensor in [gate, up, down] {
+            if tensor.shape[1].checked_mul(experts.len()).is_none_or(|n| n > MAX_VECTOR)
+                || tensor.shape[2].checked_mul(experts.len()).is_none_or(|n| n > MAX_VECTOR)
+            {
+                return Err(Error::Invalid("fused feed-forward activation bound exceeded"));
+            }
+            let planes = if let Some(affine) = &tensor.affine {
+                self.tensor(&affine.scales)?.size.checked_add(self.tensor(&affine.biases)?.size)
+            } else {
+                Some(0)
+            };
+            let selected = planes
+                .and_then(|n| n.checked_add(tensor.size))
+                .map(|n| n / tensor.shape[0])
+                .and_then(|n| n.checked_mul(experts.len()));
+            if selected.is_none_or(|n| n > MAX_SELECTED_BYTES) {
+                return Err(Error::Invalid("fused feed-forward selected weight bound exceeded"));
+            }
+        }
+        let repeated = input.repeat(experts.len());
+        let down_inputs = vec![0.0; experts.len() * down.shape[2]];
+        let shared_inputs = vec![0.0; shared_values.len()];
+        let selected = |tensor: &Tensor| {
+            experts
+                .iter()
+                .map(|&index| self.mapped_matrix(tensor, index, tensor.shape[1], tensor.shape[2], false))
+                .collect::<Result<Vec<_>>>()
+        };
+        let operations = [
+            super::weight_metal::MappedOperation {
+                matrices: selected(gate)?,
+                inputs: &repeated,
+                rows: gate.shape[1],
+                columns: gate.shape[2],
+                rows_per_batch: 0,
+                format: self.matrix_format(gate)?,
+            },
+            super::weight_metal::MappedOperation {
+                matrices: selected(up)?,
+                inputs: &repeated,
+                rows: up.shape[1],
+                columns: up.shape[2],
+                rows_per_batch: 0,
+                format: self.matrix_format(up)?,
+            },
+            super::weight_metal::MappedOperation {
+                matrices: selected(down)?,
+                inputs: &down_inputs,
+                rows: down.shape[1],
+                columns: down.shape[2],
+                rows_per_batch: 0,
+                format: self.matrix_format(down)?,
+            },
+            super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(shared, 0, shared.shape[0], shared.shape[1], true)?],
+                inputs: &shared_inputs,
+                rows: shared.shape[0],
+                columns: shared.shape[1],
+                rows_per_batch: 0,
+                format: self.matrix_format(shared)?,
+            },
+        ];
+        super::weight_metal::mapped_ffn(&operations, probabilities, shared_gate, shared_values, shared_up, clamp)
     }
 
     fn matrix_slice(
@@ -1641,6 +1996,51 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(weak.upgrade().is_none(), "dropped static cache retained its source mapping");
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn whole_bank_views_reuse_nonconsecutive_experts_and_release_mapping() {
+        let fixture = Fixture::new();
+        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
+        safetensors(&fixture.0.join("model.safetensors"), &[("experts", "F32", vec![4, 2, 32], data)]);
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let weak = Arc::downgrade(&weights.files[0]);
+        let input = vec![1.0; 32];
+        assert_eq!(weights.expert_matvec("experts", 2, &input).unwrap(), vec![96.0; 2]);
+        assert_eq!(
+            weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
+            vec![128.0, 128.0, 64.0, 64.0, 128.0, 128.0]
+        );
+        assert!(weights.selected_matvec("experts", &[4], &input).is_err());
+        assert!(weights.static_views.lock().unwrap().entries.is_empty());
+        {
+            let cache = weights.bank_views.lock().unwrap();
+            assert_eq!(cache.entries.len(), 1);
+            assert_eq!(cache.order.len(), 1);
+            assert_eq!(cache.registered_bytes, cache.limit);
+            let bank = cache.entries.values().next().unwrap();
+            assert!(bank.subslice(0, 0).is_err());
+            assert!(bank.subslice(1024, 1).is_err());
+            assert!(bank.subslice(usize::MAX, 1).is_err());
+        }
+        // Exercise the same numerical path when complete-bank retention was
+        // rejected by the memory-budget admission check.
+        *weights.bank_views.lock().unwrap() = StaticViewCache::new(0);
+        assert_eq!(
+            weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
+            vec![128.0, 128.0, 64.0, 64.0, 128.0, 128.0]
+        );
+        assert!(weights.bank_views.lock().unwrap().entries.is_empty());
+        drop(weights);
+        for _ in 0..100 {
+            if weak.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(weak.upgrade().is_none(), "whole-bank views retained their source mapping after drop");
     }
 
     #[cfg(feature = "metal")]

@@ -4,9 +4,13 @@
 //! streams. They deliberately do not enter the dense decoder's artifact path.
 
 pub mod glm;
+#[cfg(feature = "metal")]
+mod glm_metal;
 pub mod math;
 pub mod profile;
 pub mod qwen;
+#[cfg(feature = "metal")]
+mod qwen_metal;
 #[cfg(feature = "metal")]
 mod weight_metal;
 pub mod weights;

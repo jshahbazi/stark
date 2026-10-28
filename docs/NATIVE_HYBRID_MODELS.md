@@ -71,26 +71,46 @@ quantization includes Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, IQ2_XS,
 IQ3_XXS and IQ4_XS. Floating tensors support F32, F16 and BF16 storage. MLX supports
 affine 4/8-bit matrices with group sizes 32, 64 or 128. Metal reads owned,
 page-aligned views of the immutable weight mappings, avoiding repeated compressed
-weight uploads. Selected experts bind only their checked ranges and scale/bias
-planes, bounded to 256 MiB of logical selected storage plus page padding.
+weight uploads. Selected expert products remain bounded to 256 MiB of logical
+selected storage per projection. A bank view can cover additional immutable
+experts without expanding or copying those weights.
 The whole model is never expanded into BF16 or F32 weights. Mapping ownership
 lasts through GPU completion, and completed temporary resources are released.
 Static projections use a model-local FIFO cache of read-only mapped weight views,
-limited to 8 GiB of page-rounded registrations. Selected experts remain transient.
+limited to 8 GiB of page-rounded registrations. A separate registry retains full
+rank-three weight-bank views only when the entire deduplicated inventory fits
+within 75% of Metal's recommended working-set size minus the 8 GiB static
+allowance. Every bank must
+also fit the device's maximum buffer length and the kernels' 32-bit view
+offsets. This admits the current Qwen expert banks while leaving its large
+n-gram tables CPU-mapped. Larger inventories use transient selected views.
+The registries count page-rounded resource spans, not physical resident pages.
+Retained no-copy buffers alone do not wire memory.
 Active command ranges have their separate bounds and may outlive an eviction
 until completion. Dropping the loaded model releases its retained weight views.
 This cache contains immutable weights; request state and score-cache rules below
 are unchanged.
 
-This implementation uses F32 forward arithmetic. Small vector operations,
-recurrent updates and sparse selection run in Rust on the CPU; matrix products
-run on Metal. Independent projections share command submissions while retaining
-their individual kernel arithmetic. Prefill processes tokens sequentially and
-projects vocabulary logits only for the final input token. Performance must be
+This implementation uses F32 forward arithmetic. Recurrent KDA/GDN state and
+updates execute on Metal. Fused feed-forward and Qwen hyperconnection stages
+keep intermediate projections and activations on the GPU until each combined
+submission completes. Selected sparse routing, attention control and n-gram
+history remain in Rust. Vector kernels decode multiple packed values together
+and distribute output rows across SIMD groups; their reduction schedule differs
+from the scalar oracle and is checked against the existing numerical gates.
+GLM's tiny mHC projections use a bounded immutable decoded control cache and
+CPU NEON arithmetic on Apple silicon, avoiding separate GPU submissions. The
+cache admits at most 8 million values per projection and 256 MiB in total;
+larger control layouts keep the GPU path. Prefill processes tokens sequentially
+and projects vocabulary logits only for the final input token. Performance must be
 measured on the exact checkpoint and host. Published Sushi or MLX throughput
 does not qualify Stark's throughput. See the
-[native optimization benchmark](benchmarks/GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md)
+[GPU graph and kernel benchmark](benchmarks/GLM_QWEN_NATIVE_GRAPH_2026_10_28.md)
 for measured scope, before/after results and reproduction commands.
+The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
+and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
+record the remaining graph, kernel and prefill opportunities with source and
+license boundaries.
 
 Both paths are text-only. The native loader does not execute vision, video,
 audio, MTP or DFlash. The workers retain their 16,384-token context and
