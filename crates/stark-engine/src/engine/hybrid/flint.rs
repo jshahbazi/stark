@@ -1,8 +1,8 @@
 //! Recursive Flint native execution over original BF16 or MLX affine weights.
 //!
 //! Tensor contracts and equations follow `rec/engine/src/rec_mlx/model.py`,
-//! revision 0e3150ca4262f572dee25c231d9ac7148414d2af (Apache-2.0),
-//! Copyright 2026 Recursive Superintelligence, Inc. This independent Rust
+//! revision 0e3150ca4262f572dee25c231d9ac7148414d2af (Apache-2.0).
+//! Reference publisher: Recursive Superintelligence, Inc. This independent Rust
 //! implementation uses Stark's native matrix kernels; it does not execute
 //! repository Python or invoke a foreign inference runtime.
 

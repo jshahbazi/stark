@@ -55,7 +55,7 @@ Recursive Flint's native Rust forward contract follows the Apache-2.0
 `0e3150ca4262f572dee25c231d9ac7148414d2af`, path
 `engine/src/rec_mlx/model.py`, SHA-256
 `56363f7a1caea2b9db317feb192f4bfea32eccb2b6b190dffc3fa93ee09695b1`.
-Copyright 2026 Recursive Superintelligence, Inc. Its complete license is
+The reference is published by Recursive Superintelligence, Inc. Its complete license is
 preserved in `LICENSE.flint-reference` and copied into distribution notices.
 The official MLX checkpoint is pinned separately at
 `RecursiveSI/flint-int4` revision `3b93f9053b530488405ae9fca51d4900d6ce21f0`.

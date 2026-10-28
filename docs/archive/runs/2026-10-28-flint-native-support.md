@@ -88,7 +88,7 @@ these values if subsequent fixes change any listed file.
 
 | File | SHA-256 |
 | --- | --- |
-| `crates/stark-engine/src/engine/hybrid/flint.rs` | `7b349a52fd2924ddb858df6cc649333d20c72a1db84e8f2402c76d713cd5bc17` |
+| `crates/stark-engine/src/engine/hybrid/flint.rs` | `d3df9b5845e05b7d4263cc2222309953f0c2dcff86011804fe80fd45eb25d1bb` |
 | `crates/stark-engine/src/engine/hybrid/flint_tests.rs` | `6cb0e6b4fcd35169407b102c127c1f6f02c8aa912729950e717ae8e9f5d1aef0` |
 | `crates/stark-engine/src/engine/hybrid/weights.rs` | `2d5d33dcd15365780f4eafa90ec9cf3ca23d9f01456f100245be9996e8191d4d` |
 | `crates/stark-engine/src/engine/hybrid/mod.rs` | `4e8c65b35f1a9ac9f44a6e6abf613d295143d538a1ae2eed70e22ae70c1fc6e3` |
