@@ -12,7 +12,7 @@ import os
 import re
 import subprocess
 
-from .chat import Worker
+from .chat import Worker, _popen_with_gpu_memory
 
 LETTERS = "ABCDEFGHIJKLMNOP"
 MAX_CONTEXT_TOKENS = 16384
@@ -33,7 +33,7 @@ class DecisionProtocolError(Exception):
 
 
 class ScoreWorker(Worker):
-    def __init__(self, executable, model, timeout):
+    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
         self.timeout = timeout
         self.pending = b""
         environment = {
@@ -42,8 +42,9 @@ class ScoreWorker(Worker):
             if not key.startswith(("STARK_CAPTURE_", "UZU_CAPTURE_"))
             and key not in {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP", "PYTHONINSPECT"}
         }
-        self.process = subprocess.Popen(
+        self.process, telemetry_fd = _popen_with_gpu_memory(
             [str(executable), "--score-model-path", str(model)],
+            callback=gpu_memory_callback,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -51,6 +52,12 @@ class ScoreWorker(Worker):
             start_new_session=True,
             env=environment,
         )
+        self._closed = False
+        try:
+            self._start_gpu_memory_reader(telemetry_fd, gpu_memory_callback)
+        except BaseException:
+            self.close()
+            raise
 
 
 def validate_inputs(text, question, answers):

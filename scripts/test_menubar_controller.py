@@ -139,6 +139,43 @@ extension EngineController {
              "message": action == "trash" ? "Its files will move to Trash." : "Its folder will remain on this Mac."]
         }
         switch scenario {
+        case "gpu-memory-live-and-validation":
+            func memory(_ bytes: Any, model: String = "fixture-model", mode: String = "decision") {
+                engine.apply(["event": "gpu_memory", "model_id": model, "mode": mode, "gpu_memory_bytes": bytes])
+            }
+            memory(Int64(2_147_483_648))
+            guard engine.gpuMemoryBytes == 2_147_483_648, engine.gpuMemoryText.contains("2 GB") else { return false }
+            engine.state = "deciding"
+            memory(Int64(1_073_741_824))
+            guard engine.gpuMemoryBytes == 1_073_741_824 else { return false }
+            engine.selectedID = "another-selection"
+            memory(512)
+            memory(999, model: "another-selection")
+            guard engine.gpuMemoryBytes == 512 else { return false }
+            for invalid: Any in [true, -1, 1.5, "42", NSNull(), NSNumber(value: UInt64.max)] {
+                memory(invalid)
+                guard engine.gpuMemoryBytes == nil else { return false }
+            }
+            memory(0)
+            return engine.gpuMemoryBytes == 0
+        case "gpu-memory-stop-and-mode-fence":
+            let sample: [String: Any] = ["event": "gpu_memory", "model_id": "fixture-model",
+                                         "mode": "decision", "gpu_memory_bytes": 4096]
+            engine.apply(sample)
+            engine.stop()
+            _ = command()
+            engine.apply(sample)
+            guard engine.gpuMemoryBytes == nil, engine.gpuMemoryText == "GPU memory —" else { return false }
+            engine.apply(["event": "status", "state": "idle"])
+            engine.changeMode(.chat)
+            guard engine.run() else { return false }
+            _ = command()
+            engine.apply(sample)
+            guard engine.gpuMemoryBytes == nil else { return false }
+            engine.apply(["event": "gpu_memory", "model_id": "fixture-model", "mode": "chat", "gpu_memory_bytes": 8192])
+            guard engine.gpuMemoryBytes == 8192 else { return false }
+            engine.apply(["event": "status", "state": "error"])
+            return engine.gpuMemoryBytes == nil
         case "vision-install-opt-in":
             engine.install(source: "Qwen/Qwen3.5-0.8B", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
@@ -1450,6 +1487,12 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_gpu_memory_updates_during_requests_and_validates_measurements(self):
+        self.exercise("gpu-memory-live-and-validation")
+
+    def test_gpu_memory_clears_and_fences_stopped_or_replaced_workers(self):
+        self.exercise("gpu-memory-stop-and-mode-fence")
+
     @classmethod
     def setUpClass(cls):
         cls.temporary = tempfile.TemporaryDirectory(prefix="stark-controller-test-")

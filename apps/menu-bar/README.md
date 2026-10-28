@@ -2,6 +2,8 @@
 
 A native macOS menu bar application for installing, running and chatting with converted models. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
+The playground shows **GPU memory** beside the status in both modes. It refreshes about once a second, including during model loading and requests, and reports the model worker's current Metal resource allocation. Apple silicon uses shared memory; the value excludes CPU-only allocations and other applications. A dash means no measurement is available. Stop clears the readout.
+
 ## Build and install
 
 For normal use, install the [signed release](../../docs/INSTALLATION.md). The commands below rebuild the app from source during development on an Apple silicon Mac with macOS 26.4 or newer, Xcode's command line tools, Rust 1.98.1, uv, and an existing [standalone CLI installation](../../docs/INSTALLATION.md#install-from-a-source-checkout) whose runtime the app copies. The builder refreshes native dependency and adaptation notices for the current workers using the pinned Rust toolchain and Cargo lockfile.

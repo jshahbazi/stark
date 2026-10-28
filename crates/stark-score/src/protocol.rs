@@ -52,6 +52,9 @@ pub fn main(digest_mode: bool) {
             }
         }
     }
+    // SAFETY: startup is single-threaded here, and the inherited pipe write FD
+    // is transferred exclusively to the sampler.
+    let _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
     let mut output = io::BufWriter::new(output);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (path, enabled) = arguments(std::env::args_os().skip(1))?;

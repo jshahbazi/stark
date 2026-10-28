@@ -40,8 +40,9 @@ def artifact(path, *, schema=3, vision=True):
 
 
 class StubWorker:
-    def __init__(self, path):
+    def __init__(self, path, gpu_memory_callback=None):
         self.model_path = path
+        self.gpu_memory_callback = gpu_memory_callback
         self.process = SimpleNamespace(closed=False)
         self.closed = False
         self.images = False
@@ -64,10 +65,10 @@ def host(tmp_path, monkeypatch):
     instances = []
     state = {"fail": False, "after_read": None, "before_create": None, "images": True}
 
-    def factory(_executable, path, _timeout):
+    def factory(_executable, path, _timeout, *, gpu_memory_callback=None):
         if state["before_create"] is not None:
             state["before_create"]()
-        instance = StubWorker(path)
+        instance = StubWorker(path, gpu_memory_callback)
         instances.append(instance)
 
         def read():
@@ -342,6 +343,15 @@ def test_running_family_reports_local_evidence_in_app_and_api(host, tmp_path):
     identifier = desktop.models[0]["id"]
     desktop.run(desktop.epoch, identifier)
     assert desktop.worker.images and desktop.active_model == identifier
+    assert callable(desktop.worker.gpu_memory_callback)
+    desktop.worker.gpu_memory_callback(desktop.worker, 4096)
+    memory = [value for value in events(desktop) if value.get("event") == "gpu_memory"][-1]
+    assert memory == {
+        "event": "gpu_memory",
+        "model_id": identifier,
+        "mode": "chat",
+        "gpu_memory_bytes": 4096,
+    }
     ready = [value for value in events(desktop) if value.get("event") == "ready"][-1]
     assert ready["images"] is True and ready["image_verification"] == "locally_tested"
     status = desktop.api_status()
