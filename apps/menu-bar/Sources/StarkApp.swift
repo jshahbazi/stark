@@ -1385,8 +1385,9 @@ final class EngineController: ObservableObject {
         catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
     }
 
-    func run() {
-        guard !selectedID.isEmpty, !busy else { return }
+    @discardableResult
+    func run() -> Bool {
+        guard !selectedID.isEmpty, !busy else { return false }
         UserDefaults.standard.set(selectedID, forKey: "selectedModel")
         errorMessage = nil
         clearConversation()
@@ -1395,7 +1396,18 @@ final class EngineController: ObservableObject {
         supportsImages = false
         imageVerification = "unverified"
         state = "loading"; message = "Loading model…"
-        send(["command": "run", "model_id": selectedID, "mode": mode.rawValue])
+        return send(["command": "run", "model_id": selectedID, "mode": mode.rawValue])
+    }
+
+    @discardableResult
+    func runModel(id: String) -> Bool {
+        guard !busy, models.contains(where: { $0.id == id }) else { return false }
+        selectedID = id
+        if modelReady {
+            UserDefaults.standard.set(id, forKey: "selectedModel")
+            return true
+        }
+        return run()
     }
 
     func changeMode(_ updated: PlaygroundMode) {
@@ -1679,6 +1691,7 @@ struct MenuView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var updater: AppUpdateController
     let install: () -> Void
+    let manage: () -> Void
     let run: () -> Void
     let console: () -> Void
     let connection: () -> Void
@@ -1696,10 +1709,13 @@ struct MenuView: View {
             }
             StatusLine(engine: engine)
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            Picker("Model", selection: $engine.selectedID) {
-                if engine.models.isEmpty { Text("Install a model to begin").tag("") }
-                ForEach(engine.models) { Text($0.name).tag($0.id) }
-            }.disabled(engine.busy)
+            HStack(spacing: 8) {
+                Picker("Model", selection: $engine.selectedID) {
+                    if engine.models.isEmpty { Text("Install a model to begin").tag("") }
+                    ForEach(engine.models) { Text($0.name).tag($0.id) }
+                }.disabled(engine.busy).frame(maxWidth: .infinity)
+                Button("Manage Models", action: manage).controlSize(.small).fixedSize()
+            }
             if engine.mode == .chat {
                 SpeedView(engine: engine)
                 Text("Last request").font(.caption2).foregroundStyle(.secondary)
@@ -1764,7 +1780,8 @@ struct InstallStageView: View {
 
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
-    @Environment(\.dismiss) private var dismiss
+    let onDone: () -> Void
+    let onRun: (String) -> Void
     @State private var tab = ModelsSheetTab.initial
     @State private var selectedFamily: ModelsInventory.Family?
     @State private var artifactChoices: [String: ModelArtifactMode] = [:]
@@ -1839,7 +1856,7 @@ struct ModelsView: View {
                 if let family = selectedFamily {
                     Button { leaveFamily() } label: { Label("Back", systemImage: "chevron.left") }.buttonStyle(.link)
                     Text(family.name).font(.title2.weight(.semibold))
-                } else { Text("Models").font(.title2.weight(.semibold)) }
+                } else { Text("Manage Models").font(.title2.weight(.semibold)) }
                 Spacer(minLength: 0)
             }
             if selectedFamily == nil { Picker("Models", selection: $tab) {
@@ -1915,7 +1932,8 @@ struct ModelsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+            if engine.state == "error" { StatusLine(engine: engine) }
+            HStack { Spacer(); Button("Done", action: onDone).keyboardShortcut(.defaultAction) }
         }.padding(24).frame(width: 640, height: 580)
             .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
             .onChange(of: tab) { leaveFamily() }
@@ -1976,6 +1994,8 @@ struct ModelsView: View {
             Text(model.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "—")
                 .font(.caption).foregroundStyle(.secondary).frame(width: 76, alignment: .leading)
             modelRepositoryLink(model).frame(width: 28, alignment: .leading)
+            Button("Run") { onRun(model.id) }.controlSize(.small).frame(width: 44)
+                .disabled(engine.busy).accessibilityLabel("Run " + model.name)
             removalButton(model).frame(width: 22)
         }.frame(minHeight: 32)
             .help(savedModelHelp(model, family: family))
@@ -2118,17 +2138,16 @@ struct InstallSupportView: View {
 
 struct InstallView: View {
     @ObservedObject var engine: EngineController
+    let manage: () -> Void
     @State private var kind = "huggingface"
     @State private var source = ""
     @State private var visionConversion = false
-    @State private var showingModels = false
     var body: some View {
         ScrollView { form }
             .frame(width: 470, height: 650)
             .onAppear { engine.resetInstallProgress(kind: kind) }
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
             .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
-            .sheet(isPresented: $showingModels) { ModelsView(engine: engine) }
     }
 
     private var form: some View {
@@ -2136,10 +2155,7 @@ struct InstallView: View {
             HStack {
                 Text("Install a model").font(.title2.weight(.semibold))
                 Spacer()
-                Button("Models…") {
-                    engine.requestModelFamilies()
-                    showingModels = true
-                }.buttonStyle(.link).font(.caption)
+                Button("Manage Models", action: manage).controlSize(.small)
             }
             Picker("Source", selection: $kind) {
                 Text("Hugging Face").tag("huggingface")
@@ -2319,6 +2335,7 @@ struct AdvancedOptionsView: View {
 struct PlaygroundView: View {
     @ObservedObject var engine: EngineController
     let connection: () -> Void
+    let manage: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -2336,9 +2353,10 @@ struct PlaygroundView: View {
                 Picker("Model", selection: $engine.selectedID) {
                     if engine.models.isEmpty { Text("Install a model to begin").tag("") }
                     ForEach(engine.models) { Text($0.name).tag($0.id) }
-                }.disabled(engine.busy)
+                }.disabled(engine.busy).frame(maxWidth: .infinity)
+                Button("Manage Models", action: manage).controlSize(.small).fixedSize()
                 if engine.loadedID != engine.selectedID || engine.loadedID.isEmpty || engine.loadedMode != engine.mode {
-                    Button("Run", action: engine.run).disabled(engine.selectedID.isEmpty || engine.busy)
+                    Button("Run") { engine.run() }.disabled(engine.selectedID.isEmpty || engine.busy)
                 }
                 if !engine.loadedID.isEmpty || engine.busy {
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
@@ -2508,7 +2526,7 @@ private final class MenuPanel: NSPanel {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let engine = EngineController()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -2516,6 +2534,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var localMenuMonitor: Any?
     private var globalMenuMonitor: Any?
     private var installWindow: NSWindow?
+    private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
 
@@ -2530,6 +2549,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let installMenu = NSMenuItem(title: "Install Model…", action: #selector(showInstall), keyEquivalent: "i")
         installMenu.target = self
         applicationMenu.addItem(installMenu)
+        let modelsMenu = NSMenuItem(title: "Manage Models", action: #selector(showModels), keyEquivalent: "")
+        modelsMenu.target = self
+        applicationMenu.addItem(modelsMenu)
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit Stark", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         applicationItem.submenu = applicationMenu
@@ -2562,6 +2584,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
             engine: engine, updater: updater, install: { [weak self] in self?.showInstall() },
+            manage: { [weak self] in self?.showModels() },
             run: { [weak self] in self?.run() }, console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
             .onChange(of: updater.message) { [weak self] _, _ in
@@ -2641,13 +2664,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func showInstall() {
         dismissMenu()
-        if installWindow == nil { installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine), resizable: false) }
+        if installWindow == nil {
+            installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine, manage: { [weak self] in self?.showModels() }), resizable: false)
+        }
         present(installWindow)
+    }
+
+    @objc private func showModels() {
+        dismissMenu()
+        engine.requestModelFamilies()
+        if modelsWindow?.isVisible != true {
+            let view = ModelsView(engine: engine,
+                                  onDone: { [weak self] in self?.modelsWindow?.close() },
+                                  onRun: { [weak self] identifier in self?.runSavedModel(identifier) })
+            if let modelsWindow = modelsWindow {
+                modelsWindow.contentViewController = NSHostingController(rootView: view)
+            } else {
+                modelsWindow = window(title: "Stark — Manage Models", view: view, resizable: false)
+                modelsWindow?.delegate = self
+            }
+        }
+        present(modelsWindow)
+    }
+
+    private func runSavedModel(_ identifier: String) {
+        guard engine.runModel(id: identifier) else { return }
+        modelsWindow?.close()
+        showPrompt()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSWindow, closing === modelsWindow else { return }
+        engine.cancelModelCatalog()
     }
 
     private func showPrompt() {
         dismissMenu()
-        if promptWindow == nil { promptWindow = window(title: "Stark — Playground", view: PlaygroundView(engine: engine, connection: { [weak self] in self?.showConnection() }), resizable: true) }
+        if promptWindow == nil {
+            promptWindow = window(title: "Stark — Playground",
+                                  view: PlaygroundView(engine: engine,
+                                                       connection: { [weak self] in self?.showConnection() },
+                                                       manage: { [weak self] in self?.showModels() }), resizable: true)
+        }
         present(promptWindow)
     }
 

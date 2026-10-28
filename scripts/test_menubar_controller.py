@@ -24,6 +24,12 @@ DRIVER = r"""
 
 extension EngineController {
     static func exercise(_ scenario: String, backendError: String) -> Bool {
+        let previousSelectedModel = UserDefaults.standard.object(forKey: "selectedModel")
+        defer {
+            if let previousSelectedModel = previousSelectedModel {
+                UserDefaults.standard.set(previousSelectedModel, forKey: "selectedModel")
+            } else { UserDefaults.standard.removeObject(forKey: "selectedModel") }
+        }
         let engine = EngineController()
         let pipe = Pipe()
         engine.input = pipe.fileHandleForWriting
@@ -60,6 +66,10 @@ extension EngineController {
             pipe.fileHandleForReading.availableData.split(separator: 10).map {
                 try! JSONSerialization.jsonObject(with: Data($0)) as! [String: Any]
             }
+        }
+        func noCommandSent() -> Bool {
+            var descriptor = pollfd(fd: pipe.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            return Darwin.poll(&descriptor, 1, 0) == 0
         }
         func staged() -> [String] {
             try! FileManager.default.contentsOfDirectory(atPath: engine.attachmentStaging!.root.path)
@@ -294,6 +304,59 @@ extension EngineController {
             let inventory = ModelsInventory(models: models, loadedID: "", registry: nil)
             return inventory.groups.map(\.name) == ["Base", "Model 2", "Model 10"] &&
                 inventory.groups[0].models.map(\.id) == ["compact", "bf16", "larger", "unknown"]
+        case "saved-row-run-private-id":
+            engine.models = [
+                InstalledModel(id: "model-a", name: "Same name", path: "/private/model-a", apiID: "owner/Same"),
+                InstalledModel(id: "model-b", name: "Same name", path: "/private/model-b", apiID: "owner/Same")
+            ]
+            engine.selectedID = "model-a"; engine.loadedID = "model-a"
+            guard engine.runModel(id: "model-b") else { return false }
+            let request = command()
+            guard request["command"] as? String == "run", request["model_id"] as? String == "model-b",
+                  request["mode"] as? String == "decision", engine.selectedID == "model-b",
+                  UserDefaults.standard.string(forKey: "selectedModel") == "model-b",
+                  engine.state == "loading", !engine.modelReady else { return false }
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "model-a"])
+            guard !engine.modelReady else { return false }
+            engine.apply(["event": "ready", "mode": "decision", "model_id": "model-b"])
+            return engine.modelReady && engine.loadedID == "model-b"
+        case "saved-row-run-guards":
+            engine.models = [
+                InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
+                InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")
+            ]
+            engine.messages = [ChatMessage(text: "synthetic retained turn", isUser: true)]
+            engine.state = "generating"
+            guard !engine.runModel(id: "other"), engine.selectedID == "fixture-model", engine.state == "generating",
+                  engine.messages.count == 1 else { return false }
+            engine.state = "ready"
+            guard !engine.runModel(id: "missing"), engine.selectedID == "fixture-model", engine.modelReady,
+                  engine.messages.count == 1 else { return false }
+            return noCommandSent()
+        case "saved-row-run-already-loaded":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.models = [
+                InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current"),
+                InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")
+            ]
+            engine.selectedID = "other"
+            engine.messages = [ChatMessage(text: "synthetic retained turn", isUser: true)]
+            engine.supportsImages = true; engine.imageVerification = "locally_tested"
+            guard !engine.modelReady, engine.runModel(id: "fixture-model") else { return false }
+            return engine.modelReady && engine.loadedID == "fixture-model" && engine.messages.count == 1 &&
+                engine.supportsImages && engine.imageVerification == "locally_tested" && noCommandSent()
+        case "saved-row-run-mode-mismatch":
+            engine.mode = .chat; engine.loadedMode = .decision
+            engine.models = [InstalledModel(id: "fixture-model", name: "Current", path: "/private/current", apiID: "current")]
+            engine.messages = [ChatMessage(text: "synthetic previous turn", isUser: true)]
+            guard engine.runModel(id: "fixture-model") else { return false }
+            let request = command()
+            return request["model_id"] as? String == "fixture-model" && request["mode"] as? String == "chat" &&
+                engine.state == "loading" && !engine.modelReady && engine.messages.isEmpty
+        case "saved-row-run-unavailable-runtime":
+            engine.models = [InstalledModel(id: "other", name: "Other", path: "/private/other", apiID: "other")]
+            engine.input = nil
+            return !engine.runModel(id: "other") && engine.state == "error" && !engine.modelReady && noCommandSent()
         case "models-artifact-mode-label":
             let descriptor = InstalledModelDisplay(modelDisplay())
             let models = [
@@ -1339,6 +1402,27 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_saved_name_sort_matches_visible_rows_after_group_filtering(self):
         self.exercise("models-visible-row-name-sort")
+
+    def test_saved_row_run_uses_private_id_for_duplicate_names_and_loads_that_model(
+        self,
+    ):
+        self.exercise("saved-row-run-private-id")
+
+    def test_saved_row_run_rejects_busy_or_removed_rows_without_changing_selection(
+        self,
+    ):
+        self.exercise("saved-row-run-guards")
+
+    def test_running_the_loaded_row_preserves_its_conversation_and_image_capabilities(
+        self,
+    ):
+        self.exercise("saved-row-run-already-loaded")
+
+    def test_saved_row_run_reloads_when_the_loaded_mode_differs(self):
+        self.exercise("saved-row-run-mode-mismatch")
+
+    def test_saved_row_run_reports_send_failure_without_becoming_ready(self):
+        self.exercise("saved-row-run-unavailable-runtime")
 
     def test_grouped_text_and_image_variants_have_distinct_stored_mode_label(self):
         self.exercise("models-artifact-mode-label")

@@ -39,7 +39,10 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
 
-**Models…** opens a model browser. Search and sort settings are separate for
+**Manage Models**, beside the model dropdown in the menu and Playground, opens
+the model browser in its own window. The same button appears in the install
+dialog. **Install Model** opens only the install dialog, without opening model
+management. Search and sort settings are separate for
 **On this Mac**, the family overview and a family's detail view. Search filters
 the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
@@ -47,8 +50,12 @@ current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
 **On this Mac** shows compact rows with the saved name, quantization, file size,
-repo link and removal button on one line. Multiple saved variants keep a shared
-model heading. Hover a row for its family, source version and image support when
+repo link, **Run** and removal button on one line. **Run** selects that exact saved
+version, loads it in the current Chat or Decision mode and opens the Playground.
+An already-running model in that mode opens without reloading or clearing its
+conversation. Run is unavailable while another app operation is busy. Multiple
+saved variants keep a shared model heading. Hover a row for its family, source
+version and image support when
 available. Sort by model name A–Z or Z–A, or total disk
 size ascending or descending. Saved versions with a recorded source repository
 also have a **link** beside the file size; local imports can use their conversion

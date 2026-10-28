@@ -2,8 +2,8 @@
 
 Stark uses one family registry for conversion coverage, intended application
 modes and early installation checks. The converter CLI and **Model families**
-tab in the menu bar app's **Models…** view consume that registry. A family entry describes
-implemented paths and constraints; a source preflight checks selected checkpoint
+tab in the menu bar app's **Manage Models** window consume that registry. A family
+entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
 Neither result establishes that a complete model has loaded or executed. Exact
@@ -13,7 +13,9 @@ authority for live API and image capabilities.
 
 ## Browsing and removing models
 
-The app's **Models…** view lists application model families. Search filters the
+The app's **Manage Models** window lists application model families. Its buttons
+beside the menu/Playground model dropdown and in the install dialog open it
+explicitly; opening Install Model does not open it. Search filters the
 current view immediately and does not trigger another Hugging Face request.
 Search text is transient; sort choices persist independently for **On this Mac**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
@@ -66,7 +68,11 @@ a candidate. Offline and failed discovery have fixed messages and can be retried
 **On this Mac** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
 standalone entry with its stored name. Compact rows place the saved name,
-quantization, stored weight-file size, repo link and removal control on one line.
+quantization, stored weight-file size, repo link, Run and removal controls on one line.
+Run resolves the current saved private ID, selects it and opens the Playground in
+the current app mode. Busy or stale rows cannot start a run. A model already
+ready in that mode is reused. Closing the management window cancels catalogue
+browsing without stopping the loaded model.
 Multiple versions retain a shared model heading. Row help retains the family,
 image support and full source revision when known; removal confirmations also
 include image support and the short source version. Matrix representation is
