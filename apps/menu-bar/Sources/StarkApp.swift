@@ -973,7 +973,14 @@ final class EngineController: ObservableObject {
         if loadedMode == nil && (state == "loading" || state == "stopping") { return selectedID }
         return loadedID
     }
-    var activeName: String { models.first { $0.id == loadedID }?.name ?? "No model running" }
+    var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
+    var activeName: String { activeModel?.name ?? "No model running" }
+    var activeVersionDetails: String {
+        guard let display = activeModel?.display else { return "" }
+        return [display.quantization,
+                display.weightBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) }]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
     var canAttachImage: Bool { modelReady && supportsImages && conversationImage == nil }
     var imageVerificationNote: String {
         switch imageVerification {
@@ -1713,6 +1720,20 @@ struct SpeedView: View {
     }
 }
 
+struct RunningModelLabel: View {
+    @ObservedObject var engine: EngineController
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(engine.activeName).lineLimit(1).truncationMode(.middle)
+            if !engine.activeVersionDetails.isEmpty {
+                Text(engine.activeVersionDetails).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle).frame(maxWidth: 160, alignment: .leading)
+                    .layoutPriority(1)
+            }
+        }.accessibilityElement(children: .combine)
+    }
+}
+
 struct MenuView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var updater: AppUpdateController
@@ -1728,7 +1749,7 @@ struct MenuView: View {
                 }
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Stark").font(.headline)
-                    Text(engine.activeName).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    RunningModelLabel(engine: engine).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -2382,7 +2403,7 @@ struct PlaygroundView: View {
             }
             StatusLine(engine: engine)
             HStack {
-                Text(engine.activeName).font(.callout.weight(.medium)).lineLimit(1).truncationMode(.middle)
+                RunningModelLabel(engine: engine).font(.callout.weight(.medium))
                 Spacer(minLength: 0)
                 Button("Manage Models", action: manage).controlSize(.small).fixedSize()
                 if !engine.loadedID.isEmpty || engine.busy {

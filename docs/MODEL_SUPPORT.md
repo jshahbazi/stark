@@ -18,6 +18,8 @@ in the menu, Playground and install dialog open it explicitly; the menu and
 Playground use it to select and run models instead of model dropdowns. Opening
 Install Model does not open management. Search filters the
 current view immediately and does not trigger another Hugging Face request.
+The menu and Playground show the running private version's saved name,
+quantization and stored weight-file size. Missing metadata is omitted.
 Search text is transient; sort choices persist independently for **On this Mac**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The

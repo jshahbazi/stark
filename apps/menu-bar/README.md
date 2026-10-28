@@ -41,8 +41,9 @@ The source tabs start with **Hugging Face**, selected by default, followed by
 
 **Manage Models** in the menu and Playground opens the model browser in its own
 window. These views show the running model's name and use management to choose
-and run a model. The same button appears in the install
-dialog. **Install Model** opens only the install dialog, without opening model
+and run a model. Its quantization and stored weight-file size appear beside the
+name when recorded, so saved versions can be distinguished. The same button
+appears in the install dialog. **Install Model** opens only the install dialog, without opening model
 management. Search and sort settings are separate for
 **On this Mac**, the family overview and a family's detail view. Search filters
 the visible rows immediately; family search uses the current catalogue and does

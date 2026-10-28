@@ -529,6 +529,29 @@ extension EngineController {
                 idle.otherGroups.flatMap({ $0.models.map(\.id) }) == idle.groups.flatMap({ $0.models.map(\.id) }) &&
                 missing.runningGroup == nil && missing.otherGroups.flatMap({ $0.models.map(\.id) }) ==
                     idle.otherGroups.flatMap({ $0.models.map(\.id) })
+        case "running-model-version-details-identity":
+            let full = InstalledModel(id: "full", name: "Same name", path: "/private/full", apiID: "owner/Same",
+                                      display: InstalledModelDisplay(modelDisplay()))
+            var compactDisplay = modelDisplay(); compactDisplay["quantization"] = "4-bit"
+            compactDisplay["weight_bytes"] = Int64(400_000_000)
+            let compact = InstalledModel(id: "compact", name: "Same name", path: "/private/compact", apiID: "owner/Same",
+                                         display: InstalledModelDisplay(compactDisplay))
+            engine.models = [full, compact]
+            engine.selectedID = compact.id; engine.loadedID = full.id
+            guard engine.activeModel?.id == full.id, engine.activeName == full.name,
+                  engine.activeVersionDetails == "BF16 · " + ByteCountFormatter.string(fromByteCount: 1_190_000_000, countStyle: .file)
+            else { return false }
+            engine.selectedID = full.id; engine.loadedID = compact.id
+            guard engine.activeModel?.id == compact.id,
+                  engine.activeVersionDetails == "4-bit · " + ByteCountFormatter.string(fromByteCount: 400_000_000, countStyle: .file)
+            else { return false }
+            engine.loadedID = "missing"
+            guard engine.activeModel == nil, engine.activeName == "No model running", engine.activeVersionDetails.isEmpty
+            else { return false }
+            engine.loadedID = compact.id
+            engine.apply(["event": "status", "state": "idle", "message": "Stopped"])
+            return engine.selectedID == full.id && engine.activeModel == nil &&
+                engine.activeName == "No model running" && engine.activeVersionDetails.isEmpty
         case "image-catalog-stale-family":
             engine.requestModelCatalog(familyID: "qwen3")
             let first = command()
@@ -1550,6 +1573,11 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_running_section_respects_search_and_is_absent_without_active_model(self):
         self.exercise("models-running-extraction-search-and-idle")
+
+    def test_running_model_version_uses_loaded_private_identity_and_clears_on_stop(
+        self,
+    ):
+        self.exercise("running-model-version-details-identity")
 
     def test_saved_row_run_uses_private_id_for_duplicate_names_and_loads_that_model(
         self,
