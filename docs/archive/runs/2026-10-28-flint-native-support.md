@@ -6,6 +6,8 @@ Base commit: `018f89c5028d871c16914107e5b5578a42452380`
 
 Branch: `codex/recursive-flint`
 
+Host: Apple M5 Max, 128 GiB RAM, macOS 26.7.1.
+
 ## Scope
 
 This record covers native Rust/Metal execution of Recursive Flint and the
@@ -20,6 +22,18 @@ The official MLX INT4 checkpoint is `RecursiveSI/flint-int4` at revision
 `3b93f9053b530488405ae9fca51d4900d6ce21f0`; its five Safetensors shards total
 22,568,912,600 bytes. The native forward is an independent implementation
 based on the pinned reference. It does not run upstream Python or MLX.
+
+An independent source comparison also checked
+[llama.cpp's Flint forward](https://github.com/ggml-org/llama.cpp/blob/ac8e1694d837b11ed0aab944a6a2eee34b9c4d80/src/models/flint.cpp)
+at `ac8e1694d837b11ed0aab944a6a2eee34b9c4d80` and
+[SGLang's Flint forward](https://github.com/sgl-project/sglang/blob/5ac32ada54371cf24525dfeeb814b3e432df6eb9/python/sglang/srt/models/flint.py)
+at `5ac32ada54371cf24525dfeeb814b3e432df6eb9`. QK normalization order,
+split-half rotary encoding, sink normalization, routing, shared-expert scaling
+and dense-layer placement agree with the implemented contract. Every required
+native tensor name is present in the five pinned INT4 headers. This is static
+source review, separate from numerical execution checks. Extreme routing-score
+clamps and floating-point tie order can differ between runtimes; the numerical
+oracle here is Recursive's implementation with the documented F32 policy.
 
 ## Engine validation
 
@@ -68,10 +82,38 @@ Python suite passed 4,962 tests with 88 skips; one unchanged failure was the
 RSS sampler in `test_benchmark.py`. Rerunning all 61 benchmark tests in
 isolation passed. Repository policy, Ruff, and formatting checks passed.
 Clippy passed with warnings denied for both workers and all targets, including
-the scorer's `optimized` features. The full official-checkpoint native smoke
-test remains pending.
-The official checkpoint download was still in progress when this record was
-written; no full-checkpoint execution result is claimed.
+the scorer's `optimized` features.
+
+## Official INT4 checkpoint
+
+All five downloaded weight shards match the expected sizes and SHA-256 values
+in Recursive's
+[pinned Apple Silicon manifest](https://github.com/recursive-oss/rec/blob/0e3150ca4262f572dee25c231d9ac7148414d2af/packaging/flint-int4-mlx.json).
+The preserved weights total 22,568,912,600 bytes. The completed prepared folder
+passes the desktop import validator and loads the upstream chat template.
+Prepared configuration SHA-256 is
+`06271655d67c1ce5cfc08ccc771faaddcc1a1c9719b3b2c499ddae1c1aa8cef0`.
+
+The full checkpoint passed a native worker smoke test on the final binaries
+listed above:
+
+- Generation consumed an 11-token prompt and sampled eight tokens, ending at
+  the requested length. Total generation duration was 2.943396083 seconds,
+  including prompt processing. This is a short execution check, not a decode
+  throughput benchmark.
+- Repeating generation after an invalid request produced exactly the same
+  completion. Completion SHA-256 is
+  `c0d1648b2a70fb1759c32f8ee446fb7a6063b1846076453bb0ba8b965a2a4e6d`.
+- Scoring returned finite candidate logits and normalized probabilities. An
+  identical immediately consecutive request hit the existing scoring cache.
+- Both workers exited cleanly. Prompts, completions, token vectors and logits
+  were not printed or committed.
+
+This establishes loading and bounded generation/scoring execution for the
+pinned official INT4 export. Full-checkpoint numerical parity, answer quality,
+long-context behavior, sustained throughput and the official BF16 checkpoint
+remain unqualified. Preparation receipts continue to describe download
+provenance; this validation record is separate from those receipts.
 
 ## Fix during validation
 
