@@ -50,6 +50,32 @@ Model weights, private fixtures, runtime executables, and host application archi
 
 ## Naming and compatibility
 
+The native hybrid text path separately implements GLM5-Next and Qwen4-Exp.
+GGUF quantization block layouts, IQ codebooks, transformed GLM tensors and
+absorbed MLA follow `ggml-org/llama.cpp` revision
+`8ca4060b7e30e76baaa5670ee1ec1b760b7f8552`; its complete MIT license is retained
+in `LICENSE.ggml-hybrid`. The Rust and Metal implementations preserve that
+attribution and do not link to a llama.cpp runtime.
+
+The Qwen4-Exp algorithm adaptation follows PipeNetwork's Apache-2.0 implementation,
+repository revision `0352280b927a731fd35276ac622ef2f28da5c936`, and its model
+module in `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` at
+`b2c422f3c643e36f04227a64d61796b44a4b1029`. The inspected Python source SHA-256 is
+`6fae4ec0decbf77ca4a4571de683bc5580ec75e84325ecb432dfcd2fc81df75e`.
+`LICENSE.qwen38-reference` preserves the full license; the engine package declares
+the combined MIT and Apache-2.0 licensing, and the distribution notice collector
+copies both added notices. These are source adaptations with separate validation
+records. They do not change the preserved Uzu source-bound evidence.
+
+The GLM reference validator uses Transformers revision
+`95bafdcccfffe17ec383999fc39273867b11385e`, modeling source SHA-256
+`7870e7ce6ca477d26de3ec79b31d41553b75a09a726c661f04c2e26e790bdf36`.
+The Qwen validator runs the pinned PipeNetwork model module with the repository's
+locked MLX comparison environment. These Python runtimes are validation tools;
+native loading and execution do not import them. Model weights and synthetic
+reference captures remain ignored. The supported checkpoint identities and
+precision policy are recorded in [native hybrid models](../docs/NATIVE_HYBRID_MODELS.md).
+
 The Rust workspace contains only the `stark-engine`, `stark-engine-macros`, `stark-score` and `stark-generate` crates. These upstream identifiers are kept on purpose:
 
 - Uzu Git history, upstream license, revision metadata and original patch hashes.

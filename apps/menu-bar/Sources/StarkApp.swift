@@ -407,6 +407,8 @@ struct ModelFamily: Identifiable {
         case "qwen3": return "Qwen3"
         case "qwen2": return "Qwen2"
         case "qwen3_5": return "Qwen3.5"
+        case "qwen4_exp": return "Qwen3.8 Flash Next"
+        case "glm5_next": return "GLM-5.3 Flash"
         case "llama": return "Llama"
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
@@ -2254,7 +2256,7 @@ struct InstallView: View {
                 Text("Local Folder").tag("local")
             }.pickerStyle(.segmented).onChange(of: kind) { source = ""; engine.resetInstallProgress(kind: kind) }.disabled(engine.busy)
             if kind == "local" {
-                Text("Choose a converted Stark model or a supported Safetensors checkpoint folder. Converted models stay in the selected folder; keep that folder available.")
+                Text("Choose a prepared Stark model folder or a supported checkpoint folder. Imported models stay in the selected folder; keep that folder available.")
                     .font(.callout).foregroundStyle(.secondary)
                 HStack {
                     Text(source.isEmpty ? "No folder selected" : source).lineLimit(2).truncationMode(.middle)

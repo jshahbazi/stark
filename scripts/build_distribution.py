@@ -509,6 +509,8 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
     notices.mkdir()
     for name in (
         "LICENSE",
+        "LICENSE.ggml-hybrid",
+        "LICENSE.qwen38-reference",
         "provenance/UPSTREAM.md",
         "tools/converter/LICENSE.lalamo",
         "vendor/cxx/LICENSE-MIT",

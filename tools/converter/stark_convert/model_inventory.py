@@ -11,6 +11,7 @@ import struct
 from pathlib import Path
 
 from ._build_metadata import open_regular
+from .hybrid_prepare import prepared_identity
 from .model_support import normalize_architecture
 from .streaming import authorize_source_path
 
@@ -224,6 +225,18 @@ def model_display(model):
         "artifact_mode": mode if isinstance(mode, str) and mode in {"text", "vision-language"} else "text",
     }
     root = Path(os.path.abspath(model["path"]))
+    hybrid = prepared_identity(root)
+    if hybrid is not None:
+        repo = hybrid["repo"]
+        result.update(
+            group_id="repo:" + repo,
+            group_name=repo.split("/")[-1],
+            family_id=hybrid["architecture"],
+            quantization=hybrid["quantization"],
+            weight_bytes=hybrid["weight_bytes"],
+            source_revision=hybrid["revision"],
+        )
+        return result
     try:
         result["weight_bytes"], result["quantization"] = _weights(root)
     except Exception:

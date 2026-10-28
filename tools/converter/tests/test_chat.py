@@ -95,6 +95,36 @@ def test_bad_metadata_and_sandbox(model):
         template.render(messages=[])
 
 
+def test_template_loopcontrols_compile_and_run(model):
+    (model / "config.json").write_text(
+        json.dumps(
+            {
+                "token_codec_config": {
+                    "type": "ChatCodecConfig",
+                    "prompt_template": (
+                        "{% for item in messages %}"
+                        "{% if item == 'skip' %}{% continue %}{% endif %}"
+                        "{% if item == 'stop' %}{% break %}{% endif %}"
+                        "{{ item }}{% endfor %}"
+                    ),
+                }
+            }
+        )
+    )
+    _, template = load_template(model)
+    assert template.render(messages=["a", "skip", "b", "stop", "unreachable"]) == "ab"
+
+
+def test_template_syntax_error_is_content_free(model):
+    private_source = "{% break %} private template detail"
+    (model / "config.json").write_text(
+        json.dumps({"token_codec_config": {"type": "ChatCodecConfig", "prompt_template": private_source}})
+    )
+    with pytest.raises(ChatError, match="Cannot read chat metadata") as error:
+        load_template(model)
+    assert private_source not in str(error.value)
+
+
 def test_worker_real_pipes_timeout_and_cleanup(tmp_path):
     executable = tmp_path / "fake worker"
     executable.write_text(

@@ -4,6 +4,11 @@
 
 ## Interactive CLI chat
 
+GLM-5.3-Flash UD-Q2_K_XL and Qwen3.8-Flash-Next mixed 4/8-bit use the
+[native hybrid loader](NATIVE_HYBRID_MODELS.md). Their prepared original-format
+folders use this same text protocol, sampling, cancellation and fresh-request
+state policy. Their initial native implementation is text-only.
+
 The installed bundle includes a terminal chat client built on the worker:
 
 ```sh

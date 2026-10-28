@@ -33,6 +33,7 @@ from .chat import (
 )
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
+from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
 from .model_inventory import model_display
@@ -81,6 +82,12 @@ def terminate(process):
 
 
 def model_valid(path):
+    if prepared_identity(path) is not None:
+        try:
+            load_template(path)
+            return True
+        except Exception:
+            return False
     if not path.is_dir() or not all((path / name).is_file() for name in MODEL_FILES):
         return False
     try:
@@ -959,7 +966,8 @@ class Desktop:
             name = path.name
             converted = model_valid(path)
             try:
-                is_stark = "decoder_config" in read_model_config(path)
+                local_config = read_model_config(path)
+                is_stark = "decoder_config" in local_config or "stark_native_hybrid" in local_config
             except Exception:
                 is_stark = False
             if is_stark and not converted:
