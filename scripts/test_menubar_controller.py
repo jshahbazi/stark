@@ -211,10 +211,13 @@ extension EngineController {
         case "models-empty-state":
             let inventory = ModelsInventory(models: [], loadedID: "missing", registry: nil)
             guard inventory.models.isEmpty, inventory.families == nil,
-                  ModelsSheetTab.initial == .onThisMac,
-                  ModelsSheetTab.onThisMac.title(modelCount: 0) == "On this Mac (0)",
-                  ModelsSheetTab.onThisMac.emptyTitle == "No models yet",
-                  ModelsSheetTab.onThisMac.emptyMessage == "Install a model to add it here." else { return false }
+                  ModelsSheetTab.initial == .installed,
+                  ModelsSheetTab.allCases == [.installed, .download, .installModel],
+                  ModelsSheetTab.installed.title(modelCount: 0) == "Installed (0)",
+                  ModelsSheetTab.download.title(modelCount: 0) == "Download",
+                  ModelsSheetTab.installModel.title(modelCount: 0) == "Install Model",
+                  ModelsSheetTab.installed.emptyTitle == "No models yet",
+                  ModelsSheetTab.installed.emptyMessage == "Install a model to add it here." else { return false }
             var registry = familyRegistry()
             registry["families"] = [[String: Any]]()
             guard let parsed = ModelFamilyRegistry(registry) else { return false }
@@ -847,6 +850,29 @@ extension EngineController {
             var item = catalogItem(); item["installed_ids"] = ["downloaded"]
             engine.apply(catalogReply(refresh, items: [item]))
             return engine.catalogItemIsDownloaded(engine.catalog!.items[0], artifactMode: .text)
+        case "catalog-install-survives-browser-cancel":
+            var callbacks = 0; engine.onInstalled = { callbacks += 1 }
+            engine.requestModelCatalog(familyID: "qwen3")
+            let browse = command(); engine.apply(catalogReply(browse))
+            engine.installCatalogItem(id: "entry", artifactMode: .text)
+            let install = command()
+            engine.apply(["event": "progress", "phase": "download", "state": "running",
+                          "completed_bytes": Int64(10), "total_bytes": Int64(20)])
+            engine.cancelModelCatalog()
+            guard engine.catalog == nil, engine.catalogFamilyID == nil, !engine.catalogLoading,
+                  engine.catalogInstallation != nil, engine.busy, engine.state == "installing",
+                  engine.downloadProgress.state == "running", engine.downloadProgress.completedBytes == 10,
+                  noCommandSent() else { return false }
+            engine.apply(catalogReply(browse))
+            guard engine.catalog == nil, engine.catalogInstallation != nil else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.busy else { return false }
+            engine.apply(["event": "installed", "support_request_id": install["support_request_id"]!, "model": ["id": "downloaded"]])
+            let cleanup = command()
+            return cleanup["command"] as? String == "catalog_cancel" &&
+                cleanup["request_id"] as? String == browse["request_id"] as? String &&
+                engine.catalogInstallation == nil && engine.catalog == nil && callbacks == 0 &&
+                engine.selectedID == "fixture-model" && engine.loadedID == "fixture-model" && engine.modelReady
         case "catalog-install-stale-error":
             engine.requestModelCatalog(familyID: "qwen3")
             let browse = command(); engine.apply(catalogReply(browse))
@@ -1676,6 +1702,11 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_catalog_install_retains_selection_and_browser_after_terminal_status(self):
         self.exercise("catalog-install-selection")
+
+    def test_catalog_install_survives_leaving_browser_and_cleans_up_after_completion(
+        self,
+    ):
+        self.exercise("catalog-install-survives-browser-cancel")
 
     def test_catalog_install_errors_require_current_request_and_clear_on_reset(self):
         self.exercise("catalog-install-stale-error")

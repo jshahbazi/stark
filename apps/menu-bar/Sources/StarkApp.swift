@@ -727,17 +727,38 @@ struct ModelRemovalConfirmation: Identifiable {
 }
 
 enum ModelsSheetTab: String, CaseIterable {
-    case onThisMac, availableFamilies
-    static let initial = Self.onThisMac
+    case installed, download, installModel
+    static let initial = Self.installed
 
     func title(modelCount: Int) -> String {
-        self == .onThisMac ? "On this Mac (\(modelCount))" : "Model families"
+        switch self {
+        case .installed: return "Installed (\(modelCount))"
+        case .download: return "Download"
+        case .installModel: return "Install Model"
+        }
     }
 
-    var emptyTitle: String { self == .onThisMac ? "No models yet" : "No families available" }
-    var emptyMessage: String {
-        self == .onThisMac ? "Install a model to add it here." : "No model families are available in this version of Stark."
+    var emptyTitle: String {
+        switch self {
+        case .installed: return "No models yet"
+        case .download: return "No families available"
+        case .installModel: return "Install a model"
+        }
     }
+    var emptyMessage: String {
+        switch self {
+        case .installed: return "Install a model to add it here."
+        case .download: return "No model families are available in this version of Stark."
+        case .installModel: return "Choose a repository or local folder."
+        }
+    }
+}
+
+final class ModelManagementState: ObservableObject {
+    @Published var tab = ModelsSheetTab.initial
+    @Published var installKind = "huggingface"
+    @Published var installSource = ""
+    @Published var visionConversion = false
 }
 
 struct ModelsInventory {
@@ -1737,7 +1758,6 @@ struct RunningModelLabel: View {
 struct MenuView: View {
     @ObservedObject var engine: EngineController
     @ObservedObject var updater: AppUpdateController
-    let install: () -> Void
     let manage: () -> Void
     let console: () -> Void
     let connection: () -> Void
@@ -1761,11 +1781,9 @@ struct MenuView: View {
                 Text("Last request").font(.caption2).foregroundStyle(.secondary)
                     .padding(.top, -10)
             }
-            HStack {
-                Button(engine.state == "installing" ? "Installation Progress…" : "Install Model…", action: install)
-                    .disabled(engine.busy && engine.state != "installing")
-                Spacer()
-                if engine.busy || !engine.loadedID.isEmpty {
+            if engine.busy || !engine.loadedID.isEmpty {
+                HStack {
+                    Spacer()
                     Button("Stop", action: engine.stop).disabled(engine.state == "stopping")
                 }
             }
@@ -1818,9 +1836,9 @@ struct InstallStageView: View {
 
 struct ModelsView: View {
     @ObservedObject var engine: EngineController
+    @ObservedObject var navigation: ModelManagementState
     let onDone: () -> Void
     let onRun: (String) -> Void
-    @State private var tab = ModelsSheetTab.initial
     @State private var selectedFamily: ModelsInventory.Family?
     @State private var artifactChoices: [String: ModelArtifactMode] = [:]
     @State private var removalConfirmation: ModelRemovalConfirmation?
@@ -1838,7 +1856,7 @@ struct ModelsView: View {
     }
 
     private var browserScope: ModelBrowserScope {
-        selectedFamily != nil ? .catalog : (tab == .onThisMac ? .saved : .families)
+        selectedFamily != nil ? .catalog : (navigation.tab == .installed ? .saved : .families)
     }
 
     private var catalogItems: [FamilyModelCatalog.Item] {
@@ -1891,78 +1909,83 @@ struct ModelsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 12) {
-                if let family = selectedFamily {
+                if navigation.tab == .download, let family = selectedFamily {
                     Button { leaveFamily() } label: { Label("Back", systemImage: "chevron.left") }.buttonStyle(.link)
                     Text(family.name).font(.title2.weight(.semibold))
                 } else { Text("Manage Models").font(.title2.weight(.semibold)) }
                 Spacer(minLength: 0)
             }
-            if selectedFamily == nil { Picker("Models", selection: $tab) {
+            Picker("Models", selection: $navigation.tab) {
                 ForEach(ModelsSheetTab.allCases, id: \.self) { choice in
                     Text(choice.title(modelCount: engine.models.count)).tag(choice)
                 }
-            }.pickerStyle(.segmented).labelsHidden() }
-            else {
-                Picker("Quantization", selection: quantizationBinding) {
-                    ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
-                }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
-            }
-            HStack(spacing: 10) {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(searchPrompt, text: queryBinding).textFieldStyle(.roundedBorder)
-                    .accessibilityLabel(searchPrompt)
-                if !queryBinding.wrappedValue.isEmpty {
-                    Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
-                        .buttonStyle(.plain).foregroundStyle(.secondary).help("Clear search").accessibilityLabel("Clear search")
+            }.pickerStyle(.segmented).labelsHidden()
+            if navigation.tab == .installModel {
+                InstallView(engine: engine, kind: $navigation.installKind, source: $navigation.installSource,
+                            visionConversion: $navigation.visionConversion)
+            } else {
+                if selectedFamily != nil {
+                    Picker("Quantization", selection: quantizationBinding) {
+                        ForEach(quantizationTabs, id: \.self) { choice in Text(choice.title).tag(choice) }
+                    }.pickerStyle(.segmented).labelsHidden().accessibilityLabel("Model quantization")
                 }
-                Picker("Sort", selection: sortBinding) {
-                    ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
-                }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
-            }
-            ScrollView {
-                if let family = selectedFamily { catalogContent(family) }
-                else if tab == .onThisMac {
-                    if engine.models.isEmpty { emptyState(tab) }
-                    else if inventory.groups.isEmpty { noSearchResults("No matching models") }
-                    else {
-                        LazyVStack(alignment: .leading, spacing: 4) {
-                            if let active = inventory.runningGroup {
-                                Text(engine.state == "loading" ? "Starting" : (engine.state == "stopping" ? "Stopping" : "Running"))
-                                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
-                                modelGroup(active)
-                                if !inventory.otherGroups.isEmpty {
-                                    Divider().padding(.vertical, 10)
-                                    Text("Other models").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
-                                }
-                            }
-                            ForEach(inventory.otherGroups) { group in modelGroup(group) }
-                        }
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    TextField(searchPrompt, text: queryBinding).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel(searchPrompt)
+                    if !queryBinding.wrappedValue.isEmpty {
+                        Button { queryBinding.wrappedValue = "" } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary).help("Clear search").accessibilityLabel("Clear search")
                     }
-                } else if let families = inventory.families {
-                    if families.isEmpty { emptyState(tab) }
-                    else if visibleFamilies(families).isEmpty { noSearchResults("No matching families") }
-                    else { LazyVStack(spacing: 4) {
-                        ForEach(visibleFamilies(families)) { family in
-                            Button {
-                                selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
-                                engine.requestModelCatalog(familyID: family.id)
-                            } label: {
-                                HStack {
-                                    Text(family.name).font(.callout.weight(.medium))
-                                    Spacer(minLength: 0)
-                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                                }.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
-                                .padding(.horizontal, 12)
-                                .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
-                                .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
-                            }.buttonStyle(.plain).accessibilityLabel("Browse \(family.name) models")
-                        }
-                    } }
-                } else {
-                    Text("Available families will appear when Stark is ready.")
-                        .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
+                    Picker("Sort", selection: sortBinding) {
+                        ForEach(browserScope.sorts, id: \.self) { Text($0.title).tag($0) }
+                    }.labelsHidden().frame(width: 178).accessibilityLabel("Sort models")
                 }
-            }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                ScrollView {
+                    if let family = selectedFamily { catalogContent(family) }
+                    else if navigation.tab == .installed {
+                        if engine.models.isEmpty { emptyState(navigation.tab) }
+                        else if inventory.groups.isEmpty { noSearchResults("No matching models") }
+                        else {
+                            LazyVStack(alignment: .leading, spacing: 4) {
+                                if let active = inventory.runningGroup {
+                                    Text(engine.state == "loading" ? "Starting" : (engine.state == "stopping" ? "Stopping" : "Running"))
+                                        .font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
+                                    modelGroup(active)
+                                    if !inventory.otherGroups.isEmpty {
+                                        Divider().padding(.vertical, 10)
+                                        Text("Other models").font(.caption.weight(.semibold)).foregroundStyle(.secondary).padding(.bottom, 4)
+                                    }
+                                }
+                                ForEach(inventory.otherGroups) { group in modelGroup(group) }
+                            }
+                        }
+                    } else if let families = inventory.families {
+                        if families.isEmpty { emptyState(navigation.tab) }
+                        else if visibleFamilies(families).isEmpty { noSearchResults("No matching families") }
+                        else { LazyVStack(spacing: 4) {
+                            ForEach(visibleFamilies(families)) { family in
+                                Button {
+                                    selectedFamily = family; artifactChoices = [:]; catalogQuery = ""; catalogQuantization = .all
+                                    engine.requestModelCatalog(familyID: family.id)
+                                } label: {
+                                    HStack {
+                                        Text(family.name).font(.callout.weight(.medium))
+                                        Spacer(minLength: 0)
+                                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                                    }.frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                                    .padding(.horizontal, 12)
+                                    .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 7))
+                                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(.quaternary, lineWidth: 1))
+                                }.buttonStyle(.plain).accessibilityLabel("Browse \(family.name) models")
+                            }
+                        } }
+                    } else {
+                        Text("Available families will appear when Stark is ready.")
+                            .foregroundStyle(.secondary).frame(maxWidth: .infinity, minHeight: 300)
+                    }
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
             if let installation = engine.catalogInstallation {
                 VStack(alignment: .leading, spacing: 9) {
                     HStack {
@@ -1979,11 +2002,34 @@ struct ModelsView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let error = engine.removalError { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            if engine.catalogInstallation == nil && (engine.busy || engine.state == "error") { StatusLine(engine: engine) }
-            HStack { Spacer(); Button("Done", action: onDone).keyboardShortcut(.defaultAction) }
+            if navigation.tab != .installModel && engine.catalogInstallation == nil {
+                if engine.busy || engine.state == "error" { StatusLine(engine: engine) }
+                if engine.state == "installing" {
+                    HStack {
+                        Button("Show Installation Progress") { navigation.tab = .installModel }
+                        Spacer()
+                        Button("Cancel Installation", action: engine.stop)
+                    }
+                }
+            }
+            HStack {
+                if navigation.tab == .installModel && engine.state == "installing" && engine.catalogInstallation == nil {
+                    Button("Cancel Installation", action: engine.stop)
+                }
+                Spacer()
+                Button("Done", action: onDone).keyboardShortcut(navigation.tab == .installModel ? nil : .defaultAction)
+                if navigation.tab == .installModel {
+                    Button("Install") {
+                        engine.install(source: navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines),
+                                       kind: navigation.installKind, artifactMode: navigation.visionConversion ? "vision-language" : nil)
+                    }.buttonStyle(.borderedProminent)
+                        .disabled(navigation.installSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
         }.padding(24).frame(width: 640, height: 580)
-            .onAppear { tab = .initial; selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
-            .onChange(of: tab) { leaveFamily() }
+            .onAppear { selectedFamily = nil; artifactChoices = [:]; catalogQuantization = .all }
+            .onChange(of: navigation.tab) { leaveFamily() }
             .onChange(of: quantizationTabs) {
                 guard !engine.catalogLoading, engine.catalog?.status == .ready,
                       engine.catalog?.familyID == selectedFamily?.id else { return }
@@ -2191,25 +2237,18 @@ struct InstallSupportView: View {
 
 struct InstallView: View {
     @ObservedObject var engine: EngineController
-    let manage: () -> Void
-    @State private var kind = "huggingface"
-    @State private var source = ""
-    @State private var visionConversion = false
+    @Binding var kind: String
+    @Binding var source: String
+    @Binding var visionConversion: Bool
     var body: some View {
         ScrollView { form }
-            .frame(width: 470, height: 650)
-            .onAppear { engine.resetInstallProgress(kind: kind) }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .onChange(of: source) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
             .onChange(of: visionConversion) { if !engine.busy { engine.resetInstallProgress(kind: kind) } }
     }
 
     private var form: some View {
         VStack(alignment: .leading, spacing: 18) {
-            HStack {
-                Text("Install a model").font(.title2.weight(.semibold))
-                Spacer()
-                Button("Manage Models", action: manage).controlSize(.small)
-            }
             Picker("Source", selection: $kind) {
                 Text("Hugging Face").tag("huggingface")
                 Text("Local Folder").tag("local")
@@ -2240,27 +2279,18 @@ struct InstallView: View {
             }
             Text("Models stay on this Mac. Conversion may take several minutes.")
                 .font(.caption).foregroundStyle(.secondary)
-            if let report = engine.installSupportReport { InstallSupportView(report: report) }
-            VStack(spacing: 14) {
-                InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
-                InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
-            }
-            .padding(14)
-            .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
-            if engine.state == "installing" || engine.state == "error" { StatusLine(engine: engine) }
-            if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
-            Spacer(minLength: 0)
-            HStack {
-                if engine.state == "installing" { Button("Cancel Installation", action: engine.stop) }
-                Spacer()
-                Button("Install") {
-                    engine.install(source: source.trimmingCharacters(in: .whitespacesAndNewlines), kind: kind,
-                                   artifactMode: visionConversion ? "vision-language" : nil)
+            if engine.catalogInstallation == nil {
+                if let report = engine.installSupportReport { InstallSupportView(report: report) }
+                VStack(spacing: 14) {
+                    InstallStageView(title: "Download", phase: "download", progress: engine.downloadProgress)
+                    InstallStageView(title: "Conversion", phase: "conversion", progress: engine.conversionProgress)
                 }
-                    .buttonStyle(.borderedProminent).disabled(source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || engine.busy)
-                    .keyboardShortcut(.defaultAction)
+                .padding(14)
+                .background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 10))
+                if engine.state == "installing" || engine.state == "error" { StatusLine(engine: engine) }
+                if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             }
-        }.padding(24)
+        }
     }
 }
 
@@ -2573,12 +2603,12 @@ private final class MenuPanel: NSPanel {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let engine = EngineController()
+    private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
     private let menuPanel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var localMenuMonitor: Any?
     private var globalMenuMonitor: Any?
-    private var installWindow: NSWindow?
     private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
@@ -2628,7 +2658,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
-            engine: engine, updater: updater, install: { [weak self] in self?.showInstall() },
+            engine: engine, updater: updater,
             manage: { [weak self] in self?.showModels() },
             console: { [weak self] in self?.showPrompt() },
             connection: { [weak self] in self?.showConnection() })
@@ -2637,7 +2667,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 13))
             .clipShape(RoundedRectangle(cornerRadius: 13)))
-        engine.onInstalled = { [weak self] in self?.installWindow?.orderOut(nil); self?.showPrompt() }
         engine.start()
         updater.startAutomaticChecks()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
@@ -2708,18 +2737,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func showInstall() {
-        dismissMenu()
-        if installWindow == nil {
-            installWindow = window(title: "Stark — Install Model", view: InstallView(engine: engine, manage: { [weak self] in self?.showModels() }), resizable: false)
-        }
-        present(installWindow)
+        presentModels(tab: .installModel)
     }
 
     @objc private func showModels() {
+        presentModels()
+    }
+
+    private func presentModels(tab: ModelsSheetTab? = nil) {
         dismissMenu()
+        if let tab = tab { modelManagement.tab = tab }
+        else if modelsWindow?.isVisible != true { modelManagement.tab = .initial }
         engine.requestModelFamilies()
         if modelsWindow?.isVisible != true {
-            let view = ModelsView(engine: engine,
+            let view = ModelsView(engine: engine, navigation: modelManagement,
                                   onDone: { [weak self] in self?.modelsWindow?.close() },
                                   onRun: { [weak self] identifier in self?.runSavedModel(identifier) })
             if let modelsWindow = modelsWindow {

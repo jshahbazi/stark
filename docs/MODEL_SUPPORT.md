@@ -1,7 +1,7 @@
 # Model-family support and installation preflight
 
 Stark uses one family registry for conversion coverage, intended application
-modes and early installation checks. The converter CLI and **Model families**
+modes and early installation checks. The converter CLI and **Download**
 tab in the menu bar app's **Manage Models** window consume that registry. A family
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
@@ -13,14 +13,15 @@ authority for live API and image capabilities.
 
 ## Browsing and removing models
 
-The app's **Manage Models** window lists application model families. Its buttons
-in the menu, Playground and install dialog open it explicitly; the menu and
-Playground use it to select and run models instead of model dropdowns. Opening
-Install Model does not open management. Search filters the
+The app's **Manage Models** window has **Installed**, **Download** and
+**Install Model** tabs. Buttons in the menu and Playground open it to select and
+run models; Command-I selects Install Model in the same window. The install form
+keeps its source and options when switching tabs. Active progress and cancellation
+remain accessible, and completion stays in management. Search filters the
 current view immediately and does not trigger another Hugging Face request.
 The menu and Playground show the running private version's saved name,
 quantization and stored weight-file size. Missing metadata is omitted.
-Search text is transient; sort choices persist independently for **On this Mac**,
+Search text is transient; sort choices persist independently for **Installed**,
 the family overview and family detail. The saved-model view sorts by name A–Z or
 Z–A, or total disk bytes from its visible versions ascending or descending. The
 family overview sorts by name A–Z or Z–A; family detail sorts by name in either
@@ -68,7 +69,7 @@ are shown as BF16, the native output format; packed tensor counts are not shown
 as logical parameter counts. Missing metadata can leave a size unknown or omit
 a candidate. Offline and failed discovery have fixed messages and can be retried.
 
-**On this Mac** groups saved versions by their bound,
+**Installed** groups saved versions by their bound,
 unambiguous source repository; local or incomplete metadata falls back to a
 standalone entry with its stored name. Compact rows place the saved name,
 quantization, stored weight-file size, repo link, Run/Stop and removal controls on

@@ -34,24 +34,34 @@ uv run --no-project --python 3.13.13 python -m unittest scripts.test_app_update 
 
 ## Models and requests
 
-**Install Model** accepts a local folder or a Hugging Face repository name or URL such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model is registered in place; a supported local checkpoint is converted offline; a Hugging Face checkpoint is downloaded and converted. Supported models are governed by the [converter](../../tools/converter/README.md). The install dialog shows Download and Conversion progress; **Stop** cancels; **Installation Progress** in the menu and Command-I reopen the dialog.
+**Manage Models** contains three tabs: **Installed**, **Download** and
+**Install Model**. Installed lists saved versions; Download browses model families;
+Install Model accepts a local folder or a Hugging Face repository name or URL
+such as `Qwen/Qwen3-0.6B`. A folder that already contains a converted Stark model
+is registered in place; a supported local checkpoint is converted offline; a
+Hugging Face checkpoint is downloaded and converted. Supported models are
+governed by the [converter](../../tools/converter/README.md). The third tab shows
+Download and Conversion progress; **Cancel Installation** cancels. Command-I
+opens that tab in the same window.
 
 The source tabs start with **Hugging Face**, selected by default, followed by
 **Local Folder**.
 
-**Manage Models** in the menu and Playground opens the model browser in its own
-window. These views show the running model's name and use management to choose
+**Manage Models** in the menu and Playground opens the shared management window.
+These views show the running model's name and use management to choose
 and run a model. Its quantization and stored weight-file size appear beside the
-name when recorded, so saved versions can be distinguished. The same button
-appears in the install dialog. **Install Model** opens only the install dialog, without opening model
-management. Search and sort settings are separate for
-**On this Mac**, the family overview and a family's detail view. Search filters
+name when recorded, so saved versions can be distinguished. Installation uses
+the third tab. Entered source and image options remain in memory when switching
+tabs or reopening the window. Switching tabs preserves an active installation;
+its progress and cancellation remain accessible. Completion stays in management.
+Search and sort settings are separate for
+**Installed**, the Download family overview and a family's detail view. Search filters
 the visible rows immediately; family search uses the current catalogue and does
 not fetch from Hugging Face again while you type. Search text stays within the
 current browsing session. Sort choices are remembered between app launches.
 The family overview uses compact, full-width rows in a single column.
 
-**On this Mac** shows compact rows with the saved name, quantization, file size,
+**Installed** shows compact rows with the saved name, quantization, file size,
 repo link, **Run** or **Stop**, and removal button on one line. **Run** selects
 that exact saved version and loads it in the current Chat or Decision mode while
 keeping management open. The active model's button becomes **Stop**; starting a
@@ -67,7 +77,7 @@ available. Sort by model name A–Z or Z–A, or total disk
 size ascending or descending. Saved versions with a recorded source repository
 also have a **link** beside the file size; local imports can use their conversion
 receipt to identify that source. Models without a known repository omit the link.
-In **Model families**, model cards group size and
+In **Download**, model cards group size and
 quantization choices into compact rows. Choose a family, filter its model cards,
 then choose a row and **Download**.
 Inside a family, the tabs at the top switch between **All models** and each
@@ -80,7 +90,7 @@ When text and image artifacts are both offered, choose which to install. Sort
 the family overview by name A–Z or Z–A; family detail sorts by name in either
 direction or model size ascending or descending. Unknown numeric values stay last
 in either direction. Download and preparation progress
-stay in the browser. A completed download appears in **On this Mac** without
+stay in the browser. A completed download appears in **Installed** without
 selecting it; choose it and **Run** when ready. Some image installations stop
 the running model for their required local checks.
 
@@ -94,7 +104,7 @@ them. Browsing reads metadata only. Stark checks the selected model again before
 downloading weights and uses that row's exact source version. **Back** or
 **Done** leaves the browser; **Stop** cancels an active installation.
 
-Use a model's trash button in **On this Mac** to review its removal. **Move to
+Use a model's trash button in **Installed** to review its removal. **Move to
 Trash** removes an owned model folder from Stark and puts its files in macOS
 Trash. Imported folders and paths Stark cannot establish as exclusively owned
 offer **Remove from Stark**, which leaves their files in place. The confirmation

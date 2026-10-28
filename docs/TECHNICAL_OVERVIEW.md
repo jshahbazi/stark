@@ -109,8 +109,11 @@ Search queries are local and transient; sort preferences are persisted separatel
 for the saved-model list, family overview and family detail. Typing in a search
 field does not issue another catalogue request.
 
-The app delegate owns the independent Manage Models window. Explicit management
-buttons open it; Install Model has no management-sheet binding. The menu and
+The app delegate owns the shared Manage Models window and its navigation/install
+draft state. Installed, Download and Install Model share this window; Command-I
+selects its install tab. Tab changes retain the form and active installation
+without resetting progress. Completion does not navigate to the Playground.
+Explicit management buttons open the window. The menu and
 Playground show the running name and open management instead of model pickers.
 Saved-row Run uses a live private-ID lookup before selecting the model and
 sending the existing `run` command. It inherits the current app mode, rejects
