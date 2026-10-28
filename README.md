@@ -11,6 +11,7 @@
 
 <p align="center">
   <a href="#quickstart">Get started</a> ·
+  <a href="#supported-model-families">Models</a> ·
   <a href="#measured-performance">Benchmarks</a> ·
   <a href="#developing-stark">Developers</a> ·
   <a href="docs/README.md">Documentation</a> ·
@@ -61,7 +62,18 @@ The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG 
 
 ## Models and application integration
 
-The [converter guide](tools/converter/README.md#catalog-coverage-and-qualification) lists supported families and formats, including selected Qwen, Llama, Gemma, LFM2 and other architectures, and existing MLX 4/8-bit checkpoints, which are repacked without requantization. For a complete downloaded or merged fine-tuned checkpoint:
+### Supported model families
+
+| Path | Implemented families | Scope |
+| --- | --- | --- |
+| Text conversion | Qwen2, Qwen3 dense, Qwen3.5 dense, Llama, Mistral, Gemma 2, Gemma 3 text, Phi-3, Granite, SmolLM3, LFM2, LLaMBA | Supported Safetensors configurations and tensor layouts; selected families also accept existing MLX affine 4/8-bit weights. |
+| Native original-format execution | GLM-5.3-Flash, Qwen3.8-Flash-Next, Recursive Flint | Separate Rust/Metal paths with [pinned GGUF or MLX checkpoints and preparation commands](docs/NATIVE_HYBRID_MODELS.md). See [Flint setup and limits](docs/FLINT.md). |
+| Image input | Qwen3.5 dense BF16 | Compatible models and merged fine-tunes require reviewed processing metadata and automatic local image checks. |
+| Classifier conversion | ModernBERT | Classifier artifacts only; the app has no ModernBERT chat, Decision or image workflow. |
+
+Family support describes implemented code paths. Each checkpoint needs compatible metadata and tensors and a successful native load; quality, throughput and Decision calibration require separate validation. These are source-tree capabilities; installed releases may contain an earlier set of families.
+
+The [converter guide](tools/converter/README.md#catalog-coverage-and-qualification) details formats and checkpoint coverage. Existing supported MLX 4/8-bit weights are repacked without requantization. For a complete downloaded or merged fine-tuned checkpoint:
 
 ```sh
 stark convert /absolute/path/to/checkpoint --metadata-profile hf-generic \
