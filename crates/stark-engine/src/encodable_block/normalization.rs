@@ -5,11 +5,11 @@ use crate::{
     array::size_for_shape,
     backends::common::{
         Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding,
-        kernel::{Kernels, NormalizationKernel},
+        kernel::{Kernels, NormalizationKernel, ReferenceRMSBF16Kernel},
     },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
-    parameters::{ParameterLoaderError, ParameterTree},
+    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
 };
 
 // TODO: clean up
@@ -46,6 +46,7 @@ pub struct Normalization<B: Backend> {
     post_layer_scalar_value: f32,
     data_type: DataType,
     kernel: <B::Kernels as Kernels>::NormalizationKernel,
+    reference: Option<<B::Kernels as Kernels>::ReferenceRMSBF16Kernel>,
 }
 
 impl<B: Backend> Normalization<B> {
@@ -63,6 +64,28 @@ impl<B: Backend> Normalization<B> {
             ShortcutMode::None => (false, false),
             ShortcutMode::Copy => (true, false),
             ShortcutMode::Add => (true, true),
+        };
+        let reference = if parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+            if data_type != DataType::BF16
+                || config.subtract_mean
+                || config.has_biases
+                || !config.has_scale
+                || config.upcast_mode != UpcastMode::FullLayer
+                || hadamard_factors.is_some()
+                || post_layer_scalar != PostLayerScalar::None
+                || element_count < 16
+                || !element_count.is_multiple_of(16)
+            {
+                return Err(NormalizationNewError::Backend(
+                    crate::backends::common::InvalidInput("unsupported reference BF16 RMS configuration").into(),
+                ));
+            }
+            Some(
+                <B::Kernels as Kernels>::ReferenceRMSBF16Kernel::new(context, false, copy_to_shortcut, residual_add)
+                    .map_err(NormalizationNewError::Backend)?,
+            )
+        } else {
+            None
         };
 
         let scales = config
@@ -109,6 +132,7 @@ impl<B: Backend> Normalization<B> {
             post_layer_scalar_value,
             data_type,
             kernel,
+            reference,
         })
     }
 
@@ -126,6 +150,24 @@ impl<B: Backend> Normalization<B> {
         let row_offset_bytes = row_offset as usize * row_size;
         let shortcut = shortcut.map(|shortcut| shortcut.subrange_mut(row_offset_bytes..));
         let mut output = command_buffer.allocate_scratch_for_shape(&[row_count, self.element_count], self.data_type)?;
+        if let Some(reference) = &self.reference {
+            reference.encode(
+                Some(input.subrange(row_offset_bytes..)),
+                self.scales.as_ref().unwrap(),
+                &mut output,
+                shortcut,
+                row_count,
+                self.element_count,
+                self.element_count,
+                self.epsilon,
+                self.scale_offset.unwrap_or(0.0),
+                0,
+                1,
+                command_buffer,
+            );
+            command_buffer.pop_debug_group();
+            return Ok(output);
+        }
         self.kernel.encode(
             Some(input.subrange(row_offset_bytes..)),
             self.scales.as_ref(),

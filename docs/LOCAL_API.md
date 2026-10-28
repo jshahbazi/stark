@@ -1,6 +1,6 @@
 # Stark local API
 
-The menu bar application serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It covers text chat completions, buffered or streamed, through one loaded model. It is not a hosted service: it binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
+The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
 
 ## Connection and authentication
 
@@ -17,7 +17,7 @@ Request rules enforced before any endpoint runs:
 - The `Host` header must name `127.0.0.1`, `localhost` or `::1`.
 - Requests carrying an `Origin` header are rejected, so browser pages and webviews cannot use the API. `OPTIONS` preflight returns 501 because there is no CORS handler.
 - Duplicate `Host` or `Authorization` headers are rejected.
-- Bodies are limited to 1 MiB, must carry exactly one `Content-Length`, and must not use `Transfer-Encoding`. When `Content-Type` is present it must be `application/json`. JSON with duplicate keys, `NaN` or infinities is rejected.
+- Text-only request bodies are limited to 1 MiB. When `capabilities.images` is true, a request containing an image part may use up to 6 MiB; text-only bodies remain limited to 1 MiB. Every request must carry exactly one `Content-Length` and must not use `Transfer-Encoding`. When `Content-Type` is present it must be `application/json`. JSON with duplicate keys, `NaN` or infinities is rejected.
 
 Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except the connection-limit response described under [limits](#limits-queueing-and-cancellation). Stark writes no access log and never logs prompts, replies or keys.
 
@@ -29,17 +29,33 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | `GET /v1/capabilities` | The same status document |
 | `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running in Chat mode |
 | `GET /v1/models/{id}` | The matching running model, or 404 |
-| `POST /v1/chat/completions` | One text completion, buffered or streamed |
+| `POST /v1/chat/completions` | One text completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
 
-Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length` and `max_output_tokens`. Embeddings, the Responses API, image input, structured output, tool and function calls, and batching are not available.
+Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length` and `max_output_tokens`. Embeddings, the Responses API, structured output, tool and function calls, and batching are not available.
 
 Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
+
+## Image qualification
+
+`capabilities.images` becomes true after the live worker passes one of two host evidence paths. The status document's `image_verification` identifies the result:
+
+| Value | Meaning |
+| --- | --- |
+| `reference_verified` | The schema-2 `mediaref-v1` contract matches a passed external execution record for the exact artifact, worker and runtime. |
+| `locally_tested` | The admitted family passed bounded local text/image, token-accounting, recoverable-error and cleanup checks, or reused an identical private receipt. |
+| `unverified` | No passing evidence is active; images are disabled. |
+
+The host checks all five loaded file hashes—weights, config, tokenizer, processor and template—plus the worker executable hash, Metal device properties and current macOS version. It hashes the executable before launch and again when readiness arrives. Local receipts also bind the checker, Python/dependency versions, actual family/schema versions, admitted vocabulary and image limits. Installation metadata cannot enable the capability. Native readiness reports `qualified: false` because the host supplies the evidence decision. See the [family contract and cache rules](VISION_FAMILY_CONTRACT.md).
+
+The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains the developer `5fc92516…` and Developer ID signed `741a3ea7…` worker tuples for the same BF16 Qwen3.5 artifact on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Their records bind the [developer execution evidence](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker evidence](archive/runs/2026-10-27-qwen35-signed-worker.md). The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers that delivered GUI. Public notarized distribution remains pending. A rebuilt, signed or modified worker requires matching reference evidence or fresh local checks. `locally_tested` does not assert reference parity or visual accuracy for a fine-tune.
 
 ## Chat completions
 
 Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user` and `metadata`. Unknown fields are rejected.
 
-**Model and messages.** `model` may be omitted, or may be the running model's public ID, installed name or previous private library ID; any other value returns 404 `model_not_found`. `messages` must be non-empty. Roles `system`, `developer` (normalised to `system`), `user` and `assistant` are accepted. Content is a string or an array of `{"type":"text","text":"..."}` parts, which are concatenated. An optional `name` of up to 64 ASCII characters is validated and ignored. Assistant messages may carry `reasoning_content` as a string, which is passed to the chat template; Stark 0.4.0 and earlier reject that field. Tool and function-call fields are rejected. The model's chat template renders the conversation; a template that rejects the messages returns 400 `invalid_messages`.
+**Model and messages.** `model` may be omitted, or may be the running model's public ID, installed name or previous private library ID; any other value returns 404 `model_not_found`. `messages` must be non-empty. Roles `system`, `developer` (normalised to `system`), `user` and `assistant` are accepted. Content is a string or an array of ordered parts. Text parts use `{"type":"text","text":"..."}`. When `capabilities.images` is true, one user message may also include `{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`; `detail` may be omitted or set to `auto`. The URL must be an inline canonical Base64 PNG or JPEG data URL; remote URLs and image parts on non-user roles are rejected. Only one image is accepted per request. Image bytes are passed to the worker separately from the rendered prompt, which receives only an image placeholder. An optional `name` of up to 64 ASCII characters is validated and ignored. Assistant messages may carry `reasoning_content` as a string, which is passed to the chat template; Stark 0.4.0 and earlier reject that field. Tool and function-call fields are rejected. The model's chat template renders the conversation; a template that rejects the messages returns 400 `invalid_messages`.
+
+The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. The engine transport has a wider 20 MiB file limit, but the HTTP service applies its 4 MiB cap before staging. The parser does not decode pixels in Python; the native processor applies its source dimension, source pixel, processed pixel, patch and image-token limits. See the [request parser](../tools/converter/stark_convert/api_request.py), [image validator](../tools/converter/stark_convert/media.py) and [worker qualification gate](../tools/converter/stark_convert/vision_runtime.py).
 
 **Output limit.** `max_tokens` and `max_completion_tokens` are aliases; supply at most one. The default is the smaller of 512 and the model's limit. Requests may go up to the model's limit, which is capped at 4,096 and shown as `max_output_tokens` in `/v1/models`; a larger value returns 400 rather than being clamped. `n` must be 1. A completion that reaches the output or context limit reports `finish_reason: "length"`.
 
@@ -53,10 +69,13 @@ Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_t
 
 - The server accepts at most 16 concurrent connections. Excess connections receive a bare 429 with `Retry-After: 1` and no `X-Request-Id` header.
 - One completion runs at a time. Up to eight more wait in FIFO order; a ninth receives 429 `queue_full`, and a queued request that waits more than 30 seconds receives 429 `queue_timeout`.
-- Each request has a 300-second deadline from the time its body is read; reaching it returns 504 `request_timeout`.
+- After its body has been read and parsed, each completion has a 300-second deadline covering queueing and execution; reaching it returns 504 `request_timeout`.
 - The handler polls the client connection every 50 ms while a request runs. A closed connection cancels the native generation at the next safe boundary and, when a response can still be written, returns 499 `request_cancelled`. Closing only the write side of the socket counts as a disconnect.
 - Stopping or changing the model in Stark fails waiting and running requests with 503 `model_changed`; cancellation and deadlines keep the model loaded.
 - The body limit and the worker's own 1 MiB request line are separate. Worker requests include the rendered prompt (system prompt, template framing and all messages) or token IDs, JSON encoding and the terminating newline. A request that exceeds this encoded line limit returns 400 `request_too_large` before writing that request to the worker. The model stays loaded, and a shorter conversation can be retried.
+- The server reserves declared raw body bytes against a shared 24 MiB pending-body budget before reading. It holds that reservation through completion and releases it on success, parse failure, disconnect or cancellation. This bounds concurrent request bodies, not total process RSS: JSON parsing and decoded image bytes add memory beyond the raw-body reservation.
+- The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
+- Image preparation, generation, streaming reads, frame writes and discard share one worker transaction deadline, with a 300-second default. The timeout does not reset for each operation. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
 Each request is tokenized and prefilled from scratch by the worker; there is no prompt or prefix cache between requests.
 
@@ -71,14 +90,16 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN` or infinity |
 | 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
 | 400 | `invalid_messages` | The chat template rejected the messages |
+| 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
 | 400 | `request_too_large` | Rendered worker request exceeds the 1 MiB encoded line limit |
 | 401 | `invalid_api_key` | Missing or wrong bearer key |
 | 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
 | 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |
-| 413 | `body_too_large` | Body above 1 MiB |
+| 413 | `body_too_large` | Body exceeds the active body cap: 1 MiB normally, or 6 MiB when image capability is enabled |
+| 413 | `image_too_large` | Decoded image exceeds the 4 MiB service limit |
 | 415 | `unsupported_media_type` | `Content-Type` other than `application/json` |
-| 429 | `server_busy`, `queue_full`, `queue_timeout` | Connection limit, queue limit, or queue wait expired |
+| 429 | `server_busy`, `queue_full`, `queue_timeout`, `body_budget_full` | Connection limit, queue limit, queue wait expired, or shared pending raw-body budget reached |
 | 499 | `request_cancelled` | Client disconnected |
 | 503 | `model_not_loaded`, `model_changed`, `server_stopped`, `server_shutdown`, `request_stopped`, `streaming_unavailable`, `stop_sequences_unavailable`, `generation_failed` | No model in Chat mode, model stopped or changed, Stark quitting, worker lacks a capability, or native generation failed |
 | 504 | `request_timeout` | 300-second deadline reached |
@@ -86,7 +107,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 
 ## Client compatibility
 
-Clients must send authenticated requests from native or backend code on the same Mac and use the text-only subset above. The following were checked against the published 0.3.0 bridge and worker on 2026-10-23 ([record](archive/runs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md)):
+Clients must send authenticated requests from native or backend code on the same Mac and stay within the capabilities shown by `/v1/capabilities`. The client checks below validated the text subset against the published 0.3.0 bridge and worker on 2026-10-23 ([record](archive/runs/LOCAL_API_CLIENT_VALIDATION_2026_10_23.md)); they do not qualify image input:
 
 | Client | Configuration | Result |
 | --- | --- | --- |
@@ -99,4 +120,4 @@ A client appearing here does not mean its agents, tools or other workflows are s
 
 ## Compatibility boundary
 
-The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to text templates, a single model and a bounded worker. Client libraries that require tools, multimodal content, JSON-schema output, embeddings, the Responses API, batching or vendor-specific sampling fields need a configuration that stays within the text-only subset.
+The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, tools, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported.

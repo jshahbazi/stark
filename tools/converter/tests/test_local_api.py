@@ -485,13 +485,25 @@ class LocalAPITest(unittest.TestCase):
             first = threading.Thread(target=lambda: self.request_to(info, {}), daemon=True)
             first.start()
             self.assertTrue(entered.wait(2))
+            # The server rejects at accept time, before parsing headers or
+            # reading a request body. Use the HTTP Expect handshake so the
+            # client waits for that early response instead of racing a body
+            # write against the server's intentional close.
+            port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
             try:
-                self.request_to(info, {})
-                self.fail("capacity request unexpectedly succeeded")
-            except urllib.error.HTTPError as error:
-                status, headers = error.code, error.headers
-            self.assertEqual(status, 429)
-            self.assertEqual(headers.get("Retry-After"), "1")
+                connection.putrequest("POST", "/v1/chat/completions")
+                connection.putheader("Authorization", "Bearer " + info["api_key"])
+                connection.putheader("Content-Type", "application/json")
+                connection.putheader("Content-Length", "2")
+                connection.putheader("Expect", "100-continue")
+                connection.endheaders()
+                response = connection.getresponse()
+                self.assertEqual(response.status, 429)
+                self.assertEqual(response.headers.get("Retry-After"), "1")
+                response.read()
+            finally:
+                connection.close()
         finally:
             release.set()
             api.close()

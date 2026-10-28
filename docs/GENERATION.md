@@ -1,6 +1,6 @@
 # Text generation
 
-`stark-generate` is the native text generation worker. It loads one converted language model and serves tokenize, decode and generate requests over a private JSON-lines protocol. The calling application renders the chat template, owns tools and the agent loop, and sends either the rendered prompt or token IDs. Conventions shared with the scoring worker (framing, readiness, error classes, privacy) are in [worker protocols](WORKER_PROTOCOLS.md).
+`stark-generate` is the native generation worker. It loads one converted model and serves tokenize, decode and generate requests over a private JSON-lines protocol. Its Qwen3.5 vision path accepts one private image-file reference through a prepared-image transaction. Image availability depends on the host evidence described under [image qualification](#image-qualification), including automatic local checks for the [supported model family](VISION_FAMILY_CONTRACT.md). The calling application renders the chat template, owns tools and the agent loop, and sends either the rendered prompt or token IDs. Conventions shared with the scoring worker (framing, readiness, error classes, privacy) are in [worker protocols](WORKER_PROTOCOLS.md).
 
 ## Interactive CLI chat
 
@@ -15,23 +15,37 @@ From a source checkout, build the worker first and use the launcher, which runs 
 ```sh
 cargo build --release --locked -p stark-generate
 ./scripts/stark chat --model-path /absolute/path/to/converted-model
+./scripts/stark chat --model-path /absolute/path/to/converted-model --image /absolute/path/to/image.png
 ```
 
-The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Nothing is written to disk.
+The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
+| `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
 | `--context-tokens N` | smaller of 8192 and the worker limit | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
-| `--timeout SECONDS` | 300 | Maximum wait for each worker reply, including startup |
+| `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
 Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes the same settings through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)).
 
+With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
+
+## Image qualification
+
+The [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) contains two passed schema-2 records for BF16 `Qwen/Qwen3.5-0.8B`: the developer worker `5fc92516…` and Developer ID signed worker `741a3ea7…`. Both use Metal on an Apple M5 Max with 40 GPU cores, Apple GPU family 1010 and MXU enabled, running macOS 26.7.1. Each record binds all five artifact-file hashes, the exact full executable hash, and its source-bound evidence: [developer execution](archive/runs/2026-10-26-qwen35-image-execution.md) and [signed-worker execution](archive/runs/2026-10-27-qwen35-signed-worker.md).
+
+An exact catalog match enables images with `image_verification: "reference_verified"`. The host checks the supported schema-2 transport, all five loaded file hashes, the worker executable hash, the reported Metal device properties and current macOS version. It snapshots the executable hash before launch and hashes the path again at readiness; both must match. Conversion metadata can identify a named qualified build, while serving verifies the executable being launched.
+
+The [supported family profiles](VISION_FAMILY_CONTRACT.md) also admit complete merged BF16 dense Qwen3.5 models and fine-tunes. New version-2 artifacts derive supported decoder/tower dimensions from bounded configuration; version 1 retains the fixed 0.8B graph. After native admission, the host runs bounded text, image, recovery, vocabulary accounting and cleanup checks. Passing enables images with `image_verification: "locally_tested"`. The desktop can reuse a private receipt for an identical artifact, worker, actual family/version, vocabulary, checker, dependencies, device and OS. Terminal chat runs the checks at startup without a persistent receipt. This path also serves a supported schema-2 model when its worker has no exact catalog match. Local checks do not establish reference parity or visual accuracy. Native readiness always reports `image_input.qualified: false`; the host supplies both evidence decisions.
+
+The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers the earlier exact-tuple attachment, GUI, recovery and cleanup checks. Public notarized distribution remains pending. Rebuilding or signing the worker changes its identity, requiring matching reference evidence or fresh local checks. See the [host gate](../tools/converter/stark_convert/vision_runtime.py) and [local checker](../tools/converter/stark_convert/image_checks.py).
+
 ## Private JSON-lines protocol
 
-Start the worker with exactly `--model-path PATH`, where `PATH` is a converted model directory. Models that contain a `speculator` directory are refused.
+Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport. Models that contain a `speculator` directory are refused.
 
 ### Readiness
 
@@ -51,6 +65,16 @@ On success the first line is:
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
+
+An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
+
+### Prepared image operations
+
+The owning host creates an empty mode-0700 staging directory and launches the worker with `--vision-staging-root PATH`. At startup the worker requires an absolute, owner-private directory with no entries. The host then writes mode-0600 regular files named with opaque IDs. The JSON line contains only an ID, byte length and media type; image bytes never enter worker JSON. The engine accepts PNG and JPEG up to 20 MiB compressed, while the terminal and HTTP services apply their narrower 4 MiB limit. Image processing is bounded by 32 million source pixels, a 16,384-pixel maximum source dimension, 1,048,576 processed pixels, 4,096 patches and 1,024 image tokens.
+
+The owning host sends `prepare_image` with the rendered prompt, file reference, context limit and output limit. The worker validates the opened file's owner, regular-file type, private permissions, single link, declared length, stable metadata and image signature. It immediately unlinks the name before processing and retains the opened-file lease through terminal completion. A successful prepare reply provides a single-use `prepared_id` and token counts. The host sends `generate_image` with that ID and the usual generation options, then consumes a `discard_image` reply to clear any remaining prepared state. Prepared state belongs to one loaded model and is consumed once. A different operation, request error, cancellation, process failure or explicit discard clears it. Each image request repeats this transaction with fresh model state.
+
+The host serializes the whole transaction and uses one deadline across frame writes, preparation, generation, streaming reads and discard; the budget does not restart for each operation. A protocol failure or expired deadline closes and reaps the worker. The host's staging cleanup removes an unclaimed file on every exit path. Worker teardown also removes remaining opaque, owner-private, single-link regular files in its pinned directory. The exact request structs and cleanup fence are in [`generation.rs`](../crates/stark-generate/src/generation.rs); the file checks and teardown are in [`media.rs`](../crates/stark-generate/src/media.rs).
 
 ### Tokenize
 
@@ -141,7 +165,7 @@ Consume every delta and the terminal reply before sending another request. The c
 
 ### Cancellation
 
-If the environment variable `STARK_CANCEL_FD` names an inherited pipe descriptor (3 or higher, a FIFO), the worker reads it for cancellation frames: eight little-endian bytes holding the `request_id` to cancel. The worker checks the pipe before allocating state and around every token. A frame matching the running request stops generation after native cleanup and returns the recoverable error `generation_cancelled`; the model stays loaded. Frames for other IDs are discarded. End of file on the pipe cancels the running request and every later one. The worker removes `STARK_CANCEL_FD` from its environment before loading the model. Without the variable, the only way to interrupt a request is to terminate the process.
+If the environment variable `STARK_CANCEL_FD` names an inherited pipe descriptor (3 or higher, a FIFO), the worker reads it for cancellation frames: eight little-endian bytes holding the `request_id` to cancel. The worker checks the pipe before allocating state and around every token. Image requests also check before and after CPU preparation and after vision work has drained, before decoder work starts. A frame matching the running request stops generation after native cleanup and returns the recoverable error `generation_cancelled`; the model stays loaded. Frames for other IDs are discarded. End of file on the pipe cancels the running request and every later one. The worker removes `STARK_CANCEL_FD` from its environment before loading the model. Without the variable, the only way to interrupt a request is to terminate the process.
 
 ### Error codes
 
@@ -149,9 +173,9 @@ Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [e
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled` |
-| Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `decoding_failed`, `cancel_channel_failed` |
-| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
+| Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `invalid_image_preparation_output`, `decoding_failed`, `cancel_channel_failed` |
+| Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
 
 A write failure on the reply pipe also ends the process with exit status 1.
 

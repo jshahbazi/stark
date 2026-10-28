@@ -115,6 +115,7 @@ fn run_prefill<T: ArrayElement>(
                 case.value_dim as u32,
                 case.suffix_len as u32,
                 qkv_stride as u32,
+                0,
                 &mut command_buffer,
             );
             <BackendKernels<Metal> as Kernels>::DeltaNetPrefillKernel::new(context, T::data_type(), HEAD_K_DIM as u32)
@@ -175,6 +176,7 @@ fn run_prefill<T: ArrayElement>(
         case.total_proj_dim as u32,
         1e-6,
         case.suffix_len as u32,
+        0,
         &mut command_buffer,
     );
     command_buffer.end_encoding().submit().wait_until_completed().unwrap();

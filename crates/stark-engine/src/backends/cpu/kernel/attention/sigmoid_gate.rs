@@ -12,6 +12,7 @@ pub fn sigmoid_gate<T: ArrayElement + Float>(
     gate_dim: u32,
     batch_dim: u32,
     gate_row_stride: u32,
+    #[specialize] reference_bf16: bool,
 ) {
     assert!(gate_dim > 0, "sigmoid gate requires nonzero gate_dim");
     assert!(gate_row_stride >= gate_dim, "sigmoid gate row stride is too small");
@@ -24,6 +25,11 @@ pub fn sigmoid_gate<T: ArrayElement + Float>(
             let gate_idx = batch_idx * gate_row_stride + gate_idx;
             let g = unsafe { (*gate.add(gate_idx)).to_f32().unwrap() };
             let sigmoid = 1.0f32 / (1.0f32 + (-g).exp());
+            let sigmoid = if reference_bf16 {
+                bf16::from_f32(sigmoid).to_f32()
+            } else {
+                sigmoid
+            };
             let out = unsafe { (*output.add(output_idx)).to_f32().unwrap() };
             unsafe { *output.add(output_idx) = T::from(out * sigmoid).unwrap() };
         }

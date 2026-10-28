@@ -466,6 +466,8 @@ def test_cli_converts_repository_names_and_urls(source, tmp_path, monkeypatch, c
     monkeypatch.setattr(huggingface_hub, "HfApi", hub.HfApi)
     monkeypatch.setattr(huggingface_hub, "list_repo_files", hub.list_repo_files)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", hub.hf_hub_download)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_url", hub.hf_hub_url)
+    monkeypatch.setattr(huggingface_hub, "get_hf_file_metadata", hub.get_hf_file_metadata)
     output = tmp_path / "output"
     options = ["--metadata-profile", "hf-generic"] if generic else []
     monkeypatch.setattr("sys.argv", ["stark-convert", value.format(repo=repo), "--output", str(output), *options])

@@ -30,7 +30,7 @@ Use an **Apple silicon Mac with macOS 26.4 or newer** in a native arm64 terminal
 
 ### Install the app
 
-Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. In the menu bar, choose **Install Model**, select a supported local folder or Hugging Face repository, then **Run** to open the chat. [Menu bar guide](apps/menu-bar/README.md)
+Download the signed, notarized `.dmg` from the [latest release](https://github.com/jshahbazi/stark/releases/latest) and open **Install Stark** when included. It replaces the running copy and launches the new app. Older DMGs use drag-and-drop: copy `Stark.app` into Applications, quit the old app, then open the installed copy. Click the cat icon and choose **Manage Models**. Use **Model Catalog** or **Add from Source** to add a model, choose **Run** in **Installed**, then **Open Playground** to chat. [Menu bar guide](apps/menu-bar/README.md)
 
 ### Install the app and terminal tools
 
@@ -55,7 +55,9 @@ Conversion downloads the model; use a new output directory each time. Chat loads
 
 ### Use Stark from another app
 
-Stark serves an OpenAI-style text-chat API for clients on the same Mac. Run a model, open **Connection Details** from Stark's menu, and paste the **Base URL**, **API key** and **Model ID** into the client's OpenAI-compatible provider settings. The key changes on every launch. Browser-origin requests, remote devices, tool calls, embeddings, images and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+Stark serves an OpenAI-style chat API for clients on the same Mac. Run a model, open **Connection Details** from Stark's menu, and paste the **Base URL**, **API key** and **Model ID** into the client's OpenAI-compatible provider settings. The key changes on every launch. Browser-origin requests, remote devices, tool calls, embeddings and structured output are unsupported. See the [local API contract](docs/LOCAL_API.md) and [tested clients](docs/LOCAL_API.md#client-compatibility).
+
+The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG through the CLI, Local API, and Swift attachments. Compatible dense Qwen3.5 BF16 models and merged fine-tunes use the [configuration-driven family contract](docs/VISION_FAMILY_CONTRACT.md), with automatic local checks before image input is enabled. Reference qualification is separately recorded for an exact 0.8B artifact, worker, device and macOS tuple. The app supports attachment selection, drop, paste, preview, removal, and image conversations.
 
 ## Models and application integration
 

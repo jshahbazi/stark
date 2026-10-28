@@ -19,10 +19,22 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .model_support import (
+    check_hub_metadata_size,
+    check_vision_processing_metadata,
+    read_metadata_bytes,
+    read_support_config,
+    require_metadata_support,
+)
 from .profiles import GENERIC_OPTIONAL, GENERIC_PROFILE, GENERIC_REQUIRED, generic_files
 from .progress import DownloadProgress, ProgressCallback, ProgressReporter, reporter
-from .registry import architecture_for_config, get_model, required_files
+from .registry import architecture_for_config, get_model
+from .registry import required_files as required_files
 from .streaming import ConversionError, UnsupportedConversion, authorize_source_path, open_regular, read_json
+from .vision_contract import REPO as VISION_REPO
+from .vision_contract import REVISION as VISION_REVISION
+from .vision_contract import source_rules
+from .vision_family import family_source_files, read_family_config
 
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _HASH = re.compile(r"[0-9a-f]{64}")
@@ -167,6 +179,10 @@ class SourceSnapshot:
     manifest: dict
 
     @property
+    def artifact_mode(self) -> str:
+        return self.manifest.get("artifact_mode", "text")
+
+    @property
     def conversion_profile(self) -> dict | None:
         return self.manifest.get("conversion_profile")
 
@@ -177,7 +193,7 @@ class SourceSnapshot:
     @property
     def config_path(self) -> Path:
         """Return the declared model config, including external source rules."""
-        entry = get_model(self.repo) if self.repo else None
+        entry = get_model(self.repo) if self.repo and self.conversion_profile is None else None
         rule = entry["files"]["model_config"] if entry else {"repo": self.repo, "filename": "config.json"}
         return self.resolve_file(rule["filename"], repo=rule["repo"])
 
@@ -193,7 +209,9 @@ class SourceSnapshot:
         raise FileNotFoundError("source_file_not_in_manifest")
 
     def _assert_selection(self) -> None:
-        entry = get_model(self.repo) if self.repo else None
+        if self.artifact_mode not in {"text", "vision-language"}:
+            raise ConversionError("Unknown source artifact mode")
+        entry = get_model(self.repo) if self.repo and self.conversion_profile is None else None
         names = tuple(
             sorted(path.relative_to(self.root).as_posix() for path in self.root.rglob("*") if path.is_file())
         )
@@ -204,11 +222,22 @@ class SourceSnapshot:
                 or not isinstance(profile, dict)
                 or set(profile) != {"architecture", "metadata_profile"}
                 or profile["metadata_profile"] != GENERIC_PROFILE
-                or architecture_for_config(read_json(self.root / "config.json")) != profile["architecture"]
+                or architecture_for_config(
+                    read_family_config(self.resolve_file("config.json"))
+                    if self.artifact_mode == "vision-language"
+                    else read_json(self.root / "config.json")
+                )
+                != profile["architecture"]
             ):
                 raise ConversionError("Generic source profile disagrees with its checkpoint")
-            rules = generic_files(self.repo, names)
+            rules = (
+                family_source_files(self.repo, names)
+                if self.artifact_mode == "vision-language"
+                else generic_files(self.repo, names)
+            )
             roles = set(GENERIC_REQUIRED) | set(GENERIC_OPTIONAL)
+            if self.artifact_mode == "vision-language":
+                roles.add("processor_config")
             actual = {
                 (record["role"], record["filename"]) for record in self.manifest["files"] if record["role"] in roles
             }
@@ -243,7 +272,7 @@ class SourceSnapshot:
         if entry is not None:
             # Sidecars can share a physical file (e.g. a JSON-field template).
             # Resolution keeps the first role in the deterministic rule order.
-            descriptors = [*required_files(entry)]
+            descriptors = [*source_rules(entry, self.artifact_mode)]
             if index_name:
                 descriptors.append({"repo": self.repo, "filename": index_name, "role": "weight_index"})
             descriptors.extend({"repo": self.repo, "filename": name, "role": "weights"} for name in selected)
@@ -329,6 +358,23 @@ class SourceSnapshot:
                     {"sources": sources, "files": files, "conversion_profile": self.conversion_profile}, sort_keys=True
                 ).encode()
             ).hexdigest()
+        if self.artifact_mode != "text":
+            result["artifact_mode"] = self.artifact_mode
+            result["source_manifest_sha256"] = hashlib.sha256(
+                json.dumps(
+                    {
+                        "sources": sources,
+                        "files": files,
+                        "artifact_mode": self.artifact_mode,
+                        **(
+                            {"conversion_profile": self.conversion_profile}
+                            if self.conversion_profile is not None
+                            else {}
+                        ),
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
         return result
 
     def write_manifest(self, path: Path) -> None:
@@ -349,17 +395,36 @@ class SourceSnapshot:
 
 
 def _replay(
-    path: Path, *, repo: str | None, revision: str | None, metadata_profile: str | None, architecture: str | None
+    path: Path,
+    *,
+    repo: str | None,
+    revision: str | None,
+    metadata_profile: str | None,
+    architecture: str | None,
+    artifact_mode: str,
 ) -> SourceSnapshot:
     manifest = read_json(path)
     try:
         schema = manifest["schema_version"]
         profile = manifest.get("conversion_profile")
-        if type(schema) is not int or schema not in {1, 2} or not isinstance(manifest["root"], str):
+        if type(schema) is not int or schema not in {1, 2, 3} or not isinstance(manifest["root"], str):
+            raise ValueError()
+        if schema in {1, 2} and ("artifact_mode" in manifest or artifact_mode != "text"):
+            raise ValueError()
+        if schema == 3 and (
+            manifest.get("artifact_mode") != "vision-language"
+            or artifact_mode != "vision-language"
+            or profile is None
+            and (
+                metadata_profile is not None
+                or manifest.get("primary_repo") != VISION_REPO
+                or manifest.get("primary_revision") != VISION_REVISION
+            )
+        ):
             raise ValueError()
         if schema == 1 and (profile is not None or metadata_profile is not None):
             raise ValueError()
-        if schema == 2 and (
+        if (schema == 2 or schema == 3 and profile is not None) and (
             not isinstance(profile, dict)
             or set(profile) != {"architecture", "metadata_profile"}
             or profile["metadata_profile"] != GENERIC_PROFILE
@@ -407,16 +472,16 @@ def _replay(
                 or any(type(number) is not int for number in record["signature"])
             ):
                 raise ValueError()
-        entry = get_model(primary) if primary else None
-        if schema == 2 and entry is not None:
+        entry = get_model(primary) if primary and profile is None else None
+        if (schema == 2 or schema == 3 and profile is not None) and entry is not None:
             raise ValueError()
         names = tuple(record["filename"] for record in manifest["files"] if record["repo"] == primary)
         rules = (
-            generic_files(
+            (family_source_files if schema == 3 else generic_files)(
                 primary, tuple(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
             )
-            if schema == 2
-            else required_files(entry)
+            if profile is not None
+            else source_rules(entry, artifact_mode)
             if entry is not None
             else (
                 {"repo": primary, "filename": name}
@@ -453,12 +518,35 @@ def resolve_source(
     hub: Any = None,
     metadata_profile: str | None = None,
     architecture: str | None = None,
+    artifact_mode: str = "text",
+    support_mode: str | None = None,
+    dtype: str = "bfloat16",
+    model_kind: str | None = None,
     progress: ProgressCallback | ProgressReporter | None = None,
 ) -> SourceSnapshot:
     """Resolve all repositories before any file downloads or conversion starts."""
     progress = reporter(progress)
     if repo is not None:
         repo = huggingface_repository(repo)
+    if artifact_mode not in {"text", "vision-language"}:
+        raise ValueError("invalid_artifact_mode")
+    if support_mode is not None and (support_mode == "vision-language") != (artifact_mode == "vision-language"):
+        raise ValueError("support_mode_artifact_mode_mismatch")
+
+    def admit(config, *, entry=None, source_repo=None):
+        primary_repo = source_repo if source_repo is not None else repo
+        mode = support_mode or (
+            "vision-language" if artifact_mode == "vision-language" and primary_repo != VISION_REPO else None
+        )
+        return require_metadata_support(
+            config,
+            mode=mode,
+            dtype=dtype,
+            model_kind=model_kind,
+            expected_architecture=architecture or (entry.get("adapter") if entry else None),
+            container=entry["container"] if entry else ".safetensors",
+        )
+
     if source_manifest is not None:
         snapshot = _replay(
             Path(source_manifest),
@@ -466,6 +554,13 @@ def resolve_source(
             revision=revision,
             metadata_profile=metadata_profile,
             architecture=architecture,
+            artifact_mode=artifact_mode,
+        )
+        selected_config = snapshot.config_path
+        admit(
+            read_support_config(selected_config, root=selected_config.parent),
+            entry=get_model(snapshot.repo) if snapshot.conversion_profile is None else None,
+            source_repo=snapshot.repo,
         )
         if progress is not None:
             progress.emit("download", "skipped", force=True)
@@ -482,6 +577,20 @@ def resolve_source(
             raise ValueError("conflicting_repository")
         repo = repository
     entry = get_model(repo) if repo else None
+    if artifact_mode == "vision-language":
+        if repo == VISION_REPO:
+            if metadata_profile is not None or revision not in {None, VISION_REVISION}:
+                raise UnsupportedConversion("Vision conversion requires the pinned official checkpoint")
+            revision = VISION_REVISION
+        else:
+            if entry is not None and entry.get("adapter") != "qwen3_5":
+                raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
+            # Vision family sources always bind their own metadata, even when
+            # the text catalog has external metadata rules for this repository.
+            entry = None
+            metadata_profile = metadata_profile or GENERIC_PROFILE
+            if architecture not in {None, "qwen3_5"}:
+                raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
     if metadata_profile not in {None, GENERIC_PROFILE} or metadata_profile is not None and entry is not None:
         raise UnsupportedConversion("Generic metadata requires an uncatalogued source")
     if repo is not None and entry is None and metadata_profile is None:
@@ -489,7 +598,7 @@ def resolve_source(
     if not local and offline:
         raise ConversionError("Offline resolution requires a source manifest")
     rules = (
-        required_files(entry)
+        source_rules(entry, artifact_mode)
         if entry is not None
         else tuple(
             {"role": role, "repo": repo, "filename": filename}
@@ -522,9 +631,34 @@ def resolve_source(
             )
             if not isinstance(resolved, str) or not _REVISION.fullmatch(resolved):
                 raise ConversionError("Repository revision is not immutable")
+            if repository == repo and revision is not None and _REVISION.fullmatch(revision) and resolved != revision:
+                raise ConversionError("Repository resolved to a different immutable revision")
+            if artifact_mode == "vision-language" and repo == VISION_REPO and resolved != VISION_REVISION:
+                raise ConversionError("Vision source resolved to a different checkpoint")
             revisions[repository] = resolved
     else:
         revisions = {repo: revision}
+    config_rule = next(rule for rule in rules if rule["role"] == "model_config")
+    if local and config_rule["repo"] == repo:
+        metadata_path = path.resolve() / _relative(config_rule["filename"])
+        metadata_root = path.resolve()
+    else:
+        repository, filename = config_rule["repo"], config_rule["filename"]
+        check_hub_metadata_size(hub, repository, filename, revisions[repository], 1024 * 1024)
+        if downloads is not None:
+            metadata_path = downloads.download(hub, repository, filename, revisions[repository])
+        else:
+            metadata_path = Path(
+                hub.hf_hub_download(
+                    repo_id=repository, filename=filename, revision=revisions[repository], local_files_only=False
+                )
+            )
+        metadata_root = metadata_path
+        for _ in _relative(filename).parts:
+            metadata_root = metadata_root.parent
+    # Reject metadata-proven exclusions before selecting or opening any primary
+    # weight payload, including catalog profiles with external model configs.
+    admit(read_support_config(metadata_path, root=metadata_root), entry=entry)
     selected = None
     if local:
         root = path.resolve()
@@ -563,9 +697,23 @@ def resolve_source(
             root = root.parent
     profile = None
     if metadata_profile == GENERIC_PROFILE:
-        rules = generic_files(repo, names)
-        detected = architecture_for_config(read_json(loader("config.json")), architecture)
+        rules = family_source_files(repo, names) if artifact_mode == "vision-language" else generic_files(repo, names)
+        config_path = authorize_source_path(root, loader("config.json"))
+        detected = architecture_for_config(
+            read_family_config(config_path) if artifact_mode == "vision-language" else read_json(config_path),
+            architecture,
+        )
+        if artifact_mode == "vision-language" and detected != "qwen3_5":
+            raise UnsupportedConversion("Vision family requires Qwen3.5 architecture")
         profile = {"architecture": detected, "metadata_profile": GENERIC_PROFILE}
+        if artifact_mode == "vision-language":
+
+            def inspect_sidecar(filename, maximum):
+                if not local:
+                    check_hub_metadata_size(hub, repo, filename, revisions[repo], maximum)
+                return read_metadata_bytes(loader(filename), root=root, maximum=maximum)
+
+            check_vision_processing_metadata(names, inspect_sidecar)
     if selected is None:
         selected, index_name = _weights(names, entry["container"] if entry else ".safetensors", loader)
     descriptors = list(rules)
@@ -616,7 +764,7 @@ def resolve_source(
     for record, signature, digest in zip(records, signatures, hashes, strict=True):
         record.update(size=signature[2], sha256=digest, signature=list(signature))
     manifest = {
-        "schema_version": 2 if profile is not None else 1,
+        "schema_version": 3 if artifact_mode == "vision-language" else 2 if profile is not None else 1,
         "root": str(root.absolute()),
         "primary_repo": repo,
         "primary_revision": revisions[repo],
@@ -628,6 +776,8 @@ def resolve_source(
     }
     if profile is not None:
         manifest["conversion_profile"] = profile
+    if artifact_mode != "text":
+        manifest["artifact_mode"] = artifact_mode
     snapshot = SourceSnapshot(root, repo, revisions[repo], manifest)
     if profile is not None:
         snapshot.assert_unchanged(verify_content=False)

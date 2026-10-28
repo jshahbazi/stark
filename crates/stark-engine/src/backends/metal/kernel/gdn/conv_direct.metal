@@ -22,6 +22,7 @@ PUBLIC KERNEL(DeltaNetConvDirect)(
     constant const uint& output_stride,
     constant const uint& state_stride,
     constant const uint& conv_dim,
+    constant const uint& reference_bf16,
     const bool has_bias SPECIALIZE,
     const uint token_idx AXIS(suffix_len + kernel_size - 1, 1),
     const uint channel_idx AXIS(row_stride, 32)
@@ -44,7 +45,8 @@ PUBLIC KERNEL(DeltaNetConvDirect)(
           : float(input[(padded_row - state_stride) * row_stride + channel_idx]);
       acc += float(weight_row[tap]) * sample;
     }
-    output[dst] = static_cast<T>(activate_silu(acc));
+    const float convolution = reference_bf16 != 0 ? float(bfloat(acc)) : acc;
+    output[dst] = static_cast<T>(activate_silu(convolution));
   } else if (channel_idx < conv_dim) {
     const uint tap = token_idx - suffix_len;
     // Small suffixes can retain history samples in their next state.

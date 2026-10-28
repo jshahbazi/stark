@@ -9,6 +9,8 @@ struct ConnectionInfo {
     let status: String
     let contextTokens: Int
     let maxNewTokens: Int
+    var images = false
+    var imageVerification = "unverified"
 
     static let usageNotes = [
         "Choose OpenAI-compatible or Custom OpenAI in your client.",
@@ -38,8 +40,10 @@ struct ConnectionInfo {
             ],
             "capabilities": [
                 "text_chat_completions": true, "streaming": true,
-                "tools": false, "images": false, "responses_api": false
+                "tools": false, "images": images && !runningModelID.isEmpty, "responses_api": false
             ],
+            "image_verification": images && !runningModelID.isEmpty && ["locally_tested", "reference_verified"].contains(imageVerification)
+                ? imageVerification : "unverified",
             "sampling_parameters": ["temperature", "top_p", "top_k", "min_p", "seed", "stop"],
             "usage_notes": Self.usageNotes,
             "running_model_curl_example": runningModelID.isEmpty ? NSNull() : curl as Any

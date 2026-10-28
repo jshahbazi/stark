@@ -27,6 +27,7 @@ PUBLIC KERNEL(DeltaNetNormGate)(
     constant const uint& total_proj_dim,
     constant const float& norm_epsilon,
     constant const uint& suffix_len,
+    constant const uint& reference_bf16,
     threadgroup float shared_scratch[32],
     const ThreadContext thread_context,
     const uint token_idx GROUPS(suffix_len),
@@ -50,6 +51,13 @@ PUBLIC KERNEL(DeltaNetNormGate)(
     float nw = float(norm_weight[tid]);
     uint z_idx = token_idx * total_proj_dim + conv_dim + hv_idx * head_v_dim + tid;
     float z_silu = activate_silu(float(in_proj[z_idx]));
-    in_out[base + tid] = static_cast<T>(o_i * inv_rms * nw * z_silu);
+    if (reference_bf16 != 0) {
+      const float normalized = float(bfloat(o_i * inv_rms));
+      const float gain = float(bfloat(nw));
+      const float affine = float(bfloat(normalized * gain));
+      in_out[base + tid] = static_cast<T>(affine * z_silu);
+    } else {
+      in_out[base + tid] = static_cast<T>(o_i * inv_rms * nw * z_silu);
+    }
   }
 }

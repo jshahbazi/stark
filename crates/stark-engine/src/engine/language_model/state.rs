@@ -30,11 +30,25 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) transformer_state: TransformerState<B>,
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
+    pub(super) multimodal_failed: bool,
+    #[cfg(test)]
+    pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
+    #[cfg(test)]
+    pub(crate) vision_prefill_layer_readbacks: Option<(usize, Box<[B::GlobalBuffer]>)>,
 }
 
 impl<B: Backend> LanguageModelState<B> {
     pub fn tokens(&self) -> &[u64] {
         &self.tokens
+    }
+
+    pub(crate) fn context_capacity(&self) -> Option<u32> {
+        self.max_context_length
+    }
+
+    #[cfg(test)]
+    pub(crate) fn vision_validation_state(&self) -> (u32, Option<i64>) {
+        (self.transformer_state.context_length(), self.transformer_state.rotary_position_delta())
     }
 }
 
@@ -92,6 +106,11 @@ impl<B: Backend> LanguageModel<B> {
             transformer_state,
             speculator_state,
             max_context_length,
+            multimodal_failed: false,
+            #[cfg(test)]
+            vision_prefill_logits_readback: None,
+            #[cfg(test)]
+            vision_prefill_layer_readbacks: None,
         })
     }
 }

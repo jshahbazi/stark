@@ -26,6 +26,7 @@ pub fn delta_net_norm_gate<T: ArrayElement + Float>(
     total_proj_dim: u32,
     norm_epsilon: f32,
     suffix_len: u32,
+    reference_bf16: u32,
 ) {
     let in_out_ptr = in_out as *const T;
     let num_v_heads = num_v_heads as usize;
@@ -51,7 +52,14 @@ pub fn delta_net_norm_gate<T: ArrayElement + Float>(
                 let norm_w = unsafe { *norm_weight.add(i) };
                 let z_idx = token * total_proj_dim + conv_dim + hv * head_v_dim + i;
                 let z_i = unsafe { (*in_proj.add(z_idx)).to_f32().unwrap() };
-                let final_val = o_i * inv_rms * norm_w * ActivationType::SILU.activate(z_i);
+                let final_val = if reference_bf16 != 0 {
+                    let normalized = bf16::from_f32(o_i * inv_rms).to_f32();
+                    let gain = bf16::from_f32(norm_w).to_f32();
+                    let affine = bf16::from_f32(normalized * gain).to_f32();
+                    affine * ActivationType::SILU.activate(z_i)
+                } else {
+                    o_i * inv_rms * norm_w * ActivationType::SILU.activate(z_i)
+                };
                 unsafe {
                     *in_out.add(base + i) = T::from(final_val).unwrap();
                 }

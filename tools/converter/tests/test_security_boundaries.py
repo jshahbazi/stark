@@ -150,10 +150,10 @@ def test_scalar_vector_matrix_and_zero_shapes_remain_valid(tmp_path, shape, payl
     ],
 )
 def test_local_sidecars_cannot_escape_source_root(tmp_path, filename, repo):
-    root = files(tmp_path / "source")
+    root = files(tmp_path / "source", model_type="mistral" if repo == "mistralai/Devstral-Small-2505" else "qwen3")
     if repo is None:
         (root / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
-    external = files(tmp_path / "external")
+    external = files(tmp_path / "external", model_type="mistral")
     (external / "chat_template.json").write_text("{}")
     hub = Hub(
         {
@@ -193,6 +193,49 @@ def test_canonical_hf_blob_metadata_links_remain_supported(tmp_path):
     snapshot.write_manifest(manifest)
     replay = resolve_source(PRIMARY, source_manifest=manifest, offline=True)
     replay.assert_unchanged()
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        ("blobs", "aa", "a" * 64),
+        ("blobs", "bb", "a" * 64),
+        ("blobs", "aa", "a" * 63),
+        ("blobs", "AA", "A" * 64),
+        ("blobs", "aa", "a" * 64, "nested"),
+        ("other-blobs", "aa", "a" * 64),
+        ("unrelated-cache", "blobs", "aa", "a" * 64),
+    ],
+)
+def test_shared_hf_blob_authority_requires_current_cache_and_exact_digest_layout(tmp_path, relative):
+    cache = tmp_path / "hub"
+    root = files(cache / "models--Qwen--Qwen3-0.6B" / "snapshots" / ("1" * 40))
+    target = cache.joinpath(*relative)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("synthetic shared blob")
+    sidecar = root / "tokenizer_config.json"
+    sidecar.unlink()
+    sidecar.symlink_to(target)
+    if relative == ("blobs", "aa", "a" * 64):
+        assert streaming.authorize_source_path(root, sidecar) == target
+    else:
+        with pytest.raises(ConversionError, match="authorized"):
+            streaming.authorize_source_path(root, sidecar)
+
+
+def test_shared_hf_blob_authority_rejects_a_link_escaping_the_selected_cache(tmp_path):
+    cache = tmp_path / "hub"
+    root = files(cache / "models--Qwen--Qwen3-0.6B" / "snapshots" / ("1" * 40))
+    outside = tmp_path / "outside"
+    outside.write_text("synthetic outside text")
+    target = cache / "blobs" / "aa" / ("a" * 64)
+    target.parent.mkdir(parents=True)
+    target.symlink_to(outside)
+    sidecar = root / "tokenizer_config.json"
+    sidecar.unlink()
+    sidecar.symlink_to(target)
+    with pytest.raises(ConversionError, match="authorized"):
+        streaming.authorize_source_path(root, sidecar)
 
 
 @pytest.mark.parametrize("kind", ["fifo", "device"])

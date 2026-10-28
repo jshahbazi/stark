@@ -6,25 +6,11 @@ import hashlib
 import json
 from importlib.resources import files
 
+from .model_support import ARCHITECTURE_ALIASES, CONFIG_ADAPTERS
 from .streaming import ConversionError, UnsupportedConversion
 
 REFERENCE_REVISION = "831accb8252a6b6606c378048caeb44178f1a050"
-CONFIG_ADAPTERS = {
-    "HFQwen3Config": "qwen3",
-    "HFQwen2Config": "qwen2",
-    "HFLlamaConfig": "llama",
-    "HFMistralConfig": "mistral",
-    "HFGemma2Config": "gemma2",
-    "HFGemma3TextConfig": "gemma3_text",
-    "HFPhi3Config": "phi3",
-    "HFGraniteConfig": "granite",
-    "HFSmolLM3Config": "smollm3",
-    "HFQwen35Config": "qwen3_5",
-    "HFLFM2Config": "lfm2",
-    "HFLlambaConfig": "llamba",
-    "ModernBERTConfig": "modernbert",
-}
-_ARCHITECTURE_ALIASES = {"qwen3_5_text": "qwen3_5"}
+_ARCHITECTURE_ALIASES = ARCHITECTURE_ALIASES
 
 
 def model_kind_for_architecture(architecture: str) -> str:

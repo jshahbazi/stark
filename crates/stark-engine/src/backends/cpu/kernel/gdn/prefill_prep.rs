@@ -25,6 +25,7 @@ pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float
     value_dim: u32,
     suffix_len: u32,
     qkv_stride: u32,
+    reference_bf16: u32,
     #[specialize] write_log_decay: bool,
     #[specialize] write_compact_v: bool,
 ) {
@@ -88,6 +89,11 @@ pub fn delta_net_prefill_prep<T: ArrayElement + Float, QKT: ArrayElement + Float
 
                 let beta_raw = unsafe { (*controls.add(control_offset + conv_dim + value_dim + hv)).to_f32().unwrap() };
                 let beta = 1.0 / (1.0 + (-beta_raw).exp());
+                let beta = if reference_bf16 != 0 {
+                    bf16::from_f32(beta).to_f32()
+                } else {
+                    beta
+                };
 
                 let a_log_val = unsafe { *a_log.add(hv) };
                 let dt_bias_val = unsafe { *dt_bias.add(hv) };

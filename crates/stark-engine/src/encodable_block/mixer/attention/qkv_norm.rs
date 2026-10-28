@@ -4,11 +4,11 @@ use thiserror::Error;
 use crate::{
     backends::common::{
         Backend, BufferMut, CommandBuffer, CommandBufferEncoding,
-        kernel::{Kernels, QKVNormKernel},
+        kernel::{Kernels, QKVNormKernel, ReferenceRMSBF16Kernel},
     },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
-    parameters::{ParameterLoaderError, ParameterTree},
+    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
 };
 
 #[derive(Debug, Error)]
@@ -21,6 +21,7 @@ pub enum QKVNormError<B: Backend> {
 
 struct Head<B: Backend> {
     kernel: <B::Kernels as Kernels>::QKVNormKernel,
+    reference: Option<<B::Kernels as Kernels>::ReferenceRMSBF16Kernel>,
     scales: Option<B::GlobalBuffer>,
     config: NormalizationConfig,
 }
@@ -48,6 +49,7 @@ impl<B: Backend> QKVNorm<B> {
         projection_row_stride: u32,
         head_dim: u32,
     ) -> Result<Self, QKVNormError<B>> {
+        let reference_profile = parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16;
         let query = query_config
             .map(|cfg| {
                 Self::build_head(
@@ -56,6 +58,7 @@ impl<B: Backend> QKVNorm<B> {
                     cfg,
                     Some(&parameter_tree.subtree("query_norm")),
                     head_dim,
+                    reference_profile,
                 )
             })
             .transpose()?;
@@ -67,11 +70,12 @@ impl<B: Backend> QKVNorm<B> {
                     cfg,
                     Some(&parameter_tree.subtree("key_norm")),
                     head_dim,
+                    reference_profile,
                 )
             })
             .transpose()?;
         let value = value_config
-            .map(|cfg| Self::build_head(context, intermediate_data_type, cfg, None, head_dim))
+            .map(|cfg| Self::build_head(context, intermediate_data_type, cfg, None, head_dim, reference_profile))
             .transpose()?;
 
         Ok(Self {
@@ -91,7 +95,28 @@ impl<B: Backend> QKVNorm<B> {
         config: NormalizationConfig,
         parameter_tree: Option<&ParameterTree<B>>,
         head_dim: u32,
+        reference_profile: bool,
     ) -> Result<Head<B>, QKVNormError<B>> {
+        let reference = if reference_profile {
+            if intermediate_data_type != DataType::BF16
+                || config.subtract_mean
+                || config.has_biases
+                || !config.has_scale
+                || config.upcast_mode != UpcastMode::FullLayer
+                || head_dim < 16
+                || !head_dim.is_multiple_of(16)
+            {
+                return Err(QKVNormError::BackendError(
+                    crate::backends::common::InvalidInput("unsupported reference BF16 Q/K RMS configuration").into(),
+                ));
+            }
+            Some(
+                <B::Kernels as Kernels>::ReferenceRMSBF16Kernel::new(context, true, false, false)
+                    .map_err(QKVNormError::BackendError)?,
+            )
+        } else {
+            None
+        };
         let scales = if config.has_scale {
             Some(
                 parameter_tree
@@ -115,6 +140,7 @@ impl<B: Backend> QKVNorm<B> {
         .map_err(QKVNormError::BackendError)?;
         Ok(Head {
             kernel,
+            reference,
             scales,
             config,
         })
@@ -178,6 +204,23 @@ impl<B: Backend> QKVNorm<B> {
                 continue;
             };
             if head_count == 0 {
+                continue;
+            }
+            if let Some(reference) = &head.reference {
+                reference.encode(
+                    None::<&B::ScratchBuffer>,
+                    head.scales.as_ref().unwrap(),
+                    buffer.reborrow(),
+                    None::<&mut B::ScratchBuffer>,
+                    batch_dim,
+                    self.head_dim,
+                    input_row_stride,
+                    head.config.epsilon,
+                    head.config.scale_offset.unwrap_or(0.0),
+                    head_offset,
+                    head_count,
+                    command_buffer,
+                );
                 continue;
             }
             head.kernel.encode(

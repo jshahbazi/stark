@@ -6,6 +6,7 @@ from typing import Literal
 from .streaming import ConversionPlan
 
 ModelKind = Literal["language", "classifier", "tts"]
+ArtifactMode = Literal["text", "vision-language"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class ConversionRequest:
     require_native_support: bool = False
     architecture: str | None = None
     metadata_profile: Literal["hf-generic"] | None = None
+    artifact_mode: ArtifactMode = "text"
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,11 @@ class CapabilityResult:
     conversion: Literal["implemented", "unsupported"]
     source_validation: Literal["not_performed", "complete"] = "not_performed"
     native_loading: Literal[
-        "qualified_tuple", "supported_layout_unverified_tuple", "runtime_blocked", "unverified"
+        "qualified_tuple",
+        "supported_layout_unverified_tuple",
+        "supported_family_unverified",
+        "runtime_blocked",
+        "unverified",
     ] = "unverified"
     execution: Literal["unverified"] = "unverified"
     reason: str | None = None
@@ -39,6 +45,7 @@ class PlannedConversion:
     capability: CapabilityResult
     tensors: ConversionPlan
     model_config: dict
+    artifact_contract: dict | None = None
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,11 @@
 use crate::{
     backends::common::{
-        Backend, BufferRef, CommandBuffer, CommandBufferEncoding,
+        Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
         gpu_types::ActivationType,
-        kernel::{ActivationQuantization, GatedActMul, GatedActMulSettings, matmul::ActivationFormat},
+        kernel::{
+            ActivationQuantization, GatedActMul, GatedActMulSettings, ReferenceGatedSiLUBF16Kernel,
+            matmul::ActivationFormat,
+        },
     },
     config::{activation::AnyActivation, clipping::ClippingBounds},
     data_type::DataType,
@@ -17,6 +20,7 @@ pub struct MlpGateActMulEncodable<B: Backend> {
     hadamard_factors: Option<B::GlobalBuffer>,
     activation_quantization: Option<ActivationQuantization>,
     quantized_kernel: Option<GatedActMul<B>>,
+    reference: Option<<B::Kernels as Kernels>::ReferenceGatedSiLUBF16Kernel>,
 }
 
 impl<B: Backend> MlpGateActMulEncodable<B> {
@@ -28,9 +32,26 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
         value_clipping: ClippingBounds,
         hidden_dim: u32,
         input_preparation: Option<LinearInputPreparation<B>>,
+        reference_bf16: bool,
     ) -> Result<Self, B::Error> {
         let (hadamard_factors, activation_quantization) = input_preparation
             .map_or((None, None), |preparation| (Some(preparation.rht_signs), preparation.activation_quantization));
+        let reference = if reference_bf16 {
+            if data_type != DataType::BF16
+                || activation.act_type() != ActivationType::SILU
+                || activation.alpha() != 1.0
+                || hidden_dim == 0
+                || gate_clipping.into_pair().is_some()
+                || value_clipping.into_pair().is_some()
+                || hadamard_factors.is_some()
+                || activation_quantization.is_some()
+            {
+                return Err(InvalidInput("unsupported reference BF16 MLP gate configuration").into());
+            }
+            Some(<B::Kernels as Kernels>::ReferenceGatedSiLUBF16Kernel::new(context)?)
+        } else {
+            None
+        };
         let settings = GatedActMulSettings {
             activation_alpha: activation.custom_alpha(),
             gate_clipping,
@@ -49,6 +70,7 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
             hadamard_factors,
             activation_quantization,
             quantized_kernel,
+            reference,
         })
     }
 
@@ -60,6 +82,18 @@ impl<B: Backend> MlpGateActMulEncodable<B> {
         act_format: ActivationFormat,
     ) -> Result<LinearInput<B>, B::Error> {
         command_buffer.push_debug_group("gate act mul");
+        if let Some(reference) = &self.reference {
+            if act_format != ActivationFormat::Bf16
+                || fused_up.size() != batch_dim as usize * self.hidden_dim as usize * 2 * size_of::<half::bf16>()
+            {
+                return Err(InvalidInput("invalid reference BF16 MLP gate input").into());
+            }
+            let mut hidden =
+                command_buffer.allocate_scratch_for_shape(&[batch_dim, self.hidden_dim], DataType::BF16)?;
+            reference.encode(fused_up, &mut hidden, self.hidden_dim, batch_dim, command_buffer);
+            command_buffer.pop_debug_group();
+            return Ok(LinearInput::FullPrecision(hidden));
+        }
 
         if self.activation.act_type() == ActivationType::IDENTITY {
             panic!("Identity activation is not supported for kernel")

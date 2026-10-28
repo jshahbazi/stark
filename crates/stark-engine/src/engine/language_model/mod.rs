@@ -1,4 +1,10 @@
-use std::{fs::File, io, io::BufReader, path::Path, sync::Arc};
+use std::{
+    fs::File,
+    io,
+    io::BufReader,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use derive_more::Debug;
 use thiserror::Error;
@@ -20,9 +26,31 @@ use crate::{
     speculators::dflash_tfm::{DFlashSpeculatorLoadError, DFlashTfmSpeculator},
 };
 
+pub(crate) mod multimodal;
+#[cfg(test)]
+mod multimodal_tests;
 pub mod scoring;
 pub mod state;
 pub mod stream;
+
+#[derive(Clone, Copy)]
+pub(crate) enum SpeculatorPolicy {
+    Discover,
+    Disabled,
+}
+
+fn select_speculator_path(
+    model_path: &Path,
+    policy: SpeculatorPolicy,
+) -> Option<PathBuf> {
+    match policy {
+        SpeculatorPolicy::Discover => {
+            let path = model_path.join("speculator");
+            path.exists().then_some(path)
+        },
+        SpeculatorPolicy::Disabled => None,
+    }
+}
 
 #[cfg(grammar)]
 pub mod grammar;
@@ -72,11 +100,30 @@ impl<B: Backend> Engine<B> {
         let weights_file = File::open(model_path.join("model.safetensors"))?;
         let weight_loader = ParameterLoader::new(&weights_file, &*self.context)?;
 
-        // TODO
-        let speculator_path = model_path.join("speculator");
-        let speculator_path = speculator_path.exists().then_some(speculator_path);
+        let model =
+            self.language_model_from_config(model_path, config, &weight_loader, None, SpeculatorPolicy::Discover)?;
+        weight_loader.tree().assert_all_tensors_validated()?;
+        Ok(model)
+    }
 
-        let tokenizer = Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?);
+    /// Shared construction for the private vision loader. Its caller validates
+    /// the complete decoder and vision tensor tree before publishing the model.
+    pub(crate) fn language_model_from_config(
+        self: &Arc<Self>,
+        model_path: &Path,
+        config: LanguageModelConfig,
+        weight_loader: &ParameterLoader<B>,
+        tokenizer: Option<Arc<Tokenizer>>,
+        speculator_policy: SpeculatorPolicy,
+    ) -> Result<LanguageModel<B>, EngineLoadLanguageModelError<B>> {
+        // The guarded vision loader disables discovery even if a new directory
+        // appears after its initial artifact admission check.
+        let speculator_path = select_speculator_path(model_path, speculator_policy);
+
+        let tokenizer = match tokenizer {
+            Some(tokenizer) => tokenizer,
+            None => Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?),
+        };
         if config.decoder_config.vocab_size == 0
             || tokenizer.get_vocab(true).values().any(|&id| id >= config.decoder_config.vocab_size)
         {
@@ -108,8 +155,6 @@ impl<B: Backend> Engine<B> {
         let context_ring_update = <B::Kernels as Kernels>::ContextRingUpdateKernel::new(&self.context)
             .map_err(EngineLoadLanguageModelError::Backend)?;
 
-        weight_loader.tree().assert_all_tensors_validated()?;
-
         let generation_config = config.generation_config;
         let end_of_thinking_tag = match &config.token_codec_config {
             AnyTokenCodecConfig::ChatCodecConfig(token_codec_config) => token_codec_config.end_of_thinking_tag.clone(),
@@ -132,6 +177,35 @@ impl<B: Backend> Engine<B> {
             #[cfg(grammar)]
             vocab_size,
         })
+    }
+}
+
+#[cfg(test)]
+mod speculator_policy_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::{SpeculatorPolicy, select_speculator_path};
+
+    #[stark_test]
+    fn disabled_speculator_policy_ignores_directory_created_after_admission() {
+        let path = std::env::temp_dir().join(format!(
+            "stark-speculator-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&path).unwrap();
+        assert!(select_speculator_path(&path, SpeculatorPolicy::Disabled).is_none());
+        assert!(select_speculator_path(&path, SpeculatorPolicy::Discover).is_none());
+        std::fs::create_dir(path.join("speculator")).unwrap();
+        assert!(select_speculator_path(&path, SpeculatorPolicy::Disabled).is_none());
+        assert_eq!(select_speculator_path(&path, SpeculatorPolicy::Discover), Some(path.join("speculator")));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }
 

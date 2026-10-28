@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferRef, CommandBuffer, CommandBufferEncoding,
+        Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput,
         kernel::{
             ActivationQuantization, Kernels,
             matmul::{ActivationFormat, MatmulA, MatmulArguments, MatmulB, MatmulDOps, MatmulKernel, MatmulShape},
@@ -13,10 +13,10 @@ use crate::{
     config::weight_matrix::{AnyWeightMatrixSpec, Layout},
     data_type::DataType,
     encodable_block::{
-        linear::{Gather, Linear, LinearInput},
+        linear::{Gather, Linear, LinearInput, ReferenceBF16Matmul},
         weight_matrix::{WeightMatrix, WeightMatrixError},
     },
-    parameters::{ParameterLoaderError, ParameterTree},
+    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
 };
 
 #[derive(Debug, Error)]
@@ -41,6 +41,7 @@ pub struct LinearMatmul<B: Backend> {
     input_dim: u32,
     output_dim: u32,
     output_data_type: DataType,
+    reference_matmul: Option<ReferenceBF16Matmul<B>>,
 }
 
 fn load_biases<B: Backend>(
@@ -90,6 +91,21 @@ impl<B: Backend> LinearMatmul<B> {
 
         let biases = load_biases(weights_data_type, output_data_type, output_dim, bias_tree)?;
 
+        let reference_matmul = if weights_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+            if weights_data_type != DataType::BF16
+                || input_data_type != DataType::BF16
+                || output_data_type != DataType::BF16
+                || matrix.quantization().is_some()
+                || biases.is_some()
+            {
+                return Err(LinearMatmulError::UnsupportedConfiguration(
+                    "reference BF16 linear requires full BF16 weights/activations without biases".into(),
+                ));
+            }
+            Some(ReferenceBF16Matmul::new(context).map_err(LinearMatmulError::BackendError)?)
+        } else {
+            None
+        };
         let kernel =
             <B::Kernels as Kernels>::MatmulKernel::new(context, weights_data_type, input_data_type, output_data_type)
                 .map_err(LinearMatmulError::BackendError)?;
@@ -102,6 +118,7 @@ impl<B: Backend> LinearMatmul<B> {
             input_dim,
             output_dim,
             output_data_type,
+            reference_matmul,
         })
     }
 
@@ -124,6 +141,25 @@ impl<B: Backend> LinearMatmul<B> {
     ) -> Result<B::ScratchBuffer, B::Error> {
         let (output_dim, gather_indices) =
             gather.map_or((self.output_dim, None), |gather| (gather.output_dim, Some(gather.indices)));
+        if let Some(reference) = &self.reference_matmul {
+            if gather_indices.is_some() {
+                return Err(InvalidInput("reference BF16 linear does not support gathered columns").into());
+            }
+            let MatmulA::FullPrecision {
+                values,
+                offset,
+            } = a
+            else {
+                return Err(InvalidInput("reference BF16 linear requires full precision activations").into());
+            };
+            let MatmulB::FullPrecision {
+                b,
+            } = self.matmul_b()
+            else {
+                return Err(InvalidInput("reference BF16 linear requires full precision weights").into());
+            };
+            return reference.encode(values, offset, b, batch_dim, output_dim, self.input_dim, command_buffer);
+        }
         let mut output = command_buffer.allocate_scratch_for_shape(&[batch_dim, output_dim], self.output_data_type)?;
         self.kernel.lock().encode(
             MatmulArguments {

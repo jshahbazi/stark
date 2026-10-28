@@ -1,0 +1,16 @@
+Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
+
+The Qwen3.5 reference numerical profile adapts the gated DeltaNet forward
+boundaries and the 64-token torch_chunk_gated_delta_rule equations from:
+
+Repository: https://github.com/huggingface/transformers
+Revision: 2e12b325d5c4532f3ec5b0ec54e1ff0b7e0db397
+Source: src/transformers/models/qwen3_5/modeling_qwen3_5.py
+Source SHA-256: af05d0acfe79fff8aea1c75f93516a6a72bc80f6f901329a73e66a3866fe1e7c
+
+Stark implements separate Rust/Metal kernels and F32 scratch/state storage for
+these equations, with a software binary64 magnitude accumulator for Metal's
+nonpositive F32 decay prefixes. It does not add a Transformers runtime
+dependency. Pinned PyTorch/SLEEF arithmetic adaptations have separate notices
+and source entries in manifest.json. The exact upstream Apache-2.0 license
+file is preserved as transformers-LICENSE.

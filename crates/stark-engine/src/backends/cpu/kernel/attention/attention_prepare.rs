@@ -11,6 +11,7 @@ fn apply_rope<ElementT: ArrayElement + Float>(
     batch_idx: usize,
     head_dim_idx: usize,
     rope_dim: usize,
+    reference_bf16: bool,
 ) -> ElementT {
     let half_rope_dim = rope_dim / 2;
     let paired_idx = if head_dim_idx < half_rope_dim {
@@ -27,6 +28,16 @@ fn apply_rope<ElementT: ArrayElement + Float>(
     };
     let cos_val = unsafe { (*cosines.add(batch_idx * rope_dim + head_dim_idx)).to_f32().unwrap() };
     let sin_val = unsafe { (*sines.add(batch_idx * rope_dim + head_dim_idx)).to_f32().unwrap() };
+
+    if reference_bf16 {
+        // The pinned text rotary operation receives BF16 coefficients and
+        // materializes both BF16 products before its final BF16 addition.
+        let cosine = bf16::from_f32(cos_val).to_f32();
+        let sine = bf16::from_f32(sin_val).to_f32();
+        let first = bf16::from_f32(input * cosine).to_f32();
+        let second = bf16::from_f32(signed_paired * sine).to_f32();
+        return ElementT::from(first + second).unwrap();
+    }
 
     ElementT::from(input * cos_val + signed_paired * sin_val).unwrap()
 }
@@ -49,6 +60,7 @@ pub fn attention_prepare_kv_only<ElementT: ArrayElement + Float, RopeT: ArrayEle
     input_row_stride: u32,
     batch_dim: u32,
     #[specialize] has_rope: bool,
+    #[specialize] reference_bf16: bool,
 ) {
     assert!(num_kv_heads > 0, "KV-only prepare requires nonzero KV heads");
     assert!(head_dim > 0, "KV-only prepare requires nonzero head_dim");
@@ -77,7 +89,7 @@ pub fn attention_prepare_kv_only<ElementT: ArrayElement + Float, RopeT: ArrayEle
             for head_dim_idx in 0..head_dim {
                 let mut element = unsafe { *qkvg_head.add(head_dim_idx) };
                 if has_rope && head_dim_idx < rope_dim && is_key {
-                    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+                    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim, reference_bf16);
                 }
                 if is_key {
                     let key_offset = (kv_token_offset + batch_idx) * num_kv_heads * head_dim
@@ -118,6 +130,7 @@ pub fn attention_prepare<ElementT: ArrayElement + Float, RopeT: ArrayElement + F
     batch_dim: u32,
     #[specialize] has_kv: bool,
     #[specialize] has_rope: bool,
+    #[specialize] reference_bf16: bool,
 ) {
     assert!(num_q_heads > 0 || has_kv, "attention prepare without KV requires at least one query head");
     assert!(head_dim > 0, "attention prepare requires nonzero head_dim");
@@ -168,7 +181,7 @@ pub fn attention_prepare<ElementT: ArrayElement + Float, RopeT: ArrayElement + F
             for head_dim_idx in 0..head_dim {
                 let mut element = unsafe { *qkvg_head.add(head_dim_idx) };
                 if has_rope && head_dim_idx < rope_dim && (is_query || is_key) {
-                    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim);
+                    element = apply_rope(qkvg_head, cosines, sines, batch_idx, head_dim_idx, rope_dim, reference_bf16);
                 }
 
                 if is_query {

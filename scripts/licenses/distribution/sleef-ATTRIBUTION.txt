@@ -1,0 +1,8 @@
+The pinned SLEEF source files referenced in the supplemental adaptation
+manifest contain these copyright notices:
+
+Copyright Naoki Shibata and contributors 2010 - 2024.
+Copyright ARM Ltd. 2010 - 2024.
+
+SLEEF source revision:
+https://github.com/shibatch/sleef/tree/5a1d179df9cf652951b59010a2d2075372d67f68

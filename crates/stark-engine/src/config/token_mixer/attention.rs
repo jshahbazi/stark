@@ -26,6 +26,9 @@ pub struct AttentionConfig {
     pub has_gate: bool,
     pub normalize_values: bool,
     pub is_kv_sharing: bool,
+    /// Preserve the pinned BF16 coefficient and product boundaries in RoPE.
+    #[serde(default)]
+    pub reference_bf16: bool,
 }
 
 impl AttentionConfig {

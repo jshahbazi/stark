@@ -29,6 +29,7 @@ PUBLIC KERNEL(DeltaNetUpdate)(
     constant const uint& key_dim,
     constant const uint& value_dim,
     constant const float& norm_epsilon,
+    constant const uint& reference_bf16,
     threadgroup float shared_o[UPDATE_MAX_HEAD_V_DIM],
     threadgroup float shared_scratch[METAL_SIMD_SIZE],
     const ThreadContext thread_context,
@@ -71,7 +72,8 @@ PUBLIC KERNEL(DeltaNetUpdate)(
 
   // beta / decay (scalar per head)
   const float beta_raw = float(in_proj[conv_dim + value_dim + hv_idx]);
-  const float beta = 1.0f / (1.0f + fast::exp(-beta_raw));
+  const float beta_full = 1.0f / (1.0f + fast::exp(-beta_raw));
+  const float beta = reference_bf16 != 0 ? float(bfloat(beta_full)) : beta_full;
   const float a_raw = float(in_proj[conv_dim + value_dim + num_v_heads + hv_idx]);
   const float sp = activate_softplus(a_raw + float(dt_bias[hv_idx]));
   const float decay = fast::exp(-fast::exp(float(a_log[hv_idx])) * sp);
@@ -103,7 +105,7 @@ PUBLIC KERNEL(DeltaNetUpdate)(
     }
 
     if (lane == 0) {
-      shared_o[dv] = o_i;
+      shared_o[dv] = reference_bf16 != 0 ? float(bfloat(o_i)) : o_i;
     }
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -123,7 +125,14 @@ PUBLIC KERNEL(DeltaNetUpdate)(
       const float nw = float(norm_weight[dv]);
       const float z_i = float(in_proj[conv_dim + hv_idx * head_v_dim + dv]);
       const float z_silu = activate_silu(z_i);
-      out[hv_idx * head_v_dim + dv] = static_cast<T>(shared_o[dv] * inv_rms * nw * z_silu);
+      if (reference_bf16 != 0) {
+        const float normalized = float(bfloat(shared_o[dv] * inv_rms));
+        const float gain = float(bfloat(nw));
+        const float affine = float(bfloat(normalized * gain));
+        out[hv_idx * head_v_dim + dv] = static_cast<T>(affine * z_silu);
+      } else {
+        out[hv_idx * head_v_dim + dv] = static_cast<T>(shared_o[dv] * inv_rms * nw * z_silu);
+      }
     }
   }
 }

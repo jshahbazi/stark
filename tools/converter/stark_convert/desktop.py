@@ -4,9 +4,11 @@ Only model metadata is persisted. Conversation content stays in memory and pipes
 """
 
 import argparse
+import hashlib
 import json
 import math
 import os
+import re
 import select
 import shutil
 import signal
@@ -20,14 +22,30 @@ from pathlib import Path
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .chat import ChatCancelled, ChatError, ChatRequestTooLarge, Worker, load_template
+from .chat import (
+    ChatCancelled,
+    ChatError,
+    ChatImageError,
+    ChatRequestTooLarge,
+    Worker,
+    load_template,
+    read_model_config,
+)
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
+from .desktop_media import DesktopAttachments
 from .local_api import APIError, LocalAPI
+from .media import MAX_IMAGE_BYTES, MediaError
+from .model_inventory import model_display
+from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
+from .model_support import support_matrix
 from .registry import get_model
 from .sources import huggingface_repository
+from .vision_runtime import supported_image_family
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
+MAX_SUPPORT_BYTES = 65536
+MAX_CATALOG_BYTES = 256 * 1024
 PROGRESS_PHASES = ("download", "conversion")
 MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
@@ -66,9 +84,25 @@ def model_valid(path):
     if not path.is_dir() or not all((path / name).is_file() for name in MODEL_FILES):
         return False
     try:
-        config = json.loads((path / "config.json").read_text())
+        config = read_model_config(path)
         if not isinstance(config.get("decoder_config"), dict):
             return False
+        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+            codec = config.get("token_codec_config", {})
+            contract = config.get("artifact_contract")
+            if (
+                not isinstance(contract, dict)
+                or type(contract.get("schema_version")) is not int
+                or contract["schema_version"] not in (2, 3)
+            ):
+                return False
+            return (
+                all((path / name).is_file() for name in ("preprocessor_config.json", "chat_template.jinja"))
+                and isinstance(codec, dict)
+                and codec.get("type") == "ChatCodecConfig"
+                and isinstance(codec.get("prompt_template"), str)
+                and bool(codec["prompt_template"])
+            )
         load_template(path)
         return True
     except Exception:
@@ -127,11 +161,14 @@ class Desktop:
     """Backend for the menu bar app: model library, worker lifecycle and the loopback API.
 
     The app sends one JSON command per line on stdin (``list``, ``install``, ``run``,
-    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``) and receives
+    ``stop``, ``quit``, ``generate``, ``decide``, ``reset``, ``configure``, ``support``,
+    ``catalog``, ``catalog_cancel``, ``install_catalog``, ``remove_model``) and receives
     one JSON event per line on ``output`` (``models``, ``status``, ``progress``,
     ``installed``, ``ready``, ``configured``, ``reply``, ``decision``, ``connection``,
-    ``error``). One worker is loaded at a time, under ``self.lock``. ``self.epoch``
-    increases whenever the model is stopped or replaced; commands, queued API
+    ``error``, ``model_families``, ``model_support``, ``model_catalog``,
+    ``model_removed``, ``model_remove_error``). One worker is loaded at a
+    time, under ``self.lock``. ``self.epoch`` increases whenever the model is
+    stopped or replaced; commands, queued API
     requests and in-flight replies carry the epoch they started under and are
     discarded when it no longer matches, so a late reply from a previous worker
     can never reach the app or a client. App chat turns and API completions share
@@ -140,7 +177,7 @@ class Desktop:
     the HTTP contract.
     """
 
-    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None):
+    def __init__(self, executable, data_dir, output=None, timeout=300, score_executable=None, attachment_root=None):
         self.executable = executable
         self.score_executable = score_executable or Path(executable).with_name("stark-score")
         self.data_dir = data_dir.expanduser().absolute()
@@ -148,11 +185,18 @@ class Desktop:
         self.timeout = timeout
         self.lock = threading.RLock()
         self.write_lock = threading.Lock()
+        self._completion_events = {}
         self.output_failed = False
         self.epoch = 0
         self.job = None
         self.worker = None
         self.converter = None
+        self.catalog_process = None
+        self.catalog_generation = 0
+        self.catalog_request_id = None
+        self.catalog_family_id = None
+        self.catalog_entries = {}
+        self.catalog_termination_lock = threading.Lock()
         self.install_epoch = None
         self.install_progress = {}
         self.active_model = None
@@ -161,6 +205,8 @@ class Desktop:
         self.template = None
         self.codec = None
         self.messages = []
+        self.image_identity = None
+        self.attachments = None
         self.context = 8192
         self.maximum = 512
         self.system_prompt = None
@@ -199,10 +245,21 @@ class Desktop:
                     raise DesktopError("Cannot read the model library.")
                 ids.add(model["id"])
             self.models = value
+        self.attachments = DesktopAttachments(attachment_root) if attachment_root is not None else None
 
     def emit(self, event, epoch=None, **fields):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
+                return
+            operation = getattr(self, "_completion_events", {}).get(threading.current_thread())
+            if operation is not None and (
+                event in {"ready", "reply", "decision", "error", "installed", "model_removed", "model_remove_error"}
+                or (event == "status" and fields.get("state") in {"ready", "idle", "error"})
+            ):
+                # The next command must be admissible when the UI sees Ready.
+                # Publish terminal events only after this operation releases its slot.
+                operation_epoch, completion = operation
+                completion.append((event, operation_epoch if epoch is None else epoch, fields))
                 return
             with self.write_lock:
                 try:
@@ -217,10 +274,318 @@ class Desktop:
         self.emit("status", epoch, state=state, message=message)
 
     def library(self):
-        self.emit(
-            "models",
-            models=[{**{k: m[k] for k in ("id", "name", "path")}, "api_id": api_model_id(m)} for m in self.models],
+        with self.lock:
+            rows = []
+            for model in self.models:
+                display = model_display(model)
+                rows.append(
+                    {
+                        **{key: model[key] for key in ("id", "name", "path")},
+                        "api_id": api_model_id(model),
+                        "display": display,
+                        "artifact_mode": display.get("artifact_mode", "text") if display else "text",
+                        "removal": removal_info(model, self.model_dir, self.models),
+                    }
+                )
+            self.emit(
+                "models",
+                models=rows,
+            )
+
+    def families(self):
+        self.emit("model_families", report=support_matrix())
+
+    @staticmethod
+    def request_id(value):
+        return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is not None
+
+    def cancel_catalog(self, request_id=None):
+        with self.lock:
+            if request_id is not None and request_id != getattr(self, "catalog_request_id", None):
+                return
+            self.catalog_generation = getattr(self, "catalog_generation", 0) + 1
+            process = getattr(self, "catalog_process", None)
+            self.catalog_process = None
+            self.catalog_request_id = None
+            self.catalog_family_id = None
+            self.catalog_entries = {}
+        self.terminate_catalog(process)
+
+    def terminate_catalog(self, process):
+        if process is None:
+            return
+        with self.catalog_termination_lock:
+            try:
+                terminate(process)
+            except PermissionError:
+                if process.poll() is None:
+                    raise
+
+    def start_catalog(self, family, request_id):
+        allowed = {item["family_id"] for item in support_matrix()["families"] if item["model_kind"] == "language"}
+        if family not in allowed or not self.request_id(request_id):
+            raise DesktopError("Choose a model family to browse.")
+        self.cancel_catalog()
+        with self.lock:
+            self.catalog_request_id, self.catalog_family_id = request_id, family
+            generation = self.catalog_generation
+        threading.Thread(
+            target=self.load_catalog, args=(family, request_id, generation), name="stark-model-catalog", daemon=True
+        ).start()
+
+    def run_catalog_check(self, command, environment, generation):
+        process = None
+        try:
+            with self.lock:
+                if generation != self.catalog_generation:
+                    return None
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                )
+                self.catalog_process = process
+            pending = bytearray()
+            deadline = time.monotonic() + 120
+            while True:
+                with self.lock:
+                    if generation != self.catalog_generation:
+                        return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ValueError()
+                if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > MAX_CATALOG_BYTES:
+                    raise ValueError()
+            with self.lock:
+                if generation != self.catalog_generation:
+                    return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+                raise ValueError()
+            return json.loads(pending)
+        finally:
+            if process is not None:
+                self.terminate_catalog(process)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    if process.poll() is None:
+                        raise
+                if process.stdout is not None:
+                    process.stdout.close()
+                with self.lock:
+                    if self.catalog_process is process:
+                        self.catalog_process = None
+
+    def catalog_report(self, value, family):
+        if (
+            not isinstance(value, dict)
+            or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1
+            or value.get("family_id") != family
+            or value.get("status") not in {"ready", "offline", "error"}
+            or not isinstance(value.get("message"), str)
+            or not 0 < len(value["message"]) <= 2000
+            or not isinstance(value.get("items"), list)
+            or len(value["items"]) > 30
+            or type(value.get("has_more")) is not bool
+        ):
+            raise ValueError()
+        if value["status"] != "ready" and value["items"]:
+            raise ValueError()
+        ids = set()
+        for item in value["items"]:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{32}", item["id"]) is None
+                or item["id"] in ids
+                or not isinstance(item.get("repo"), str)
+                or huggingface_repository(item["repo"]) != item["repo"]
+                or not isinstance(item.get("revision"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", item["revision"]) is None
+                or not isinstance(item.get("name"), str)
+                or not 0 < len(item["name"].encode()) <= 256
+                or any(ord(char) < 32 or ord(char) == 127 for char in item["name"])
+                or not isinstance(item.get("quantization"), str)
+                or not 0 < len(item["quantization"]) <= 64
+                or item.get("downloadable") is not True
+                or not isinstance(item.get("artifact_modes"), list)
+                or not item["artifact_modes"]
+                or len(item["artifact_modes"]) != len(set(item["artifact_modes"]))
+                or not set(item["artifact_modes"]) <= {"text", "vision-language"}
+                or item.get("default_artifact_mode") not in item["artifact_modes"]
+            ):
+                raise ValueError()
+            group = item.get("model_group")
+            if group is not None and (
+                not isinstance(group, dict)
+                or set(group) != {"id", "name", "publisher"}
+                or not isinstance(group.get("id"), str)
+                or re.fullmatch(r"[0-9a-f]{32}", group["id"]) is None
+                or not isinstance(group.get("name"), str)
+                or not 0 < len(group["name"].encode()) <= 256
+                or any(ord(char) < 32 or ord(char) == 127 for char in group["name"])
+                or not isinstance(group.get("publisher"), str)
+                or re.fullmatch(r"[A-Za-z0-9_.-]{1,96}", group["publisher"]) is None
+            ):
+                raise ValueError()
+            for key in ("parameter_count", "weight_bytes"):
+                if item.get(key) is not None and (type(item[key]) is not int or not 0 < item[key] <= 2**63 - 1):
+                    raise ValueError()
+            if item.get("size_label") is not None and (
+                not isinstance(item["size_label"], str) or not 0 < len(item["size_label"]) <= 64
+            ):
+                raise ValueError()
+            ids.add(item["id"])
+        return value
+
+    def catalog_installed_ids(self, item, artifact_mode=None, descriptions=None):
+        identifiers = []
+        descriptions = (
+            descriptions
+            if descriptions is not None
+            else [(model["id"], model_display(model)) for model in self.models]
         )
+        for identifier, display in descriptions:
+            if (
+                display
+                and display["group_id"] == "repo:" + item["repo"]
+                and display["source_revision"] == item["revision"]
+                and (artifact_mode is None or display["artifact_mode"] == artifact_mode)
+            ):
+                identifiers.append(identifier)
+        return identifiers
+
+    def load_catalog(self, family, request_id, generation):
+        command = [sys.executable, "-I", "-B", "-m", "stark_convert.cli", "--family-models", family]
+        environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+        try:
+            report = self.run_catalog_check(command, environment, generation)
+            if report is None:
+                return
+            report = self.catalog_report(report, family)
+        except Exception:
+            report = {
+                "schema_version": 1,
+                "family_id": family,
+                "status": "error",
+                "items": [],
+                "has_more": False,
+                "message": "Models could not be loaded. Check your connection and try again.",
+            }
+        with self.lock:
+            if generation != self.catalog_generation or request_id != self.catalog_request_id:
+                return
+            self.catalog_entries = {item["id"]: dict(item) for item in report["items"]}
+            descriptions = [(model["id"], model_display(model)) for model in self.models]
+            report = {
+                **report,
+                "items": [
+                    {**item, "installed_ids": self.catalog_installed_ids(item, descriptions=descriptions)}
+                    for item in report["items"]
+                ],
+            }
+            self.emit("model_catalog", request_id=request_id, family_id=family, report=report)
+
+    def install_catalog(self, payload):
+        with self.lock:
+            if self.job is not None and self.job.is_alive():
+                raise DesktopError("Wait for the current operation or choose Stop.")
+            if payload.get("catalog_request_id") != self.catalog_request_id:
+                raise DesktopError("Refresh this family before downloading a model.")
+            identifier = payload.get("entry_id")
+            item = self.catalog_entries.get(identifier) if isinstance(identifier, str) else None
+            request_id = payload.get("support_request_id")
+            if item is None or not self.request_id(request_id):
+                raise DesktopError("Choose an available model to download.")
+            mode = payload.get("artifact_mode", item["default_artifact_mode"])
+            if mode not in item["artifact_modes"]:
+                raise DesktopError("Choose an available model version.")
+            installed = self.catalog_installed_ids(item, mode)
+            previous = next((model for model in self.models if model["id"] in installed), None)
+            if previous is not None and model_valid(Path(previous["path"])):
+                self.library()
+                self.emit(
+                    "installed",
+                    model={key: previous[key] for key in ("id", "name", "path")},
+                    support_request_id=request_id,
+                )
+                self.status("ready" if self.worker else "idle", "Model already downloaded")
+                return
+            self.start(
+                self.install,
+                "installing",
+                "Checking model support…",
+                "huggingface",
+                item["repo"],
+                mode,
+                mode,
+                request_id,
+                item["revision"],
+                request_id=request_id,
+            )
+
+    def remove_saved_model(self, epoch, identifier, action, request_id):
+        stopped = False
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                model = next((entry for entry in self.models if entry["id"] == identifier), None)
+                if model is None:
+                    raise RemovalError("This model is no longer in your library.")
+                plan = prepare_removal(model, self.model_dir, self.models)
+                if plan.action != action:
+                    raise RemovalError("The model folder changed. Refresh your library before removing it.")
+                if self.active_model == identifier:
+                    self.close_worker()
+                    stopped = True
+                original = list(self.models)
+
+                def commit():
+                    self.models[:] = [entry for entry in original if entry["id"] != identifier]
+                    try:
+                        self.persist()
+                    except BaseException:
+                        self.models[:] = original
+                        raise
+
+                result = remove_model(plan, commit)
+                self.library()
+                self.emit(
+                    "model_removed",
+                    epoch,
+                    request_id=request_id,
+                    stopped_model_id=identifier if stopped else None,
+                    **result,
+                )
+                self.status("ready" if self.worker else "idle", "Model removed", epoch)
+        except Exception as error:
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                message = (
+                    str(error) if isinstance(error, RemovalError) else "The model could not be removed. Try again."
+                )
+                self.emit(
+                    "model_remove_error",
+                    epoch,
+                    request_id=request_id,
+                    model_id=identifier,
+                    message=message,
+                    stopped_model_id=identifier if stopped else None,
+                )
+                self.status("ready" if self.worker else "idle", "Ready" if self.worker else "Model stopped", epoch)
 
     def persist(self):
         temporary = self.data_dir / (".models-" + uuid.uuid4().hex)
@@ -241,10 +606,10 @@ class Desktop:
             self.active_mode = None
             self.vocab_size = None
             self.messages = []
+            self.image_identity = None
             self.codec = None
             self.template = None
         if worker is not None:
-            terminate(worker.process)
             worker.close()
 
     def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
@@ -266,7 +631,7 @@ class Desktop:
                 return
             self.install_epoch = epoch
             self.install_progress = {}
-            self.progress(epoch, "download", "running" if kind == "huggingface" else "skipped")
+            self.progress(epoch, "download", "waiting" if kind == "huggingface" else "skipped")
             self.progress(epoch, "conversion", "waiting")
 
     def finish_install_progress(self, epoch, skipped=False):
@@ -286,6 +651,7 @@ class Desktop:
             self.progress(epoch, phase, "failed", previous.get("completed_bytes", 0), previous.get("total_bytes"))
 
     def stop(self, quiet=False):
+        self.cancel_catalog()
         with self.lock:
             cancelled = self.install_progress.copy() if self.install_epoch == self.epoch else {}
             self.epoch += 1
@@ -307,11 +673,21 @@ class Desktop:
                 self.converter = None
         if not quiet:
             self.status("idle", "Stopped")
+        attachments = getattr(self, "attachments", None)
+        if attachments is not None:
+            try:
+                attachments.clear()
+            except MediaError:
+                raise DesktopError("Cannot clear private image storage. Quit and reopen Stark.") from None
 
-    def start(self, function, state, message, *args):
+    def start(self, function, state, message, *args, request_id=None):
         with self.lock:
             if self.job is not None and self.job.is_alive():
-                self.emit("error", message="Wait for the current operation or choose Stop.")
+                self.emit(
+                    "error",
+                    message="Wait for the current operation or choose Stop.",
+                    **({"request_id": request_id} if request_id else {}),
+                )
                 return
             epoch = self.epoch
             installing = state == "installing"
@@ -320,13 +696,19 @@ class Desktop:
             self.status(state, message, epoch)
 
             def execute():
+                current = threading.current_thread()
+                completion = []
+                with self.lock:
+                    self._completion_events[current] = (epoch, completion)
                 try:
                     function(epoch, *args)
                 except (DesktopError, ChatRequestTooLarge) as error:
                     if epoch == self.epoch:
                         if installing:
                             self.fail_install_progress(epoch)
-                        self.emit("error", epoch, message=str(error))
+                        self.emit(
+                            "error", epoch, message=str(error), **({"request_id": request_id} if request_id else {})
+                        )
                         self.status(
                             "ready" if self.worker else "error", "Ready" if self.worker else "Operation failed", epoch
                         )
@@ -336,15 +718,22 @@ class Desktop:
                             self.fail_install_progress(epoch)
                         self.close_worker()
                         self.emit(
-                            "error", epoch, message="Unable to complete the operation. Check the model and try again."
+                            "error",
+                            epoch,
+                            message="Unable to complete the operation. Check the model and try again.",
+                            **({"request_id": request_id} if request_id else {}),
                         )
                         self.status("error", "Operation failed", epoch)
                 finally:
                     with self.lock:
+                        self._completion_events.pop(current, None)
                         if installing and self.install_epoch == epoch:
                             self.install_epoch = None
-                        if self.job is threading.current_thread():
+                        if self.job is current:
                             self.job = None
+                            self.api_condition.notify_all()
+                        for event, event_epoch, fields in completion:
+                            self.emit(event, event_epoch, **fields)
 
             self.job = threading.Thread(target=execute, name="stark-desktop-operation", daemon=True)
             self.job.start()
@@ -422,7 +811,146 @@ class Desktop:
                     if self.converter is process:
                         self.converter = None
 
-    def install(self, epoch, kind, source):
+    def run_support_check(self, command, environment, epoch):
+        """Read one bounded metadata-only report from an isolated cancellable child."""
+        process = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    return None
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    env=environment,
+                    start_new_session=True,
+                )
+                self.converter = process
+            pending = bytearray()
+            deadline = time.monotonic() + min(self.timeout, 120)
+            while True:
+                with self.lock:
+                    if epoch != self.epoch:
+                        return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DesktopError("The model support check timed out. Check Hugging Face access and retry.")
+                if not select.select([process.stdout], [], [], min(remaining, 0.1))[0]:
+                    continue
+                chunk = os.read(process.stdout.fileno(), 65536)
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > MAX_SUPPORT_BYTES:
+                    raise DesktopError("Cannot read the model support report. Update Stark and retry.")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or process.wait(timeout=remaining) != 0:
+                raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.")
+            report = json.loads(pending)
+            if (
+                not isinstance(report, dict)
+                or type(report.get("schema_version")) is not int
+                or report["schema_version"] != 1
+                or report.get("status") not in {"conditional", "unsupported", "inconclusive"}
+                or not isinstance(report.get("message"), str)
+                or not 0 < len(report["message"]) <= 2000
+                or not isinstance(report.get("source"), dict)
+            ):
+                raise ValueError
+            return report
+        except DesktopError:
+            raise
+        except (OSError, ValueError, UnicodeError, TypeError, subprocess.SubprocessError):
+            raise DesktopError("Cannot check this model's family. Check the source and Hugging Face access.") from None
+        finally:
+            if process is not None:
+                terminate(process)
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                if process.stdout is not None:
+                    process.stdout.close()
+                with self.lock:
+                    if self.converter is process:
+                        self.converter = None
+
+    def check_install_support(
+        self, epoch, kind, source, selected_mode, support_mode, request_id, expected_revision=None
+    ):
+        command = [
+            sys.executable,
+            "-I",
+            "-B",
+            "-m",
+            "stark_convert.cli",
+            source,
+            "--preflight",
+            "--support-mode",
+            support_mode,
+            "--artifact-mode",
+            selected_mode,
+        ]
+        if expected_revision is not None:
+            command.extend(["--revision", expected_revision])
+        if kind == "local" or get_model(source) is None:
+            command.extend(["--metadata-profile", "hf-generic"])
+        if kind == "local":
+            command.append("--offline")
+        environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
+        self.status("installing", "Checking model family before downloading weights…", epoch)
+        report = self.run_support_check(command, environment, epoch)
+        with self.lock:
+            if epoch != self.epoch:
+                return None
+            if report is None:
+                raise DesktopError("Cannot check this model's family. Retry the support check.")
+            if report.get("mode") != support_mode:
+                raise DesktopError("The model support report does not match this installation. Retry.")
+            identity = report["source"]
+            revision = identity.get("revision")
+            if report["status"] == "conditional" and expected_revision is not None and revision != expected_revision:
+                raise DesktopError("The model version changed. Refresh this family and try again.")
+            if kind == "huggingface" and (
+                identity.get("repo") != source
+                or not isinstance(revision, str)
+                or re.fullmatch(r"[0-9a-f]{40}", revision) is None
+            ):
+                if report["status"] == "conditional":
+                    raise DesktopError("Cannot pin this model's source revision. Retry the support check.")
+            self.emit("model_support", epoch, request_id=request_id, report=report)
+            if report["status"] != "conditional":
+                raise DesktopError(report["message"])
+            return revision
+
+    def install(
+        self,
+        epoch,
+        kind,
+        source,
+        artifact_mode=None,
+        support_mode=None,
+        support_request_id=None,
+        expected_revision=None,
+    ):
+        if expected_revision is not None and (
+            kind != "huggingface"
+            or not isinstance(expected_revision, str)
+            or re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
+        ):
+            raise DesktopError("Choose a pinned model version to download.")
+        if artifact_mode not in (None, "text", "vision-language"):
+            raise DesktopError("Choose text or vision-language conversion.")
+        selected_mode = artifact_mode or "text"
+        if support_mode not in (None, "text", "decision", "vision-language"):
+            raise DesktopError("Choose text, decision or image support.")
+        if support_request_id is not None and (
+            not isinstance(support_request_id, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", support_request_id) is None
+        ):
+            raise DesktopError("Invalid model support request.")
+        if artifact_mode == "vision-language" and support_mode not in (None, "vision-language"):
+            raise DesktopError("Image artifacts support Chat mode only. Choose image input or a text artifact.")
         if kind == "local":
             path = Path(source).expanduser().resolve()
             if not path.is_dir():
@@ -431,11 +959,17 @@ class Desktop:
             name = path.name
             converted = model_valid(path)
             try:
-                is_stark = "decoder_config" in json.loads((path / "config.json").read_text())
+                is_stark = "decoder_config" in read_model_config(path)
             except Exception:
                 is_stark = False
             if is_stark and not converted:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
+            if converted:
+                config = read_model_config(path)
+                stored_mode = "vision-language" if config.get("type") == "Qwen35VisionLanguageModelConfig" else "text"
+                if artifact_mode is not None and selected_mode != stored_mode:
+                    raise DesktopError("The selected conversion mode does not match this Stark artifact.")
+                selected_mode = stored_mode
         elif kind == "huggingface":
             try:
                 source = huggingface_repository(source)
@@ -444,22 +978,68 @@ class Desktop:
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
+        purpose = support_mode or selected_mode
+        if converted and selected_mode == "vision-language" and purpose == "text":
+            purpose = "vision-language"  # Ordinary Chat can import an existing image artifact.
+        if selected_mode == "vision-language" and purpose != "vision-language":
+            raise DesktopError(
+                "This vision artifact supports Chat mode only. Choose Chat or a text artifact for decisions."
+            )
+        if selected_mode != "vision-language" and purpose == "vision-language":
+            raise DesktopError("Enable image input when converting this checkpoint.")
         with self.lock:
             if epoch != self.epoch:
                 return
-            previous = next((m for m in self.models if m["source"] == source_key), None)
-            if previous is not None:
-                if not model_valid(Path(previous["path"])):
-                    raise DesktopError("The installed model folder is missing or incomplete.")
+            previous = next(
+                (
+                    m
+                    for m in self.models
+                    if m["source"] == source_key
+                    and m.get("artifact_mode", "text") == selected_mode
+                    and (
+                        expected_revision is None
+                        or (model_display(m) or {}).get("source_revision") == expected_revision
+                    )
+                ),
+                None,
+            )
+        if previous is not None:
+            if not model_valid(Path(previous["path"])):
+                raise DesktopError("The installed model folder is missing or incomplete.")
+            verification = self.check_family_install(epoch, Path(previous["path"]))
+            with self.lock:
+                if epoch != self.epoch:
+                    return
+                if verification is not None:
+                    previous["image_verification"] = verification
+                    self.persist()
                 self.finish_install_progress(epoch, skipped=True)
-                self.emit("installed", epoch, model={k: previous[k] for k in ("id", "name", "path")})
+                self.emit(
+                    "installed",
+                    epoch,
+                    model={k: previous[k] for k in ("id", "name", "path")},
+                    support_request_id=support_request_id,
+                )
                 self.status("ready" if self.worker else "idle", "Model already installed", epoch)
                 return
         identifier = uuid.uuid4().hex
         staging = self.model_dir / (".install-" + identifier)
         managed = None
+        source_revision = None
         try:
             if not converted:
+                source_revision = self.check_install_support(
+                    epoch,
+                    kind,
+                    str(path) if kind == "local" else source,
+                    selected_mode,
+                    purpose,
+                    support_request_id,
+                    **({"expected_revision": expected_revision} if expected_revision is not None else {}),
+                )
+                with self.lock:
+                    if epoch != self.epoch:
+                        return
                 staging.mkdir(mode=0o700)
                 output = staging / "model"
                 command = [
@@ -471,11 +1051,17 @@ class Desktop:
                     str(path) if kind == "local" else source,
                     "--output",
                     str(output),
+                    "--support-mode",
+                    purpose,
                 ]
                 if kind == "local" or get_model(source) is None:
                     command.extend(["--metadata-profile", "hf-generic"])
                 if kind == "local":
                     command.append("--offline")
+                if selected_mode == "vision-language":
+                    command.extend(["--artifact-mode", "vision-language"])
+                if source_revision is not None:
+                    command.extend(["--revision", source_revision])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
                 result = self.run_converter(command, environment, epoch)
                 with self.lock:
@@ -491,7 +1077,12 @@ class Desktop:
                     managed = self.model_dir / identifier
                     output.replace(managed)
                     path = managed
+            verification = self.check_family_install(epoch, path)
             model = {"id": identifier, "name": name, "path": str(path), "source": source_key}
+            if selected_mode == "vision-language":
+                model["artifact_mode"] = selected_mode
+            if verification is not None:
+                model["image_verification"] = verification
             with self.lock:
                 if epoch != self.epoch:
                     return
@@ -504,18 +1095,78 @@ class Desktop:
                 managed = None  # The registry now owns the managed folder.
                 self.finish_install_progress(epoch, skipped=converted)
                 self.library()
-                self.emit("installed", epoch, model={k: model[k] for k in ("id", "name", "path")})
+                self.emit(
+                    "installed",
+                    epoch,
+                    model={k: model[k] for k in ("id", "name", "path")},
+                    support_request_id=support_request_id,
+                )
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
         finally:
             shutil.rmtree(staging, ignore_errors=True)
             if managed is not None:
                 shutil.rmtree(managed, ignore_errors=True)
 
+    def check_family_install(self, epoch, path):
+        """Check a family artifact before publishing it, with one loaded worker."""
+        config = read_model_config(path)
+        contract = config.get("artifact_contract", {})
+        if (
+            config.get("type") != "Qwen35VisionLanguageModelConfig"
+            or not isinstance(contract, dict)
+            or contract.get("schema_version") != 3
+        ):
+            return None
+        family = contract.get("family")
+        if not supported_image_family(family):
+            raise DesktopError("This image model family is not supported.")
+        with self.lock:
+            if epoch != self.epoch:
+                raise DesktopError("Image checks were interrupted by a model change.")
+        self.emit("image_check", epoch, state="checking")
+        self.status("installing", "Checking image support on this Mac…", epoch)
+        with self.lock:
+            if epoch != self.epoch:
+                raise DesktopError("Image checks were interrupted by a model change.")
+            self.close_worker()
+        worker = None
+        try:
+            with self.lock:
+                if epoch != self.epoch:
+                    raise DesktopError("Image checks were interrupted by a model change.")
+                worker = Worker(self.executable, path, self.timeout)
+                worker.image_check_dir = self.data_dir / "image-checks"
+                self.worker = worker
+            ready = worker.read()
+            with self.lock:
+                if epoch != self.epoch or self.worker is not worker:
+                    raise DesktopError("Image checks were interrupted by a model change.")
+                if (
+                    ready.get("ready") is not True
+                    or ready.get("mode") != "text-generation-v1"
+                    or worker.images is not True
+                    or worker.image_verification != "locally_tested"
+                ):
+                    raise DesktopError("This model did not pass local image execution checks.")
+                return "locally_tested"
+        except ChatError as error:
+            raise DesktopError(str(error)) from None
+        finally:
+            with self.lock:
+                current = self.worker is worker
+                if current:
+                    self.close_worker()
+            if not current and worker is not None:
+                worker.close()
+
     def run(self, epoch, identifier, mode="chat"):
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        codec, template = load_template(Path(model["path"]))
+        vision = read_model_config(Path(model["path"])).get("type") == "Qwen35VisionLanguageModelConfig"
+        codec, template = (None, None) if vision else load_template(Path(model["path"]))
+        if mode == "decision" and vision:
+            raise DesktopError("Vision-language artifacts support Chat mode only.")
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -525,7 +1176,14 @@ class Desktop:
                 else Worker(self.executable, Path(model["path"]), self.timeout)
             )
             self.worker = worker
+            if mode == "chat":
+                worker.image_check_dir = self.data_dir / "image-checks"
+                worker.image_check_progress = lambda: self.status(
+                    "loading", "Checking image support on this Mac…", epoch
+                )
         ready = worker.read()
+        if vision:
+            codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
         if mode == "decision":
             if (
                 ready.get("ready") is not True
@@ -581,6 +1239,10 @@ class Desktop:
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
             "max_output_tokens": self.output_limit,
+            "images": bool(self.attachments is not None and self.worker and getattr(self.worker, "images", False)),
+            "image_attachment_transport": "private-file-v1",
+            "max_image_bytes": MAX_IMAGE_BYTES,
+            "image_verification": getattr(self.worker, "image_verification", "unverified"),
         }
 
     def configure(self, payload):
@@ -614,17 +1276,49 @@ class Desktop:
             if system is None:
                 system = (self.codec or {}).get("default_system_prompt")
             self.messages = [{"role": "system", "content": system}] if system else []
+            self.image_identity = None
 
-    def generate(self, epoch, text):
+    def generate(self, epoch, text, reference=None):
         with self.lock:
+            if epoch != self.epoch:
+                return
             if self.active_mode != "chat":
                 raise DesktopError("Choose Chat mode and run a model before sending a message.")
-            candidate = [*self.messages, {"role": "user", "content": text}]
-        reply = self.infer(candidate, self.maximum, epoch=epoch, thinking=self.thinking)
+            attachments = self.attachments
+            previous_image = self.image_identity
+            if reference is not None and (
+                attachments is None or self.worker is None or not getattr(self.worker, "images", False)
+            ):
+                raise DesktopError("Image support has not passed checks for this model.")
+            if previous_image is not None and reference is None:
+                raise DesktopError("Resupply the conversation image or start a new chat.")
+            history = list(self.messages)
+            maximum, thinking = self.maximum, self.thinking
+        image = None
+        identity = None
+        try:
+            if reference is not None:
+                self.emit("image_progress", epoch, phase="preparing")
+                image = attachments.claim(reference)
+                identity = (image.media_type, hashlib.sha256(image.data).digest())
+                if previous_image is not None and identity != previous_image:
+                    raise DesktopError("Start a new chat to use a different image.")
+            content = (
+                [{"type": "text", "text": text}, {"type": "image"}]
+                if image is not None and previous_image is None
+                else text
+            )
+            candidate = [*history, {"role": "user", "content": content}]
+            if image is not None:
+                self.emit("image_progress", epoch, phase="generating")
+            reply = self.infer(candidate, maximum, epoch=epoch, thinking=thinking, image=image)
+        except (MediaError, ChatImageError) as error:
+            raise DesktopError(str(error)) from None
         with self.lock:
             if epoch != self.epoch:
                 return
             self.messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
+            self.image_identity = identity
             fields = metrics(reply)
             self.emit("metrics", epoch, **fields)
             self.emit("reply", epoch, text=reply["text"], finish_reason=reply.get("finish_reason"), **fields)
@@ -643,11 +1337,13 @@ class Desktop:
         cancelled=None,
         epoch=None,
         thinking=False,
+        image=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             worker, template, codec = self.worker, self.template, self.codec
+            dispatch_epoch, identifier = self.epoch, self.active_model
             context = context or self.context
         if worker is None or template is None:
             raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
@@ -657,6 +1353,18 @@ class Desktop:
             )
         if stop and not worker.stop_sequences:
             raise APIError(503, "This worker needs an update for stop sequences.", "stop_sequences_unavailable")
+        if on_delta is not None:
+            deliver = on_delta
+
+            def on_delta(text):
+                # Keep delivery atomic with Stop/model replacement. The HTTP
+                # writer has a bounded timeout. OSError asks Worker to cancel
+                # and consume the terminal reply before the next request.
+                with self.lock:
+                    if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
+                        raise OSError("Request no longer belongs to the running model.")
+                    deliver(text)
+
         try:
             prompt = template.render(
                 messages=messages,
@@ -668,6 +1376,21 @@ class Desktop:
             )
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
+        if image is not None:
+            if not getattr(worker, "images", False):
+                raise APIError(400, "Image support has not passed checks for this model.", "images_unsupported")
+            options = {
+                "context_tokens": context,
+                "max_new_tokens": maximum,
+                "sampling": sampling or {"mode": "greedy"},
+                "seed": seed,
+                "stop": stop or [],
+                "stream": on_delta is not None,
+            }
+            reply = worker.request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
+            if not isinstance(reply.get("text"), str) or "error" in reply:
+                raise ValueError
+            return reply
         tokens = worker.request(
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
@@ -739,6 +1462,11 @@ class Desktop:
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
                 "models": self.api_models(),
+                "image_verification": (
+                    getattr(self.worker, "image_verification", "unverified")
+                    if self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                    else "unverified"
+                ),
                 "capabilities": {
                     "chat_completions": True,
                     "streaming": True,
@@ -747,7 +1475,9 @@ class Desktop:
                     "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
                     "tool_calling": False,
                     "structured_output": False,
-                    "images": False,
+                    "images": bool(
+                        self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                    ),
                     "embeddings": False,
                     "responses": False,
                 },
@@ -769,7 +1499,12 @@ class Desktop:
         """
         cancelled = cancelled or threading.Event()
         with self.lock:
-            request = parse_chat_request(payload, self.api_maximum, self.api_vocab)
+            request = parse_chat_request(
+                payload,
+                self.api_maximum,
+                self.api_vocab,
+                allow_images=bool(self.worker and getattr(self.worker, "images", False)),
+            )
             maximum = request["maximum"]
             messages = request["messages"]
             if self.api_closing:
@@ -782,7 +1517,7 @@ class Desktop:
                 raise APIError(
                     404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
                 )
-            epoch, identifier = self.epoch, self.active_model
+            epoch, identifier, worker = self.epoch, self.active_model, self.worker
             if len(self.api_queue) >= self.api_queue_limit:
                 raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
             ticket = object()
@@ -822,9 +1557,10 @@ class Desktop:
                 stop=request["stop"],
                 cancelled=cancelled,
                 epoch=epoch,
+                image=request["image"],
             )
             with self.lock:
-                if epoch != self.epoch:
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
                     raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
                 self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
@@ -849,6 +1585,12 @@ class Desktop:
             }
         except ChatCancelled:
             raise cancellation_error(cancelled) from None
+        except ChatImageError as error:
+            if error.code == "context_overflow":
+                raise APIError(400, "Image and text exceed the context budget.", "context_length_exceeded") from None
+            raise APIError(
+                400, "The image request was rejected. Check its format and token budget.", error.code
+            ) from None
         except ChatRequestTooLarge:
             raise APIError(
                 400,
@@ -865,7 +1607,7 @@ class Desktop:
             raise
         except BaseException:
             with self.lock:
-                if epoch == self.epoch:
+                if epoch == self.epoch and self.worker is worker and self.active_model == identifier:
                     self.close_worker()
             raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
         finally:
@@ -907,6 +1649,36 @@ class Desktop:
         command = payload["command"]
         if command == "list":
             self.library()
+        elif command == "support":
+            self.families()
+        elif command == "catalog":
+            self.start_catalog(payload.get("family_id"), payload.get("request_id"))
+        elif command == "catalog_cancel":
+            if not self.request_id(payload.get("request_id")):
+                raise DesktopError("Invalid model catalogue request.")
+            self.cancel_catalog(payload["request_id"])
+        elif command == "install_catalog":
+            try:
+                self.install_catalog(payload)
+            except DesktopError as error:
+                self.emit("error", message=str(error), request_id=payload.get("support_request_id"))
+        elif command == "remove_model":
+            identifier, action, request_id = payload.get("model_id"), payload.get("action"), payload.get("request_id")
+            if (
+                not isinstance(identifier, str)
+                or action not in {"trash", "unregister"}
+                or not self.request_id(request_id)
+            ):
+                raise DesktopError("Choose a model and removal action.")
+            self.start(
+                self.remove_saved_model,
+                "removing",
+                "Removing model…",
+                identifier,
+                action,
+                request_id,
+                request_id=request_id,
+            )
         elif command in ("stop", "quit"):
             self.stop()
             return command != "quit"
@@ -917,9 +1689,44 @@ class Desktop:
             self.stop(quiet=True)
             self.start(self.run, "loading", "Loading model…", payload["model_id"], mode)
         elif command == "install" and isinstance(payload.get("source"), str) and isinstance(payload.get("kind"), str):
-            self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
-        elif command == "generate" and isinstance(payload.get("text"), str) and payload["text"].strip():
-            self.start(self.generate, "generating", "Generating…", payload["text"])
+            artifact_mode = payload.get("artifact_mode")
+            if artifact_mode not in (None, "text", "vision-language"):
+                raise DesktopError("Choose text or vision-language conversion.")
+            if "support_mode" in payload or "support_request_id" in payload:
+                self.start(
+                    self.install,
+                    "installing",
+                    "Checking model support…",
+                    payload["kind"],
+                    payload["source"].strip(),
+                    artifact_mode,
+                    payload.get("support_mode"),
+                    payload.get("support_request_id"),
+                )
+            elif artifact_mode is None:
+                self.start(self.install, "installing", "Installing model…", payload["kind"], payload["source"].strip())
+            else:
+                self.start(
+                    self.install,
+                    "installing",
+                    "Installing model…",
+                    payload["kind"],
+                    payload["source"].strip(),
+                    artifact_mode,
+                )
+        elif (
+            command == "generate"
+            and isinstance(payload.get("text"), str)
+            and (payload["text"].strip() or "image" in payload)
+        ):
+            if set(payload) not in ({"command", "text"}, {"command", "text", "image"}):
+                raise DesktopError("Invalid app command.")
+            if "image" in payload:
+                if not isinstance(payload["image"], dict):
+                    raise DesktopError("Invalid image attachment.")
+                self.start(self.generate, "generating", "Generating…", payload["text"], payload["image"])
+            else:
+                self.start(self.generate, "generating", "Generating…", payload["text"])
         elif command == "decide":
             try:
                 answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))
@@ -940,6 +1747,7 @@ class Desktop:
 
 def serve(desktop):
     desktop.library()
+    desktop.families()
     desktop.status("idle", "Choose a model to run")
     desktop.start_api()
     pending = b""
@@ -980,6 +1788,7 @@ def main(argv=None):
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--score-worker", type=Path)
     parser.add_argument("--data-dir", type=Path, required=True)
+    parser.add_argument("--attachment-root", type=Path)
     args = parser.parse_args(argv)
     desktop = None
 
@@ -989,7 +1798,9 @@ def main(argv=None):
     signal.signal(signal.SIGTERM, interrupted)
     signal.signal(signal.SIGINT, interrupted)
     try:
-        desktop = Desktop(args.worker, args.data_dir, score_executable=args.score_worker)
+        desktop = Desktop(
+            args.worker, args.data_dir, score_executable=args.score_worker, attachment_root=args.attachment_root
+        )
         serve(desktop)
         return 0
     except (KeyboardInterrupt, BrokenPipeError):
@@ -1009,9 +1820,17 @@ def main(argv=None):
         if desktop is not None:
             with desktop.lock:
                 desktop.api_closing = True
-            desktop.stop(quiet=True)
-            if desktop.api is not None:
-                desktop.api.close()
+            # Every resource gets a cleanup attempt even if an earlier one fails.
+            # Exceptions here must not bypass main's content-free error boundary.
+            for cleanup in (
+                lambda: desktop.stop(quiet=True),
+                lambda: desktop.api.close() if desktop.api is not None else None,
+                lambda: desktop.attachments.close() if desktop.attachments is not None else None,
+            ):
+                try:
+                    cleanup()
+                except BaseException:
+                    desktop.emit("error", message="Cannot finish cleanup. Quit and reopen Stark.")
 
 
 if __name__ == "__main__":

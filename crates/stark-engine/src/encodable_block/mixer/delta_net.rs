@@ -12,6 +12,7 @@ use crate::{
         kernel::{
             Conv1dPackKernel, ConvTreeScanKernel, DeltaNetConvScanKernel, DeltaNetConvUpdateKernel,
             DeltaNetNormGateKernel, DeltaNetPrefillKernel, DeltaNetPrefillPrepKernel, DeltaNetUpdateKernel,
+            ReferenceGDNConvBF16Kernel, ReferenceGDNDecayKernel, ReferenceGDNNormGateKernel, ReferenceGDNQKL2Kernel,
             StateAdvanceKernel,
             delta_net_chunked_prefill::{DeltaNetChunkedPrefill, DeltaNetChunkedPrefillArgs},
             delta_net_tree_verify::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait,
@@ -32,6 +33,9 @@ use crate::{
     utils::maybe_mut::MaybeMut,
 };
 
+mod reference_chunk;
+#[cfg(test)]
+mod reference_tests;
 pub(crate) mod tree_verify;
 
 const INNER_DATA_TYPE: DataType = DataType::F32;
@@ -129,6 +133,13 @@ pub struct DeltaNet<B: Backend> {
     total_proj_dim: u32,
     kernel_size: u32,
     outer_data_type: DataType,
+    reference_bf16: bool,
+    reference_l2: Option<<B::Kernels as Kernels>::ReferenceGDNQKL2Kernel>,
+    reference_norm_gate: Option<<B::Kernels as Kernels>::ReferenceGDNNormGateKernel>,
+    reference_chunk: Option<reference_chunk::ReferenceChunk<B>>,
+    reference_log_prep: Option<<B::Kernels as Kernels>::DeltaNetPrefillPrepKernel>,
+    reference_decay: Option<<B::Kernels as Kernels>::ReferenceGDNDecayKernel>,
+    reference_conv: Option<<B::Kernels as Kernels>::ReferenceGDNConvBF16Kernel>,
     in_projection: Box<dyn Linear<B>>,
     conv_weight: B::GlobalBuffer,
     conv_bias: Option<B::GlobalBuffer>,
@@ -176,6 +187,58 @@ impl<B: Backend> DeltaNet<B> {
         parameter_tree: &ParameterTree<B>,
         context: &B::Context,
     ) -> Result<(Self, Option<B::GlobalBuffer>), DeltaNetNewError<B>> {
+        if config.reference_bf16 && outer_data_type != DataType::BF16 {
+            return Err(DeltaNetNewError::UnsupportedConfiguration("reference_bf16 requires BF16 activations".into()));
+        }
+        if config.reference_bf16 && config.conv_config.has_biases {
+            return Err(DeltaNetNewError::UnsupportedConfiguration(
+                "reference BF16 DeltaNet requires unbiased convolution".into(),
+            ));
+        }
+        if config.reference_bf16 && (config.head_dim != 128 || config.value_head_dim != 128) {
+            return Err(DeltaNetNewError::UnsupportedConfiguration(
+                "reference BF16 DeltaNet requires 128-wide key/value heads".into(),
+            ));
+        }
+        let reference_l2 = config
+            .reference_bf16
+            .then(|| <B::Kernels as Kernels>::ReferenceGDNQKL2Kernel::new(context))
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
+        let reference_norm_gate = config
+            .reference_bf16
+            .then(|| <B::Kernels as Kernels>::ReferenceGDNNormGateKernel::new(context))
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
+        let reference_chunk = config
+            .reference_bf16
+            .then(|| reference_chunk::ReferenceChunk::new(context))
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
+        let reference_log_prep = config
+            .reference_bf16
+            .then(|| {
+                <B::Kernels as Kernels>::DeltaNetPrefillPrepKernel::new(
+                    context,
+                    outer_data_type,
+                    DataType::F32,
+                    config.head_dim,
+                    true,
+                    false,
+                )
+            })
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
+        let reference_decay = config
+            .reference_bf16
+            .then(|| <B::Kernels as Kernels>::ReferenceGDNDecayKernel::new(context))
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
+        let reference_conv = config
+            .reference_bf16
+            .then(|| <B::Kernels as Kernels>::ReferenceGDNConvBF16Kernel::new(context))
+            .transpose()
+            .map_err(DeltaNetNewError::Backend)?;
         crate::config::validation::validate_heads(config.num_heads, config.num_groups, config.head_dim)
             .map_err(|_| DeltaNetNewError::UnsupportedConfiguration("invalid head/group geometry".into()))?;
         if config.kernel_size < 2 {
@@ -280,27 +343,34 @@ impl<B: Backend> DeltaNet<B> {
                 .map_err(DeltaNetNewError::Backend)?;
         let delta_net_norm_gate = <B::Kernels as Kernels>::DeltaNetNormGateKernel::new(context, outer_data_type)
             .map_err(DeltaNetNewError::Backend)?;
-        let tree_verify =
-            if <<B::Kernels as Kernels>::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait>::is_supported(context) {
-                Some(
-                    <<B::Kernels as Kernels>::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait>::new(
-                        context,
-                        &TreeVerifyNewArguments {
-                            data_type: outer_data_type,
-                            num_k_heads: config.num_groups,
-                            num_v_heads: config.num_heads,
-                            head_k_dim: config.head_dim,
-                            head_v_dim: config.value_head_dim,
-                        },
-                    )
-                    .map_err(DeltaNetNewError::Backend)?,
+        let tree_verify = if !config.reference_bf16
+            && <<B::Kernels as Kernels>::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait>::is_supported(context)
+        {
+            Some(
+                <<B::Kernels as Kernels>::DeltaNetTreeVerify as DeltaNetTreeVerifyTrait>::new(
+                    context,
+                    &TreeVerifyNewArguments {
+                        data_type: outer_data_type,
+                        num_k_heads: config.num_groups,
+                        num_v_heads: config.num_heads,
+                        head_k_dim: config.head_dim,
+                        head_v_dim: config.value_head_dim,
+                    },
                 )
-            } else {
-                None
-            };
+                .map_err(DeltaNetNewError::Backend)?,
+            )
+        } else {
+            None
+        };
 
-        let chunked = <B::Kernels as Kernels>::DeltaNetChunkedPrefill::new(context, outer_data_type, config.head_dim)
-            .map_err(DeltaNetNewError::Backend)?;
+        // The optimized chunk solver intentionally uses extra BF16 scratch
+        // planes. The reference policy keeps the recurrent arithmetic in F32.
+        let chunked = if config.reference_bf16 {
+            None
+        } else {
+            <B::Kernels as Kernels>::DeltaNetChunkedPrefill::new(context, outer_data_type, config.head_dim)
+                .map_err(DeltaNetNewError::Backend)?
+        };
 
         let out_projection = <dyn Linear<B>>::new_mixed_precision(
             value_dim,
@@ -325,6 +395,13 @@ impl<B: Backend> DeltaNet<B> {
                 total_proj_dim,
                 kernel_size: config.kernel_size,
                 outer_data_type,
+                reference_bf16: config.reference_bf16,
+                reference_l2,
+                reference_norm_gate,
+                reference_chunk,
+                reference_log_prep,
+                reference_decay,
+                reference_conv,
                 in_projection,
                 conv_weight,
                 conv_bias,
@@ -404,6 +481,7 @@ impl<B: Backend> DeltaNet<B> {
             self.value_dim,
             tree_size,
             self.total_proj_dim,
+            u32::from(self.reference_bf16),
             command_buffer,
         );
 
@@ -431,6 +509,7 @@ impl<B: Backend> DeltaNet<B> {
             self.total_proj_dim,
             self.norm_epsilon,
             tree_size,
+            u32::from(self.reference_bf16),
             command_buffer,
         );
 
@@ -542,7 +621,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
 
         let mut delta_output =
             command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), self.value_dim], self.outer_data_type)?;
-        if batch_dim.size() == 1 {
+        if batch_dim.size() == 1 && !self.reference_bf16 {
             self.conv_update.encode(
                 &self.conv_weight,
                 self.conv_bias.as_ref(),
@@ -551,6 +630,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                 self.kernel_size,
                 self.conv_dim,
                 self.kernel_size - 1,
+                u32::from(self.reference_bf16),
                 command_buffer,
             );
 
@@ -567,6 +647,7 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                 self.key_dim,
                 self.value_dim,
                 self.norm_epsilon,
+                u32::from(self.reference_bf16),
                 command_buffer,
             );
         } else {
@@ -578,23 +659,15 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
             // The pool remains owned by the command/pending submission.
             #[cfg(feature = "compact-delta-conv")]
             let controls;
-            #[cfg(feature = "direct-delta-conv")]
-            {
-                // Preserve immutable original samples until every output has
-                // been encoded. A history snapshot prevents cross-thread races
-                // between early-token reads and next-state writes.
+            if let Some(reference_conv) = &self.reference_conv {
                 let mut history = command_buffer.allocate_scratch(state.conv_state.size())?;
                 command_buffer.encode_copy(&state.conv_state, &mut history);
-                #[cfg(feature = "compact-delta-conv")]
                 let mut convolved =
                     command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), qkv_stride], self.outer_data_type)?;
-                #[cfg(not(feature = "compact-delta-conv"))]
-                let mut convolved = command_buffer.allocate_scratch(in_projected.size())?;
-                self.conv_direct.encode(
+                reference_conv.encode(
                     &in_projected,
                     &history,
                     &self.conv_weight,
-                    self.conv_bias.as_ref(),
                     &mut convolved,
                     &mut state.conv_state,
                     batch_dim.size(),
@@ -610,37 +683,73 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     controls = in_projected;
                 }
                 in_projected = convolved;
-            }
-            #[cfg(not(feature = "direct-delta-conv"))]
-            {
-                let mut padded = command_buffer.allocate_scratch_for_shape(
-                    &[batch_dim.size() + self.kernel_size - 1, self.total_proj_dim],
-                    INNER_DATA_TYPE,
-                )?;
-                self.conv_pack.encode(
-                    &state.conv_state,
-                    &in_projected,
-                    &mut padded,
-                    self.kernel_size - 1,
-                    self.total_proj_dim,
-                    batch_dim.size(),
-                    self.conv_dim,
-                    command_buffer,
-                );
-                self.conv_scan.encode(
-                    &padded,
-                    &self.conv_weight,
-                    self.conv_bias.as_ref(),
-                    &mut in_projected,
-                    &mut state.conv_state,
-                    batch_dim.size(),
-                    self.kernel_size,
-                    self.total_proj_dim,
-                    self.kernel_size - 1,
-                    self.conv_dim,
-                    self.total_proj_dim,
-                    command_buffer,
-                );
+            } else {
+                #[cfg(feature = "direct-delta-conv")]
+                {
+                    // Preserve immutable original samples until every output has
+                    // been encoded. A history snapshot prevents cross-thread races
+                    // between early-token reads and next-state writes.
+                    let mut history = command_buffer.allocate_scratch(state.conv_state.size())?;
+                    command_buffer.encode_copy(&state.conv_state, &mut history);
+                    #[cfg(feature = "compact-delta-conv")]
+                    let mut convolved = command_buffer
+                        .allocate_scratch_for_shape(&[batch_dim.size(), qkv_stride], self.outer_data_type)?;
+                    #[cfg(not(feature = "compact-delta-conv"))]
+                    let mut convolved = command_buffer.allocate_scratch(in_projected.size())?;
+                    self.conv_direct.encode(
+                        &in_projected,
+                        &history,
+                        &self.conv_weight,
+                        self.conv_bias.as_ref(),
+                        &mut convolved,
+                        &mut state.conv_state,
+                        batch_dim.size(),
+                        self.kernel_size,
+                        self.total_proj_dim,
+                        qkv_stride,
+                        self.kernel_size - 1,
+                        self.conv_dim,
+                        u32::from(self.reference_bf16),
+                        command_buffer,
+                    );
+                    #[cfg(feature = "compact-delta-conv")]
+                    {
+                        controls = in_projected;
+                    }
+                    in_projected = convolved;
+                }
+                #[cfg(not(feature = "direct-delta-conv"))]
+                {
+                    let mut padded = command_buffer.allocate_scratch_for_shape(
+                        &[batch_dim.size() + self.kernel_size - 1, self.total_proj_dim],
+                        INNER_DATA_TYPE,
+                    )?;
+                    self.conv_pack.encode(
+                        &state.conv_state,
+                        &in_projected,
+                        &mut padded,
+                        self.kernel_size - 1,
+                        self.total_proj_dim,
+                        batch_dim.size(),
+                        self.conv_dim,
+                        command_buffer,
+                    );
+                    self.conv_scan.encode(
+                        &padded,
+                        &self.conv_weight,
+                        self.conv_bias.as_ref(),
+                        &mut in_projected,
+                        &mut state.conv_state,
+                        batch_dim.size(),
+                        self.kernel_size,
+                        self.total_proj_dim,
+                        self.kernel_size - 1,
+                        self.conv_dim,
+                        self.total_proj_dim,
+                        u32::from(self.reference_bf16),
+                        command_buffer,
+                    );
+                }
             }
             #[cfg(feature = "compact-delta-conv")]
             let controls = &controls;
@@ -674,7 +783,12 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), self.num_heads], INNER_DATA_TYPE)?;
                 let mut prep_decay =
                     command_buffer.allocate_scratch_for_shape(&[batch_dim.size(), self.num_heads], INNER_DATA_TYPE)?;
-                self.delta_net_prefill_prep.encode(
+                let preparation = if batch_dim.size() > 1 {
+                    self.reference_log_prep.as_ref().unwrap_or(&self.delta_net_prefill_prep)
+                } else {
+                    &self.delta_net_prefill_prep
+                };
+                preparation.encode(
                     &in_projected,
                     controls,
                     &self.a_log,
@@ -690,40 +804,104 @@ impl<B: Backend> Mixer<B> for DeltaNet<B> {
                     self.value_dim,
                     batch_dim.size(),
                     qkv_stride,
+                    u32::from(self.reference_bf16),
                     command_buffer,
                 );
-                self.delta_net_prefill.encode(
-                    &prep_q_norm,
-                    &prep_k_norm,
-                    &prep_beta,
-                    &prep_decay,
-                    &in_projected,
-                    &mut state.ssm_state,
+                if let Some(reference_decay) = &self.reference_decay {
+                    reference_decay.encode(
+                        controls,
+                        &self.a_log,
+                        &self.dt_bias,
+                        &mut prep_decay,
+                        batch_dim.size(),
+                        self.num_heads,
+                        self.conv_dim,
+                        self.value_dim,
+                        self.total_proj_dim,
+                        u32::from(batch_dim.size() > 1),
+                        command_buffer,
+                    );
+                }
+                if let Some(reference_l2) = &self.reference_l2 {
+                    reference_l2.encode(
+                        &in_projected,
+                        &mut prep_q_norm,
+                        &mut prep_k_norm,
+                        self.key_dim,
+                        batch_dim.size(),
+                        qkv_stride,
+                        command_buffer,
+                    );
+                }
+                if batch_dim.size() > 1
+                    && let Some(reference_chunk) = &self.reference_chunk
+                {
+                    reference_chunk.encode(
+                        &prep_q_norm,
+                        &prep_k_norm,
+                        &prep_beta,
+                        &prep_decay,
+                        &in_projected,
+                        &mut state.ssm_state,
+                        &mut delta_output,
+                        batch_dim.size(),
+                        self.num_heads,
+                        self.num_groups,
+                        self.key_dim,
+                        self.value_dim,
+                        qkv_stride,
+                        command_buffer,
+                    )?;
+                } else {
+                    self.delta_net_prefill.encode(
+                        &prep_q_norm,
+                        &prep_k_norm,
+                        &prep_beta,
+                        &prep_decay,
+                        &in_projected,
+                        &mut state.ssm_state,
+                        &mut delta_output,
+                        self.num_heads,
+                        self.num_groups,
+                        self.value_head_dim,
+                        self.key_dim,
+                        self.value_dim,
+                        batch_dim.size(),
+                        self.value_head_dim.div_ceil(16),
+                        qkv_stride,
+                        command_buffer,
+                    );
+                }
+            }
+            if let Some(reference_norm_gate) = &self.reference_norm_gate {
+                reference_norm_gate.encode(
                     &mut delta_output,
-                    self.num_heads,
-                    self.num_groups,
-                    self.value_head_dim,
-                    self.key_dim,
-                    self.value_dim,
+                    controls,
+                    &self.norm_weight,
                     batch_dim.size(),
-                    self.value_head_dim.div_ceil(16),
-                    qkv_stride,
+                    self.num_heads,
+                    self.value_dim,
+                    self.conv_dim,
+                    self.total_proj_dim,
+                    self.norm_epsilon,
+                    command_buffer,
+                );
+            } else {
+                self.delta_net_norm_gate.encode(
+                    &mut delta_output,
+                    controls,
+                    &self.norm_weight,
+                    self.num_heads,
+                    self.value_head_dim,
+                    self.value_dim,
+                    self.conv_dim,
+                    self.total_proj_dim,
+                    self.norm_epsilon,
+                    batch_dim.size(),
+                    u32::from(self.reference_bf16),
                     command_buffer,
                 );
             }
-            self.delta_net_norm_gate.encode(
-                &mut delta_output,
-                controls,
-                &self.norm_weight,
-                self.num_heads,
-                self.value_head_dim,
-                self.value_dim,
-                self.conv_dim,
-                self.total_proj_dim,
-                self.norm_epsilon,
-                batch_dim.size(),
-                command_buffer,
-            );
         }
 
         state.suffix_status = Some(DeltaNetSuffixStatus::Flat {

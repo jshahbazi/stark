@@ -28,6 +28,7 @@ use crate::{
 
 mod mode;
 mod qkv_norm;
+pub(crate) mod reference;
 mod state;
 
 pub use state::{ATTENTION_SUFFIX_CAPACITY, AttentionState, KVCacheView};
@@ -48,6 +49,7 @@ pub struct Attention<B: Backend> {
     prepare_kv_only: Option<<B::Kernels as Kernels>::AttentionPrepareKVOnlyKernel>,
     sinks: Option<B::GlobalBuffer>,
     kernel: <B::Kernels as Kernels>::AttentionKernel,
+    reference: Option<reference::ReferenceBF16Attention<B>>,
     gate_kernel: Option<<B::Kernels as Kernels>::SigmoidGateKernel>,
     out_projection: Box<dyn Linear<B>>,
 }
@@ -76,6 +78,14 @@ impl<B: Backend> Attention<B> {
         context: &B::Context,
     ) -> Result<(Self, Option<B::GlobalBuffer>), AttentionNewError<B>> {
         crate::config::validation::validate_attention(config, rope_config)?;
+        if config.reference_bf16 && data_type != DataType::BF16 {
+            return Err(crate::backends::common::InvalidInput("reference_bf16 requires BF16 activations").into());
+        }
+        let reference = config
+            .reference_bf16
+            .then(|| reference::ReferenceBF16Attention::<B>::new(context, config))
+            .transpose()
+            .map_err(AttentionNewError::Backend)?;
         let is_kv_sharing = config.is_kv_sharing;
 
         let head_dim = config.head_dim;
@@ -142,6 +152,7 @@ impl<B: Backend> Attention<B> {
             DataType::F32,
             !is_kv_sharing,
             rope_config.is_some(),
+            config.reference_bf16,
         )
         .map_err(AttentionNewError::Backend)?;
         let sinks = config
@@ -161,6 +172,7 @@ impl<B: Backend> Attention<B> {
                     data_type,
                     DataType::F32,
                     rope_config.is_some(),
+                    config.reference_bf16,
                 )
             })
             .transpose()
@@ -184,7 +196,7 @@ impl<B: Backend> Attention<B> {
 
         let gate_kernel = config
             .has_gate
-            .then(|| <B::Kernels as Kernels>::SigmoidGateKernel::new(context, data_type))
+            .then(|| <B::Kernels as Kernels>::SigmoidGateKernel::new(context, data_type, config.reference_bf16))
             .transpose()
             .map_err(AttentionNewError::Backend)?;
 
@@ -215,6 +227,7 @@ impl<B: Backend> Attention<B> {
                 prepare_kv_only,
                 sinks,
                 kernel,
+                reference,
                 gate_kernel,
                 out_projection,
             },

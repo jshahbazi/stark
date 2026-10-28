@@ -25,6 +25,7 @@ from ..streaming import (
     tensor_sha256,
 )
 from .dense import _COMMON_KEYS, _DTYPES, _bool, _positive_float, _positive_int
+from .qwen35_vision import build_qwen35_vision_plan
 
 _KEYS = _COMMON_KEYS | {
     "text_config",
@@ -86,7 +87,7 @@ def _matrix_row_range(info: TensorInfo | MLXMatrixSource, start: int, count: int
     return _row_range(info, start, count)
 
 
-def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16", include_vision: bool = False) -> ConversionPlan:
     """Plan dense or existing affine MLX text weights from checkpoint dimensions.
 
     Split, directly fused and group-interleaved DeltaNet projections share this
@@ -102,6 +103,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         raise UnsupportedConversion("Qwen3.5 dense adapter requires model_type qwen3_5")
     if dtype not in _DTYPES:
         raise UnsupportedConversion("Qwen3.5 supports BF16, F16 and F32 output")
+    if include_vision and dtype != "bfloat16":
+        raise UnsupportedConversion("Qwen3.5 vision exports require BF16 output")
     target = _DTYPES[dtype]
     # The pinned Qwen importer uses this specific field to select baked norms.
     # An alias-only description cannot safely establish that interpretation.
@@ -163,7 +166,14 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         raise ConversionError("Qwen3.5 mrope_section is malformed")
     if "mrope_interleaved" in rope_parameters:
         _bool(rope_parameters, "mrope_interleaved", False)
-    if set(config) - _KEYS:
+    annotations = {"model_name": (str, 256), "unsloth_version": (str, 64), "unsloth_fixed": (bool, None)}
+    if include_vision and any(
+        type(config[key]) is not expected_type or maximum is not None and not 0 < len(config[key]) <= maximum
+        for key, (expected_type, maximum) in annotations.items()
+        if key in config
+    ):
+        raise ConversionError("Qwen3.5 training annotation metadata is invalid")
+    if set(config) - (_KEYS | set(annotations) if include_vision else _KEYS):
         unsupported.append("Qwen3.5 config options are outside implemented coverage")
     text_only = outer.get("model_type") == "qwen3_5_text"
     architectures = (
@@ -424,8 +434,18 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     # The pinned decoder root dispatch also accepts MLX-VL's language_model.model.
     # Its declared visual tower has a separate exact namespace; do not permit
     # another wrapper's visual alias to hide an otherwise unconsumed tensor.
-    vision_prefix = "vision_tower." if prefix == "language_model.model" else "model.visual."
-    ignored = {name for name in tensors if name.startswith(vision_prefix)} if text and vision else set()
+    ignored = set()
+    if include_vision:
+        if not (vision and prefix == "model.language_model"):
+            raise UnsupportedConversion(
+                "Qwen3.5 vision requires the official model.language_model/model.visual wrapper"
+            )
+        vision_ops, vision_expected = build_qwen35_vision_plan(vision, tensors, dim)
+        operations.extend(vision_ops)
+        expected.update(vision_expected)
+    else:
+        vision_prefix = "vision_tower." if prefix == "language_model.model" else "model.visual."
+        ignored = {name for name in tensors if name.startswith(vision_prefix)} if text and vision else set()
     # The reference text loader also omits the declared auxiliary MTP decoder.
     # Untrusted prefixes alone never authorize dropping source tensors.
     if config.get("mtp_num_hidden_layers", 0) > 0:
@@ -439,12 +459,16 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     norm_config = {
         "epsilon": epsilon,
         "scale_offset": None if quantization is not None else 1.0,
-        "upcast_mode": "only_normalization",
+        # Qwen3.5 keeps zero-centered RMS normalization and its gain in FP32
+        # through one final activation cast. Preserve the existing text export
+        # profile while qualifying the exact full-vision artifact separately.
+        "upcast_mode": "full_layer" if include_vision else "only_normalization",
         "subtract_mean": False,
         "has_scale": True,
         "has_biases": False,
     }
-    delta_norm = {**norm_config, "scale_offset": None}
+    # RMSNormGated deliberately casts normalized values before its direct gain.
+    delta_norm = {**norm_config, "scale_offset": None, "upcast_mode": "only_normalization"}
     mlp = {
         "type": "DenseMLPConfig",
         "linear_config": {},
@@ -469,6 +493,10 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             "value_head_dim": value_dim,
             "kernel_size": kernel,
         }
+        if include_vision:
+            # The pinned BF16 conditional model materializes its activation
+            # boundaries inside DeltaNet instead of fusing them in FP32.
+            mixer["reference_bf16"] = True
         if layer == "full_attention":
             mixer = {
                 "type": "AttentionConfig",
@@ -490,6 +518,8 @@ def build_qwen35_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 "normalize_values": False,
                 "is_kv_sharing": False,
             }
+            if include_vision:
+                mixer["reference_bf16"] = True
         layer_configs.append(
             {
                 "pre_mixer_norm_config": norm_config,

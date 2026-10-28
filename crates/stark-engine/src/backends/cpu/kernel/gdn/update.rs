@@ -26,6 +26,7 @@ pub fn delta_net_update<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
     key_dim: u32,
     value_dim: u32,
     norm_epsilon: f32,
+    reference_bf16: u32,
 ) {
     let num_v_heads = num_v_heads as usize;
     let num_k_heads = num_k_heads as usize;
@@ -77,6 +78,11 @@ pub fn delta_net_update<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
         // Compute gating
         let beta_raw = unsafe { (*in_proj.add(conv_dim + value_dim + hv)).to_f32().unwrap() };
         let beta = 1.0 / (1.0 + (-beta_raw).exp()); // sigmoid
+        let beta = if reference_bf16 != 0 {
+            bf16::from_f32(beta).to_f32()
+        } else {
+            beta
+        };
 
         let a_raw = unsafe { (*in_proj.add(conv_dim + value_dim + num_v_heads + hv)).to_f32().unwrap() };
         let a_log_val = unsafe { *a_log.add(hv) };
@@ -114,6 +120,9 @@ pub fn delta_net_update<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
             let retrieved_i = decay * sk_acc;
             let delta_i = beta * (v_i - retrieved_i);
             o[i] = decay * sq_acc + delta_i * kq_dot;
+            if reference_bf16 != 0 {
+                o[i] = bf16::from_f32(o[i]).to_f32();
+            }
 
             // Pass 2: update state row S[i,:]
             for j in 0..head_k_dim {
@@ -133,7 +142,13 @@ pub fn delta_net_update<T: ArrayElement + Float, const HEAD_K_DIM: u32>(
             let norm_w = unsafe { *norm_weight.add(i) };
             let z_i = unsafe { (*in_proj.add(conv_dim + hv * head_v_dim + i)).to_f32().unwrap() };
             let z_silu = ActivationType::SILU.activate(z_i);
-            let final_val = o[i] * inv_rms * norm_w * z_silu;
+            let final_val = if reference_bf16 != 0 {
+                let normalized = bf16::from_f32(o[i] * inv_rms).to_f32();
+                let gain = bf16::from_f32(norm_w).to_f32();
+                bf16::from_f32(normalized * gain).to_f32() * z_silu
+            } else {
+                o[i] * inv_rms * norm_w * z_silu
+            };
             unsafe {
                 *out.add(hv * head_v_dim + i) = T::from(final_val).unwrap();
             }

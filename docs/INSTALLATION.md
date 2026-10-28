@@ -10,7 +10,10 @@ Download the signed, notarized `.dmg` from the [latest release](https://github.c
 
 Older DMGs use drag-and-drop. Copy `Stark.app` to Applications, eject the image, quit the running old app, then open the installed app. Drag-copying alone cannot stop an older running copy.
 
-After installation, click the cat icon, choose **Install Model**, select a supported folder or Hugging Face repository, then **Run**. See the [menu bar guide](../apps/menu-bar/README.md).
+After installation, click the cat icon and choose **Manage Models**. Use
+**Model Catalog** or **Add from Source** to add a model, then choose **Run** in
+**Installed**. **Open Playground** opens the chat. See the
+[menu bar guide](../apps/menu-bar/README.md).
 
 ## Install the app and terminal tools
 

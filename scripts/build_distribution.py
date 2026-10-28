@@ -460,6 +460,44 @@ def build_python(
     )
 
 
+def source_adaptation_notices(directory: Path, key: str) -> list[Path]:
+    """Verify pinned notices for a source-level algorithm adaptation."""
+    manifest = directory / "manifest.json"
+    if not manifest.is_file():
+        raise BuildError("source_adaptation_license_manifest_missing")
+    document = json.loads(manifest.read_text())
+    adaptations = (
+        document.get("source_adaptations") if isinstance(document, dict) else None
+    )
+    entry = adaptations.get(key) if isinstance(adaptations, dict) else None
+    if not isinstance(entry, dict):
+        raise BuildError("source_adaptation_license_entry_missing")
+    name = entry.get("license_file")
+    digest = entry.get("license_sha256")
+    if not isinstance(name, str) or not isinstance(digest, str):
+        raise BuildError("source_adaptation_license_metadata_invalid")
+    notice_entries = [{"license_file": name, "license_sha256": digest}]
+    additional = entry.get("additional_notices", [])
+    if not isinstance(additional, list):
+        raise BuildError("source_adaptation_license_metadata_invalid")
+    notice_entries.extend(additional)
+    paths = []
+    for notice in notice_entries:
+        if not isinstance(notice, dict):
+            raise BuildError("source_adaptation_license_metadata_invalid")
+        filename = notice.get("license_file")
+        expected_digest = notice.get("license_sha256")
+        if not isinstance(filename, str) or not isinstance(expected_digest, str):
+            raise BuildError("source_adaptation_license_metadata_invalid")
+        path = directory / filename
+        if not path.resolve().is_relative_to(directory.resolve()) or not path.is_file():
+            raise BuildError("source_adaptation_license_file_missing")
+        if sha256(path) != expected_digest:
+            raise BuildError("source_adaptation_license_hash_mismatch")
+        paths.append(path)
+    return paths
+
+
 def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
     """Include upstream native notices without relying on an extra Cargo tool.
 
@@ -479,6 +517,12 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         destination = notices / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
+    supplemental_directory = ROOT / "scripts" / "licenses" / "distribution"
+    source_licenses = source_adaptation_notices(
+        supplemental_directory, "pytorch-bf16-vision-layernorm-moments"
+    )
+    for source_license in source_licenses:
+        shutil.copyfile(source_license, notices / source_license.name)
     sysroot = Path(
         run(
             ["rustc", f"+{RUST_VERSION}", "--print", "sysroot"],
@@ -502,7 +546,6 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
     shutil.copytree(
         rust_notices / "licenses", notices / "rust" / "licenses", symlinks=False
     )
-    supplemental_directory = ROOT / "scripts" / "licenses" / "distribution"
     supplemental_provenance = notices / "supplemental-provenance"
     supplemental_provenance.mkdir()
     for name in ("manifest.json", "README.md"):

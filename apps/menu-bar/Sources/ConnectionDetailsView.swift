@@ -23,7 +23,9 @@ struct ConnectionDetailsView: View {
             baseURL: engine.apiBaseURL, apiKey: engine.apiKey, modelID: displayedModelID,
             runningModelID: engine.models.first { $0.id == modelID }?.apiID ?? "",
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
-            status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens
+            status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
+            images: engine.supportsImages && engine.loadedMode == .chat,
+            imageVerification: engine.imageVerification
         )
     }
 
@@ -83,9 +85,18 @@ struct ConnectionDetailsView: View {
             Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key changes when Stark reopens.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Supports text Chat Completions, live streaming, temperature, top-p, seed and stop sequences. Up to 8 requests can wait in order. Cancelled requests keep the model loaded. Tools, images and the Responses API are unavailable. Model limits and capabilities are available through the API.")
+            Text("Supports Chat Completions, live streaming, temperature, top-p, seed and stop sequences. Up to 8 requests can wait in order. Cancelled API requests keep the model loaded. Tools and the Responses API are unavailable. Model limits and capabilities are available through the API.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+            Text(engine.supportsImages && engine.loadedMode == .chat
+                 ? "The running model accepts one PNG or JPEG up to 4 MiB through inline image data URLs."
+                 : "Image input is unavailable for the running model and app build.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if engine.supportsImages && engine.loadedMode == .chat {
+                Text(engine.imageVerificationNote).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button("Copy All as JSON") {
                     if let json = connectionInfo.json { copy(json, label: "connection JSON (includes API key)", sensitive: true) }

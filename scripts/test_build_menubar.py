@@ -196,6 +196,74 @@ class RuntimeVerificationTests(unittest.TestCase):
                 builder.verify_runtime(runtime)
 
 
+class NativeNoticeTests(unittest.TestCase):
+    def test_current_notices_overlay_and_hashes_preserve_base_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            embedded, work = root / "runtime", root / "work"
+            work.mkdir()
+            notices = embedded / "share/stark/licenses"
+            notices.mkdir(parents=True)
+            (notices / "base-runtime-notice").write_text("preserve")
+            (notices / "pytorch-LICENSE").write_text("stale")
+            cargo = root / "cargo"
+            cargo.touch()
+
+            def collect(overlay, selected_cargo, environment):
+                self.assertEqual(selected_cargo, str(cargo))
+                self.assertTrue(environment["PATH"].startswith(str(cargo.parent)))
+                target = overlay / "share/stark/licenses"
+                target.mkdir()
+                (target / "pytorch-LICENSE").write_text("current pinned notice")
+                (target / "cargo-inventory.json").write_text('{"packages": []}')
+
+            distribution = {
+                "clean_environment": lambda: {"PATH": "/usr/bin"},
+                "dependency_licenses": collect,
+                "RUST_VERSION": "1.98.1",
+                "BuildError": RuntimeError,
+            }
+            with (
+                patch.object(builder.shutil, "which", return_value=str(cargo)),
+                patch.object(builder.runpy, "run_path", return_value=distribution),
+            ):
+                result = builder.install_native_notices(embedded, work)
+            self.assertEqual((notices / "base-runtime-notice").read_text(), "preserve")
+            self.assertEqual(
+                (notices / "pytorch-LICENSE").read_text(), "current pinned notice"
+            )
+            self.assertEqual(result["rust_version"], "1.98.1")
+            self.assertEqual(
+                result["cargo_lock_sha256"], builder.sha256(builder.ROOT / "Cargo.lock")
+            )
+            self.assertEqual(
+                result["files_sha256"]["share/stark/licenses/pytorch-LICENSE"],
+                builder.sha256(notices / "pytorch-LICENSE"),
+            )
+
+    def test_collector_failure_does_not_publish_partial_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cargo = root / "cargo"
+            cargo.touch()
+            distribution = {
+                "clean_environment": lambda: {"PATH": "/usr/bin"},
+                "dependency_licenses": lambda *_args: (_ for _ in ()).throw(
+                    RuntimeError("private failure")
+                ),
+                "BuildError": RuntimeError,
+            }
+            with (
+                patch.object(builder.shutil, "which", return_value=str(cargo)),
+                patch.object(builder.runpy, "run_path", return_value=distribution),
+                self.assertRaisesRegex(
+                    builder.BuildError, "native_dependency_license_collection_failed"
+                ),
+            ):
+                builder.install_native_notices(root / "runtime", root)
+            self.assertFalse((root / "runtime").exists())
+
+
 class DesktopDependencyTests(unittest.TestCase):
     def test_requirements_include_only_locked_renderer_packages_and_wheel_hashes(self):
         requirements, versions = builder.desktop_requirements(
@@ -343,7 +411,17 @@ class ConverterPackageTests(unittest.TestCase):
                 "streaming.py",
                 "progress.py",
                 "desktop.py",
+                "desktop_media.py",
                 "chat.py",
+                "media.py",
+                "vision_runtime.py",
+                "image_checks.py",
+                "vision_family.py",
+                "model_support.py",
+                "model_inventory.py",
+                "model_catalog.py",
+                "model_removal.py",
+                "vision_runtime_qualifications.json",
             ):
                 relative = "stark_convert/" + name
                 self.assertEqual(
@@ -373,6 +451,15 @@ class ConverterPackageTests(unittest.TestCase):
             wheel = root / f"stark_convert-{source['version']}-py3-none-any.whl"
             for missing in (
                 "stark_convert/progress.py",
+                "stark_convert/desktop_media.py",
+                "stark_convert/image_checks.py",
+                "stark_convert/vision_family.py",
+                "stark_convert/model_support.py",
+                "stark_convert/model_inventory.py",
+                "stark_convert/model_catalog.py",
+                "stark_convert/model_removal.py",
+                "stark_convert/media.py",
+                "stark_convert/vision_runtime_qualifications.json",
                 "stark_convert/_build_inputs/uv.lock",
                 f"stark_convert-{source['version']}.dist-info/licenses/LICENSE.lalamo",
             ):

@@ -26,6 +26,20 @@ struct ConnectionInfoTests {
         precondition(stoppedJSON["running_model"] is NSNull)
         precondition(stoppedJSON["running_model_limits"] is NSNull)
         precondition(stoppedJSON["running_model_curl_example"] is NSNull)
+        var vision = info
+        vision.images = true
+        vision.imageVerification = "locally_tested"
+        let visionJSON = try JSONSerialization.jsonObject(with: Data(vision.json!.utf8)) as! [String: Any]
+        precondition((visionJSON["capabilities"] as! [String: Any])["images"] as? Bool == true)
+        precondition(visionJSON["image_verification"] as? String == "locally_tested")
+        vision.imageVerification = "invented"
+        let unknownJSON = try JSONSerialization.jsonObject(with: Data(vision.json!.utf8)) as! [String: Any]
+        precondition(unknownJSON["image_verification"] as? String == "unverified")
+        var noModel = stopped
+        noModel.images = true
+        let noModelJSON = try JSONSerialization.jsonObject(with: Data(noModel.json!.utf8)) as! [String: Any]
+        precondition((noModelJSON["capabilities"] as! [String: Any])["images"] as? Bool == false)
+        precondition(noModelJSON["image_verification"] as? String == "unverified")
 
         let quoted = ConnectionInfo(
             baseURL: info.baseURL, apiKey: info.apiKey, modelID: "Model's name", runningModelID: "Model's name",

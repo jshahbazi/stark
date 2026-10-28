@@ -199,7 +199,7 @@ def test_configless_checkpoint_sizes_external_metadata_before_weight_payload(tmp
     tokenizer = "meta-llama/Llama-3.2-1B-Instruct"
     roots = {
         primary: files(tmp_path / "primary"),
-        external: files(tmp_path / "external"),
+        external: files(tmp_path / "external", model_type="llamba"),
         tokenizer: files(tmp_path / "tokenizer"),
     }
     (roots[primary] / "config.json").unlink()

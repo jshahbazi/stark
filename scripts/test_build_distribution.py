@@ -440,6 +440,158 @@ class BundleConstructionTests(unittest.TestCase):
                 with self.assertRaisesRegex(distribution.BuildError, "path_invalid"):
                     distribution.supplemental_notices(package, source)
 
+    def test_pytorch_license_is_copied_into_distribution_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in (
+                "LICENSE",
+                "provenance/UPSTREAM.md",
+                "tools/converter/LICENSE.lalamo",
+                "vendor/cxx/LICENSE-MIT",
+                "vendor/cxx/LICENSE-APACHE",
+                "scripts/licenses/distribution/manifest.json",
+                "scripts/licenses/distribution/README.md",
+                "scripts/licenses/distribution/pytorch-LICENSE",
+                "scripts/licenses/distribution/ggml-LICENSE",
+                "scripts/licenses/distribution/sleef-LICENSE.txt",
+                "scripts/licenses/distribution/sleef-ATTRIBUTION.txt",
+                "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt",
+                "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt",
+            ):
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(f"{name}\n")
+            license_path = root / "scripts/licenses/distribution/pytorch-LICENSE"
+            ggml_license_path = root / "scripts/licenses/distribution/ggml-LICENSE"
+            sleef_license_path = (
+                root / "scripts/licenses/distribution/sleef-LICENSE.txt"
+            )
+            sleef_attribution_path = (
+                root / "scripts/licenses/distribution/sleef-ATTRIBUTION.txt"
+            )
+            arm_license_path = (
+                root
+                / "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt"
+            )
+            arm_attribution_path = (
+                root
+                / "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt"
+            )
+            manifest_path = root / "scripts/licenses/distribution/manifest.json"
+            manifest = {
+                "source_adaptations": {
+                    "pytorch-bf16-vision-layernorm-moments": {
+                        "license_file": "pytorch-LICENSE",
+                        "license_sha256": distribution.sha256(license_path),
+                        "additional_notices": [
+                            {
+                                "license_file": "ggml-LICENSE",
+                                "license_sha256": distribution.sha256(
+                                    ggml_license_path
+                                ),
+                            },
+                            {
+                                "license_file": "sleef-LICENSE.txt",
+                                "license_sha256": distribution.sha256(
+                                    sleef_license_path
+                                ),
+                            },
+                            {
+                                "license_file": "sleef-ATTRIBUTION.txt",
+                                "license_sha256": distribution.sha256(
+                                    sleef_attribution_path
+                                ),
+                            },
+                            {
+                                "license_file": "arm-optimized-routines-LICENSE.txt",
+                                "license_sha256": distribution.sha256(arm_license_path),
+                            },
+                            {
+                                "license_file": "arm-optimized-routines-ATTRIBUTION.txt",
+                                "license_sha256": distribution.sha256(
+                                    arm_attribution_path
+                                ),
+                            },
+                        ],
+                    }
+                }
+            }
+            manifest_path.write_text(json.dumps(manifest))
+            sysroot = root / "rust"
+            rust_docs = sysroot / "share/doc/rust"
+            (rust_docs / "licenses").mkdir(parents=True)
+            (rust_docs / "COPYRIGHT-library.html").write_text("rust library notice")
+            score_id = "path+file:///workspace#stark-score@0.1.0"
+            generate_id = "path+file:///workspace#stark-generate@0.1.0"
+            metadata = {
+                "packages": [
+                    {"id": score_id, "name": "stark-score", "source": None},
+                    {"id": generate_id, "name": "stark-generate", "source": None},
+                ],
+                "resolve": {
+                    "nodes": [
+                        {"id": score_id, "deps": []},
+                        {"id": generate_id, "deps": []},
+                    ]
+                },
+            }
+            bundle = root / "bundle"
+            (bundle / "share/stark").mkdir(parents=True)
+
+            def command_result(command, *_args, **_kwargs):
+                if command[0] == "rustc":
+                    stdout = str(sysroot).encode()
+                else:
+                    stdout = json.dumps(metadata).encode()
+                return subprocess.CompletedProcess(command, 0, stdout=stdout)
+
+            with (
+                patch.object(distribution, "ROOT", root),
+                patch.object(distribution, "run", side_effect=command_result),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                distribution.dependency_licenses(bundle, "cargo", {})
+
+            self.assertEqual(
+                (bundle / "share/stark/licenses/pytorch-LICENSE").read_text(),
+                "scripts/licenses/distribution/pytorch-LICENSE\n",
+            )
+            self.assertEqual(
+                (bundle / "share/stark/licenses/ggml-LICENSE").read_text(),
+                "scripts/licenses/distribution/ggml-LICENSE\n",
+            )
+            self.assertEqual(
+                (bundle / "share/stark/licenses/sleef-LICENSE.txt").read_text(),
+                "scripts/licenses/distribution/sleef-LICENSE.txt\n",
+            )
+            self.assertEqual(
+                (bundle / "share/stark/licenses/sleef-ATTRIBUTION.txt").read_text(),
+                "scripts/licenses/distribution/sleef-ATTRIBUTION.txt\n",
+            )
+            self.assertEqual(
+                (
+                    bundle / "share/stark/licenses/arm-optimized-routines-LICENSE.txt"
+                ).read_text(),
+                "scripts/licenses/distribution/arm-optimized-routines-LICENSE.txt\n",
+            )
+            self.assertEqual(
+                (
+                    bundle
+                    / "share/stark/licenses/arm-optimized-routines-ATTRIBUTION.txt"
+                ).read_text(),
+                "scripts/licenses/distribution/arm-optimized-routines-ATTRIBUTION.txt\n",
+            )
+            manifest["source_adaptations"]["pytorch-bf16-vision-layernorm-moments"][
+                "license_sha256"
+            ] = "0" * 64
+            manifest_path.write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(
+                distribution.BuildError, "source_adaptation_license_hash_mismatch"
+            ):
+                distribution.source_adaptation_notices(
+                    manifest_path.parent, "pytorch-bf16-vision-layernorm-moments"
+                )
+
     def test_owned_source_manifest_includes_untracked_code_and_excludes_root_extras(
         self,
     ):

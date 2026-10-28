@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::{
-        Backend, BufferRef, CommandBuffer, CommandBufferEncoding, Kernels,
+        Backend, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput, Kernels,
         kernel::{
             LogitTransformKernel,
             matmul::{MatmulA, MatmulArguments, MatmulDOps, MatmulKernel},
@@ -14,9 +14,9 @@ use crate::{
     data_type::DataType,
     encodable_block::{
         embedding_table::{EmbeddingTable, EmbeddingTableError, read_output_signs},
-        linear::{Gather, LinearMatmulError, UntiedReadout},
+        linear::{Gather, LinearMatmulError, ReferenceBF16Matmul, UntiedReadout},
     },
-    parameters::{ParameterLoaderError, ParameterTree},
+    parameters::{NumericalProfile, ParameterLoaderError, ParameterTree},
 };
 
 #[derive(Debug, Error)]
@@ -37,6 +37,7 @@ enum EmbeddingTying<B: Backend> {
     Tied {
         table: EmbeddingTable<B>,
         readout: Mutex<<B::Kernels as Kernels>::MatmulKernel>,
+        reference_matmul: Option<ReferenceBF16Matmul<B>>,
     },
     Untied {
         input_table: EmbeddingTable<B>,
@@ -83,6 +84,16 @@ impl<B: Backend> Embedding<B> {
                 if table.as_matrix().is_none() {
                     return Err(EmbeddingError::UnsupportedConfiguration("tied embeddings need a matrix table".into()));
                 }
+                let reference_matmul = if parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16 {
+                    if data_type != DataType::BF16 || table.as_matrix().unwrap().quantization().is_some() {
+                        return Err(EmbeddingError::UnsupportedConfiguration(
+                            "reference BF16 readout requires a full BF16 embedding table".into(),
+                        ));
+                    }
+                    Some(ReferenceBF16Matmul::new(context).map_err(EmbeddingError::BackendError)?)
+                } else {
+                    None
+                };
                 // The output norm fuses the readout's input rotation, so it needs its own copy of the factors.
                 let readout_input_hadamard_factors =
                     if let AnyWeightMatrixSpec::HybridSpec(_) = embedding_tree.metadata("spec")? {
@@ -94,6 +105,7 @@ impl<B: Backend> Embedding<B> {
                     EmbeddingTying::Tied {
                         table,
                         readout: readout_kernel(context, data_type)?,
+                        reference_matmul,
                     },
                     readout_input_hadamard_factors,
                 )
@@ -206,27 +218,47 @@ impl<B: Backend> Embedding<B> {
             EmbeddingTying::Tied {
                 table,
                 readout,
+                reference_matmul,
             } => {
-                let mut output = command_buffer
-                    .allocate_scratch_for_shape(&[batch_dim, output_dim], self.data_type)
-                    .map_err(EmbeddingError::BackendError)?;
-                let arguments = MatmulArguments {
-                    a: MatmulA::FullPrecision {
-                        values: input_buffer,
-                        offset: 0,
-                    },
-                    b: table.as_matrix().expect("tied embedding tables are matrices").matmul_b(),
-                    b_leading_dimension: None,
-                    b_transpose: true,
-                    d: &mut output,
-                    d_transform: MatmulDOps::none(),
-                    gather_indices,
-                    m: batch_dim,
-                    n: output_dim,
-                    k: self.model_dim,
-                };
-                readout.lock().encode(arguments, command_buffer).map_err(EmbeddingError::BackendError)?;
-                output
+                if let Some(reference) = reference_matmul {
+                    if gather_indices.is_some() || output_dim != self.vocab_size {
+                        return Err(EmbeddingError::BackendError(
+                            InvalidInput("reference BF16 readout requires the complete vocabulary").into(),
+                        ));
+                    }
+                    let crate::backends::common::kernel::matmul::MatmulB::FullPrecision {
+                        b,
+                    } = table.as_matrix().expect("tied embedding tables are matrices").matmul_b()
+                    else {
+                        return Err(EmbeddingError::BackendError(
+                            InvalidInput("reference BF16 readout requires full precision weights").into(),
+                        ));
+                    };
+                    reference
+                        .encode(input_buffer, 0, b, batch_dim, output_dim, self.model_dim, command_buffer)
+                        .map_err(EmbeddingError::BackendError)?
+                } else {
+                    let mut output = command_buffer
+                        .allocate_scratch_for_shape(&[batch_dim, output_dim], self.data_type)
+                        .map_err(EmbeddingError::BackendError)?;
+                    let arguments = MatmulArguments {
+                        a: MatmulA::FullPrecision {
+                            values: input_buffer,
+                            offset: 0,
+                        },
+                        b: table.as_matrix().expect("tied embedding tables are matrices").matmul_b(),
+                        b_leading_dimension: None,
+                        b_transpose: true,
+                        d: &mut output,
+                        d_transform: MatmulDOps::none(),
+                        gather_indices,
+                        m: batch_dim,
+                        n: output_dim,
+                        k: self.model_dim,
+                    };
+                    readout.lock().encode(arguments, command_buffer).map_err(EmbeddingError::BackendError)?;
+                    output
+                }
             },
         };
 

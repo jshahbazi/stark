@@ -36,6 +36,7 @@ mod device_capabilities;
 pub(crate) mod gpu_types;
 mod input_error;
 pub(crate) mod kernel;
+pub(crate) mod vision_math;
 
 pub use backend::Backend;
 pub(crate) use buffer::{

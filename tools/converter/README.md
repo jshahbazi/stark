@@ -42,7 +42,54 @@ Some catalog profiles take tokenizer or generation metadata from another reposit
 
 The output directory contains `config.json`, `tokenizer.json`, `model.safetensors` and `conversion.json`. The receipt records the source revision and content hashes, converter inputs, dependency lock, emitted file hashes, workspace use and the native-loading status. BF16 is the default output dtype and the only one the engine loads; F16 and F32 outputs are conversion-only and are marked runtime-blocked. The converter stages into a private temporary directory and publishes with an atomic no-replace rename, so a failed or interrupted conversion leaves no partial output.
 
-A successful conversion validates the complete supported layout. It does not run the model: new conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record (see [qualification](#catalog-coverage-and-qualification)).
+A successful conversion validates the complete supported layout. It does not run the model. Text conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record. Vision conversion reports the applicable unverified layout/family status or a matching exact record (see [qualification](#catalog-coverage-and-qualification)).
+
+## Check family and mode coverage
+
+The [shared support registry](../../docs/MODEL_SUPPORT.md) describes implemented
+conversion paths, format constraints and Text, Decision and Image eligibility.
+Inspect it without downloading a checkpoint:
+
+```sh
+uv run --project tools/converter --locked stark-convert --list-families
+```
+
+Browse representative download choices for one family without fetching weights:
+
+```sh
+uv run --project tools/converter --locked stark-convert --family-models qwen3_5
+```
+
+This combines reference sources with bounded live Hugging Face discovery, using
+parsed configuration and recognized source formats. It inspects at most 45
+candidates and returns at most 30 choices, preserving available sizes and
+quantizations. It reads bounded metadata and repository file information only.
+The JSON report has `ready`, `offline` or `error` status; each choice includes an
+immutable primary revision, metadata-derived size when known, native output
+quantization and offered artifact modes. Missing size metadata remains unknown.
+The list is representative, and a compatible fine-tune can appear without a
+registered catalogue entry. `--offline` returns an offline report.
+
+Check source metadata before downloading weights:
+
+```sh
+uv run --project tools/converter --locked stark-convert owner/model \
+  --preflight --support-mode text
+```
+
+Preflight returns JSON with `conditional`, `unsupported` or `inconclusive` status;
+all three are report outcomes with exit status 0. It creates no converted model.
+A conditional result leaves complete tensor and native checks pending. An
+uncatalogued source can qualify for an implemented family path; adapter presence
+alone does not establish complete-model support, execution or decision
+calibration. `--support-mode` can also require intended-mode eligibility during
+actual conversion before weights are requested. The app uses the same path and
+pins the checked primary source revision. External catalog metadata is resolved
+and checked again during conversion. In the app's family browser, the backend
+caches each offered revision and mode, then repeats preflight at that revision
+before downloading. The browser keeps installation progress visible and adds
+the result to the library without selecting or running it. See the
+[model browser and removal workflow](../../apps/menu-bar/README.md#models-and-requests).
 
 ## Command reference
 
@@ -60,11 +107,16 @@ stark-convert [SOURCE] [options]
 | `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the pinned Qwen3.5-0.8B BF16 checkpoint or the supported merged-BF16 [family profile](../../docs/VISION_FAMILY_CONTRACT.md) |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
 | `--write-source-manifest PATH` | | Write a private manifest describing every selected source file |
-| `--require-native-support` | | Fail unless the exact artifact matches a stored load-only qualification. Requires BF16 and a catalog model |
+| `--require-native-support` | | Require a stored named-build match for the exact output: load-only evidence for text mode, image execution evidence for vision mode. Requires BF16 and a catalog model |
+| `--list-families` | | Print the shared family/mode/format matrix without a source or download |
+| `--family-models FAMILY` | family ID, such as `qwen3_5` | Print representative compatible download choices from bounded live metadata discovery; no source or output directory required |
+| `--preflight` | | Inspect selected source metadata and print a support report before weight download; creates no output |
+| `--support-mode MODE` | `text`, `decision`, `vision-language` | Check intended native use during preflight or conversion; preflight defaults to the artifact mode |
 | `--capabilities` | | Report catalog coverage for `SOURCE` without reading or downloading it |
 | `--backend` | `auto`, `streaming` | Accepted for compatibility; both select the same implementation |
 | `--version` | | Print the converter version |
@@ -97,7 +149,20 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 | ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router` (both repositories currently inaccessible) |
 
-Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. Twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Every other implemented identity, every size variant, and every generic conversion starts as `unverified`, or `runtime_blocked` when its dtype or dimensions exceed what the engine loads. `--require-native-support` refuses anything but an exact match. Remaining catalog rows (specialized, MoE, multimodal and later-generation variants) fail with an unsupported category.
+Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
+
+Vision mode uses a separate [execution catalog](stark_convert/vision_runtime_qualifications.json).
+Its records bind all five artifact files and the generation worker to the
+tested Metal device class and macOS version. The [execution record](../../docs/archive/runs/2026-10-26-qwen35-image-execution.md)
+includes final-logit parity, visual questions, resource observations, and failure
+recovery. Conversion returns that named-build evidence when output hashes match;
+serving additionally verifies the launched executable and current runtime.
+Compatible merged BF16 Qwen3.5 fine-tunes use schema 3 and report
+`native_loading: "supported_family_unverified"`. On installation or startup,
+the host can enable image input after automatic local checks and labels it
+`locally_tested`. Exact catalog matches are `reference_verified`. These local
+checks do not create an execution-catalog entry or prove reference parity; see
+the [family contract](../../docs/VISION_FAMILY_CONTRACT.md).
 
 Probe coverage without reading a checkpoint:
 
@@ -106,6 +171,47 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 ```
 
 ## Future checkpoints and architecture tracking
+
+The `vision-language` artifact mode is tracked separately in the
+[native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
+It validates and retains the full vision tower, processor and template for the
+pinned checkpoint or the merged BF16 dense Qwen3.5 family. New family artifacts
+use config-derived version 2: supported decoder/tower dimensions and tensor
+shapes come from validated configuration within operation, indexing and storage
+bounds. Previously converted fixed version-1 0.8B artifacts remain readable.
+Both require recognized tokenizer, template and processor forms. Version 2
+additionally accepts a second reviewed tokenizer processing program, the stock
+reasoning template and equivalent processor files when their normalized recipes
+agree. The two tokenizer programs share vocabulary and special tokens but
+intentionally differ for some combining-mark text; conversion preserves the
+selected program. Formatting/key-order equivalence cannot admit an arbitrary
+new program. Schema 2 and version 1 retain their original tokenizer gate. The
+worker, CLI, Local API and Swift app support
+one PNG/JPEG image after passing host evidence checks. Default Qwen3.5 conversions
+remain text-only. A model's size or repository name does not establish support;
+its complete graph and weights must pass admission and its local execution
+checks must pass before images are enabled. MoE, LoRA-only repositories,
+quantized vision weights, unrecognized operations and new architectures require
+additional support. The
+[local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
+covers the earlier exact-tuple Swift and GUI checks. Public notarized release
+qualification remains pending.
+
+Convert a self-contained merged vision checkpoint with:
+
+```sh
+uv run --project tools/converter --locked stark-convert my-org/qwen35-merged \
+  --artifact-mode vision-language \
+  --write-source-manifest runtime/converter-sources/qwen35-merged.json \
+  --output models/qwen35-merged-vision
+```
+
+Vision mode selects the family profile automatically from a supported complete
+checkpoint. Use a local source path plus `--offline` for a downloaded folder. The converter
+uses the checkpoint's own metadata; it does not borrow sidecars from the official
+model. Family conversion performs structural validation. Installation checks
+execution on the current Mac before registering a schema-3 model. See the
+[complete family boundary](../../docs/VISION_FAMILY_CONTRACT.md).
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
 
@@ -116,7 +222,7 @@ uv run --project tools/converter --locked stark-convert my-org/future-model \
   --output models/future-model-stark
 ```
 
-The adapter is selected from the checkpoint's `model_type` and the full config and tensor layout are validated. `hf-generic` requires self-contained `config.json`, `tokenizer.json` and `tokenizer_config.json`, uses `generation_config.json` and `chat_template.jinja` when present, and requires a supported chat template and explicit EOS identifiers for language models. Duplicate inline and Jinja templates must agree exactly. The checkpoint's own tokenizer, template and generation fields are used with plain system, user and assistant roles; output parsers, reasoning controls and default system prompts need a reviewed catalog profile. Hugging Face text-only exports with `model_type=qwen3_5_text` select the `qwen3_5` adapter; a nested text or vision wrapper that conflicts with the text layout is rejected.
+The adapter is selected from the checkpoint's `model_type` and the full config and tensor layout are validated. `hf-generic` requires self-contained `config.json`, `tokenizer.json` and `tokenizer_config.json`, uses `generation_config.json` and `chat_template.jinja` when present, and requires a supported chat template and explicit EOS identifiers for language models. Duplicate inline and Jinja templates must agree exactly. Generic text conversion uses the checkpoint's own tokenizer, template and generation fields with plain system, user and assistant roles; output parsers, reasoning controls and default system prompts need a reviewed catalog profile. Version-2 vision artifacts receive the reviewed family boolean thinking control. Hugging Face text-only exports with `model_type=qwen3_5_text` select the `qwen3_5` adapter; a nested text or vision wrapper that conflicts with the text layout is rejected.
 
 Trained `Qwen/Qwen3-4B-Instruct-2507` and `empero-ai/Qwen3.8-4B-Distill` checkpoints are covered step by step in the [trained checkpoint guide](../../docs/QWEN_TRAINED_CHECKPOINTS.md).
 

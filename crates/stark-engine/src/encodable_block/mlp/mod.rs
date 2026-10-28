@@ -11,7 +11,7 @@ use crate::{
     config::mlp::AnyMLPConfig,
     data_type::DataType,
     encodable_block::linear::{Linear, LinearBlockError},
-    parameters::ParameterTree,
+    parameters::{NumericalProfile, ParameterTree},
 };
 
 pub trait Mlp<B: Backend>: Send + Sync {
@@ -70,6 +70,7 @@ impl<B: Backend> dyn Mlp<B> {
                     dense_config.up_clipping,
                     hidden_dimension,
                     down_input_preparation,
+                    parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16,
                 )
                 .map_err(MlpBlockError::BackendError)?;
 
