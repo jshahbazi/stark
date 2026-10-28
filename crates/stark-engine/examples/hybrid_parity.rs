@@ -8,9 +8,10 @@ use std::{fs, path::Path, time::Instant};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use stark_engine::engine::hybrid::{glm::GlmModel, qwen::QwenModel, weights::Weights};
+use stark_engine::engine::hybrid::{flint::FlintModel, glm::GlmModel, qwen::QwenModel, weights::Weights};
 
 enum Model {
+    Flint(FlintModel),
     Glm(GlmModel),
     Qwen(QwenModel),
 }
@@ -21,6 +22,7 @@ impl Model {
         token: u32,
     ) -> stark_engine::engine::hybrid::Result<Vec<f32>> {
         match self {
+            Self::Flint(model) => model.step(token),
             Self::Glm(model) => model.step(token),
             Self::Qwen(model) => model.step(token),
         }
@@ -28,6 +30,7 @@ impl Model {
 
     fn reset(&mut self) {
         match self {
+            Self::Flint(model) => model.reset(),
             Self::Glm(model) => model.reset(),
             Self::Qwen(model) => model.reset(),
         }
@@ -68,6 +71,7 @@ fn run() -> Result<bool, &'static str> {
     let weights = Weights::open(path).map_err(|_| "native weight admission failed")?;
     let family = config.get("model_type").and_then(Value::as_str).ok_or("missing model type")?;
     let mut model = match family {
+        "flint" => Model::Flint(FlintModel::new(weights, &config).map_err(|_| "native model admission failed")?),
         "glm5_next" => Model::Glm(GlmModel::new(weights, &config).map_err(|_| "native model admission failed")?),
         "qwen4_exp" => Model::Qwen(QwenModel::new(weights, &config).map_err(|_| "native model admission failed")?),
         _ => return Err("unsupported model type"),

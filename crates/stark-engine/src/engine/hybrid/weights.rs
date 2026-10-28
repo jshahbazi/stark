@@ -33,6 +33,7 @@ const MAX_STATIC_VIEW_BYTES: usize = 8 * 1024 * 1024 * 1024;
 const U32_KIND: u32 = 101;
 const I64_KIND: u32 = 102;
 const I32_KIND: u32 = 103;
+const U8_KIND: u32 = 104;
 
 /// Mapping stays alive for every borrowed tensor byte range. Source files must
 /// remain immutable for the loaded model's lifetime, like the existing loader.
@@ -379,7 +380,7 @@ impl Weights {
         let quant = config.get("quantization").or_else(|| config.get("quantization_config"));
         let names: Vec<_> = self.tensors.keys().filter(|name| name.ends_with(".weight")).cloned().collect();
         for name in names {
-            if self.tensor(&name)?.kind != U32_KIND {
+            if !matches!(self.tensor(&name)?.kind, U32_KIND | U8_KIND) {
                 continue;
             }
             let stem = name.strip_suffix(".weight").unwrap();
@@ -395,13 +396,27 @@ impl Weights {
             if description.get("mode").and_then(Value::as_str).is_some_and(|mode| mode != "affine") {
                 return Err(Error::Unsupported("unsupported matrix quantization mode"));
             }
+            // Recursive's official INT4 export stores the same little-endian
+            // MLX words as byte arrays. Its embedding alone uses eight bits,
+            // explicitly declared by mlx_export rather than the global width.
             let bits =
-                description.get("bits").and_then(Value::as_u64).ok_or(Error::Invalid("missing affine width"))? as usize;
+                if config.get("model_type").and_then(Value::as_str) == Some("flint") && stem == "model.embed_tokens" {
+                    config.get("mlx_export").and_then(|v| v.get("embedding_bits")).or_else(|| description.get("bits"))
+                } else {
+                    description.get("bits")
+                }
+                .and_then(Value::as_u64)
+                .ok_or(Error::Invalid("missing affine width"))? as usize;
             let group = description
                 .get("group_size")
                 .and_then(Value::as_u64)
                 .ok_or(Error::Invalid("missing affine group size"))? as usize;
             let rank = tensor.shape.len();
+            let stored_bits = if tensor.kind == U8_KIND {
+                8
+            } else {
+                32
+            };
             if !matches!(bits, 4 | 8)
                 || !matches!(group, 32 | 64 | 128)
                 || rank < 2
@@ -410,14 +425,16 @@ impl Weights {
                 || scales.kind != biases.kind
                 || !matches!(scales.kind, 0 | 1 | 30)
                 || tensor.shape[..rank - 1] != scales.shape[..rank - 1]
+                || (tensor.kind == U8_KIND && !tensor.shape[rank - 1].is_multiple_of(4))
             {
                 return Err(Error::Unsupported("unsupported affine matrix layout"));
             }
             let columns = scales.shape[rank - 1].checked_mul(group).ok_or(Error::Invalid("affine shape overflow"))?;
-            if tensor.shape[rank - 1].checked_mul(32) != columns.checked_mul(bits) {
+            if tensor.shape[rank - 1].checked_mul(stored_bits) != columns.checked_mul(bits) {
                 return Err(Error::Invalid("inconsistent affine planes"));
             }
             let tensor = self.tensors.get_mut(&name).unwrap();
+            tensor.kind = U32_KIND;
             tensor.shape[rank - 1] = columns;
             tensor.affine = Some(Affine {
                 bits,
@@ -1218,6 +1235,7 @@ pub(super) fn block_layout(kind: u32) -> Result<(usize, usize)> {
         18 => (256, 98),
         23 => (256, 136),
         U32_KIND | I32_KIND => (1, 4),
+        U8_KIND => (1, 1),
         I64_KIND => (1, 8),
         _ => return Err(Error::Unsupported("unsupported weight block format")),
     })
@@ -1261,6 +1279,7 @@ fn read_safetensors(
             "F16" => 1,
             "BF16" => 30,
             "U32" => U32_KIND,
+            "U8" => U8_KIND,
             "I32" => I32_KIND,
             "I64" => I64_KIND,
             _ => return Err(Error::Unsupported("unsupported Safetensors dtype")),
@@ -2096,6 +2115,62 @@ mod tests {
     }
 
     #[stark_test]
+    fn byte_packed_flint_planes_preserve_words_and_embedding_width() {
+        let fixture = Fixture::new();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("model.embed_tokens.weight", "U8", vec![2, 32], vec![0x42; 64]),
+                (
+                    "model.embed_tokens.scales",
+                    "F32",
+                    vec![2, 1],
+                    [0.25f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ),
+                (
+                    "model.embed_tokens.biases",
+                    "F32",
+                    vec![2, 1],
+                    [0.5f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect(),
+                ),
+                ("byte.weight", "U8", vec![2, 16], vec![0x42; 32]),
+                ("word.weight", "U32", vec![2, 4], vec![0x42; 32]),
+                ("byte.scales", "F32", vec![2, 1], [0.25f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect()),
+                ("word.scales", "F32", vec![2, 1], [0.25f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect()),
+                ("byte.biases", "F32", vec![2, 1], [0.5f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect()),
+                ("word.biases", "F32", vec![2, 1], [0.5f32; 2].iter().flat_map(|v| v.to_le_bytes()).collect()),
+            ],
+        );
+        fs::write(
+            fixture.0.join("config.json"),
+            br#"{"model_type":"flint","quantization":{"bits":4,"group_size":32},"mlx_export":{"embedding_bits":8}}"#,
+        )
+        .unwrap();
+        // MLX may leave the JSON header unpadded. Packed kernels load bytes,
+        // so a word's absolute file address need not be aligned to four bytes.
+        let path = fixture.0.join("model.safetensors");
+        let mut bytes = fs::read(&path).unwrap();
+        let header_bytes = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        bytes.insert(8 + header_bytes, b' ');
+        bytes[..8].copy_from_slice(&((header_bytes + 1) as u64).to_le_bytes());
+        fs::write(path, bytes).unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        assert_eq!(weights.shape("model.embed_tokens.weight").unwrap(), [2, 32]);
+        assert_eq!(weights.row("model.embed_tokens.weight", 1).unwrap(), vec![17.0; 32]);
+        assert_eq!(weights.shape("byte.weight").unwrap(), [2, 32]);
+        assert_eq!(weights.row("byte.weight", 1).unwrap(), weights.row("word.weight", 1).unwrap());
+        let input: Vec<_> = (0..32).map(|i| i as f32 * 0.01).collect();
+        assert_eq!(weights.matvec("byte.weight", &input).unwrap(), weights.matvec("word.weight", &input).unwrap());
+        // A missing embedding override must reject the inconsistent plane width.
+        fs::write(
+            fixture.0.join("config.json"),
+            br#"{"model_type":"flint","quantization":{"bits":4,"group_size":32}}"#,
+        )
+        .unwrap();
+        assert!(Weights::open(&fixture.0).is_err());
+    }
+
+    #[stark_test]
     fn independent_matrix_jobs_preserve_mixed_formats_and_distinct_inputs() {
         let fixture = Fixture::new();
         let path = fixture.0.join("model.safetensors");
@@ -2497,7 +2572,7 @@ mod tests {
 
     #[stark_test]
     fn gguf_rejects_safetensors_private_integer_tags() {
-        for kind in [U32_KIND, I64_KIND, I32_KIND] {
+        for kind in [U32_KIND, I64_KIND, I32_KIND, U8_KIND] {
             let fixture = Fixture::new();
             let mut bytes = b"GGUF".to_vec();
             bytes.extend(3u32.to_le_bytes());

@@ -66,7 +66,7 @@ def prepare_fixture(source: Path, destination: Path) -> dict:
     config = bounded_json(config_path)
     require(isinstance(config, dict), "fixture_config_invalid")
     family = config.get("model_type")
-    require(family in {"glm5_next", "qwen4_exp"}, "fixture_family_invalid")
+    require(family in {"glm5_next", "qwen4_exp", "flint"}, "fixture_family_invalid")
     text = config.get("text_config", config)
     vocab_size = text.get("vocab_size")
     max_context = text.get("max_position_embeddings")

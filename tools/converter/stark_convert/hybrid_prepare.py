@@ -19,6 +19,17 @@ from huggingface_hub import snapshot_download
 from .cli import _publish
 
 SOURCES = {
+    "flint-int4": {
+        "architecture": "flint",
+        "weights_repo": "RecursiveSI/flint-int4",
+        "weights_revision": "3b93f9053b530488405ae9fca51d4900d6ce21f0",
+        "weights_patterns": ["*.safetensors", "README.md"],
+        "metadata_repo": "RecursiveSI/flint-int4",
+        "metadata_revision": "3b93f9053b530488405ae9fca51d4900d6ce21f0",
+        "weight_bytes": 22_568_912_600,
+        "quantization": "MLX affine 4-bit, 8-bit embeddings",
+        "weight_shards": 5,
+    },
     "glm53-q2": {
         "architecture": "glm5_next",
         "weights_repo": "unsloth/GLM-5.3-Flash-GGUF",
@@ -28,6 +39,7 @@ SOURCES = {
         "metadata_revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
         "weight_bytes": 108_720_071_552,
         "quantization": "UD-Q2_K_XL",
+        "weight_shards": 4,
     },
     "qwen38-mixed": {
         "architecture": "qwen4_exp",
@@ -166,7 +178,7 @@ def prepared_identity(directory: Path) -> dict | None:
         files = list(directory.glob("*" + extension))
         if not 1 <= len(files) <= 512 or any(path.is_symlink() or not path.is_file() for path in files):
             return None
-        if source["architecture"] == "glm5_next" and len(files) != 4:
+        if "weight_shards" in source and len(files) != source["weight_shards"]:
             return None
         size = sum(path.stat().st_size for path in files)
         if size != source["weight_bytes"] or receipt.get("weight_bytes") != size:
@@ -255,6 +267,8 @@ def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
     weights = [path for path in stage.iterdir() if path.suffix in {".gguf", ".safetensors"}]
     if not weights or any(path.is_symlink() or not path.is_file() for path in weights):
         raise ValueError("invalid prepared weight files")
+    if "weight_shards" in source and len(weights) != source["weight_shards"]:
+        raise ValueError("incomplete pinned weight shard set")
     weight_bytes = sum(path.stat().st_size for path in weights)
     if weight_bytes != source["weight_bytes"]:
         raise ValueError("pinned weight size mismatch")

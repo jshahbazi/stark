@@ -1,19 +1,24 @@
-# Native GLM-5.3-Flash and Qwen3.8-Flash-Next
+# Native GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint
 
-Stark has a separate native Rust/Metal forward path for `glm5_next` and
-`qwen4_exp`. It reads the original quantized GGUF or MLX Safetensors storage.
+Stark has a separate native Rust/Metal forward path for `glm5_next`,
+`qwen4_exp` and `flint`. It reads the original quantized GGUF or MLX Safetensors storage.
 There is no Sushi, llama.cpp, MLX, Python or Transformers inference process in
 this execution path. Python is used to prepare download metadata and by the
 optional reference validators.
 
 ## Checkpoints and preparation
 
-The preparation command pins these two sources:
+The preparation command pins these sources:
 
 | Choice | Checkpoint | Weight files |
 | --- | --- | --- |
 | `glm53-q2` | `unsloth/GLM-5.3-Flash-GGUF`, `UD-Q2_K_XL`, revision `a38483c8cd5df544f53d70fb281afe97369d5ab6` | 108,720,071,552 bytes, 101.25 GiB |
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
+| `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
+
+See [Recursive Flint](FLINT.md) for its architecture, installation command,
+precision policy and validation. The GLM/Qwen-specific execution details below
+retain their own scope.
 
 GLM uses the configuration and tokenizer from `zai-org/GLM-5.3-Flash` at
 `04c4e9e95c5da8862dced7e5056455116f83a7e0`. Its four GGUF shards retain their
@@ -112,7 +117,7 @@ and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-r
 record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
-Both paths are text-only. The native loader does not execute vision, video,
+These paths are text-only. The native loader does not execute vision, video,
 audio, MTP or DFlash. The workers retain their 16,384-token context and
 4,096-output-token caps; the upstream advertised maximum context is not a Stark
 memory qualification. A weight set fitting within 128 GiB does not establish

@@ -117,6 +117,51 @@ def test_incomplete_download_keeps_owned_resumable_stage(tmp_path, monkeypatch):
         hybrid.prepare("glm53-q2", tmp_path / "model", offline=True)
 
 
+def test_flint_preparation_preserves_packed_bytes_and_imports_local_folder(tmp_path, monkeypatch):
+    source = {**hybrid.SOURCES["flint-int4"], "weight_bytes": 20}
+    monkeypatch.setitem(hybrid.SOURCES, "flint-int4", source)
+    calls = []
+
+    def download(repo, **options):
+        assert repo == "RecursiveSI/flint-int4"
+        calls.append(options)
+        root = Path(options["local_dir"])
+        if "*.safetensors" in options["allow_patterns"]:
+            for index in range(5):
+                (root / f"model-{index:05}.safetensors").write_bytes(bytes([index, 2, 3, 4]))
+        else:
+            metadata(root, "flint")
+            config = {"model_type": "flint", "vocab_size": 8, "eos_token_id": [1, 3]}
+            (root / "config.json").write_text(json.dumps(config))
+            (root / "chat_template.jinja").write_text("<|user|>{{ messages[0]['content'] }}<|assistant|>")
+
+    monkeypatch.setattr(hybrid, "snapshot_download", download)
+    output = tmp_path / "flint"
+    receipt = hybrid.prepare("flint-int4", output, offline=True)
+    assert receipt["architecture"] == "flint"
+    assert receipt["native_loading"] == receipt["execution"] == "unverified"
+    assert all(call["revision"] == "3b93f9053b530488405ae9fca51d4900d6ce21f0" for call in calls)
+    assert all(call["local_files_only"] for call in calls)
+    assert not any(pattern.endswith(".py") for call in calls for pattern in call["allow_patterns"])
+    assert (output / "model-00004.safetensors").read_bytes() == bytes([4, 2, 3, 4])
+    config = json.loads((output / "config.json").read_text())
+    assert config["eos_token_id"] == [1, 3, 2]
+    assert config["token_codec_config"]["prompt_template"].startswith("<|user|>")
+    from stark_convert.desktop import model_valid
+    from stark_convert.model_inventory import model_display
+
+    assert model_valid(output)
+    assert hybrid.prepared_identity(output)["architecture"] == "flint"
+    display = model_display({"id": "flint", "name": "Flint", "path": str(output)})
+    assert display["weight_bytes"] == 20
+    assert display["quantization"] == source["quantization"]
+    # Equal total bytes cannot substitute for a complete pinned shard set.
+    (output / "model-00004.safetensors").unlink()
+    (output / "model-00003.safetensors").write_bytes(b"12345678")
+    assert hybrid.prepared_identity(output) is None
+    assert not model_valid(output)
+
+
 def test_interrupted_gguf_flatten_resumes_without_downloading_moved_shards(tmp_path, monkeypatch):
     source = {**hybrid.SOURCES["glm53-q2"], "weight_bytes": 4}
     monkeypatch.setitem(hybrid.SOURCES, "glm53-q2", source)

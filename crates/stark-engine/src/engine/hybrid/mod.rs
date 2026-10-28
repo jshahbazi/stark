@@ -1,8 +1,9 @@
-//! Native, source-format execution for the GLM5-Next and Qwen4-Exp families.
+//! Native, source-format execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
 //!
 //! These models carry distinct recurrent state, sparse attention and residual
 //! streams. They deliberately do not enter the dense decoder's artifact path.
 
+pub mod flint;
 pub mod glm;
 #[cfg(feature = "metal")]
 mod glm_metal;
@@ -73,14 +74,15 @@ fn extend_eos(
     Ok(())
 }
 
-/// Detect only the two explicitly implemented architectures; never infer one
+/// Detect only the explicitly implemented architectures; never infer one
 /// from a repository name or load repository-provided Python code.
 pub fn recognizes(path: &Path) -> Result<bool> {
     let value = config(path)?;
-    Ok(matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp")))
+    Ok(matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
 }
 
 enum Forward {
+    Flint(flint::FlintModel),
     Glm(glm::GlmModel),
     Qwen(qwen::QwenModel),
 }
@@ -147,6 +149,7 @@ impl Model {
         }
         let weights = weights::Weights::open(path)?;
         let forward = match outer.get("model_type").and_then(Value::as_str) {
+            Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
             Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
             Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
             _ => return Err(Error::Unsupported("architecture")),
@@ -177,6 +180,7 @@ impl Model {
     /// is persisted, and failures invalidate the entire current sequence.
     pub fn reset(&mut self) {
         match &mut self.forward {
+            Forward::Flint(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
             Forward::Qwen(model) => model.reset(),
         }
@@ -190,6 +194,7 @@ impl Model {
             Err(Error::Invalid("token ID"))
         } else {
             match &mut self.forward {
+                Forward::Flint(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
                 Forward::Qwen(model) => model.step(token),
             }
@@ -217,6 +222,7 @@ impl Model {
             Err(Error::Invalid("token ID"))
         } else {
             match &mut self.forward {
+                Forward::Flint(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
                 Forward::Qwen(model) => model.ingest(token),
             }
