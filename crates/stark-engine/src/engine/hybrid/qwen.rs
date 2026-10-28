@@ -10,6 +10,10 @@
 
 use serde_json::Value;
 
+#[cfg(feature = "metal")]
+#[path = "qwen_graph.rs"]
+mod decode_graph;
+
 use super::{
     Error, Result,
     math::{rms_norm, sigmoid, silu, softmax, topk},
@@ -704,15 +708,15 @@ impl Ple {
         })
     }
 
-    fn step(
-        &mut self,
+    /// Hashing and immutable n-gram lookup depend only on token history. Graph
+    /// execution prepares these embeddings before submitting any device work.
+    fn gather(
+        &self,
         weights: &Weights,
-        input: &[f32],
         token: u32,
         history: &[u32],
         g: &Geometry,
     ) -> Result<Vec<f32>> {
-        let _profile = Scope::new("qwen.ple");
         let shifted = shifted_tokens(token, history, g.ngram_size, g.eos);
         let mut embedding = Vec::with_capacity(g.ple_dim);
         let heads_per_size = g.ngram_heads / (g.ngram_size - 1);
@@ -734,6 +738,19 @@ impl Ple {
                 );
             }
         }
+        Ok(embedding)
+    }
+
+    fn step(
+        &mut self,
+        weights: &Weights,
+        input: &[f32],
+        token: u32,
+        history: &[u32],
+        g: &Geometry,
+    ) -> Result<Vec<f32>> {
+        let _profile = Scope::new("qwen.ple");
+        let embedding = self.gather(weights, token, history, g)?;
         let [key, value] = projects(weights, &self.prefix, [("key_proj", &embedding), ("value_proj", &embedding)])?;
         let key = grouped_norm(&key, &self.key_norm, g.dim, g.eps)?;
         let query = grouped_norm(input, &self.query_norm, g.dim, g.eps)?;
@@ -884,6 +901,10 @@ pub struct QwenModel {
     readout: String,
     position: usize,
     history: Vec<u32>,
+    #[cfg(feature = "metal")]
+    graph: Option<decode_graph::State>,
+    #[cfg(feature = "metal")]
+    graph_enabled: bool,
 }
 
 impl QwenModel {
@@ -1052,6 +1073,10 @@ impl QwenModel {
                 ple,
             });
         }
+        #[cfg(feature = "metal")]
+        let graph_enabled = g.active_experts <= 64
+            && weights.indexed_banks_admitted()
+            && std::env::var_os("STARK_QWEN38_DECODE_GRAPH").is_none_or(|value| value != "0");
         Ok(Self {
             weights,
             geometry: g,
@@ -1061,10 +1086,18 @@ impl QwenModel {
             readout,
             position: 0,
             history: Vec::new(),
+            #[cfg(feature = "metal")]
+            graph: None,
+            #[cfg(feature = "metal")]
+            graph_enabled,
         })
     }
 
     pub fn reset(&mut self) {
+        #[cfg(feature = "metal")]
+        {
+            self.graph = None;
+        }
         self.position = 0;
         self.history.clear();
         for layer in &mut self.layers {
@@ -1082,11 +1115,7 @@ impl QwenModel {
         &mut self,
         token: u32,
     ) -> Result<Vec<f32>> {
-        let result = self.step_inner(token, true);
-        if result.is_err() {
-            self.reset();
-        }
-        result
+        self.advance(token, true)
     }
 
     /// Advance recurrent, attention and n-gram state for a prefix token without
@@ -1095,7 +1124,30 @@ impl QwenModel {
         &mut self,
         token: u32,
     ) -> Result<()> {
-        let result = self.step_inner(token, false).map(|_| ());
+        self.advance(token, false).map(|_| ())
+    }
+
+    fn advance(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        #[cfg(feature = "metal")]
+        {
+            objc2::rc::autoreleasepool(|_| self.advance_inner(token, readout))
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            self.advance_inner(token, readout)
+        }
+    }
+
+    fn advance_inner(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        let result = self.step_inner(token, readout);
         if result.is_err() {
             self.reset();
         }
@@ -1110,6 +1162,10 @@ impl QwenModel {
         let g = &self.geometry;
         if token as usize >= g.vocab || self.position >= g.context {
             return Err(Error::Invalid("Qwen3.8 token or context boundary"));
+        }
+        #[cfg(feature = "metal")]
+        if self.graph_enabled {
+            return decode_graph::step(self, token, readout);
         }
         let embedding = {
             let _profile = Scope::new("qwen.embedding");
@@ -1257,6 +1313,56 @@ mod tests {
         prefix.reset();
         let reset = prefix.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen reset step failed"));
         assert!(reset == expected[0], "private Qwen reset output mismatch");
+    }
+
+    /// Keep the prior staged Metal path as an independent execution reference.
+    /// Repeated fixture tokens cross the first device-cache growth boundary;
+    /// failures and resets must return both paths to the first visible prefix.
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn qwen_decode_graph_matches_staged_forward_across_growth_and_reset() {
+        let path = std::env::var_os("STARK_QWEN38_NUMERICAL_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("private Qwen numerical fixture path is required"));
+        assert!(!path.join("HEADER-ADMISSION-ONLY.json").exists());
+        let read = |name| std::fs::read(path.join(name)).unwrap_or_else(|_| panic!("private Qwen fixture read failed"));
+        let config: Value = serde_json::from_slice(&read("config.json"))
+            .unwrap_or_else(|_| panic!("private Qwen fixture configuration is invalid"));
+        let tokens: Vec<u32> = serde_json::from_slice(&read("tokens.json"))
+            .unwrap_or_else(|_| panic!("private Qwen fixture sequence is invalid"));
+        assert!(!tokens.is_empty());
+        let load = || {
+            let weights = Weights::open(&path).unwrap_or_else(|_| panic!("private Qwen fixture admission failed"));
+            QwenModel::new(weights, &config).unwrap_or_else(|_| panic!("private Qwen fixture model admission failed"))
+        };
+        let mut graph = load();
+        assert!(graph.weights.indexed_banks_admitted());
+        graph.graph_enabled = true;
+        let mut staged = load();
+        staged.graph_enabled = false;
+        let count = 33.min(graph.geometry.context);
+        assert!(count > 16, "private Qwen fixture must exercise graph cache growth");
+        let mut first = Vec::new();
+        for position in 0..count {
+            let token = tokens[position % tokens.len()];
+            let expected = staged.step(token).unwrap_or_else(|_| panic!("private Qwen staged step failed"));
+            let actual = graph.step(token).unwrap_or_else(|_| panic!("private Qwen graph step failed"));
+            assert_eq!(actual.len(), expected.len());
+            let difference = actual.iter().zip(&expected).map(|(&a, &b)| (a - b).abs()).fold(0.0_f32, f32::max);
+            assert!(difference <= 2e-5, "private Qwen graph differs from staged forward");
+            if position == 0 {
+                first = actual;
+            }
+        }
+        assert!(graph.ingest(u32::MAX).is_err());
+        assert!(graph.graph.is_none());
+        let recovered = graph.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen graph recovery failed"));
+        assert!(recovered == first, "private Qwen graph failure reset differs");
+        graph.reset();
+        assert!(graph.graph.is_none());
+        let reset = graph.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen graph reset failed"));
+        assert!(reset == first, "private Qwen graph explicit reset differs");
     }
 
     /// The private fixture preserves complete production headers and only the

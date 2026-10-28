@@ -271,14 +271,19 @@ enum LayerState {
 
 /// A complete autoregressive GLM text trunk over the original GGUF weights.
 ///
-/// Hyperconnection control projections stay on the CPU; large packed matrix
-/// products and KDA state updates use Metal when enabled. Callers serialize
-/// whole requests and call `reset` between unrelated requests.
+/// Metal execution retains hyperconnections, normalization, MLA and KDA state
+/// updates on the GPU. Routed expert selection is the completion boundary for
+/// transient GLM expert mappings. Callers serialize whole requests and call
+/// `reset` between unrelated requests.
 pub struct GlmModel {
     weights: Weights,
     config: Config,
     states: Vec<LayerState>,
     hyper_connections: Option<Vec<[HcProjection; 2]>>,
+    #[cfg(feature = "metal")]
+    decode: Option<MetalDecode>,
+    #[cfg(feature = "metal")]
+    decode_graph_enabled: bool,
     position: usize,
     #[cfg(test)]
     layer_trace: Vec<Vec<f32>>,
@@ -327,11 +332,18 @@ impl GlmModel {
         } else {
             None
         };
+        #[cfg(feature = "metal")]
+        let decode_graph_enabled = hyper_connections.is_some()
+            && std::env::var_os("STARK_GLM53_DECODE_GRAPH").is_none_or(|value| value != "0");
         Ok(Self {
             weights,
             config,
             states,
             hyper_connections,
+            #[cfg(feature = "metal")]
+            decode: None,
+            #[cfg(feature = "metal")]
+            decode_graph_enabled,
             position: 0,
             #[cfg(test)]
             layer_trace: Vec::new(),
@@ -358,6 +370,12 @@ impl GlmModel {
             }
         }
         self.position = 0;
+        #[cfg(feature = "metal")]
+        if let Some(decode) = &mut self.decode {
+            for attention in decode.attention.iter_mut().flatten() {
+                attention.reset();
+            }
+        }
         #[cfg(test)]
         self.layer_trace.clear();
     }
@@ -383,6 +401,21 @@ impl GlmModel {
         token: u32,
         readout: bool,
     ) -> Result<Vec<f32>> {
+        #[cfg(feature = "metal")]
+        {
+            objc2::rc::autoreleasepool(|_| self.advance_inner(token, readout))
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            self.advance_inner(token, readout)
+        }
+    }
+
+    fn advance_inner(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
         let result = self.step_inner(token, readout);
         if result.is_err() {
             self.reset();
@@ -391,6 +424,25 @@ impl GlmModel {
     }
 
     fn step_inner(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        #[cfg(feature = "metal")]
+        {
+            if self.decode_graph_enabled {
+                self.step_inner_metal(token, readout)
+            } else {
+                self.step_inner_reference(token, readout)
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            self.step_inner_reference(token, readout)
+        }
+    }
+
+    fn step_inner_reference(
         &mut self,
         token: u32,
         readout: bool,
@@ -469,6 +521,210 @@ impl GlmModel {
         }
         self.position += 1;
         Ok(logits)
+    }
+
+    #[cfg(feature = "metal")]
+    fn step_inner_metal(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        use super::weight_metal::{DecodeGraph, DeviceVector};
+        #[cfg(test)]
+        self.layer_trace.clear();
+        let c = &self.config;
+        if token as usize >= c.vocab || self.position >= c.max_context {
+            return Err(Error::Invalid("glm_token_or_context"));
+        }
+        if self.decode.is_none() {
+            self.decode = Some(MetalDecode::new(&self.weights, c, self.hyper_connections.as_deref())?);
+            // The GPU graph owns immutable control weights now. Retain a CPU
+            // copy only in tests that compare both execution paths.
+            #[cfg(not(test))]
+            {
+                self.hyper_connections = None;
+            }
+        }
+        let decode = self.decode.as_mut().ok_or(Error::Invalid("glm_decode_state"))?;
+        let mut graph = DecodeGraph::new()?;
+        let embedding = self.weights.row("token_embd.weight", token as usize)?;
+        if embedding.len() != c.hidden {
+            return Err(Error::Invalid("glm_embedding_shape"));
+        }
+        let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
+        for (layer, state) in self.states.iter_mut().enumerate() {
+            let prefix = format!("blk.{layer}");
+            let norm = decode.controls[layer][0].pre(&mut graph, &streams)?;
+            let attention = match state {
+                LayerState::Kda(s) => encode_kda(&self.weights, c, &mut graph, &norm, &prefix, s)?,
+                LayerState::Attention(_) => encode_mla(
+                    &self.weights,
+                    c,
+                    &mut graph,
+                    &norm,
+                    &prefix,
+                    decode.attention[layer].as_mut().ok_or(Error::Invalid("glm_mla_decode_state"))?,
+                )?,
+            };
+            streams = decode.controls[layer][0].post(&mut graph, &streams, &attention)?;
+            let norm = decode.controls[layer][1].pre(&mut graph, &streams)?;
+            let ffn = if layer < c.dense_layers {
+                let gate = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate.weight"), &norm)?;
+                let up = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_up.weight"), &norm)?;
+                let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+                self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_down.weight"), &activation)?
+            } else {
+                let logits = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_inp.weight"), &norm)?;
+                let shared_gate =
+                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_shexp.weight"), &norm)?;
+                let shared_up =
+                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_up_shexp.weight"), &norm)?;
+                let rows = graph.finish(&[logits])?;
+                if let LayerState::Kda(s) = state {
+                    s.metal.as_ref().ok_or(Error::Invalid("glm_kda_decode_state"))?.check_completed()?;
+                }
+                let selected = route(&rows[0], &decode.biases[layer], c.active_experts, c.routed_scale)?;
+                let experts: Vec<_> = selected.iter().map(|&(index, _)| index).collect();
+                let probabilities: Vec<_> = selected.iter().map(|&(_, probability)| probability).collect();
+                graph = DecodeGraph::new()?;
+                let inputs = graph.repeat(&norm, experts.len())?;
+                let gate = self.weights.encode_selected_matvec(
+                    &mut graph,
+                    &format!("{prefix}.ffn_gate_exps.weight"),
+                    &experts,
+                    &inputs,
+                )?;
+                let up = self.weights.encode_selected_matvec(
+                    &mut graph,
+                    &format!("{prefix}.ffn_up_exps.weight"),
+                    &experts,
+                    &inputs,
+                )?;
+                let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+                let down = self.weights.encode_selected_matvec(
+                    &mut graph,
+                    &format!("{prefix}.ffn_down_exps.weight"),
+                    &experts,
+                    &activation,
+                )?;
+                let shared = graph.swiglu(&shared_gate, &shared_up, Some(c.swiglu_limit))?;
+                let shared =
+                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_down_shexp.weight"), &shared)?;
+                graph.weighted_sum(&down, &probabilities, &shared, 1.0)?
+            };
+            streams = decode.controls[layer][1].post(&mut graph, &streams, &ffn)?;
+            #[cfg(test)]
+            {
+                let trace = graph.finish(&[streams.clone()])?;
+                if let LayerState::Kda(s) = state {
+                    s.metal.as_ref().ok_or(Error::Invalid("glm_kda_decode_state"))?.check_completed()?;
+                }
+                self.layer_trace.push(trace[0].clone());
+                graph = DecodeGraph::new()?;
+            }
+        }
+        let output: Vec<DeviceVector> = if readout {
+            let mean = super::glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
+            let norm = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+            vec![self.weights.encode_matvec(&mut graph, "output.weight", &norm)?]
+        } else {
+            graph.check_finite(&streams)?;
+            Vec::new()
+        };
+        let mut result = graph.finish(&output)?;
+        for state in &self.states {
+            if let LayerState::Kda(s) = state
+                && let Some(metal) = &s.metal
+            {
+                metal.check_completed()?;
+            }
+        }
+        self.position += 1;
+        if readout {
+            let logits = result.pop().ok_or(Error::Invalid("glm_empty_readout"))?;
+            if logits.len() != c.vocab {
+                return Err(Error::Invalid("glm_nonfinite_output"));
+            }
+            Ok(logits)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+}
+
+#[cfg(feature = "metal")]
+struct MetalDecode {
+    controls: Vec<[super::glm_metal::Control; 2]>,
+    attention: Vec<Option<super::glm_metal::Attention>>,
+    biases: Vec<Vec<f32>>,
+    output_norm: super::weight_metal::DeviceVector,
+}
+
+#[cfg(feature = "metal")]
+impl MetalDecode {
+    fn new(
+        w: &Weights,
+        c: &Config,
+        cached: Option<&[[HcProjection; 2]]>,
+    ) -> Result<Self> {
+        use super::glm_metal::{Attention, AttentionGeometry, Control, ControlGeometry};
+        let mut controls = Vec::with_capacity(c.layer_types.len());
+        let mut attention = Vec::with_capacity(c.layer_types.len());
+        let mut biases = Vec::with_capacity(c.layer_types.len());
+        for (layer, &is_kda) in c.layer_types.iter().enumerate() {
+            let prefix = format!("blk.{layer}");
+            let make = |part: &str, index: usize| {
+                let loaded;
+                let projection = if let Some(cached) = cached {
+                    &cached[layer][index]
+                } else {
+                    loaded = HcProjection::new(w, &prefix, part)?;
+                    &loaded
+                };
+                Control::new(
+                    ControlGeometry {
+                        hidden: c.hidden,
+                        streams: c.hc,
+                        iterations: c.hc_iters,
+                        eps: c.hc_eps,
+                        rms_eps: c.rms_eps,
+                    },
+                    &projection.weights,
+                    &projection.base,
+                    &projection.scale,
+                    &w.vector(&format!("{prefix}.{part}_norm.weight"))?,
+                )
+            };
+            controls.push([make("attn", 0)?, make("ffn", 1)?]);
+            attention.push(if is_kda {
+                None
+            } else {
+                Some(Attention::new(
+                    AttentionGeometry {
+                        rank: c.kv_rank,
+                        heads: c.heads,
+                        query_dim: c.qk_dim,
+                        index_dim: c.index_dim,
+                        index_heads: c.index_heads,
+                        pool: c.index_pool,
+                        top_k: c.index_topk,
+                        context: c.max_context,
+                    },
+                    &w.vector(&format!("{prefix}.indexer_compressor_ape.weight"))?,
+                )?)
+            });
+            biases.push(if layer < c.dense_layers {
+                Vec::new()
+            } else {
+                w.vector(&format!("{prefix}.exp_probs_b.bias"))?
+            });
+        }
+        Ok(Self {
+            controls,
+            attention,
+            biases,
+            output_norm: super::weight_metal::DecodeGraph::upload(&w.vector("output_norm.weight")?)?,
+        })
     }
 }
 
@@ -978,6 +1234,96 @@ fn kda(
     }
 }
 
+#[cfg(feature = "metal")]
+fn encode_kda(
+    w: &Weights,
+    c: &Config,
+    graph: &mut super::weight_metal::DecodeGraph,
+    x: &super::weight_metal::DeviceVector,
+    p: &str,
+    state: &mut KdaState,
+) -> Result<super::weight_metal::DeviceVector> {
+    use super::weight_metal::DeviceVector;
+    if state.metal.is_none() {
+        state.metal = Some(super::glm_metal::Kda::new(
+            super::glm_metal::Geometry {
+                heads: c.kda_heads,
+                dim: c.kda_dim,
+                kernel: c.conv_kernel,
+                rms_eps: c.rms_eps,
+                lower_bound: c.decay_lower_bound,
+            },
+            [
+                &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?,
+                &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?,
+                &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?,
+            ],
+            &w.vector(&format!("{p}.ssm_dt.bias"))?,
+            &w.vector(&format!("{p}.ssm_norm.weight"))?,
+            &w.vector(&format!("{p}.ssm_a"))?,
+        )?);
+    }
+    let metal = state.metal.as_mut().ok_or(Error::Invalid("glm_kda_decode_state"))?;
+    let inner = metal.inner();
+    let input = DeviceVector {
+        buffer: metal.input_buffer().clone(),
+        offset: 0,
+        len: 5 * inner + metal.heads(),
+    };
+    for (name, offset, length) in [
+        ("attn_q.weight", 0, inner),
+        ("attn_k.weight", inner, inner),
+        ("attn_v.weight", 2 * inner, inner),
+        ("ssm_beta.weight", 5 * inner, metal.heads()),
+    ] {
+        let projection = w.encode_matvec(graph, &format!("{p}.{name}"), x)?;
+        graph.copy_into(&projection, &input.slice(offset, length)?)?;
+    }
+    for (part, offset) in [("f", 3 * inner), ("g", 4 * inner)] {
+        let low = w.encode_matvec(graph, &format!("{p}.ssm_{part}_a.weight"), x)?;
+        let projection = w.encode_matvec(graph, &format!("{p}.ssm_{part}_b.weight"), &low)?;
+        graph.copy_into(&projection, &input.slice(offset, inner)?)?;
+    }
+    metal.encode_graph(graph)?;
+    let recurrent = DeviceVector {
+        buffer: metal.output_buffer().clone(),
+        offset: 0,
+        len: inner,
+    };
+    w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &recurrent)
+}
+
+#[cfg(feature = "metal")]
+fn encode_mla(
+    w: &Weights,
+    c: &Config,
+    graph: &mut super::weight_metal::DecodeGraph,
+    x: &super::weight_metal::DeviceVector,
+    p: &str,
+    state: &mut super::glm_metal::Attention,
+) -> Result<super::weight_metal::DeviceVector> {
+    use super::weight_metal::DecodeGraph;
+    let q = w.encode_matvec(graph, &format!("{p}.attn_q_a.weight"), x)?;
+    let latent = w.encode_matvec(graph, &format!("{p}.attn_kv_a_mqa.weight"), x)?;
+    let key = w.encode_matvec(graph, &format!("{p}.indexer.attn_k.weight"), x)?;
+    let gate = w.encode_matvec(graph, &format!("{p}.indexer_compressor_gate.weight"), x)?;
+    let weights = w.encode_matvec(graph, &format!("{p}.indexer.proj.weight"), x)?;
+    let qnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_q_a_norm.weight"))?)?;
+    let q = graph.rms_norm(&q, &qnorm, c.q_rank, c.rms_eps)?;
+    let query = w.encode_matvec(graph, &format!("{p}.attn_q_b.weight"), &q)?;
+    let index_query = w.encode_matvec(graph, &format!("{p}.indexer.attn_q_b.weight"), &q)?;
+    let kvnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_kv_a_norm.weight"))?)?;
+    let latent = graph.rms_norm(&latent, &kvnorm, c.kv_rank, c.rms_eps)?;
+    let keynorm = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.weight"))?)?;
+    let keybias = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.bias"))?)?;
+    let key = super::glm_metal::index_layer_norm(graph, &key, &keynorm, &keybias)?;
+    state.append(graph, &latent, &key, &gate)?;
+    let query = w.encode_batched_matvec(graph, &format!("{p}.attn_k_b.weight"), &query)?;
+    let attended = state.attend(graph, &query, &index_query, &weights)?;
+    let output = w.encode_batched_matvec(graph, &format!("{p}.attn_v_b.weight"), &attended)?;
+    w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &output)
+}
+
 fn layer_norm(
     x: &[f32],
     weight: &[f32],
@@ -1448,6 +1794,234 @@ mod tests {
             &[0.5 / denominator * 2.5, sigmoid(2.0) / denominator * 2.5],
             1e-6,
         );
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn metal_graph_hyperconnection_preserves_controls_and_stream_order() {
+        use super::super::{
+            glm_metal::{Control, ControlGeometry},
+            weight_metal::DecodeGraph,
+        };
+        for (hidden, hc) in [(19, 2), (19, 4), (19, 8), (3072, 4)] {
+            let columns = hidden * hc;
+            let rows = (2 + hc) * hc;
+            let generate = |len: usize, offset: usize| -> Vec<f32> {
+                (0..len).map(|i| (((i * 17 + offset * 7) % 47) as f32 - 23.0) * 0.011).collect()
+            };
+            let projection = HcProjection {
+                weights: generate(rows * columns, 1),
+                base: generate(rows, 2),
+                scale: vec![0.5, -0.2, 0.4],
+                columns,
+            };
+            let normalization = generate(hidden, 3);
+            let residual = generate(columns, 4);
+            let branch = generate(hidden, 5);
+            let control = Control::new(
+                ControlGeometry {
+                    hidden,
+                    streams: hc,
+                    iterations: 20,
+                    eps: 1e-6,
+                    rms_eps: 1e-5,
+                },
+                &projection.weights,
+                &projection.base,
+                &projection.scale,
+                &normalization,
+            )
+            .unwrap();
+            let normalized = rms_norm(&residual, &vec![1.0; columns], 1e-5).unwrap();
+            let projected = projection.project(&normalized).unwrap();
+            let mut input = vec![0.0; hidden];
+            let mut post = vec![0.0; hc];
+            for stream in 0..hc {
+                let pre = sigmoid(projected[stream] * projection.scale[0] + projection.base[stream]) + 1e-6;
+                post[stream] =
+                    2.0 * sigmoid(projected[hc + stream] * projection.scale[1] + projection.base[hc + stream]);
+                for d in 0..hidden {
+                    input[d] += pre * residual[stream * hidden + d];
+                }
+            }
+            let logits: Vec<_> = projected[2 * hc..]
+                .iter()
+                .zip(&projection.base[2 * hc..])
+                .map(|(&a, &b)| a * projection.scale[2] + b)
+                .collect();
+            let mix = HcMix {
+                input,
+                post,
+                comb: sinkhorn(&logits, hc, 20, 1e-6).unwrap(),
+            };
+            let expected_pre = rms_norm(&mix.input, &normalization, 1e-5).unwrap();
+            let expected_post = hc_post(&residual, &branch, &mix, hidden, hc).unwrap();
+            let mut graph = DecodeGraph::new().unwrap();
+            let residual = DecodeGraph::upload(&residual).unwrap();
+            let pre = control.pre(&mut graph, &residual).unwrap();
+            let post = control.post(&mut graph, &residual, &DecodeGraph::upload(&branch).unwrap()).unwrap();
+            let actual = graph.finish(&[pre, post]).unwrap();
+            close(&actual[0], &expected_pre, 3e-6);
+            close(&actual[1], &expected_post, 3e-6);
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn metal_graph_mla_matches_sparse_pools_capacity_growth_and_reset() {
+        use super::super::{
+            glm_metal::{Attention, AttentionGeometry},
+            weight_metal::DecodeGraph,
+        };
+        for pool in [2, 4] {
+            let rank = 7;
+            let heads = 2;
+            let index_dim = 3;
+            let index_heads = 2;
+            let top_k = 4;
+            let generate = |len: usize, offset: usize| -> Vec<f32> {
+                (0..len)
+                    .map(|i| {
+                        let mut value = (i as u32).wrapping_add((offset as u32).wrapping_mul(0x9e37_79b9));
+                        value = (value ^ (value >> 16)).wrapping_mul(0x7feb_352d);
+                        value = (value ^ (value >> 15)).wrapping_mul(0x846c_a68b);
+                        ((value ^ (value >> 16)) % 1023) as f32 / 4096.0 - 511.0 / 4096.0
+                    })
+                    .collect()
+            };
+            // Exact dyadic pool means isolate cache growth, sort and selection
+            // from exp rounding at a near-tie boundary. Nonuniform compressor
+            // weights have a separate numerical parity test below.
+            let ape = vec![0.0; pool * index_dim];
+            let mut state = Attention::new(
+                AttentionGeometry {
+                    rank,
+                    heads,
+                    query_dim: 5,
+                    index_dim,
+                    index_heads,
+                    pool,
+                    top_k,
+                    context: 130,
+                },
+                &ape,
+            )
+            .unwrap();
+            let mut first = Vec::new();
+            for replay in 0..2 {
+                state.reset();
+                let mut scalar = AttentionState::default();
+                for position in 0..if replay == 0 {
+                    80
+                } else {
+                    7
+                } {
+                    let latent = generate(rank, position + 2);
+                    let key = generate(index_dim, position + 3);
+                    let gate = vec![0.0; index_dim];
+                    let query = generate(heads * rank, position + 5);
+                    let index_query = if position % 7 == 0 {
+                        vec![0.0; index_heads * index_dim]
+                    } else {
+                        generate(index_heads * index_dim, position + 6)
+                    };
+                    let index_weights = generate(index_heads, position + 7);
+                    scalar.latents.push(latent.clone());
+                    scalar.tail_keys.push(key.clone());
+                    scalar.tail_gates.push(gate.clone());
+                    if scalar.tail_keys.len() == pool {
+                        pool_tail(&mut scalar, &ape, pool, index_dim).unwrap();
+                    }
+                    let selected =
+                        select_tokens(&scalar, &index_query, &index_weights, pool, index_dim, top_k).unwrap();
+                    let mut expected = Vec::new();
+                    for q in query.chunks_exact(rank) {
+                        let scores: Vec<_> = selected
+                            .iter()
+                            .map(|&position| {
+                                q.iter().zip(&scalar.latents[position]).map(|(&q, &k)| q * k).sum::<f32>()
+                                    / 5.0f32.sqrt()
+                            })
+                            .collect();
+                        let probabilities = softmax(&scores).unwrap();
+                        let mut output = vec![0.0; rank];
+                        for (&position, probability) in selected.iter().zip(probabilities) {
+                            for (dst, &value) in output.iter_mut().zip(&scalar.latents[position]) {
+                                *dst += probability * value;
+                            }
+                        }
+                        expected.extend(output);
+                    }
+                    let mut graph = DecodeGraph::new().unwrap();
+                    state
+                        .append(
+                            &mut graph,
+                            &DecodeGraph::upload(&latent).unwrap(),
+                            &DecodeGraph::upload(&key).unwrap(),
+                            &DecodeGraph::upload(&gate).unwrap(),
+                        )
+                        .unwrap();
+                    let output = state
+                        .attend(
+                            &mut graph,
+                            &DecodeGraph::upload(&query).unwrap(),
+                            &DecodeGraph::upload(&index_query).unwrap(),
+                            &DecodeGraph::upload(&index_weights).unwrap(),
+                        )
+                        .unwrap();
+                    let actual = graph.finish(&[output]).unwrap().remove(0);
+                    let error = actual.iter().zip(&expected).map(|(&a, &b)| (a - b).abs()).fold(0.0f32, f32::max);
+                    assert!(
+                        error < 3e-6,
+                        "MLA graph parity failed: pool={pool}, replay={replay}, position={position}, max_error={error}"
+                    );
+                    if replay == 0 && position < 7 {
+                        first.push(actual);
+                    } else if replay == 1 {
+                        assert!(actual == first[position], "MLA graph reset changed the synthetic replay");
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn metal_graph_pooling_preserves_nonuniform_channel_weights() {
+        use super::super::{
+            glm_metal::{Attention, AttentionGeometry},
+            weight_metal::DecodeGraph,
+        };
+        let keys = [[1.0, 2.0], [3.0, 4.0], [5.0, 6.0], [7.0, 8.0]];
+        let gates = [[0.0, 0.0], [2.0f32.ln(), 3.0f32.ln()], [3.0f32.ln(), 2.0f32.ln()], [4.0f32.ln(), 0.0]];
+        let ape = [0.0, 4.0f32.ln(), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let mut state = Attention::new(
+            AttentionGeometry {
+                rank: 2,
+                heads: 1,
+                query_dim: 2,
+                index_dim: 2,
+                index_heads: 1,
+                pool: 4,
+                top_k: 4,
+                context: 8,
+            },
+            &ape,
+        )
+        .unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        for (key, gate) in keys.iter().zip(&gates) {
+            state
+                .append(
+                    &mut graph,
+                    &DecodeGraph::upload(&[0.0; 2]).unwrap(),
+                    &DecodeGraph::upload(key).unwrap(),
+                    &DecodeGraph::upload(gate).unwrap(),
+                )
+                .unwrap();
+        }
+        let rows = graph.finish(&[state.test_pool_keys()]).unwrap();
+        close(&rows[0][..2], &[5.0, 4.0], 1e-6);
     }
 
     #[stark_test]

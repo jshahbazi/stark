@@ -903,6 +903,166 @@ impl Weights {
         }
     }
 
+    /// Only a complete admitted rank-three inventory permits device-side bank
+    /// indexing. Partial admission must retain the bounded CPU selection path.
+    #[cfg(feature = "metal")]
+    pub(super) fn indexed_banks_admitted(&self) -> bool {
+        self.bank_views.lock().is_ok_and(|cache| cache.limit > 0)
+            && self.tensors.values().filter(|tensor| tensor.shape.len() == 3).all(|tensor| {
+                tensor.shape[0].checked_mul(tensor.shape[1]).is_some_and(|rows| rows <= MAX_VECTOR)
+                    && tensor.shape[2] <= MAX_VECTOR
+            })
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn encode_matvec(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        input: &super::weight_metal::DeviceVector,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        let t = self.tensor(name)?;
+        if t.shape.len() != 2 || t.shape[1] != input.len || t.shape.iter().any(|&n| n > MAX_VECTOR) {
+            return Err(Error::Invalid("decode matrix shape mismatch"));
+        }
+        graph.mapped(
+            &super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(t, 0, t.shape[0], t.shape[1], true)?],
+                inputs: &[],
+                rows: t.shape[0],
+                columns: t.shape[1],
+                rows_per_batch: 0,
+                format: self.matrix_format(t)?,
+            },
+            input,
+        )
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn encode_batched_matvec(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        input: &super::weight_metal::DeviceVector,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        let t = self.tensor(name)?;
+        if t.shape.len() != 3
+            || t.shape[0].checked_mul(t.shape[2]) != Some(input.len)
+            || t.shape[0].checked_mul(t.shape[1]).is_none_or(|n| n > MAX_VECTOR)
+        {
+            return Err(Error::Invalid("decode batched matrix shape mismatch"));
+        }
+        graph.mapped(
+            &super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(t, 0, t.shape[0] * t.shape[1], t.shape[2], true)?],
+                inputs: &[],
+                rows: t.shape[0] * t.shape[1],
+                columns: t.shape[2],
+                rows_per_batch: t.shape[1],
+                format: self.matrix_format(t)?,
+            },
+            input,
+        )
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn encode_selected_matvec(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        experts: &[usize],
+        input: &super::weight_metal::DeviceVector,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        let t = self.tensor(name)?;
+        if t.shape.len() != 3 || experts.is_empty() || experts.len() > 64 || experts.iter().any(|&i| i >= t.shape[0]) {
+            return Err(Error::Invalid("decode selected matrix geometry"));
+        }
+        let columns = t.shape[2];
+        let repeated;
+        let input = if input.len == columns && experts.len() > 1 {
+            repeated = graph.repeat(input, experts.len())?;
+            &repeated
+        } else {
+            input
+        };
+        if columns.checked_mul(experts.len()) != Some(input.len) {
+            return Err(Error::Invalid("decode selected matrix input"));
+        }
+        let planes = if let Some(a) = &t.affine {
+            self.tensor(&a.scales)?.size.checked_add(self.tensor(&a.biases)?.size)
+        } else {
+            Some(0)
+        };
+        if planes
+            .and_then(|n| n.checked_add(t.size))
+            .map(|n| n / t.shape[0])
+            .and_then(|n| n.checked_mul(experts.len()))
+            .is_none_or(|n| n > MAX_SELECTED_BYTES)
+        {
+            return Err(Error::Invalid("decode selected weight bound exceeded"));
+        }
+        graph.mapped(
+            &super::weight_metal::MappedOperation {
+                matrices: experts
+                    .iter()
+                    .map(|&i| self.mapped_matrix(t, i, t.shape[1], columns, false))
+                    .collect::<Result<_>>()?,
+                inputs: &[],
+                rows: t.shape[1],
+                columns,
+                rows_per_batch: 0,
+                format: self.matrix_format(t)?,
+            },
+            input,
+        )
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn encode_indexed_matvec(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        indices: &super::weight_metal::DeviceVector,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+        input_batched: bool,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        if !self.indexed_banks_admitted() {
+            return Err(Error::Invalid("complete expert inventory is not admitted"));
+        }
+        let t = self.tensor(name)?;
+        if t.shape.len() != 3 || t.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR) {
+            return Err(Error::Invalid("decode indexed matrix requires rank three"));
+        }
+        let planes = if let Some(a) = &t.affine {
+            self.tensor(&a.scales)?.size.checked_add(self.tensor(&a.biases)?.size)
+        } else {
+            Some(0)
+        };
+        if planes
+            .and_then(|n| n.checked_add(t.size))
+            .map(|n| n / t.shape[0])
+            .and_then(|n| n.checked_mul(selected))
+            .is_none_or(|n| n > MAX_SELECTED_BYTES)
+        {
+            return Err(Error::Invalid("decode indexed selected weight bound exceeded"));
+        }
+        let rows = t.shape[0]
+            .checked_mul(t.shape[1])
+            .filter(|&n| n <= MAX_VECTOR)
+            .ok_or(Error::Invalid("decode indexed bank shape bound"))?;
+        let matrix = self.mapped_matrix(t, 0, rows, t.shape[2], false)?;
+        graph.indexed(
+            &matrix,
+            self.matrix_format(t)?,
+            [t.shape[0], t.shape[1], t.shape[2]],
+            indices,
+            selected,
+            input,
+            input_batched,
+        )
+    }
+
     /// GLM KDA projections, recurrence and readout share one submission.
     #[cfg(feature = "metal")]
     pub(super) fn glm_kda(

@@ -96,22 +96,65 @@ until completion. Dropping the loaded model releases its retained weight views.
 This cache contains immutable weights; request state and score-cache rules below
 are unchanged.
 
-This implementation uses F32 forward arithmetic. Recurrent KDA/GDN state and
-updates execute on Metal. Fused feed-forward and Qwen hyperconnection stages
-keep intermediate projections and activations on the GPU until each combined
-submission completes. Selected sparse routing, attention control and n-gram
-history remain in Rust. Vector kernels decode multiple packed values together
-and distribute output rows across SIMD groups; their reduction schedule differs
-from the scalar oracle and is checked against the existing numerical gates.
-GLM's tiny mHC projections use a bounded immutable decoded control cache and
-CPU NEON arithmetic on Apple silicon, avoiding separate GPU submissions. The
-cache admits at most 8 million values per projection and 256 MiB in total;
-larger control layouts keep the GPU path. Prefill processes tokens sequentially
-and projects vocabulary logits only for the final input token. Performance must be
-measured on the exact checkpoint and host. Published Sushi or MLX throughput
-does not qualify Stark's throughput. See the
-[GPU graph and kernel benchmark](benchmarks/GLM_QWEN_NATIVE_GRAPH_2026_10_28.md)
-for measured scope, before/after results and reproduction commands.
+This implementation uses F32 forward arithmetic. Deferred Metal commands keep
+dependent device vectors alive through completion and use a sticky failure
+status to reject invalid intermediates, including values later hidden by
+clipping. Existing CPU controls remain available in the staged execution path.
+Temporary device vectors share disjoint 256-byte-aligned command arenas, capped
+at 512 MiB per command. Persistent recurrent and attention buffers have separate
+ownership and are never reused as command scratch.
+Each token advance scopes Metal temporary objects to an autorelease pool,
+including command transitions and error cleanup.
+Vector kernels decode multiple packed values together and distribute output rows
+across SIMD groups; their reduction schedule differs from the scalar oracle and
+is checked against the existing numerical gates. GPU RMS uses an F32 SIMD
+reduction, qualified with wide F64 oracles and the unchanged source-model gates.
+Its sum order differs from the staged scalar path; it does not narrow activations.
+
+Qwen's graph keeps hyperconnection normalization and mixing, GDN, QSA caches and
+attention, sparse routing, selected expert products, PLE control and convolution,
+residual injection and readout on Metal. Stable routing uses descending F32 total
+order and ascending expert indices for ties. Rust retains token history and the
+exact I64 n-gram hashes, gathers all PLE embeddings before submitting device
+work, and supplies the token embedding. QSA storage grows with the visible
+prefix, copying valid cache rows on the device when capacity increases. The
+graph is enabled only when the full expert inventory meets the bank-admission
+and indexed-shape checks and the model selects at most 64 experts. Other
+inventories use the staged path with bounded selected mappings. A graph error
+fails the request and clears state.
+
+GLM's graph keeps mHC projection and Sinkhorn mixing, normalization, KDA, pooled
+index selection, absorbed MLA attention, shared and selected expert products,
+residual streams and readout on Metal. Router logits cross a completion boundary
+for CPU sigmoid, correction-biased selection and mixture weights; Rust then
+registers the selected immutable expert slices before continuing the graph. This
+preserves bounded admission for the current GLM inventory. The decoded mHC
+control inventory remains capped at 8 million values per projection and 256 MiB
+in total. The graph uploads those controls once and releases the production CPU
+copy; larger layouts keep staged execution, whose bounded control cache uses
+CPU NEON arithmetic on Apple silicon.
+
+For the pinned production checkpoints, the code schedules one command completion
+per token for Qwen and 43 for GLM: one for each of its 42 routed layers and one
+final completion. Three four-step release profiles confirm these counts;
+the counters and throughput measurements are recorded in the
+[decode graph benchmark](benchmarks/GLM_QWEN_DECODE_GRAPH_2026_10_28.md).
+Test builds can add layer readbacks for numerical diagnostics.
+
+Set `STARK_QWEN38_DECODE_GRAPH=0` or `STARK_GLM53_DECODE_GRAPH=0` before loading a
+model to select its staged reference path. The execution choice remains fixed
+for that loaded model. `STARK_HYBRID_CONCURRENT_FFN=0` selects serial staged FFN
+dispatch and serial GLM graph expert batches. The graph otherwise joins serial
+dependent stages with concurrent expert encoders and explicit buffer barriers
+inside the same command. `STARK_HYBRID_ORDERED_RMS=1` selects the slower ordered
+GPU RMS diagnostic; this choice is captured once when the process initializes
+the native Metal executor. Both paths clear request state on failure and reset.
+
+Prefill processes tokens sequentially and projects vocabulary logits only for
+the final input token. Performance must be measured on the exact checkpoint and
+host. Published Sushi or MLX throughput does not qualify Stark's throughput.
+The earlier [GPU stage and kernel benchmark](benchmarks/GLM_QWEN_NATIVE_GRAPH_2026_10_28.md)
+records the execution path before the deferred graph.
 The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
 and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
 record the remaining graph, kernel and prefill opportunities with source and

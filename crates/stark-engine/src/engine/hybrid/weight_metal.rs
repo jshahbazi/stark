@@ -21,6 +21,10 @@ use super::{Error, Result, profile, weights};
 type PipelineState = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 type PipelineCache = Mutex<HashMap<MatrixFormat, PipelineState>>;
 
+#[path = "decode_graph.rs"]
+mod decode_graph;
+pub(super) use decode_graph::{DecodeGraph, DeviceVector};
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -29,6 +33,9 @@ struct Executor {
     ffn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     hc_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     gdn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
+    graph_pipelines: Mutex<HashMap<&'static str, PipelineState>>,
+    indexed_pipelines: PipelineCache,
+    ordered_rms: bool,
     #[cfg(test)]
     tiled_pipelines: PipelineCache,
     #[cfg(test)]
@@ -138,6 +145,16 @@ pub(super) unsafe fn mapped_slice<T: Send + Sync + 'static>(
 
 impl MappedOperation<'_> {
     fn parameters(&self) -> Result<[u32; 8]> {
+        if self.inputs.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("nonfinite mapped matrix input"));
+        }
+        self.parameters_for_input(self.inputs.len())
+    }
+
+    fn parameters_for_input(
+        &self,
+        input_len: usize,
+    ) -> Result<[u32; 8]> {
         let rows = self.rows;
         let columns = self.columns;
         let batches = if self.rows_per_batch == 0 {
@@ -154,9 +171,8 @@ impl MappedOperation<'_> {
             || columns > 8_000_000
             || self.matrices.is_empty()
             || self.matrices.len().checked_mul(rows).is_none_or(|n| n > 8_000_000)
-            || batches.checked_mul(columns) != Some(self.inputs.len())
-            || self.inputs.len() > 8_000_000
-            || self.inputs.iter().any(|value| !value.is_finite())
+            || batches.checked_mul(columns) != Some(input_len)
+            || input_len > 8_000_000
         {
             return Err(Error::Invalid("invalid mapped matrix dimensions"));
         }
@@ -422,8 +438,12 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_block_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
+            source.push_str(include_str!("decode_graph.metal"));
+            source.push_str(include_str!("qwen_graph.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("../../../unit/fixtures/hybrid_graph_reference.metal"));
             let options = metal::MTLCompileOptions::new();
             options.set_math_mode(metal::MTLMathMode::Safe);
             let library = device
@@ -437,6 +457,9 @@ fn executor() -> Result<&'static Executor> {
                 ffn_pipelines: Mutex::new(None),
                 hc_pipelines: Mutex::new(None),
                 gdn_pipelines: Mutex::new(None),
+                graph_pipelines: Mutex::new(HashMap::new()),
+                indexed_pipelines: Mutex::new(HashMap::new()),
+                ordered_rms: std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1"),
                 #[cfg(test)]
                 tiled_pipelines: Mutex::new(HashMap::new()),
                 #[cfg(test)]
