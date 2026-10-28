@@ -47,11 +47,15 @@ impl HybridBackend {
             return Err("invalid_generation_request");
         }
         let mut logits = Vec::new();
-        for &token in input {
+        for (index, &token) in input.iter().enumerate() {
             if cancelled()? {
                 return Err("generation_cancelled");
             }
-            logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+            if index + 1 == input.len() {
+                logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+            } else {
+                self.model.ingest(token).map_err(|_| "native_generation_failed")?;
+            }
         }
         let model = &mut self.model;
         let mut previous = None;

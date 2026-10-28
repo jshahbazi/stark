@@ -318,7 +318,24 @@ impl GlmModel {
         &mut self,
         token: u32,
     ) -> Result<Vec<f32>> {
-        let result = self.step_inner(token);
+        self.advance(token, true)
+    }
+
+    /// Advance all recurrent and attention state without projecting vocabulary
+    /// logits that an intermediate prefill position will never consume.
+    pub fn ingest(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        self.advance(token, false).map(|_| ())
+    }
+
+    fn advance(
+        &mut self,
+        token: u32,
+        readout: bool,
+    ) -> Result<Vec<f32>> {
+        let result = self.step_inner(token, readout);
         if result.is_err() {
             self.reset();
         }
@@ -328,6 +345,7 @@ impl GlmModel {
     fn step_inner(
         &mut self,
         token: u32,
+        readout: bool,
     ) -> Result<Vec<f32>> {
         #[cfg(test)]
         self.layer_trace.clear();
@@ -335,7 +353,10 @@ impl GlmModel {
         if token as usize >= c.vocab || self.position >= c.max_context {
             return Err(Error::Invalid("glm_token_or_context"));
         }
-        let embedding = self.weights.row("token_embd.weight", token as usize)?;
+        let embedding = {
+            let _scope = super::profile::Scope::new("glm.embedding");
+            self.weights.row("token_embd.weight", token as usize)?
+        };
         if embedding.len() != c.hidden {
             return Err(Error::Invalid("glm_embedding_shape"));
         }
@@ -362,6 +383,13 @@ impl GlmModel {
             #[cfg(test)]
             self.layer_trace.push(streams.clone());
         }
+        if !readout {
+            if streams.iter().any(|value| !value.is_finite()) {
+                return Err(Error::Invalid("glm_nonfinite_output"));
+            }
+            self.position += 1;
+            return Ok(Vec::new());
+        }
         let mut mean = vec![0.0; c.hidden];
         for stream in streams.chunks_exact(c.hidden) {
             for (dst, &src) in mean.iter_mut().zip(stream) {
@@ -371,6 +399,7 @@ impl GlmModel {
         for v in &mut mean {
             *v /= c.hc as f32;
         }
+        let _scope = super::profile::Scope::new("glm.readout");
         let norm = rms_norm(&mean, &self.weights.vector("output_norm.weight")?, c.rms_eps)?;
         let logits = self.weights.matvec("output.weight", &norm)?;
         if logits.len() != c.vocab || logits.iter().any(|v| !v.is_finite()) {
@@ -611,6 +640,7 @@ fn hc_pre(
     p: &str,
     part: &str,
 ) -> Result<HcMix> {
+    let _scope = super::profile::Scope::new("glm.mhc.pre");
     let ones = vec![1.0; streams.len()];
     let norm = rms_norm(streams, &ones, c.rms_eps)?;
     let mix = w.matvec(&format!("{p}.hc_{part}_fn.weight"), &norm)?;
@@ -643,6 +673,7 @@ fn hc_post(
     hidden: usize,
     hc: usize,
 ) -> Result<Vec<f32>> {
+    let _scope = super::profile::Scope::new("glm.mhc.post");
     if residual.len() != hidden * hc || output.len() != hidden || mix.post.len() != hc || mix.comb.len() != hc * hc {
         return Err(Error::Invalid("glm_hyper_connection_shape"));
     }
@@ -665,6 +696,7 @@ fn convolve(
     weights: &[f32],
     kernel: usize,
 ) -> Result<Vec<f32>> {
+    let _scope = super::profile::Scope::new("glm.kda.convolution");
     if kernel < 2 || history.len() != input.len() * (kernel - 1) || weights.len() != input.len() * kernel {
         return Err(Error::Invalid("glm_convolution_shape"));
     }
@@ -690,6 +722,7 @@ fn kda_recur(
     g: &[f32],
     beta: f32,
 ) -> Result<Vec<f32>> {
+    let _scope = super::profile::Scope::new("glm.kda.recurrent");
     let dim = q.len();
     if dim == 0 || k.len() != dim || v.len() != dim || g.len() != dim || state.len() != dim * dim {
         return Err(Error::Invalid("glm_kda_state_shape"));
@@ -726,31 +759,29 @@ fn kda(
     p: &str,
     state: &mut KdaState,
 ) -> Result<Vec<f32>> {
-    let mut q = convolve(
-        &w.matvec(&format!("{p}.attn_q.weight"), x)?,
-        &mut state.q_conv,
-        &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?,
-        c.conv_kernel,
+    let _scope = super::profile::Scope::new("glm.kda");
+    // These projections share an immutable input. Submit their unchanged
+    // kernels together before consuming any output on the CPU.
+    let [q_projection, k_projection, v_projection, f_a, g_a, beta] = project_many(
+        w,
+        [
+            (&format!("{p}.attn_q.weight"), x),
+            (&format!("{p}.attn_k.weight"), x),
+            (&format!("{p}.attn_v.weight"), x),
+            (&format!("{p}.ssm_f_a.weight"), x),
+            (&format!("{p}.ssm_g_a.weight"), x),
+            (&format!("{p}.ssm_beta.weight"), x),
+        ],
     )?;
-    let mut k = convolve(
-        &w.matvec(&format!("{p}.attn_k.weight"), x)?,
-        &mut state.k_conv,
-        &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?,
-        c.conv_kernel,
-    )?;
-    let v = convolve(
-        &w.matvec(&format!("{p}.attn_v.weight"), x)?,
-        &mut state.v_conv,
-        &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?,
-        c.conv_kernel,
-    )?;
-    let f_a = w.matvec(&format!("{p}.ssm_f_a.weight"), x)?;
-    let forget = w.matvec(&format!("{p}.ssm_f_b.weight"), &f_a)?;
+    let mut q =
+        convolve(&q_projection, &mut state.q_conv, &w.vector(&format!("{p}.ssm_conv1d_q.weight"))?, c.conv_kernel)?;
+    let mut k =
+        convolve(&k_projection, &mut state.k_conv, &w.vector(&format!("{p}.ssm_conv1d_k.weight"))?, c.conv_kernel)?;
+    let v = convolve(&v_projection, &mut state.v_conv, &w.vector(&format!("{p}.ssm_conv1d_v.weight"))?, c.conv_kernel)?;
+    let [forget, gate] =
+        project_many(w, [(&format!("{p}.ssm_f_b.weight"), &f_a), (&format!("{p}.ssm_g_b.weight"), &g_a)])?;
     let a = w.vector(&format!("{p}.ssm_a"))?;
     let dt = w.vector(&format!("{p}.ssm_dt.bias"))?;
-    let beta = w.matvec(&format!("{p}.ssm_beta.weight"), x)?;
-    let g_a = w.matvec(&format!("{p}.ssm_g_a.weight"), x)?;
-    let gate = w.matvec(&format!("{p}.ssm_g_b.weight"), &g_a)?;
     let norm_weight = w.vector(&format!("{p}.ssm_norm.weight"))?;
     let mut gated = Vec::with_capacity(q.len());
     for head in 0..c.kda_heads {
@@ -794,6 +825,7 @@ fn pool_tail(
     pool: usize,
     dim: usize,
 ) -> Result<()> {
+    let _scope = super::profile::Scope::new("glm.mla.pool");
     if state.tail_keys.len() != pool || state.tail_gates.len() != pool || ape.len() != pool * dim {
         return Err(Error::Invalid("glm_indexer_pool_shape"));
     }
@@ -817,6 +849,7 @@ fn select_tokens(
     dim: usize,
     top_k: usize,
 ) -> Result<Vec<usize>> {
+    let _scope = super::profile::Scope::new("glm.mla.index_selection");
     if queries.len() != head_weights.len() * dim || !top_k.is_multiple_of(pool) {
         return Err(Error::Invalid("glm_indexer_query_shape"));
     }
@@ -855,28 +888,39 @@ fn mla(
     p: &str,
     state: &mut AttentionState,
 ) -> Result<Vec<f32>> {
-    let q_a = w.matvec(&format!("{p}.attn_q_a.weight"), x)?;
+    let _scope = super::profile::Scope::new("glm.mla");
+    let [q_a, latent, index_key, index_gate, index_weights] = project_many(
+        w,
+        [
+            (&format!("{p}.attn_q_a.weight"), x),
+            (&format!("{p}.attn_kv_a_mqa.weight"), x),
+            (&format!("{p}.indexer.attn_k.weight"), x),
+            (&format!("{p}.indexer_compressor_gate.weight"), x),
+            (&format!("{p}.indexer.proj.weight"), x),
+        ],
+    )?;
     let q_residual = rms_norm(&q_a, &w.vector(&format!("{p}.attn_q_a_norm.weight"))?, c.rms_eps)?;
-    let query = w.matvec(&format!("{p}.attn_q_b.weight"), &q_residual)?;
-    let latent = w.matvec(&format!("{p}.attn_kv_a_mqa.weight"), x)?;
+    let [query, index_query] = project_many(
+        w,
+        [
+            (&format!("{p}.attn_q_b.weight"), q_residual.as_slice()),
+            (&format!("{p}.indexer.attn_q_b.weight"), q_residual.as_slice()),
+        ],
+    )?;
     let latent = rms_norm(&latent, &w.vector(&format!("{p}.attn_kv_a_norm.weight"))?, c.rms_eps)?;
     state.latents.push(latent);
 
-    let index_query = w.matvec(&format!("{p}.indexer.attn_q_b.weight"), &q_residual)?;
-    let index_key = w.matvec(&format!("{p}.indexer.attn_k.weight"), x)?;
     let index_key = layer_norm(
         &index_key,
         &w.vector(&format!("{p}.indexer.k_norm.weight"))?,
         &w.vector(&format!("{p}.indexer.k_norm.bias"))?,
         1e-6,
     )?;
-    let index_gate = w.matvec(&format!("{p}.indexer_compressor_gate.weight"), x)?;
     state.tail_keys.push(index_key);
     state.tail_gates.push(index_gate);
     if state.tail_keys.len() == c.index_pool {
         pool_tail(state, &w.vector(&format!("{p}.indexer_compressor_ape.weight"))?, c.index_pool, c.index_dim)?;
     }
-    let index_weights = w.matvec(&format!("{p}.indexer.proj.weight"), x)?;
     let selected = select_tokens(state, &index_query, &index_weights, c.index_pool, c.index_dim, c.index_topk)?;
     if selected.is_empty() || state.latents.len() != state.pool_keys.len() * c.index_pool + state.tail_keys.len() {
         return Err(Error::Invalid("glm_empty_or_invalid_attention"));
@@ -884,6 +928,7 @@ fn mla(
     let absorbed_queries = w.batched_matvec(&format!("{p}.attn_k_b.weight"), &query)?;
     let mut latent_outputs = Vec::with_capacity(c.heads * c.kv_rank);
     let scale = 1.0 / (c.qk_dim as f32).sqrt();
+    let _attention_scope = super::profile::Scope::new("glm.mla.attention");
     for head in 0..c.heads {
         let absorbed = &absorbed_queries[head * c.kv_rank..(head + 1) * c.kv_rank];
         let scores: Vec<_> = selected
@@ -899,6 +944,7 @@ fn mla(
         }
         latent_outputs.extend(latent_output);
     }
+    drop(_attention_scope);
     let output = w.batched_matvec(&format!("{p}.attn_v_b.weight"), &latent_outputs)?;
     w.matvec(&format!("{p}.attn_output.weight"), &output)
 }
@@ -914,6 +960,13 @@ fn swiglu(
     Ok(gate.iter().zip(up).map(|(&g, &u)| silu(g.min(limit)) * u.clamp(-limit, limit)).collect())
 }
 
+fn project_many<const N: usize>(
+    w: &Weights,
+    requests: [(&str, &[f32]); N],
+) -> Result<[Vec<f32>; N]> {
+    w.matvec_many(&requests)?.try_into().map_err(|_| Error::Invalid("glm_projection_batch_size"))
+}
+
 fn dense_ffn(
     w: &Weights,
     x: &[f32],
@@ -921,8 +974,9 @@ fn dense_ffn(
     suffix: &str,
     limit: f32,
 ) -> Result<Vec<f32>> {
-    let gate = w.matvec(&format!("{p}.ffn_gate{suffix}.weight"), x)?;
-    let up = w.matvec(&format!("{p}.ffn_up{suffix}.weight"), x)?;
+    let _scope = super::profile::Scope::new("glm.ffn.dense");
+    let [gate, up] =
+        project_many(w, [(&format!("{p}.ffn_gate{suffix}.weight"), x), (&format!("{p}.ffn_up{suffix}.weight"), x)])?;
     w.matvec(&format!("{p}.ffn_down{suffix}.weight"), &swiglu(&gate, &up, limit)?)
 }
 
@@ -948,7 +1002,15 @@ fn moe(
     x: &[f32],
     p: &str,
 ) -> Result<Vec<f32>> {
-    let logits = w.matvec(&format!("{p}.ffn_gate_inp.weight"), x)?;
+    let _scope = super::profile::Scope::new("glm.ffn.moe");
+    let [logits, shared_gate, shared_up] = project_many(
+        w,
+        [
+            (&format!("{p}.ffn_gate_inp.weight"), x),
+            (&format!("{p}.ffn_gate_shexp.weight"), x),
+            (&format!("{p}.ffn_up_shexp.weight"), x),
+        ],
+    )?;
     let bias = w.vector(&format!("{p}.exp_probs_b.bias"))?;
     let selected = route(&logits, &bias, c.active_experts, c.routed_scale)?;
     let experts: Vec<_> = selected.iter().map(|&(index, _)| index).collect();
@@ -966,7 +1028,7 @@ fn moe(
             *dst += probability * src;
         }
     }
-    let shared = dense_ffn(w, x, p, "_shexp", c.swiglu_limit)?;
+    let shared = w.matvec(&format!("{p}.ffn_down_shexp.weight"), &swiglu(&shared_gate, &shared_up, c.swiglu_limit)?)?;
     if shared.len() != output.len() {
         return Err(Error::Invalid("glm_shared_expert_shape"));
     }
@@ -1141,6 +1203,7 @@ mod tests {
                 model.reset();
                 let tokens = case["input_token_ids"].as_array().unwrap();
                 let expected = case["logits"].as_array().unwrap();
+                let mut complete_readouts = Vec::with_capacity(tokens.len());
                 assert!(tokens.len() == expected.len(), "GLM reference sequence length mismatch");
                 for (position, (token, row)) in tokens.iter().zip(expected).enumerate() {
                     let actual = model
@@ -1173,7 +1236,48 @@ mod tests {
                             }
                         }
                     }
+                    complete_readouts.push(actual);
                     positions += 1;
+                }
+                // Skipping intermediate readouts must leave every recurrent,
+                // convolution, pooled-indexer and attention-cache state exact.
+                let mut prefix_lengths = vec![1, 3.min(tokens.len().saturating_sub(1)), tokens.len().saturating_sub(1)];
+                prefix_lengths.sort_unstable();
+                prefix_lengths.dedup();
+                for prefix in prefix_lengths {
+                    if prefix == 0 || prefix >= tokens.len() {
+                        continue;
+                    }
+                    model.reset();
+                    for token in &tokens[..prefix] {
+                        assert!(model.ingest(token.as_u64().unwrap() as u32).is_ok(), "GLM prefill ingest failed");
+                    }
+                    assert_eq!(model.position, prefix, "GLM ingest did not advance position");
+                    let actual = model
+                        .step(tokens[prefix].as_u64().unwrap() as u32)
+                        .unwrap_or_else(|_| panic!("GLM readout after ingest failed"));
+                    assert!(actual == complete_readouts[prefix], "GLM ingest changed subsequent readout");
+                }
+                assert!(model.ingest(u32::MAX).is_err(), "invalid GLM ingest token was accepted");
+                let recovered = model
+                    .step(tokens[0].as_u64().unwrap() as u32)
+                    .unwrap_or_else(|_| panic!("GLM ingest failure reset replay failed"));
+                assert!(recovered == complete_readouts[0], "GLM ingest failure did not clear state");
+                if tokens.len() >= 2 {
+                    let original_context = model.config.max_context;
+                    model.config.max_context = 2;
+                    model.reset();
+                    assert!(model.ingest(tokens[0].as_u64().unwrap() as u32).is_ok(), "GLM bounded ingest failed");
+                    let final_readout = model
+                        .step(tokens[1].as_u64().unwrap() as u32)
+                        .unwrap_or_else(|_| panic!("GLM final allowed context readout failed"));
+                    assert!(final_readout == complete_readouts[1], "GLM bounded ingest changed readout");
+                    assert!(model.ingest(tokens[0].as_u64().unwrap() as u32).is_err(), "GLM ingest exceeded context");
+                    let recovered = model
+                        .step(tokens[0].as_u64().unwrap() as u32)
+                        .unwrap_or_else(|_| panic!("GLM context failure reset replay failed"));
+                    assert!(recovered == complete_readouts[0], "GLM context failure did not clear state");
+                    model.config.max_context = original_context;
                 }
                 assert!(model.step(u32::MAX).is_err(), "invalid GLM token was accepted");
                 let first = model

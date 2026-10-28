@@ -5,6 +5,7 @@
 
 pub mod glm;
 pub mod math;
+pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
 mod weight_metal;
@@ -195,6 +196,26 @@ impl Model {
                     Ok(logits)
                 }
             })
+        };
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
+    /// Advance a prefill prefix without projecting vocabulary logits that the
+    /// caller will discard. The final input token must still use `step`.
+    pub fn ingest(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        let result = if token as usize >= self.vocab_size {
+            Err(Error::Invalid("token ID"))
+        } else {
+            match &mut self.forward {
+                Forward::Glm(model) => model.ingest(token),
+                Forward::Qwen(model) => model.ingest(token),
+            }
         };
         if result.is_err() {
             self.reset();

@@ -5,6 +5,8 @@
 //! Copyright (c) 2023-2026 The ggml authors. See LICENSE.ggml-hybrid.
 //! Scalar decoding supplies the reference for the native Metal matvec path.
 
+#[cfg(feature = "metal")]
+use std::{collections::VecDeque, sync::Mutex};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
@@ -12,6 +14,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
     path::{Path, PathBuf},
     ptr::NonNull,
+    sync::Arc,
 };
 
 use half::{bf16, f16};
@@ -23,6 +26,10 @@ const MAX_HEADER: usize = 128 * 1024 * 1024;
 const MAX_COUNT: usize = 2_000_000;
 const MAX_VECTOR: usize = 8_000_000;
 const MAX_SELECTED_BYTES: usize = 256 * 1024 * 1024;
+#[cfg(feature = "metal")]
+const MAX_BATCH_WEIGHT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+#[cfg(feature = "metal")]
+const MAX_STATIC_VIEW_BYTES: usize = 8 * 1024 * 1024 * 1024;
 const U32_KIND: u32 = 101;
 const I64_KIND: u32 = 102;
 const I32_KIND: u32 = 103;
@@ -77,6 +84,59 @@ impl Mapping {
         // SAFETY: the checked span belongs to the live immutable mapping.
         Ok(unsafe { std::slice::from_raw_parts(self.pointer.as_ptr().add(offset), size) })
     }
+
+    #[cfg(feature = "metal")]
+    fn metal_span(
+        &self,
+        offset: usize,
+        size: usize,
+    ) -> Result<(usize, usize)> {
+        // Validate the logical file span before rounding only the OS mapping
+        // extent. mmap owns complete pages; the last partial file page is
+        // zero-filled by the OS. GPU kernels only address the checked span.
+        self.bytes(offset, size)?;
+        static PAGE_SIZE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let page = *PAGE_SIZE.get_or_init(|| {
+            // SAFETY: sysconf has no pointer arguments or ownership effects.
+            usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(0)
+        });
+        if !page.is_power_of_two() {
+            return Err(Error::Invalid("unsupported mapping page size"));
+        }
+        let start = offset & !(page - 1);
+        let end = offset
+            .checked_add(size)
+            .and_then(|n| n.checked_add(page - 1))
+            .ok_or(Error::Invalid("mapped Metal span overflow"))?
+            & !(page - 1);
+        let owned_end =
+            self.length.checked_add(page - 1).ok_or(Error::Invalid("mapped file span overflow"))? & !(page - 1);
+        if end > owned_end || end <= start {
+            return Err(Error::Invalid("invalid mapped Metal page span"));
+        }
+        Ok((start, end - start))
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_slice(
+        self: &Arc<Self>,
+        offset: usize,
+        size: usize,
+    ) -> Result<super::weight_metal::MappedSlice> {
+        let (start, registered_length) = self.metal_span(offset, size)?;
+        // SAFETY: start/end lie in the complete pages owned by mmap. Capturing
+        // this Arc in Metal's deallocator keeps the allocation and file alive,
+        // including when the Weights store is dropped before the GPU buffer.
+        objc2::rc::autoreleasepool(|_| unsafe {
+            super::weight_metal::mapped_slice(
+                self.pointer.add(start).cast(),
+                registered_length,
+                offset - start,
+                size,
+                Arc::clone(self),
+            )
+        })
+    }
 }
 
 impl Drop for Mapping {
@@ -108,10 +168,53 @@ struct Affine {
     biases: String,
 }
 
+#[cfg(feature = "metal")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct StaticViewKey {
+    file: usize,
+    offset: usize,
+    length: usize,
+}
+
+#[cfg(feature = "metal")]
+struct StaticViewCache {
+    limit: usize,
+    registered_bytes: usize,
+    entries: HashMap<StaticViewKey, super::weight_metal::MappedSlice>,
+    order: VecDeque<StaticViewKey>,
+}
+
+#[cfg(feature = "metal")]
+impl StaticViewCache {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            registered_bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn reserve(
+        &mut self,
+        bytes: usize,
+    ) {
+        while self.registered_bytes > self.limit - bytes {
+            let key = self.order.pop_front().unwrap();
+            let old = self.entries.remove(&key).unwrap();
+            let released = old.registered_bytes();
+            self.registered_bytes -= released;
+            super::profile::record("native.metal.static_cache.eviction", 0.0, released);
+        }
+    }
+}
+
 pub struct Weights {
-    files: Vec<Mapping>,
+    files: Vec<Arc<Mapping>>,
     tensors: HashMap<String, Tensor>,
     metadata: BTreeMap<String, Value>,
+    #[cfg(feature = "metal")]
+    static_views: Mutex<StaticViewCache>,
 }
 
 impl Weights {
@@ -134,11 +237,13 @@ impl Weights {
             files: Vec::new(),
             tensors: HashMap::new(),
             metadata: BTreeMap::new(),
+            #[cfg(feature = "metal")]
+            static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
         };
         let mut splits = BTreeMap::new();
         for path in &paths {
             let file = result.files.len();
-            let mapping = Mapping::new(path)?;
+            let mapping = Arc::new(Mapping::new(path)?);
             let (tensors, metadata) = if is_gguf {
                 read_gguf(&mapping._file, file, mapping.length)?
             } else {
@@ -373,6 +478,172 @@ impl Weights {
         self.matrix_slice(tensor, 0, tensor.shape[0], tensor.shape[1], input)
     }
 
+    /// Execute independent matrix products in order with one native Metal
+    /// submission. Inputs, parameters and outputs remain distinct for every
+    /// job until that submission completes; heterogeneous formats are allowed.
+    pub fn matvec_many(
+        &self,
+        jobs: &[(&str, &[f32])],
+    ) -> Result<Vec<Vec<f32>>> {
+        if jobs.is_empty() || jobs.len() > 64 {
+            return Err(Error::Invalid("invalid matrix job count"));
+        }
+        #[cfg(feature = "metal")]
+        {
+            let mut total_weights = 0usize;
+            let mut total_inputs = 0usize;
+            let mut total_outputs = 0usize;
+            for &(name, inputs) in jobs {
+                let tensor = self.tensor(name)?;
+                if tensor.shape.len() != 2
+                    || tensor.shape[1] != inputs.len()
+                    || inputs.iter().any(|value| !value.is_finite())
+                {
+                    return Err(Error::Invalid("invalid matrix job shape or values"));
+                }
+                let plane_bytes = if let Some(affine) = &tensor.affine {
+                    self.tensor(&affine.scales)?
+                        .size
+                        .checked_add(self.tensor(&affine.biases)?.size)
+                        .ok_or(Error::Invalid("matrix job size overflow"))?
+                } else {
+                    0
+                };
+                total_weights = total_weights
+                    .checked_add(tensor.size)
+                    .and_then(|n| n.checked_add(plane_bytes))
+                    .ok_or(Error::Invalid("matrix job size overflow"))?;
+                total_inputs =
+                    total_inputs.checked_add(inputs.len()).ok_or(Error::Invalid("matrix job size overflow"))?;
+                total_outputs =
+                    total_outputs.checked_add(tensor.shape[0]).ok_or(Error::Invalid("matrix job size overflow"))?;
+                if total_weights > MAX_BATCH_WEIGHT_BYTES || total_inputs > MAX_VECTOR || total_outputs > MAX_VECTOR {
+                    return Err(Error::Invalid("matrix batch exceeds workspace bound"));
+                }
+            }
+            let mut operations = Vec::with_capacity(jobs.len());
+            for &(name, inputs) in jobs {
+                let tensor = self.tensor(name)?;
+                if tensor.shape.len() != 2 {
+                    return Err(Error::Invalid("matvec requires a matrix"));
+                }
+                operations.push(super::weight_metal::MappedOperation {
+                    matrices: vec![self.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+                    inputs,
+                    rows: tensor.shape[0],
+                    columns: tensor.shape[1],
+                    rows_per_batch: 0,
+                    format: self.matrix_format(tensor)?,
+                });
+            }
+            super::weight_metal::mapped_many(&operations)
+        }
+        #[cfg(not(feature = "metal"))]
+        jobs.iter().map(|(name, inputs)| self.matvec(name, inputs)).collect()
+    }
+
+    #[cfg(feature = "metal")]
+    fn matrix_format(
+        &self,
+        tensor: &Tensor,
+    ) -> Result<super::weight_metal::MatrixFormat> {
+        Ok(if let Some(affine) = &tensor.affine {
+            super::weight_metal::MatrixFormat::Affine {
+                scale_dtype: self.tensor(&affine.scales)?.kind,
+                bits: affine.bits,
+                group: affine.group,
+            }
+        } else {
+            super::weight_metal::MatrixFormat::Packed(tensor.kind)
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn metal_view(
+        &self,
+        file: usize,
+        offset: usize,
+        length: usize,
+        cacheable: bool,
+    ) -> Result<super::weight_metal::MappedSlice> {
+        let mapping = &self.files[file];
+        if !cacheable {
+            return mapping.metal_slice(offset, length);
+        }
+        let key = StaticViewKey {
+            file,
+            offset,
+            length,
+        };
+        let mut cache = self.static_views.lock().map_err(|_| Error::Invalid("static Metal view cache failed"))?;
+        if let Some(view) = cache.entries.get(&key) {
+            let result = view.clone();
+            super::profile::record("native.metal.static_cache.hit", 0.0, result.registered_bytes());
+            super::profile::record("native.metal.static_cache.registered_bytes", 0.0, cache.registered_bytes);
+            return Ok(result);
+        }
+        let registered = mapping.metal_span(offset, length)?.1;
+        super::profile::record("native.metal.static_cache.miss", 0.0, registered);
+        if registered > cache.limit {
+            drop(cache);
+            return mapping.metal_slice(offset, length);
+        }
+        // Evict before allocation; creating while holding the mutex also
+        // prevents duplicate FIFO keys and accounting races across callers.
+        cache.reserve(registered);
+        let view = mapping.metal_slice(offset, length)?;
+        cache.registered_bytes += view.registered_bytes();
+        cache.order.push_back(key);
+        cache.entries.insert(key, view.clone());
+        super::profile::record("native.metal.static_cache.registered_bytes", 0.0, cache.registered_bytes);
+        Ok(view)
+    }
+
+    #[cfg(feature = "metal")]
+    fn mapped_matrix(
+        &self,
+        tensor: &Tensor,
+        index: usize,
+        rows: usize,
+        columns: usize,
+        cacheable: bool,
+    ) -> Result<super::weight_metal::MappedMatrix> {
+        let matrix_bytes = if let Some(affine) = &tensor.affine {
+            rows.checked_mul(columns).and_then(|n| n.checked_mul(affine.bits)).map(|n| n / 8)
+        } else {
+            rows.checked_mul(encoded_size(tensor.kind, columns)?)
+        }
+        .ok_or(Error::Invalid("mapped matrix size overflow"))?;
+        let start = index.checked_mul(matrix_bytes).ok_or(Error::Invalid("mapped matrix offset overflow"))?;
+        if start.checked_add(matrix_bytes).is_none_or(|end| end > tensor.size) {
+            return Err(Error::Invalid("mapped matrix exceeds tensor span"));
+        }
+        let codes = self.metal_view(tensor.file, tensor.offset + start, matrix_bytes, cacheable)?;
+        let planes = if let Some(affine) = &tensor.affine {
+            let scales = self.tensor(&affine.scales)?;
+            let biases = self.tensor(&affine.biases)?;
+            let item_size = encoded_size(scales.kind, 1)?;
+            let plane_bytes = rows
+                .checked_mul(columns / affine.group)
+                .and_then(|n| n.checked_mul(item_size))
+                .ok_or(Error::Invalid("mapped affine plane overflow"))?;
+            let start = index.checked_mul(plane_bytes).ok_or(Error::Invalid("mapped plane offset overflow"))?;
+            if start.checked_add(plane_bytes).is_none_or(|end| end > scales.size || end > biases.size) {
+                return Err(Error::Invalid("mapped affine plane exceeds tensor span"));
+            }
+            Some((
+                self.metal_view(scales.file, scales.offset + start, plane_bytes, cacheable)?,
+                self.metal_view(biases.file, biases.offset + start, plane_bytes, cacheable)?,
+            ))
+        } else {
+            None
+        };
+        Ok(super::weight_metal::MappedMatrix {
+            codes,
+            planes,
+        })
+    }
+
     pub fn expert_matvec(
         &self,
         name: &str,
@@ -409,24 +680,21 @@ impl Weights {
         }
         #[cfg(feature = "metal")]
         {
-            let bytes = self.raw(tensor)?;
-            if let Some(affine) = &tensor.affine {
-                let scales = self.tensor(&affine.scales)?;
-                let biases = self.tensor(&affine.biases)?;
-                return super::weight_metal::mlx_batched_matvec(
-                    bytes,
-                    self.raw(scales)?,
-                    self.raw(biases)?,
-                    scales.kind,
-                    affine.bits,
-                    affine.group,
-                    batches,
-                    rows,
+            let operation = super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(
+                    tensor,
+                    0,
+                    batches * rows,
                     columns,
-                    inputs,
-                );
-            }
-            super::weight_metal::batched_matvec(bytes, tensor.kind, batches, rows, columns, inputs)
+                    name.ends_with(".attn_k_b.weight") || name.ends_with(".attn_v_b.weight"),
+                )?],
+                inputs,
+                rows: batches * rows,
+                columns,
+                rows_per_batch: rows,
+                format: self.matrix_format(tensor)?,
+            };
+            super::weight_metal::mapped_many(&[operation]).map(|mut outputs| outputs.remove(0))
         }
         #[cfg(not(feature = "metal"))]
         {
@@ -490,36 +758,25 @@ impl Weights {
         }
         #[cfg(feature = "metal")]
         {
-            let source = self.raw(tensor)?;
-            let mut codes = Vec::with_capacity(matrix_bytes * experts.len());
-            for &expert in experts {
-                codes.extend_from_slice(&source[expert * matrix_bytes..(expert + 1) * matrix_bytes]);
-            }
-            if let Some(affine) = &tensor.affine {
-                let scale_tensor = self.tensor(&affine.scales)?;
-                let bias_tensor = self.tensor(&affine.biases)?;
-                let scale_source = self.raw(scale_tensor)?;
-                let bias_source = self.raw(bias_tensor)?;
-                let mut scales = Vec::with_capacity(plane_bytes * experts.len());
-                let mut biases = Vec::with_capacity(plane_bytes * experts.len());
-                for &expert in experts {
-                    scales.extend_from_slice(&scale_source[expert * plane_bytes..(expert + 1) * plane_bytes]);
-                    biases.extend_from_slice(&bias_source[expert * plane_bytes..(expert + 1) * plane_bytes]);
-                }
-                return super::weight_metal::mlx_batched_matvec(
-                    &codes,
-                    &scales,
-                    &biases,
-                    scale_tensor.kind,
-                    affine.bits,
-                    affine.group,
-                    experts.len(),
-                    rows,
-                    columns,
-                    inputs,
-                );
-            }
-            super::weight_metal::batched_matvec(&codes, tensor.kind, experts.len(), rows, columns, inputs)
+            // Map only selected compressed ranges. Each expert dispatch shares
+            // one command buffer; unused experts are never registered as GPU
+            // resources and there is no gathered weight copy.
+            let matrices = {
+                let _views = super::profile::Scope::bytes("native.weights.views", selected_bytes);
+                experts
+                    .iter()
+                    .map(|&expert| self.mapped_matrix(tensor, expert, rows, columns, false))
+                    .collect::<Result<Vec<_>>>()?
+            };
+            let operation = super::weight_metal::MappedOperation {
+                matrices,
+                inputs,
+                rows,
+                columns,
+                rows_per_batch: 0,
+                format: self.matrix_format(tensor)?,
+            };
+            super::weight_metal::mapped_many(&[operation]).map(|mut outputs| outputs.remove(0))
         }
         #[cfg(not(feature = "metal"))]
         {
@@ -550,35 +807,15 @@ impl Weights {
         }
         #[cfg(feature = "metal")]
         {
-            let bytes = self.raw(tensor)?;
-            if let Some(affine) = &tensor.affine {
-                let scales = self.tensor(&affine.scales)?;
-                let biases = self.tensor(&affine.biases)?;
-                let data_size = rows * columns * affine.bits / 8;
-                let scale_size = rows * columns / affine.group * encoded_size(scales.kind, 1)?;
-                let scales_data = self.raw(scales)?;
-                let biases_data = self.raw(biases)?;
-                return super::weight_metal::mlx_matvec(
-                    &bytes[index * data_size..(index + 1) * data_size],
-                    &scales_data[index * scale_size..(index + 1) * scale_size],
-                    &biases_data[index * scale_size..(index + 1) * scale_size],
-                    scales.kind,
-                    affine.bits,
-                    affine.group,
-                    rows,
-                    columns,
-                    input,
-                );
-            }
-            let data_size =
-                rows.checked_mul(encoded_size(tensor.kind, columns)?).ok_or(Error::Invalid("matrix size overflow"))?;
-            super::weight_metal::matvec(
-                &bytes[index * data_size..(index + 1) * data_size],
-                tensor.kind,
+            let operation = super::weight_metal::MappedOperation {
+                matrices: vec![self.mapped_matrix(tensor, index, rows, columns, tensor.shape.len() == 2)?],
+                inputs: input,
                 rows,
                 columns,
-                input,
-            )
+                rows_per_batch: 0,
+                format: self.matrix_format(tensor)?,
+            };
+            super::weight_metal::mapped_many(&[operation]).map(|mut outputs| outputs.remove(0))
         }
         #[cfg(not(feature = "metal"))]
         {
@@ -1291,6 +1528,223 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn mapped_partial_page_retains_its_owner_after_store_drop() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("partial.bin");
+        let mut bytes = vec![9u8; 3];
+        bytes.extend([1.0f32, 2.0, -1.0, 0.5, -0.25, 4.0].iter().flat_map(|value| value.to_le_bytes()));
+        fs::write(&path, bytes).unwrap();
+        let mapping = Arc::new(Mapping::new(&path).unwrap());
+        let weak = Arc::downgrade(&mapping);
+        let codes = mapping.metal_slice(3, 24).unwrap();
+        assert!(mapping.metal_slice(3, 25).is_err());
+        drop(mapping);
+        assert!(weak.upgrade().is_some());
+        let inputs = [1.0f32, 0.5, -2.0];
+        let operation = super::super::weight_metal::MappedOperation {
+            matrices: vec![super::super::weight_metal::MappedMatrix {
+                codes,
+                planes: None,
+            }],
+            inputs: &inputs,
+            rows: 2,
+            columns: 3,
+            rows_per_batch: 0,
+            format: super::super::weight_metal::MatrixFormat::Packed(0),
+        };
+        let outputs = super::super::weight_metal::mapped_many(std::slice::from_ref(&operation)).unwrap();
+        assert_eq!(outputs, vec![vec![4.0, -7.625]]);
+        drop(operation);
+        for _ in 0..100 {
+            if weak.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(weak.upgrade().is_none(), "completed mapped resources retained their allocation");
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn repeated_mapped_submissions_release_registered_ranges() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("model.safetensors");
+        safetensors(&path, &[("matrix", "F32", vec![1024, 1024], vec![0; 4 * 1024 * 1024])]);
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let inputs = vec![1.0; 1024];
+        assert_eq!(weights.matvec("matrix", &inputs).unwrap().len(), 1024);
+        let before = super::super::weight_metal::allocated_bytes().unwrap();
+        for _ in 0..32 {
+            assert_eq!(weights.matvec("matrix", &inputs).unwrap().len(), 1024);
+        }
+        let after = super::super::weight_metal::allocated_bytes().unwrap();
+        // The source mapping stays alive, but completed Metal views and their
+        // input/output allocations must not accumulate one 4 MiB resource per
+        // call. Allow modest driver scratch/reuse after the warm submission.
+        assert!(after <= before + 16 * 1024 * 1024);
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn static_view_cache_reuses_weights_excludes_experts_and_drops_ownership() {
+        struct DisableProfile;
+        impl Drop for DisableProfile {
+            fn drop(&mut self) {
+                super::super::profile::enable(false);
+            }
+        }
+        let _disable = DisableProfile;
+        super::super::profile::reset();
+        super::super::profile::enable(true);
+        let fixture = Fixture::new();
+        let data = |value: f32, count: usize| (0..count).flat_map(|_| value.to_le_bytes()).collect::<Vec<_>>();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("matrix", "F32", vec![2, 32], data(1.0, 64)),
+                ("experts", "F32", vec![3, 2, 32], data(2.0, 192)),
+                ("block.attn_k_b.weight", "F32", vec![3, 2, 32], data(3.0, 192)),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let weak = Arc::downgrade(&weights.files[0]);
+        let input = vec![1.0; 32];
+        assert_eq!(weights.matvec("matrix", &input).unwrap(), vec![32.0; 2]);
+        assert_eq!(weights.matvec("matrix", &input).unwrap(), vec![32.0; 2]);
+        assert_eq!(weights.static_views.lock().unwrap().entries.len(), 1);
+        weights.expert_matvec("experts", 1, &input).unwrap();
+        weights.selected_matvec("experts", &[2, 0], &input.repeat(2)).unwrap();
+        weights.batched_matvec("experts", &input.repeat(3)).unwrap();
+        assert_eq!(weights.static_views.lock().unwrap().entries.len(), 1);
+        weights.batched_matvec("block.attn_k_b.weight", &input.repeat(3)).unwrap();
+        {
+            let cache = weights.static_views.lock().unwrap();
+            assert_eq!(cache.entries.len(), 2);
+            assert_eq!(
+                cache.registered_bytes,
+                cache.entries.values().map(|view| view.registered_bytes()).sum::<usize>()
+            );
+            assert!(cache.registered_bytes <= cache.limit);
+        }
+        let counters = super::super::profile::snapshot();
+        assert_eq!(counters["native.metal.static_cache.hit"].calls, 1);
+        assert_eq!(counters["native.metal.static_cache.miss"].calls, 2);
+        drop(weights);
+        for _ in 0..100 {
+            if weak.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(weak.upgrade().is_none(), "dropped static cache retained its source mapping");
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn static_view_cache_bounds_rounded_spans_and_preserves_evicted_active_views() {
+        let fixture = Fixture::new();
+        let data = |value: f32| value.to_le_bytes().repeat(32);
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("a", "F32", vec![1, 32], data(1.0)),
+                ("b", "F32", vec![1, 32], data(2.0)),
+                ("c", "F32", vec![1, 32], data(3.0)),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let tensor = weights.tensor("a").unwrap();
+        let page_span = weights.files[tensor.file].metal_span(tensor.offset, tensor.size).unwrap().1;
+        // This override exists only in the test; production has a fixed 8 GiB
+        // retained-cache bound. Logical spans are only 128 bytes each.
+        *weights.static_views.lock().unwrap() = StaticViewCache::new(page_span);
+        let inputs = vec![1.0; 32];
+        let outputs = weights.matvec_many(&[("a", &inputs), ("b", &inputs)]).unwrap();
+        assert_eq!(outputs, vec![vec![32.0], vec![64.0]]);
+        let b = weights.tensor("b").unwrap();
+        {
+            let cache = weights.static_views.lock().unwrap();
+            assert_eq!(cache.entries.len(), 1);
+            assert_eq!(cache.order.len(), 1);
+            assert_eq!(cache.registered_bytes, page_span);
+            assert!(cache.entries.contains_key(&StaticViewKey {
+                file: b.file,
+                offset: b.offset,
+                length: b.size
+            }));
+        }
+        let invalid_offset = weights.files[0].length;
+        assert!(weights.metal_view(0, invalid_offset, 1, true).is_err());
+        assert_eq!(weights.static_views.lock().unwrap().registered_bytes, page_span);
+        assert_eq!(weights.static_views.lock().unwrap().entries.len(), 1);
+        // An over-cap view stays transient instead of evicting everything and
+        // entering an insertion loop that can never satisfy the bound.
+        *weights.static_views.lock().unwrap() = StaticViewCache::new(page_span - 1);
+        assert_eq!(weights.matvec("c", &inputs).unwrap(), vec![96.0]);
+        let cache = weights.static_views.lock().unwrap();
+        assert_eq!(cache.registered_bytes, 0);
+        assert!(cache.entries.is_empty() && cache.order.is_empty());
+        drop(cache);
+        *weights.static_views.lock().unwrap() = StaticViewCache::new(0);
+        assert_eq!(weights.matvec("a", &inputs).unwrap(), vec![32.0]);
+        assert!(weights.static_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[stark_test]
+    fn independent_matrix_jobs_preserve_mixed_formats_and_distinct_inputs() {
+        let fixture = Fixture::new();
+        let path = fixture.0.join("model.safetensors");
+        let a = [1.0f32, 2.0, -1.0, 0.5, -0.25, 4.0];
+        let b = [0.5f32, 1.0, -2.0, 3.0, 4.0, -1.0];
+        safetensors(
+            &path,
+            &[
+                ("a", "F32", vec![2, 3], a.iter().flat_map(|value| value.to_le_bytes()).collect()),
+                (
+                    "b",
+                    "BF16",
+                    vec![3, 2],
+                    b.iter().flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes()).collect(),
+                ),
+                ("quant.weight", "U32", vec![1, 4], vec![0x21; 16]),
+                ("quant.scales", "F32", vec![1, 1], 0.125f32.to_le_bytes().to_vec()),
+                ("quant.biases", "F32", vec![1, 1], (-0.25f32).to_le_bytes().to_vec()),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{\"quantization\":{\"bits\":4,\"group_size\":32}}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let input_a = [1.0f32, 0.5, -2.0];
+        let input_b = [2.0f32, -1.0];
+        let input_quant: Vec<_> = (0..32).map(|index| index as f32 * 0.125 - 1.0).collect();
+        let jobs: &[(&str, &[f32])] = &[("a", &input_a), ("b", &input_b), ("quant.weight", &input_quant)];
+        let outputs = weights.matvec_many(jobs).unwrap();
+        assert_eq!(outputs[0], vec![4.0, -7.625]);
+        assert_eq!(outputs[1], vec![0.0, -7.0, 9.0]);
+        let quant_expected: f32 = input_quant
+            .iter()
+            .enumerate()
+            .map(|(index, input)| {
+                input
+                    * if index % 2 == 0 {
+                        -0.125
+                    } else {
+                        0.0
+                    }
+            })
+            .sum();
+        assert!((outputs[2][0] - quant_expected).abs() < 1e-6);
+        for (index, &(name, inputs)) in jobs.iter().enumerate() {
+            assert_eq!(outputs[index], weights.matvec(name, inputs).unwrap());
+        }
+        assert!(weights.matvec_many(&[]).is_err());
+        assert!(weights.matvec_many(&[("a", &input_b)]).is_err());
+    }
+
     #[stark_test]
     fn safetensors_admits_unused_rank_five_vision_and_bounds_other_ranks_and_sizes() {
         let fixture = Fixture::new();
@@ -1515,7 +1969,9 @@ mod tests {
             let fixture = Fixture::new();
             let (block, size) = block_layout(kind).unwrap();
             let mut payload = Vec::new();
-            for row in 0..8 {
+            // Three rows make IQ2_XXS expert strides 198 bytes, deliberately
+            // misaligned for a four-byte Metal buffer binding offset.
+            for row in 0..12 {
                 for number in 0..256 / block {
                     let mut bytes: Vec<u8> =
                         (0..size).map(|i| ((i * 73 + row * 19 + number * 7) % 256) as u8).collect();
@@ -1547,7 +2003,7 @@ mod tests {
             header.extend(0u64.to_le_bytes());
             string(&mut header, "experts");
             header.extend(3u32.to_le_bytes());
-            for dimension in [256u64, 2, 4] {
+            for dimension in [256u64, 3, 4] {
                 header.extend(dimension.to_le_bytes());
             }
             header.extend(kind.to_le_bytes());
@@ -1563,8 +2019,8 @@ mod tests {
             let actual = weights.selected_matvec("experts", &experts, &inputs).unwrap();
             let row_bytes = 256 / block * size;
             for (selected, &expert) in experts.iter().enumerate() {
-                for row in 0..2 {
-                    let at = (expert * 2 + row) * row_bytes;
+                for row in 0..3 {
+                    let at = (expert * 3 + row) * row_bytes;
                     let decoded = decode_values(kind, &payload[at..at + row_bytes], 256).unwrap();
                     let products: Vec<f64> = decoded
                         .iter()
@@ -1574,7 +2030,7 @@ mod tests {
                     let expected: f64 = products.iter().sum();
                     let absolute: f64 = products.iter().map(|x| x.abs()).sum();
                     assert!(
-                        (f64::from(actual[selected * 2 + row]) - expected).abs() <= 2e-5 * absolute.max(1.0),
+                        (f64::from(actual[selected * 3 + row]) - expected).abs() <= 2e-5 * absolute.max(1.0),
                         "selected format {kind}"
                     );
                 }

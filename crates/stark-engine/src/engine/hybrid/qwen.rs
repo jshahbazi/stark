@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::{
     Error, Result,
     math::{rms_norm, sigmoid, silu, softmax, topk},
+    profile::Scope,
     weights::Weights,
 };
 
@@ -114,6 +115,18 @@ fn project(
     input: &[f32],
 ) -> Result<Vec<f32>> {
     weights.matvec(&format!("{prefix}.weight"), input)
+}
+
+/// Submit independent projections together without combining their arithmetic
+/// or changing output order. Inputs may differ, as in hyperconnection gates.
+fn projects<const N: usize>(
+    weights: &Weights,
+    prefix: &str,
+    projections: [(&str, &[f32]); N],
+) -> Result<[Vec<f32>; N]> {
+    let names = projections.each_ref().map(|(name, _)| format!("{prefix}.{name}.weight"));
+    let requests: [(&str, &[f32]); N] = std::array::from_fn(|index| (names[index].as_str(), projections[index].1));
+    weights.matvec_many(&requests)?.try_into().map_err(|_| Error::Invalid("Qwen3.8 projection batch dimensions"))
 }
 
 fn grouped_norm(
@@ -233,12 +246,26 @@ impl HyperConnection {
         input: &[f32],
         g: &Geometry,
     ) -> Result<(Vec<f32>, Vec<f32>)> {
+        let _profile = Scope::new("qwen.mhc");
         let normalized = grouped_norm(input, &self.norm, g.dim, g.eps)?;
         let mut reduced = project(weights, &format!("{}.input_mix_weight_down", self.prefix), &normalized)?;
         for value in &mut reduced {
             *value = silu(*value / g.streams as f32);
         }
-        let gates = project(weights, &format!("{}.input_mix_weight_up", self.prefix), &reduced)?;
+        let (gates, inject) = if self.combine {
+            let [gates, mut values] = projects(
+                weights,
+                &self.prefix,
+                [("input_mix_weight_up", &reduced), ("block_inject_weight", &normalized)],
+            )?;
+            if values.len() != g.streams {
+                return Err(Error::Invalid("Qwen3.8 write gate dimensions"));
+            }
+            values.iter_mut().for_each(|value| *value = 2.0 * sigmoid(*value / g.streams as f32));
+            (gates, values)
+        } else {
+            (project(weights, &format!("{}.input_mix_weight_up", self.prefix), &reduced)?, Vec::new())
+        };
         if gates.len() != input.len() {
             return Err(Error::Invalid("Qwen3.8 read gate dimensions"));
         }
@@ -249,16 +276,6 @@ impl HyperConnection {
                 mixed[channel] += sigmoid(gates[index]) * normalized[index] / g.streams as f32;
             }
         }
-        let inject = if self.combine {
-            let mut values = project(weights, &format!("{}.block_inject_weight", self.prefix), &normalized)?;
-            if values.len() != g.streams {
-                return Err(Error::Invalid("Qwen3.8 write gate dimensions"));
-            }
-            values.iter_mut().for_each(|value| *value = 2.0 * sigmoid(*value / g.streams as f32));
-            values
-        } else {
-            Vec::new()
-        };
         Ok((mixed, inject))
     }
 }
@@ -331,14 +348,17 @@ impl DeltaNet {
         input: &[f32],
         g: &Geometry,
     ) -> Result<Vec<f32>> {
-        let mixed = project(weights, &format!("{}.in_proj_qkv", self.prefix), input)?;
+        let _profile = Scope::new("qwen.gdn");
+        let [mixed, z, a, b] = projects(
+            weights,
+            &self.prefix,
+            [("in_proj_qkv", input), ("in_proj_z", input), ("in_proj_a", input), ("in_proj_b", input)],
+        )?;
         let convolved = self.conv_state.step(&mixed, &self.convolution, g.conv_kernel, 1)?;
-        let z = project(weights, &format!("{}.in_proj_z", self.prefix), input)?;
-        let a = project(weights, &format!("{}.in_proj_a", self.prefix), input)?;
-        let b = project(weights, &format!("{}.in_proj_b", self.prefix), input)?;
         let key_width = g.key_heads * g.key_dim;
         let (q, remainder) = convolved.split_at(key_width);
         let (k, v) = remainder.split_at(key_width);
+        let recurrent_profile = Scope::new("qwen.gdn.recurrent");
         let mut q = q.to_vec();
         let mut k = k.to_vec();
         normalize_l2(&mut q, g.key_dim, (g.key_dim as f32).sqrt().recip());
@@ -372,6 +392,7 @@ impl DeltaNet {
                     };
             }
         }
+        drop(recurrent_profile);
         project(weights, &format!("{}.out_proj", self.prefix), &result)
     }
 }
@@ -452,6 +473,7 @@ impl Attention {
         index_query: &[f32],
         g: &Geometry,
     ) -> Result<Vec<usize>> {
+        let _profile = Scope::new("qwen.qsa.visible");
         let count = self.index_keys.len();
         if count <= g.budget {
             return Ok((0..count).collect());
@@ -487,12 +509,16 @@ impl Attention {
         input: &[f32],
         g: &Geometry,
     ) -> Result<Vec<f32>> {
+        let _profile = Scope::new("qwen.qsa");
         let position = self.keys.len();
-        let index = project(weights, &format!("{}.indexer.index_qk_proj", self.prefix), input)?;
+        let [index, query_and_gate, mut keys, values] = projects(
+            weights,
+            &self.prefix,
+            [("indexer.index_qk_proj", input), ("q_proj", input), ("k_proj", input), ("v_proj", input)],
+        )?;
         let query_width = g.index_heads * g.index_dim;
         self.index_keys.push(index[query_width..].to_vec());
         let visible = self.visible(&index[..query_width], g)?;
-        let query_and_gate = project(weights, &format!("{}.q_proj", self.prefix), input)?;
         let mut queries = Vec::with_capacity(g.heads * g.head_dim);
         let mut gates = Vec::with_capacity(g.heads * g.head_dim);
         for head in query_and_gate.chunks_exact(2 * g.head_dim) {
@@ -501,14 +527,13 @@ impl Attention {
             queries.extend(q);
             gates.extend_from_slice(&head[g.head_dim..]);
         }
-        let mut keys = project(weights, &format!("{}.k_proj", self.prefix), input)?;
         for head in keys.chunks_exact_mut(g.head_dim) {
             let normalized = rms_norm(head, &self.k_norm, g.eps)?;
             head.copy_from_slice(&normalized);
             rope(head, g.rotary_dim, position, g.rope_theta);
         }
         self.keys.push(keys);
-        self.values.push(project(weights, &format!("{}.v_proj", self.prefix), input)?);
+        self.values.push(values);
         let mut output = vec![0.0; g.heads * g.head_dim];
         for head in 0..g.heads {
             let query = &queries[head * g.head_dim..(head + 1) * g.head_dim];
@@ -628,6 +653,7 @@ impl Ple {
         history: &[u32],
         g: &Geometry,
     ) -> Result<Vec<f32>> {
+        let _profile = Scope::new("qwen.ple");
         let shifted = shifted_tokens(token, history, g.ngram_size, g.eos);
         let mut embedding = Vec::with_capacity(g.ple_dim);
         let heads_per_size = g.ngram_heads / (g.ngram_size - 1);
@@ -649,14 +675,9 @@ impl Ple {
                 );
             }
         }
-        let key = grouped_norm(
-            &project(weights, &format!("{}.key_proj", self.prefix), &embedding)?,
-            &self.key_norm,
-            g.dim,
-            g.eps,
-        )?;
+        let [key, value] = projects(weights, &self.prefix, [("key_proj", &embedding), ("value_proj", &embedding)])?;
+        let key = grouped_norm(&key, &self.key_norm, g.dim, g.eps)?;
         let query = grouped_norm(input, &self.query_norm, g.dim, g.eps)?;
-        let value = project(weights, &format!("{}.value_proj", self.prefix), &embedding)?;
         let mut gated = vec![0.0; g.streams * g.dim];
         for stream in 0..g.streams {
             let start = stream * g.dim;
@@ -723,7 +744,17 @@ fn moe(
     input: &[f32],
     g: &Geometry,
 ) -> Result<Vec<f32>> {
-    let scores = project(weights, &format!("{prefix}.gate"), input)?;
+    let _profile = Scope::new("qwen.ffn");
+    let [scores, shared_gate, mut shared_values, shared_up] = projects(
+        weights,
+        prefix,
+        [
+            ("gate", input),
+            ("shared_expert_gate", input),
+            ("shared_expert.gate_proj", input),
+            ("shared_expert.up_proj", input),
+        ],
+    )?;
     let selected = topk(&scores, g.active_experts)?;
     let probabilities = softmax(&selected.iter().map(|&expert| scores[expert]).collect::<Vec<_>>())?;
     let repeated_input = input.repeat(selected.len());
@@ -740,13 +771,11 @@ fn moe(
             *value += probability * expert;
         }
     }
-    let shared_gate = sigmoid(project(weights, &format!("{prefix}.shared_expert_gate"), input)?[0]);
-    let mut gate = project(weights, &format!("{prefix}.shared_expert.gate_proj"), input)?;
-    let up = project(weights, &format!("{prefix}.shared_expert.up_proj"), input)?;
-    for (value, up) in gate.iter_mut().zip(up) {
+    let shared_gate = sigmoid(shared_gate[0]);
+    for (value, up) in shared_values.iter_mut().zip(shared_up) {
         *value = silu(*value) * up;
     }
-    let shared = project(weights, &format!("{prefix}.shared_expert.down_proj"), &gate)?;
+    let shared = project(weights, &format!("{prefix}.shared_expert.down_proj"), &shared_values)?;
     for (value, shared) in result.iter_mut().zip(shared) {
         *value += shared_gate * shared;
     }
@@ -973,7 +1002,20 @@ impl QwenModel {
         &mut self,
         token: u32,
     ) -> Result<Vec<f32>> {
-        let result = self.step_inner(token);
+        let result = self.step_inner(token, true);
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+
+    /// Advance recurrent, attention and n-gram state for a prefix token without
+    /// computing the stateless final mixer and vocabulary projection.
+    pub fn ingest(
+        &mut self,
+        token: u32,
+    ) -> Result<()> {
+        let result = self.step_inner(token, false).map(|_| ());
         if result.is_err() {
             self.reset();
         }
@@ -983,12 +1025,16 @@ impl QwenModel {
     fn step_inner(
         &mut self,
         token: u32,
+        readout: bool,
     ) -> Result<Vec<f32>> {
         let g = &self.geometry;
         if token as usize >= g.vocab || self.position >= g.context {
             return Err(Error::Invalid("Qwen3.8 token or context boundary"));
         }
-        let embedding = self.weights.row(&self.embedding, token as usize)?;
+        let embedding = {
+            let _profile = Scope::new("qwen.embedding");
+            self.weights.row(&self.embedding, token as usize)?
+        };
         let mut hidden = embedding.repeat(g.streams);
         for layer in &mut self.layers {
             if let Some(ple) = &mut layer.ple {
@@ -1007,11 +1053,24 @@ impl QwenModel {
             let output = moe(&self.weights, &format!("{}.mlp", layer.prefix), &input, g)?;
             inject(&mut hidden, &output, &gates, g)?;
         }
-        let (mixed, _) = self.final_mix.mix(&self.weights, &hidden, g)?;
-        let logits = self.weights.matvec(&self.readout, &mixed)?;
-        if logits.len() != g.vocab || logits.iter().any(|value| !value.is_finite()) {
-            return Err(Error::Invalid("Qwen3.8 readout values"));
+        // The next projection normally rejects nonfinite residuals. Prefix
+        // ingestion must preserve that failure boundary when it skips readout.
+        if hidden.iter().any(|value| !value.is_finite()) {
+            return Err(Error::Invalid("Qwen3.8 residual values"));
         }
+        let logits = if readout {
+            let (mixed, _) = self.final_mix.mix(&self.weights, &hidden, g)?;
+            let logits = {
+                let _profile = Scope::new("qwen.readout");
+                self.weights.matvec(&self.readout, &mixed)?
+            };
+            if logits.len() != g.vocab || logits.iter().any(|value| !value.is_finite()) {
+                return Err(Error::Invalid("Qwen3.8 readout values"));
+            }
+            logits
+        } else {
+            Vec::new()
+        };
         self.position += 1;
         self.history.push(token);
         if self.history.len() >= g.ngram_size {
@@ -1076,6 +1135,48 @@ mod tests {
         rope(&mut head, 2, 1, 10_000.0);
         assert_eq!(&head[2..], &[3.0, 4.0]);
         assert!((head[0] - (1.0_f32.cos() - 2.0 * 1.0_f32.sin())).abs() < 1e-6);
+    }
+
+    /// Uses a private complete numerical fixture, never a header-only model.
+    /// Compare every visible prefix so recurrent state, sparse tails, EOS/PLE
+    /// history, reset and the final output all exercise the ingest path.
+    #[stark_test]
+    #[ignore]
+    fn qwen_prefix_ingest_preserves_full_readout_and_failure_recovery() {
+        let path = std::env::var_os("STARK_QWEN38_NUMERICAL_FIXTURE_PATH")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| panic!("private Qwen numerical fixture path is required"));
+        assert!(!path.join("HEADER-ADMISSION-ONLY.json").exists());
+        let read = |name| std::fs::read(path.join(name)).unwrap_or_else(|_| panic!("private Qwen fixture read failed"));
+        let config: Value = serde_json::from_slice(&read("config.json"))
+            .unwrap_or_else(|_| panic!("private Qwen fixture configuration is invalid"));
+        let tokens: Vec<u32> = serde_json::from_slice(&read("tokens.json"))
+            .unwrap_or_else(|_| panic!("private Qwen fixture sequence is invalid"));
+        assert!(tokens.len() >= 2 && tokens.len() <= 4096);
+        let load = || {
+            let weights = Weights::open(&path).unwrap_or_else(|_| panic!("private Qwen fixture admission failed"));
+            QwenModel::new(weights, &config).unwrap_or_else(|_| panic!("private Qwen fixture model admission failed"))
+        };
+        let mut complete = load();
+        let expected: Vec<_> = tokens
+            .iter()
+            .map(|&token| complete.step(token).unwrap_or_else(|_| panic!("private Qwen reference step failed")))
+            .collect();
+        let mut prefix = load();
+        for end in 0..tokens.len() {
+            prefix.reset();
+            for &token in &tokens[..end] {
+                prefix.ingest(token).unwrap_or_else(|_| panic!("private Qwen prefix ingest failed"));
+            }
+            let actual = prefix.step(tokens[end]).unwrap_or_else(|_| panic!("private Qwen prefix step failed"));
+            assert!(actual == expected[end], "private Qwen prefix output mismatch");
+        }
+        assert!(prefix.ingest(u32::MAX).is_err());
+        let recovered = prefix.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen recovery step failed"));
+        assert!(recovered == expected[0], "private Qwen failure recovery mismatch");
+        prefix.reset();
+        let reset = prefix.step(tokens[0]).unwrap_or_else(|_| panic!("private Qwen reset step failed"));
+        assert!(reset == expected[0], "private Qwen reset output mismatch");
     }
 
     /// The private fixture preserves complete production headers and only the

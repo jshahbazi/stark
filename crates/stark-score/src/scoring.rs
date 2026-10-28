@@ -276,8 +276,12 @@ impl ScoringBackend for NativeBackend {
                     return Err("context_overflow");
                 }
                 let mut logits = Vec::new();
-                for &token in input {
-                    logits = model.step(token).map_err(|_| "native_scoring_failed")?;
+                for (index, &token) in input.iter().enumerate() {
+                    if index + 1 == input.len() {
+                        logits = model.step(token).map_err(|_| "native_scoring_failed")?;
+                    } else {
+                        model.ingest(token).map_err(|_| "native_scoring_failed")?;
+                    }
                 }
                 Ok(NativeScores {
                     logits,

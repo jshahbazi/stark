@@ -8,6 +8,11 @@ Measured results, each bound to the source revision, build and host named inside
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
+**Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
+Before/after full-checkpoint worker measurements, aggregate phase profiles and
+rejected kernel/wait experiments on Apple M5 Max. See the
+[native hybrid optimization study](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md).
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -24,6 +29,7 @@ Measured results, each bound to the source revision, build and host named inside
 
 | Study | Outcome |
 | --- | --- |
+| [Native GLM and Qwen optimization](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md) | Current study for the two original-format hybrid checkpoints; supersedes their initial smoke timing observations |
 | [MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) | Two decode changes accepted after bitwise validation; the throughput they produced is included in the current result |
 | [DeepInfer resource reuse](DEEPINFER_ADOPTION_2026_10_21.md) | Two experiments measured and reverted; patches retained under the archive |
 | [Qwen3 GGUF import experiment](QWEN3_GGUF_IMPORT_EXPERIMENT.md) | Experimental Q8_0 import route; see the [converter guide](../../tools/converter/README.md#experimental-qwen3-gguf-import) |

@@ -1,0 +1,43 @@
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -6,6 +6,7 @@
+     ffi::c_void,
+     ptr::NonNull,
+     sync::{Arc, Mutex, OnceLock},
++    time::{Duration, Instant},
+ };
+ 
+ use metal::{
+@@ -278,6 +279,23 @@
+         .ok_or(Error::Invalid("Metal matrix buffer allocation failed"))
+ }
+ 
++fn wait_for_completion(command: &ProtocolObject<dyn MTLCommandBuffer>) {
++    // A bounded active interval avoids a thread sleep/wakeup for the many
++    // submillisecond matrix commands. Long commands still use Metal's blocking
++    // wait, and every path retains that final wait as the completion barrier.
++    let poll = profile::Scope::new("native.metal.poll");
++    let started = Instant::now();
++    let budget = Duration::from_micros(200);
++    while !matches!(command.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error)
++        && started.elapsed() < budget
++    {
++        std::hint::spin_loop();
++    }
++    drop(poll);
++    let _blocking = profile::Scope::new("native.metal.blocking_wait");
++    command.wait_until_completed();
++}
++
+ impl Executor {
+     fn pipeline(
+         &self,
+@@ -425,7 +443,7 @@
+         command.commit();
+         drop(submit);
+         let wait = profile::Scope::new("native.metal.wait");
+-        command.wait_until_completed();
++        wait_for_completion(&command);
+         drop(wait);
+         if command.status() != MTLCommandBufferStatus::Completed {
+             return Err(Error::Invalid("Metal matrix execution failed"));
