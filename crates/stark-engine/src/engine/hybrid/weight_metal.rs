@@ -48,6 +48,11 @@ fn executor() -> Result<&'static Executor> {
                 source.push_str(&format!("{value},"));
             }
             source.push_str("};\n");
+            source.push_str("constant uint iq3xxs_grid[256]={");
+            for value in weights::IQ3XXS_GRID {
+                source.push_str(&format!("0x{value:08x}u,"));
+            }
+            source.push_str("};\n");
             source.push_str(include_str!("packed_matvec.metal"));
             let options = metal::MTLCompileOptions::new();
             options.set_math_mode(metal::MTLMathMode::Safe);
@@ -235,7 +240,7 @@ fn packed_matvec(
     rows_per_batch: usize,
 ) -> Result<Vec<f32>> {
     let (block, block_bytes) = weights::block_layout(kind)?;
-    if !matches!(kind, 0 | 1 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 17 | 18 | 23)
+    if !matches!(kind, 0 | 1 | 30 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 18 | 23)
         || !columns.is_multiple_of(block)
         || rows.checked_mul(columns / block).and_then(|n| n.checked_mul(block_bytes)) != Some(bytes.len())
     {
@@ -342,7 +347,7 @@ mod tests {
 
     #[stark_test]
     fn metal_matches_all_checkpoint_quantization_formats() {
-        for kind in [0, 1, 30, 8, 10, 11, 12, 13, 14, 17, 18, 23] {
+        for kind in [0, 1, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 23] {
             let (block, size) = weights::block_layout(kind).unwrap();
             let columns = block.max(256);
             let mut bytes = Vec::new();
@@ -351,7 +356,7 @@ mod tests {
                     let mut source: Vec<u8> =
                         (0..size).map(|i| ((i * 37 + number * 13 + row * 23) % 256) as u8).collect();
                     let half_offsets: &[usize] = match kind {
-                        1 | 8 | 17 | 18 | 23 => &[0],
+                        1 | 8 | 16 | 17 | 18 | 23 => &[0],
                         10 => &[80, 82],
                         11 => &[108],
                         12 | 13 => &[0, 2],
@@ -494,6 +499,10 @@ mod tests {
         assert!(batched_matvec(&[0; 68], 8, 2, 1, 32, &[0.0; 32]).is_err());
         assert!(batched_matvec(&[0; 68], 8, usize::MAX, 2, 32, &[]).is_err());
         assert!(mlx_batched_matvec(&[0; 32], &[0; 8], &[0; 8], 0, 4, 0, 2, 1, 32, &[0.0; 64]).is_err());
+        for kind in [101, 102, 103] {
+            assert!(matvec(&[0; 8], kind, 1, 1, &[0.0]).is_err());
+            assert!(batched_matvec(&[0; 8], kind, 1, 1, 1, &[0.0]).is_err());
+        }
     }
 
     #[stark_test]

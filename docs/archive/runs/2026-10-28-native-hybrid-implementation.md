@@ -1,5 +1,14 @@
 # Native GLM5-Next and Qwen4-Exp implementation validation
 
+Correction from subsequent full-checkpoint execution: the initial packed-codec
+fixtures used the same incorrect IQ2 format IDs as the loader. Their numerical
+comparisons did not validate GGUF enum identity. The production GLM run exposed
+the error and an additional IQ3_XXS format requirement. See the separate
+[full-checkpoint validation record](2026-10-28-native-hybrid-full-checkpoints.md)
+for the correction and replacement quantized-fixture results. The initial GLM
+quantized fixture results below do not qualify the target storage formats. The
+results below describe the initial implementation checkpoint.
+
 Date: 2026-10-28. Branch: `codex/native-glm53-qwen38`.
 Base source: `b9f9a7b5`; implementation source is the commit introducing this
 record. Host: Apple M5 Max, 128 GiB, macOS 26.7.1.

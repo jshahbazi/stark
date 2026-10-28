@@ -48,19 +48,26 @@ inline float hybrid_quant(device const uchar *p, uint kind, uint i) {
         int q=int(((ql>>(part>=2?4:0))&15)|(((qh>>(part*2))&3)<<4))-32;
         return hybrid_half(p+208)*float(as_type<char>(p[192+n*8+l/16+part*2]))*float(q);
     }
-    if (kind == 17) {
+    if (kind == 16) {
         uint part=i/32, l=(i%32)/8, j=i%8;
         uint at=2+part*8, ss=hybrid_u32(p+at+4);
         ulong grid=iq2xxs_grid[p[at+l]];
         uint signs=ksigns[(ss>>(7*l))&127];
         return hybrid_half(p)*(0.5f+float(ss>>28))*0.25f*float((grid>>(8*j))&255ul)*((signs&(1<<j))?-1.0f:1.0f);
     }
-    if (kind == 18) {
+    if (kind == 17) {
         uint part=i/32, l=(i%32)/8, j=i%8;
         uint q=hybrid_u16(p+2+part*8+l*2), scales=p[66+part];
         ulong grid=iq2xs_grid[q&511];
         uint signs=ksigns[q>>9];
         return hybrid_half(p)*(0.5f+float((scales>>(l<2?0:4))&15))*0.25f*float((grid>>(8*j))&255ul)*((signs&(1<<j))?-1.0f:1.0f);
+    }
+    if (kind == 18) {
+        uint part=i/32, l=(i%32)/8, j=i%8;
+        uint ss=hybrid_u32(p+66+part*4);
+        uint signs=ksigns[(ss>>(7*l))&127];
+        uint grid=iq3xxs_grid[p[2+part*8+2*l+(j>=4?1:0)]];
+        return hybrid_half(p)*(0.5f+float(ss>>28))*0.5f*float((grid>>(8*(j%4)))&255u)*((signs&(1<<j))?-1.0f:1.0f);
     }
     // IQ4_XS (type 23).
     uint part=i/32, j=i%16;

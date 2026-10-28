@@ -15,6 +15,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import struct
 import sys
 import urllib.request
@@ -29,6 +30,9 @@ from torch.nn import functional
 REVISION = "95bafdcccfffe17ec383999fc39273867b11385e"
 SOURCE_SHA256 = "7870e7ce6ca477d26de3ec79b31d41553b75a09a726c661f04c2e26e790bdf36"
 MINIMUM_INDEXER_CUTOFF_MARGIN = 1e-5
+GGML_REVISION = "8ca4060b7e30e76baaa5670ee1ec1b760b7f8552"
+GGML_TYPES_SHA256 = "2b4dd92fa992cb4ef484917a6c62fef5097698744160ccc09214fd0c459c92c7"
+GGML_COMMON_SHA256 = "0061131b615c5721fc88a78feeb22c1f8c450f1c2646a317d80796a653bf595c"
 SOURCE_URL = (
     "https://raw.githubusercontent.com/huggingface/transformers/"
     f"{REVISION}/src/transformers/models/glm5_next/modeling_glm5_next.py"
@@ -482,8 +486,64 @@ def write_gguf(
     path.write_bytes(header + payload)
 
 
+def reference_layouts(reference_library: Path) -> dict:
+    """Read numeric type IDs and block sizes from pinned C declarations.
+
+    The oracle library's reference_format helper uses GGML_TYPE_* and sizeof
+    directly. Enum values are independently checked against the hash-verified
+    public header; neither synthetic tensor IDs nor byte strides are guessed.
+    """
+    directory = reference_library.parent
+    types = (directory / "ggml.h").read_bytes()
+    common = (directory / "ggml-common.h").read_bytes()
+    if (
+        hashlib.sha256(types).hexdigest() != GGML_TYPES_SHA256
+        or hashlib.sha256(common).hexdigest() != GGML_COMMON_SHA256
+    ):
+        raise RuntimeError("ggml_reference_headers_hash_mismatch")
+    names = [
+        "F32",
+        "F16",
+        "BF16",
+        "Q8_0",
+        "Q2_K",
+        "Q3_K",
+        "Q4_K",
+        "Q5_K",
+        "Q6_K",
+        "IQ2_XXS",
+        "IQ2_XS",
+        "IQ3_XXS",
+        "IQ4_XS",
+    ]
+    library = ctypes.CDLL(str(reference_library.resolve(strict=True)))
+    describe = library.reference_format
+    describe.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32)]
+    describe.restype = None
+    layouts = {}
+    for index, name in enumerate(names):
+        actual = (ctypes.c_uint32 * 3)()
+        describe(index, actual)
+        declared = re.search(rb"\bGGML_TYPE_" + name.encode() + rb"\s*=\s*(\d+)", types)
+        if (
+            declared is None
+            or actual[0] != int(declared[1])
+            or not 0 < actual[1] <= 256
+            or not 0 < actual[2] <= 4096
+        ):
+            raise RuntimeError("ggml_reference_type_layout_disagreement")
+        layouts[name] = {
+            "type_id": actual[0],
+            "block_values": actual[1],
+            "block_bytes": actual[2],
+        }
+    if layouts["F32"]["type_id"] != 0:
+        raise RuntimeError("gguf_scalar_type_disagreement")
+    return layouts
+
+
 def encode_quantized(tensors: dict, reference_library: Path) -> dict:
-    """Exercise actual IQ2 expert layouts with an independent GGML decoder.
+    """Exercise production IQ2_XS/IQ3_XXS experts with a GGML decoder.
 
     The supplied private library is compiled from the pinned ggml dequantizers.
     All source-module parameters are replaced with the decoded values before
@@ -492,6 +552,7 @@ def encode_quantized(tensors: dict, reference_library: Path) -> dict:
     import numpy as np
 
     library = ctypes.CDLL(str(reference_library.resolve(strict=True)))
+    layouts = reference_layouts(reference_library)
     rng = np.random.default_rng(20261028)
     encoded = {}
     with torch.no_grad():
@@ -499,8 +560,13 @@ def encode_quantized(tensors: dict, reference_library: Path) -> dict:
             if tensor.dim() < 2:
                 continue
             if "_exps.weight" in name:
-                kind = 18 if "ffn_down_exps" in name else 17
-                block_values, block_bytes = 256, 74 if kind == 18 else 66
+                name_of_format = "IQ3_XXS" if "ffn_down_exps" in name else "IQ2_XS"
+                layout = layouts[name_of_format]
+                kind = layout["type_id"]
+                block_values, block_bytes = (
+                    layout["block_values"],
+                    layout["block_bytes"],
+                )
                 raw = bytearray(
                     rng.integers(
                         0,
@@ -513,14 +579,19 @@ def encode_quantized(tensors: dict, reference_library: Path) -> dict:
                     raw[offset : offset + 2] = struct.pack("<e", 0.0005)
                 function = getattr(
                     library,
-                    "dequantize_row_iq2_xs" if kind == 18 else "dequantize_row_iq2_xxs",
+                    "dequantize_row_" + name_of_format.lower(),
                 )
             elif (
                 tensor.shape[-1] % 32 == 0
                 and "ffn_gate_inp" not in name
                 and "indexer.proj" not in name
             ):
-                kind, block_values, block_bytes = 8, 32, 34
+                layout = layouts["Q8_0"]
+                kind, block_values, block_bytes = (
+                    layout["type_id"],
+                    layout["block_values"],
+                    layout["block_bytes"],
+                )
                 values = (
                     tensor.detach().float().contiguous().cpu().numpy().reshape(-1, 32)
                 )
@@ -540,6 +611,7 @@ def encode_quantized(tensors: dict, reference_library: Path) -> dict:
             if tensor.shape[-1] % block_values:
                 raise RuntimeError("quantized_fixture_row_alignment")
             function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+            function.restype = None
             packed = ctypes.create_string_buffer(bytes(raw))
             values = (ctypes.c_float * tensor.numel())()
             function(packed, values, tensor.numel())
@@ -631,6 +703,16 @@ def create_fixture(
         "indexer_cutoffs": cutoff_statistics,
         "minimum_required_cutoff_margin": MINIMUM_INDEXER_CUTOFF_MARGIN,
     }
+    if reference_library:
+        reference["quantization_reference"] = {
+            "ggml_revision": GGML_REVISION,
+            "types_header_sha256": GGML_TYPES_SHA256,
+            "common_header_sha256": GGML_COMMON_SHA256,
+            "library_sha256": hashlib.sha256(
+                reference_library.read_bytes()
+            ).hexdigest(),
+            "layouts": reference_layouts(reference_library),
+        }
     (output / "reference.json").write_text(json.dumps(reference) + "\n")
     os.chmod(output / "reference.json", 0o600)
     (output / "tokens.json").write_text(json.dumps(sequences[0]) + "\n")
@@ -649,6 +731,7 @@ def create_fixture(
         "quantized_tensors": len(encoded or {}),
         "indexer_cutoffs": cutoff_statistics,
         "minimum_required_cutoff_margin": MINIMUM_INDEXER_CUTOFF_MARGIN,
+        "expert_formats": ["IQ2_XS", "IQ3_XXS"] if reference_library else [],
     }
 
 

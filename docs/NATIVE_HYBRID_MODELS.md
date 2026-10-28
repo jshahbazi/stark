@@ -67,8 +67,8 @@ Hash buffers retain their integer precision; EOS boundaries segment the n-gram
 history. A Qwen3.5 adapter or model-name alias is not involved.
 
 Matrix products execute on Metal directly from packed weights. GLM's dynamic
-quantization includes Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, IQ2_XS and
-IQ4_XS. Floating tensors support F32, F16 and BF16 storage. MLX supports affine
+quantization includes Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ2_XXS, IQ2_XS,
+IQ3_XXS and IQ4_XS. Floating tensors support F32, F16 and BF16 storage. MLX supports affine
 4/8-bit matrices with group sizes 32, 64 or 128. MLA head projections and selected
 experts are batched into individual GPU submissions. Only selected expert bytes
 and their scale/bias planes are gathered, with a bounded compressed workspace.
@@ -137,7 +137,9 @@ Oracle fixtures must avoid ambiguous cutoff ties when asserting numerical
 parity. These checks establish implementation parity under the recorded F32
 execution policy. They do not replace full-checkpoint execution, BF16 runtime
 comparison, quality benchmarks or host memory measurements. Dated results belong
-under `docs/archive/runs/`.
+under `docs/archive/runs/`. The
+[full-checkpoint validation record](archive/runs/2026-10-28-native-hybrid-full-checkpoints.md)
+records the production smoke scope and the GLM format correction it exposed.
 
 ## Provenance
 
