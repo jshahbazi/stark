@@ -59,11 +59,16 @@ pub fn main() {
         }
     }
     let mut output = io::BufWriter::new(output);
+    #[cfg(feature = "metal")]
+    let mut _gpu_memory_sampler = None;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (path, staging) = arguments(std::env::args_os().skip(1))?;
         #[cfg(feature = "metal")]
         {
             let cancellation = crate::cancel::CancelSignal::from_environment()?;
+            // SAFETY: startup is single-threaded here, and the inherited pipe
+            // write FD is transferred exclusively to the sampler.
+            _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
             let media = staging.as_deref().map(crate::media::MediaStore::open).transpose()?;
             let hybrid = if media.is_none() {
                 match stark_engine::engine::hybrid::recognizes(&path) {

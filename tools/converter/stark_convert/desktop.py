@@ -619,6 +619,18 @@ class Desktop:
         if worker is not None:
             worker.close()
 
+    def report_gpu_memory(self, epoch, identifier, mode, source, amount):
+        with self.lock:
+            if epoch != self.epoch or self.worker is not source:
+                return
+            self.emit(
+                "gpu_memory",
+                epoch,
+                model_id=identifier,
+                mode=mode,
+                gpu_memory_bytes=amount,
+            )
+
     def progress(self, epoch, phase, state, completed_bytes=0, total_bytes=None):
         with self.lock:
             if epoch != self.epoch or self.install_epoch != epoch:
@@ -1178,10 +1190,24 @@ class Desktop:
         with self.lock:
             if epoch != self.epoch:
                 return
+
+            def on_gpu_memory(source, amount):
+                self.report_gpu_memory(epoch, identifier, mode, source, amount)
+
             worker = (
-                ScoreWorker(self.score_executable, Path(model["path"]), self.timeout)
+                ScoreWorker(
+                    self.score_executable,
+                    Path(model["path"]),
+                    self.timeout,
+                    gpu_memory_callback=on_gpu_memory,
+                )
                 if mode == "decision"
-                else Worker(self.executable, Path(model["path"]), self.timeout)
+                else Worker(
+                    self.executable,
+                    Path(model["path"]),
+                    self.timeout,
+                    gpu_memory_callback=on_gpu_memory,
+                )
             )
             self.worker = worker
             if mode == "chat":

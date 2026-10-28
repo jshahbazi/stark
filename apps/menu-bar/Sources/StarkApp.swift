@@ -923,7 +923,11 @@ final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
     @Published var loadedID = ""
-    @Published var state = "idle"
+    @Published var state = "idle" {
+        didSet {
+            if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
+        }
+    }
     @Published var message = "Starting Stark…"
     @Published var errorMessage: String? {
         didSet { installErrorMessage = nil }
@@ -950,6 +954,7 @@ final class EngineController: ObservableObject {
     @Published var finishReason = ""
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
+    @Published private(set) var gpuMemoryBytes: Int64?
     @Published var inputTokens = 0
     @Published var outputTokens = 0
     @Published var downloadProgress = InstallProgress()
@@ -998,6 +1003,10 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var gpuMemoryText: String {
+        guard let bytes = gpuMemoryBytes else { return "GPU memory —" }
+        return "GPU memory " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    }
     var activeVersionDetails: String {
         guard let display = activeModel?.display else { return "" }
         return [display.quantization,
@@ -1154,6 +1163,7 @@ final class EngineController: ObservableObject {
             }
             if let stopped = event["stopped_model_id"] as? String, stopped == loadedID {
                 loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
+                gpuMemoryBytes = nil
                 discardPendingMessage(); clearConversation(); clearDecision()
             }
             removalRequestID = nil; removingModelID = nil; removalAction = nil
@@ -1171,6 +1181,11 @@ final class EngineController: ObservableObject {
                 supportsImages = false
                 imageVerification = "unverified"
             }
+        case "gpu_memory":
+            guard event["model_id"] as? String == modelControlID, !modelControlID.isEmpty,
+                  event["mode"] as? String == mode.rawValue,
+                  !["idle", "error", "stopping"].contains(state) else { return }
+            gpuMemoryBytes = SupportMetadata.integer(event["gpu_memory_bytes"])
         case "ready":
             guard let readyMode = PlaygroundMode(rawValue: event["mode"] as? String ?? "chat"), readyMode == mode,
                   event["model_id"] as? String == selectedID, state != "stopping" else { return }
@@ -1232,6 +1247,7 @@ final class EngineController: ObservableObject {
         case "image_check":
             guard state == "installing", event["state"] as? String == "checking" else { return }
             loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
+            gpuMemoryBytes = nil
             clearConversation(); clearDecision()
             message = "Checking image support on this Mac…"
         case "decision":
@@ -1438,6 +1454,7 @@ final class EngineController: ObservableObject {
         clearConversation()
         clearDecision()
         loadedMode = nil
+        gpuMemoryBytes = nil
         supportsImages = false
         imageVerification = "unverified"
         state = "loading"; message = "Loading model…"
@@ -1475,6 +1492,7 @@ final class EngineController: ObservableObject {
         errorMessage = nil
         clearConversation()
         clearDecision()
+        gpuMemoryBytes = nil
         if reload { run() }
     }
 
@@ -1689,6 +1707,7 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
+        gpuMemoryBytes = nil
         clearInstallSupport()
         clearBrowserRequests()
         modelFamilies = nil
@@ -2433,7 +2452,12 @@ struct PlaygroundView: View {
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
                     .accessibilityLabel("Chat or Decision mode")
             }
-            StatusLine(engine: engine)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                StatusLine(engine: engine)
+                Text(engine.gpuMemoryText)
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary).fixedSize()
+                    .help("Current Metal memory allocated by Stark’s model worker. Refreshes about once a second. Apple silicon uses shared memory.")
+            }
             HStack {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))
                 Spacer(minLength: 0)

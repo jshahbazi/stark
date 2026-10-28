@@ -26,6 +26,52 @@ from .vision_runtime import (
     supported_image_family,
 )
 
+_MAX_GPU_MEMORY_LINE = 128
+_MAX_GPU_MEMORY_BYTES = (1 << 63) - 1
+
+
+def _popen_with_gpu_memory(command, *, callback, **kwargs):
+    """Launch a worker with an optional private telemetry pipe."""
+    if callback is None:
+        environment = kwargs.get("env")
+        if environment is None:
+            environment = os.environ
+        if "STARK_GPU_MEMORY_FD" in environment:
+            environment = dict(environment)
+            environment.pop("STARK_GPU_MEMORY_FD", None)
+            kwargs["env"] = environment
+        return subprocess.Popen(command, **kwargs), None
+    read_fd, write_fd = os.pipe()
+    try:
+        os.set_blocking(read_fd, False)
+        os.set_blocking(write_fd, False)
+        environment = dict(kwargs.get("env") or os.environ)
+        environment["STARK_GPU_MEMORY_FD"] = str(write_fd)
+        kwargs["env"] = environment
+        kwargs["pass_fds"] = (*kwargs.get("pass_fds", ()), write_fd)
+        process = subprocess.Popen(command, **kwargs)
+    except BaseException:
+        os.close(read_fd)
+        raise
+    finally:
+        os.close(write_fd)
+    return process, read_fd
+
+
+def _parse_gpu_memory_line(line):
+    if len(line) > _MAX_GPU_MEMORY_LINE:
+        return None
+    try:
+        value = json.loads(line)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    amount = value.get("gpu_memory_bytes")
+    if type(amount) is not int or not 0 <= amount <= _MAX_GPU_MEMORY_BYTES:
+        return None
+    return amount
+
 
 class ChatError(Exception):
     """Content-free user-facing failure."""
@@ -147,7 +193,7 @@ def load_template(model, *, expected_hashes=None):
 
 
 class Worker:
-    def __init__(self, executable, model, timeout):
+    def __init__(self, executable, model, timeout, gpu_memory_callback=None):
         self.timeout = timeout
         self.pending = b""
         self.cancellation = False
@@ -187,9 +233,11 @@ class Worker:
             command.extend(["--vision-staging-root", str(self.media.root)])
         read_fd, self.cancel_fd = os.pipe()
         os.set_blocking(self.cancel_fd, False)
+        telemetry_fd = None
         try:
-            self.process = subprocess.Popen(
+            self.process, telemetry_fd = _popen_with_gpu_memory(
                 command,
+                callback=gpu_memory_callback,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -205,6 +253,90 @@ class Worker:
             raise
         finally:
             os.close(read_fd)
+        try:
+            self._start_gpu_memory_reader(telemetry_fd, gpu_memory_callback)
+        except BaseException:
+            self.close()
+            raise
+
+    def _start_gpu_memory_reader(self, descriptor, callback):
+        self._gpu_memory_fd = descriptor
+        self._gpu_memory_stop = threading.Event() if descriptor is not None else None
+        self._gpu_memory_thread = None
+        if descriptor is None:
+            return
+
+        def read_memory():
+            pending = bytearray()
+            discarding = False
+            unexpected_eof = False
+            try:
+                while not self._gpu_memory_stop.is_set():
+                    if self._gpu_memory_stop.is_set():
+                        break
+                    try:
+                        readable = select.select([descriptor], [], [], 0.2)[0]
+                        chunk = os.read(descriptor, 1024) if readable else None
+                    except (OSError, ValueError):
+                        break
+                    if chunk is None:
+                        continue
+                    if not chunk:
+                        unexpected_eof = True
+                        break
+                    for byte in chunk:
+                        if discarding:
+                            if byte == 10:
+                                discarding = False
+                            continue
+                        if byte == 10:
+                            amount = _parse_gpu_memory_line(bytes(pending))
+                            pending.clear()
+                            if amount is not None:
+                                try:
+                                    callback(self, amount)
+                                except Exception:
+                                    pass
+                        elif len(pending) < _MAX_GPU_MEMORY_LINE:
+                            pending.append(byte)
+                        else:
+                            pending.clear()
+                            discarding = True
+            finally:
+                self._gpu_memory_fd = None
+                if unexpected_eof and not self._gpu_memory_stop.is_set() and not getattr(self, "_closed", False):
+                    try:
+                        callback(self, None)
+                    except Exception:
+                        pass
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        self._gpu_memory_thread = threading.Thread(target=read_memory, name="stark-gpu-memory-reader", daemon=True)
+        try:
+            self._gpu_memory_thread.start()
+        except BaseException:
+            self._gpu_memory_stop.set()
+            descriptor, self._gpu_memory_fd = self._gpu_memory_fd, None
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            self._gpu_memory_thread = None
+            self._gpu_memory_stop = None
+            raise
+
+    def _close_gpu_memory_reader(self):
+        stop = getattr(self, "_gpu_memory_stop", None)
+        if stop is None:
+            return
+        stop.set()
+        thread = self._gpu_memory_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=0.5)
 
     def cancel(self, request_id):
         if self.cancelled_id == request_id:
@@ -509,27 +641,36 @@ class Worker:
         invalidate_checks(self)
 
     def close(self):
-        if self.process.poll() not in (None, 0) and not getattr(self, "_closed", False):
+        was_closed = getattr(self, "_closed", False)
+        self._closed = True
+        self._close_gpu_memory_reader()
+        if self.process.poll() not in (None, 0) and not was_closed:
             try:
                 self.invalidate_image_checks()
             except BaseException:
                 pass  # A metadata failure cannot bypass child/resource cleanup.
-        self._closed = True
         self.images = False
         self.image_verification = "unverified"
-        try:
-            if self.process.poll() is None:
+
+        def signal_worker(signal_number):
+            if self.process.poll() is not None:
+                return
+            try:
+                os.killpg(self.process.pid, signal_number)
+            except ProcessLookupError:
+                pass  # It exited between poll and signal; still reap it.
+            except PermissionError:
                 try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
+                    self.process.send_signal(signal_number)
                 except ProcessLookupError:
-                    pass  # It exited between poll and terminate; still reap it.
+                    pass
+
+        try:
+            signal_worker(signal.SIGTERM)
             try:
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                signal_worker(signal.SIGKILL)
                 self.process.wait()
         finally:
             for pipe in (self.process.stdin, self.process.stdout):
