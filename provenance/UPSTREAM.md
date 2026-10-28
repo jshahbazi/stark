@@ -50,6 +50,22 @@ Model weights, private fixtures, runtime executables, and host application archi
 
 ## Naming and compatibility
 
+Recursive Flint's native Rust forward contract follows the Apache-2.0
+`recursive-oss/rec` model module at revision
+`0e3150ca4262f572dee25c231d9ac7148414d2af`, path
+`engine/src/rec_mlx/model.py`, SHA-256
+`56363f7a1caea2b9db317feb192f4bfea32eccb2b6b190dffc3fa93ee09695b1`.
+Copyright 2026 Recursive Superintelligence, Inc. Its complete license is
+preserved in `LICENSE.flint-reference` and copied into distribution notices.
+The official MLX checkpoint is pinned separately at
+`RecursiveSI/flint-int4` revision `3b93f9053b530488405ae9fca51d4900d6ce21f0`.
+Byte-view packed matrices retain the original little-endian MLX storage.
+The optional source-bound validator imports only the hash-verified reference
+model module, with a local cancellation exception standing in for its relative
+dependency. Native inference uses no Python model code. See
+[Flint support and limits](../docs/FLINT.md) for the execution precision and
+private validation procedure.
+
 The native hybrid text path separately implements GLM5-Next and Qwen4-Exp.
 GGUF quantization block layouts, IQ codebooks, transformed GLM tensors and
 absorbed MLA follow `ggml-org/llama.cpp` revision

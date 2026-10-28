@@ -209,7 +209,7 @@ impl NativeBackend {
         let config: Value =
             serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
                 .map_err(|_| "invalid_model_config")?;
-        if matches!(config.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp")) {
+        if matches!(config.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")) {
             let model = stark_engine::engine::hybrid::Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
             let vocab_size = model.vocab_size();
             return Ok(Self {
