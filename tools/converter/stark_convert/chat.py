@@ -20,6 +20,7 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
+    VISION_MODEL_TYPES,
     family_image_input_contract,
     image_input_contract,
     qualified_image_worker,
@@ -155,16 +156,22 @@ def load_template(model, *, expected_hashes=None):
         source = codec["prompt_template"]
         if codec.get("type") != "ChatCodecConfig" or not isinstance(source, str) or not source:
             raise ValueError
-        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if config.get("type") in VISION_MODEL_TYPES:
             # Only the recognized program may reach Jinja compilation. An
             # immutable sandbox does not bound arbitrary template computation.
             template_hashes = {
                 "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80",
                 "7f0e529032c25183bcd66c7f238da2d377f43be754a94e2725a58c4e16d2ed67",
             }
+            if config["type"] == "Gemma4VisionLanguageModelConfig":
+                template_hashes = {"0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5"}
             contract = config.get("artifact_contract")
             family = contract.get("family") if isinstance(contract, dict) else None
-            if supported_image_family(family) and family["profile"] == CONFIGURED_FAMILY_PROFILE:
+            if (
+                config["type"] == "Qwen35VisionLanguageModelConfig"
+                and supported_image_family(family)
+                and family["profile"] == CONFIGURED_FAMILY_PROFILE
+            ):
                 template_hashes.add("a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715")
             copied = _chat_file(model / "chat_template.jinja", 256 * 1024)
             if (
@@ -222,7 +229,7 @@ class Worker:
             config = read_model_config(Path(model))
         except (OSError, ValueError, ConversionError):
             config = {}
-        if isinstance(config, dict) and config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if isinstance(config, dict) and config.get("type") in VISION_MODEL_TYPES:
             from .image_checks import ImageCheckError, preflight_family_memory
 
             try:
@@ -834,7 +841,7 @@ def main(argv=None):
         parser.error("token limits and timeout must be positive and finite")
     worker = None
     try:
-        if read_model_config(args.model_path).get("type") != "Qwen35VisionLanguageModelConfig":
+        if read_model_config(args.model_path).get("type") not in VISION_MODEL_TYPES:
             load_template(args.model_path)
         print("Loading model...", file=sys.stderr)
         worker = Worker(args.worker, args.model_path, args.timeout)

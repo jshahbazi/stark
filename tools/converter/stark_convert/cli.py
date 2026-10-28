@@ -52,6 +52,21 @@ from .vision_family import (
 def capability(request: ConversionRequest) -> CapabilityResult:
     """Probe catalog coverage only; this does not validate checkpoint contents."""
     if request.artifact_mode != "text":
+        if request.repo == "google/gemma-4-E2B-it":
+            supported = (
+                request.artifact_mode == "vision-language"
+                and request.dtype == "bfloat16"
+                and request.model_kind == "language"
+                and request.architecture in {None, "gemma4_text"}
+                and request.metadata_profile is None
+            )
+            return CapabilityResult(
+                adapter="gemma4_text" if supported else None,
+                model_kind=request.model_kind,
+                conversion="implemented" if supported else "unsupported",
+                native_loading="supported_family_unverified" if supported else "runtime_blocked",
+                reason=None if supported else "unsupported_gemma4_vision_tuple",
+            )
         official = request.repo == VISION_REPO
         supported = (
             request.artifact_mode == "vision-language"
@@ -148,6 +163,7 @@ def _validate_request(request: ConversionRequest) -> None:
 def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> PlannedConversion:
     """Validate a complete supported layout and build its single tensor/config plan."""
     from .adapters import (
+        build_gemma4_plan,
         build_gemma_plan,
         build_granite_plan,
         build_lfm2_plan,
@@ -155,6 +171,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         build_llamba_plan,
         build_mistral_plan,
         build_modernbert_plan,
+        build_olmo3_plan,
         build_phi_plan,
         build_qwen2_plan,
         build_qwen35_plan,
@@ -181,9 +198,20 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         if request.artifact_mode == "vision-language"
         else read_json(snapshot.config_path)
     )
-    artifact_contract = (
-        validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
-    )
+    gemma_images = request.artifact_mode == "vision-language" and snapshot.repo == "google/gemma-4-E2B-it"
+    if gemma_images:
+        from .adapters.gemma4_vision import gemma4_vision_contract
+
+        artifact_contract = gemma4_vision_contract(snapshot.checkpoint, snapshot.repo, snapshot.revision)
+        artifact_contract["source"]["hashes"] = {
+            record["filename"]: record["sha256"]
+            for record in snapshot.manifest["files"]
+            if record["role"] not in {"weights", "weight_index"}
+        }
+    else:
+        artifact_contract = (
+            validate_vision_source(snapshot, request.dtype) if request.artifact_mode == "vision-language" else None
+        )
     if snapshot.conversion_profile is not None:
         if request.metadata_profile != GENERIC_PROFILE:
             raise ConversionError("Request and source metadata profile disagree")
@@ -199,7 +227,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             raise ConversionError("Requested architecture disagrees with catalog profile")
     if request.model_kind != model_kind_for_architecture(adapter):
         raise UnsupportedConversion("Checkpoint architecture disagrees with the requested model kind")
-    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "qwen3_5", "lfm2"}:
+    if adapter in {"qwen3", "llama", "smollm3", "gemma3_text", "gemma4_text", "olmo3", "qwen3_5", "lfm2"}:
         from .compressed import parse_mlx_quantization
 
         entry = get_model(request.repo)
@@ -209,6 +237,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             from .adapters.qwen35 import normalize_qwen35_config
 
             packing_config = normalize_qwen35_config(config)
+        elif adapter == "gemma4_text":
+            from .adapters.gemma4 import normalize_gemma4_config
+
+            packing_config = normalize_gemma4_config(config)
         quantization = parse_mlx_quantization(packing_config)
         if packing is not None:
             if quantization is None or quantization.bits != packing["bits"]:
@@ -233,6 +265,8 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "mistral": build_mistral_plan,
         "gemma2": partial(build_gemma_plan, family="gemma2"),
         "gemma3_text": partial(build_gemma_plan, family="gemma3_text"),
+        "gemma4_text": build_gemma4_plan,
+        "olmo3": build_olmo3_plan,
         "phi3": build_phi_plan,
         "granite": build_granite_plan,
         "smollm3": build_smollm3_plan,
@@ -245,6 +279,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         ),
         "modernbert": build_modernbert_plan,
     }
+    if gemma_images:
+        from .adapters.gemma4_vision import build_gemma4_vision_plan
+
+        planners["gemma4_text"] = build_gemma4_vision_plan
     tensors = planners[adapter](snapshot.checkpoint, dtype=request.dtype)
     if artifact_contract is not None and artifact_contract["schema_version"] == 3:
         validate_family_plan(tensors)
@@ -259,7 +297,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
             for source in operation.sources
         ):
             raise UnsupportedConversion("Vision family requires merged BF16 matrices and BF16/F32 control weights")
-    if artifact_contract is not None:
+    if artifact_contract is not None and adapter == "qwen3_5":
         for layer in tensors.decoder_config["transformer_config"]["layer_configs"]:
             if layer["rope_config"] is not None:
                 layer["rope_config"] = {
@@ -271,6 +309,10 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         from .adapters.qwen35 import normalize_qwen35_config
 
         config = normalize_qwen35_config(config)
+    elif adapter == "gemma4_text":
+        from .adapters.gemma4 import normalize_gemma4_config
+
+        config = normalize_gemma4_config(config)
     # Metadata and final content verification are still pending. Only a
     # successfully published conversion reports complete source validation.
     result = capability(request)
@@ -426,19 +468,26 @@ def convert(
                 snapshot.root, staging, config, model_entry=entry, resolve_file=snapshot.resolve_file
             )
             root_config = {
-                "type": "Qwen35VisionLanguageModelConfig"
+                "type": (
+                    "Gemma4VisionLanguageModelConfig"
+                    if planned.capability.adapter == "gemma4_text"
+                    else "Qwen35VisionLanguageModelConfig"
+                )
                 if artifact_mode == "vision-language"
                 else "LanguageModelConfig",
                 "decoder_config": planned.tensors.decoder_config,
                 **fragments,
             }
         family = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 3
+        gemma_image = planned.artifact_contract is not None and planned.artifact_contract["schema_version"] == 4
         if planned.artifact_contract is not None:
             root_config["artifact_contract"] = planned.artifact_contract
             for filename in ("preprocessor_config.json", "chat_template.jinja"):
                 hashes = planned.artifact_contract["source"]["hashes"]
                 source_filename = (
-                    family_processor_filename(hashes)
+                    "processor_config.json"
+                    if gemma_image and filename == "preprocessor_config.json"
+                    else family_processor_filename(hashes)
                     if family and filename == "preprocessor_config.json"
                     else filename
                 )
@@ -459,6 +508,9 @@ def convert(
             planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
             (staging / "config.json").write_bytes(family_config_bytes(root_config))
             validate_family_output_header(planned.tensors)
+        elif gemma_image:
+            planned.artifact_contract["component_hashes"] = {name: "0" * 64 for name in COMPONENT_FILES}
+            (staging / "config.json").write_bytes(family_config_bytes(root_config))
         else:
             (staging / "config.json").write_text(json.dumps(root_config, indent=4), encoding="utf-8")
         stats = write_plan(
@@ -467,7 +519,7 @@ def convert(
             chunk_bytes=chunk_bytes,
             **({"progress": progress} if progress is not None else {}),
         )
-        if family:
+        if family or gemma_image:
             planned.artifact_contract["component_hashes"] = {
                 name: file_hash(staging / name) for name in COMPONENT_FILES
             }

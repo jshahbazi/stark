@@ -31,6 +31,8 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
     pub(super) multimodal_failed: bool,
+    /// Image request marker independent of Qwen's spatial rotary delta.
+    pub(super) multimodal_prefilled: bool,
     #[cfg(test)]
     pub(crate) vision_prefill_logits_readback: Option<B::GlobalBuffer>,
     #[cfg(test)]
@@ -38,6 +40,10 @@ pub struct LanguageModelState<B: Backend> {
 }
 
 impl<B: Backend> LanguageModelState<B> {
+    pub(super) fn has_multimodal_context(&self) -> bool {
+        self.multimodal_prefilled || self.transformer_state.rotary_position_delta().is_some()
+    }
+
     pub fn tokens(&self) -> &[u64] {
         &self.tokens
     }
@@ -107,6 +113,7 @@ impl<B: Backend> LanguageModel<B> {
             speculator_state,
             max_context_length,
             multimodal_failed: false,
+            multimodal_prefilled: false,
             #[cfg(test)]
             vision_prefill_logits_readback: None,
             #[cfg(test)]

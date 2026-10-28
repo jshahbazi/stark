@@ -39,12 +39,29 @@ pub struct Decoder<B: Backend> {
     per_layer_embedding: Option<PerLayerEmbedding<B>>,
     transformer: Transformer<B>,
     data_type: DataType,
+    gemma4_image_embeddings: bool,
 }
 
 /// A validated chunk of projected image rows. No public transport accepts this.
 pub(crate) struct EmbeddingReplacement<'a> {
     pub(crate) token_start: u32,
     pub(crate) features: &'a [half::bf16],
+}
+
+fn mask_image_ple_tokens<B: Backend>(
+    token_ids: impl BufferRef<Backend = B>,
+    span: std::ops::Range<usize>,
+    batch_size: u32,
+    command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
+) -> Result<B::ScratchBuffer, B::Error> {
+    if span.start >= span.end || span.end > batch_size as usize {
+        return Err(InvalidInput("invalid image PLE token mask span").into());
+    }
+    let mut ple_tokens = command_buffer.allocate_scratch_for_shape(&[batch_size], DataType::U32)?;
+    command_buffer.encode_copy(token_ids, &mut ple_tokens);
+    let token_bytes = size_of::<u32>();
+    command_buffer.encode_fill((&mut ple_tokens).subrange_mut(span.start * token_bytes..span.end * token_bytes), 0);
+    Ok(ple_tokens)
 }
 
 pub struct DecoderEncodeOutput<B: Backend> {
@@ -125,18 +142,31 @@ impl<B: Backend> Decoder<B> {
             per_layer_embedding,
             transformer,
             data_type,
+            gemma4_image_embeddings: config.gemma4_image_embeddings,
         })
     }
 
     pub fn speculation_supported(&self) -> bool {
-        self.transformer.speculation_supported()
+        !self.gemma4_image_embeddings && self.transformer.speculation_supported()
     }
 
     pub(crate) fn multimodal_supported(&self) -> bool {
+        self.qwen35_multimodal_supported() || self.gemma4_multimodal_supported()
+    }
+
+    pub(crate) fn qwen35_multimodal_supported(&self) -> bool {
         self.data_type == DataType::BF16
+            && !self.gemma4_image_embeddings
             && self.embedding_norm.is_none()
             && self.per_layer_embedding.is_none()
             && self.transformer.multimodal_positions_supported()
+    }
+
+    pub(crate) fn gemma4_multimodal_supported(&self) -> bool {
+        self.data_type == DataType::BF16
+            && self.gemma4_image_embeddings
+            && self.embedding_norm.is_none()
+            && self.transformer.scalar_image_positions_supported()
     }
 
     pub fn max_context_length(&self) -> Option<u32> {
@@ -193,7 +223,8 @@ impl<B: Backend> Decoder<B> {
                     || replacement.features.is_empty()
                     || !replacement.features.len().is_multiple_of(width)
                     || replacement.features.iter().any(|value| !value.is_finite())
-                    || batch_dim.rotary_positions().is_none()
+                    || (self.gemma4_image_embeddings && batch_dim.rotary_positions().is_some())
+                    || (!self.gemma4_image_embeddings && batch_dim.rotary_positions().is_none())
                     || !batch_dim.full_accept()
                     || !batch_dim.is_flat()
                 {
@@ -220,6 +251,11 @@ impl<B: Backend> Decoder<B> {
                 Ok((replacement, start..end))
             })
             .transpose()?;
+        let ple_image_span = replacement.as_ref().filter(|_| self.gemma4_image_embeddings).map(|(input, _)| {
+            let first = input.token_start as usize;
+            let rows = input.features.len() / self.embedding.model_dim() as usize;
+            first..first + rows
+        });
         command_buffer.push_debug_group("decoder");
 
         let mut embedded = self.embedding.encode_lookup(token_ids, batch_dim.size(), command_buffer)?;
@@ -240,9 +276,19 @@ impl<B: Backend> Decoder<B> {
 
         let per_layer_inputs = if let Some(per_layer_embedding) = &self.per_layer_embedding {
             Some(
-                per_layer_embedding
-                    .encode(token_ids, &embedded, batch_dim.size(), command_buffer)
-                    .map_err(DecoderError::Backend)?,
+                if let Some(span) = ple_image_span {
+                    // Gemma's PLE table uses token 0 for image slots. The real
+                    // token IDs remain untouched for embedding lookup, masks,
+                    // physical KV offsets and subsequent text continuation.
+                    // Behavior reference: MLX-VLM 53ebd1647cb83549b482a031ea70ba9d9ea60a04,
+                    // gemma4/Model.get_input_embeddings and project_per_layer_inputs.
+                    let ple_tokens = mask_image_ple_tokens(token_ids, span, batch_dim.size(), command_buffer)
+                        .map_err(DecoderError::Backend)?;
+                    per_layer_embedding.encode(&ple_tokens, &embedded, batch_dim.size(), command_buffer)
+                } else {
+                    per_layer_embedding.encode(token_ids, &embedded, batch_dim.size(), command_buffer)
+                }
+                .map_err(DecoderError::Backend)?,
             )
         } else {
             None
@@ -287,5 +333,38 @@ impl<B: Backend> Decoder<B> {
             hidden_features: transformer_output.hidden_features,
             final_hidden,
         })
+    }
+}
+
+#[cfg(test)]
+mod gemma_image_ple_tests {
+    use stark_engine_macros::stark_test;
+
+    use super::mask_image_ple_tokens;
+    use crate::{
+        backends::common::{
+            Backend, Buffer, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+        },
+        tests::helpers::{buffer_to_vec, create_buffer_with_data, create_context, for_each_backend},
+    };
+
+    fn check_image_only_mask<B: Backend>() {
+        let context = create_context::<B>();
+        let original = [7u32, 91, 90, 90, 90, 92, 8];
+        let input = create_buffer_with_data::<B, u32>(&context, &original);
+        let mut command = context.create_command_buffer(None, None).unwrap();
+        let masked = mask_image_ple_tokens(&input, 2..5, original.len() as u32, &mut command).unwrap();
+        assert!(mask_image_ple_tokens(&input, 2..8, original.len() as u32, &mut command).is_err());
+        assert!(mask_image_ple_tokens(&input, 4..4, original.len() as u32, &mut command).is_err());
+        let mut readback = context.create_buffer(masked.size()).unwrap();
+        command.encode_copy(&masked, &mut readback);
+        command.end_encoding().submit().wait_until_completed().unwrap();
+        assert_eq!(buffer_to_vec::<B, u32>(&readback), [7, 91, 0, 0, 0, 92, 8]);
+        assert_eq!(buffer_to_vec::<B, u32>(&input), original);
+    }
+
+    #[stark_test]
+    fn gemma_image_ple_masks_only_image_rows_without_changing_decoder_tokens() {
+        for_each_backend!(|B| check_image_only_mask::<B>());
     }
 }

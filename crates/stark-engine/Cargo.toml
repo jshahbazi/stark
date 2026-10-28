@@ -139,3 +139,11 @@ proptest = { workspace = true, default-features = true }
 name = "cxx_string"
 path = "tests/cxx_string.rs"
 required-features = ["grammar"]
+
+[[example]]
+name = "dense_parity"
+required-features = ["metal"]
+
+[[example]]
+name = "dense_profile"
+required-features = ["metal"]

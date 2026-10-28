@@ -41,7 +41,7 @@ from .model_removal import RemovalError, prepare_removal, removal_info, remove_m
 from .model_support import support_matrix
 from .registry import get_model
 from .sources import huggingface_repository
-from .vision_runtime import supported_image_family
+from .vision_runtime import VISION_MODEL_TYPES, artifact_image_family, supported_image_family
 
 MAX_COMMAND_BYTES = 1024 * 1024
 MAX_PROGRESS_BYTES = 4096
@@ -94,13 +94,14 @@ def model_valid(path):
         config = read_model_config(path)
         if not isinstance(config.get("decoder_config"), dict):
             return False
-        if config.get("type") == "Qwen35VisionLanguageModelConfig":
+        if config.get("type") in VISION_MODEL_TYPES:
             codec = config.get("token_codec_config", {})
             contract = config.get("artifact_contract")
             if (
                 not isinstance(contract, dict)
                 or type(contract.get("schema_version")) is not int
-                or contract["schema_version"] not in (2, 3)
+                or contract["schema_version"]
+                not in ((4,) if config["type"] == "Gemma4VisionLanguageModelConfig" else (2, 3))
             ):
                 return False
             return (
@@ -986,7 +987,7 @@ class Desktop:
                 raise DesktopError("This Stark folder is incomplete or has no supported chat template.")
             if converted:
                 config = read_model_config(path)
-                stored_mode = "vision-language" if config.get("type") == "Qwen35VisionLanguageModelConfig" else "text"
+                stored_mode = "vision-language" if config.get("type") in VISION_MODEL_TYPES else "text"
                 if artifact_mode is not None and selected_mode != stored_mode:
                     raise DesktopError("The selected conversion mode does not match this Stark artifact.")
                 selected_mode = stored_mode
@@ -1132,12 +1133,12 @@ class Desktop:
         config = read_model_config(path)
         contract = config.get("artifact_contract", {})
         if (
-            config.get("type") != "Qwen35VisionLanguageModelConfig"
+            config.get("type") not in VISION_MODEL_TYPES
             or not isinstance(contract, dict)
-            or contract.get("schema_version") != 3
+            or contract.get("schema_version") not in (3, 4)
         ):
             return None
-        family = contract.get("family")
+        family = artifact_image_family(config)
         if not supported_image_family(family):
             raise DesktopError("This image model family is not supported.")
         with self.lock:
@@ -1183,7 +1184,7 @@ class Desktop:
         model = next((m for m in self.models if m["id"] == identifier), None)
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
-        vision = read_model_config(Path(model["path"])).get("type") == "Qwen35VisionLanguageModelConfig"
+        vision = read_model_config(Path(model["path"])).get("type") in VISION_MODEL_TYPES
         codec, template = (None, None) if vision else load_template(Path(model["path"]))
         if mode == "decision" and vision:
             raise DesktopError("Vision-language artifacts support Chat mode only.")

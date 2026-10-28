@@ -141,7 +141,7 @@ pub(crate) struct ImageArtifactIdentity<'a> {
 
 impl ImageArtifactIdentity<'_> {
     fn valid(&self) -> bool {
-        matches!(self.schema_version, 2 | 3)
+        matches!(self.schema_version, 2 | 3 | 4)
             && [
                 self.artifact_sha256,
                 self.config_sha256,
@@ -165,21 +165,32 @@ struct PreparedRequest<P> {
     _lease: ImageLease,
 }
 
-fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
+fn valid_image_metadata(
+    metadata: &PreparedImageMetadata,
+    geometry: (u32, u32),
+) -> bool {
+    let (patch_size, merge_size) = geometry;
+    let (max_patches, max_image_tokens) = match geometry {
+        (16, 2) => (4096, 1024),
+        (16, 3) => (2520, 280),
+        _ => return false,
+    };
     let [temporal, height, width] = metadata.grid;
     temporal == 1
         && height > 0
         && width > 0
-        && height.is_multiple_of(2)
-        && width.is_multiple_of(2)
-        && height.checked_mul(width).is_some_and(|patches| patches <= 4096 && patches / 4 == metadata.image_tokens)
-        && metadata.processed_dimensions[0].checked_div(16) == Some(width)
-        && metadata.processed_dimensions[1].checked_div(16) == Some(height)
-        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
+        && height.is_multiple_of(merge_size)
+        && width.is_multiple_of(merge_size)
+        && height.checked_mul(width).is_some_and(|patches| {
+            patches <= max_patches && patches / (merge_size * merge_size) == metadata.image_tokens
+        })
+        && metadata.processed_dimensions[0].checked_div(patch_size) == Some(width)
+        && metadata.processed_dimensions[1].checked_div(patch_size) == Some(height)
+        && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(patch_size))
         && metadata.input_tokens >= metadata.image_tokens as usize + 2
         && metadata.input_tokens <= MAX_CONTEXT_TOKENS as usize
         && metadata.image_tokens > 0
-        && metadata.image_tokens <= 1024
+        && metadata.image_tokens <= max_image_tokens
 }
 
 pub(crate) struct GenerationOptions {
@@ -388,6 +399,9 @@ pub(crate) trait GenerationBackend {
     ) -> Result<GeneratedTokens, &'static str>;
     fn supports_images(&self) -> bool {
         false
+    }
+    fn image_geometry(&self) -> (u32, u32) {
+        (16, 2)
     }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
@@ -666,7 +680,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 if self.backend.cancelled(request_id)? {
                     return Err("generation_cancelled");
                 }
-                if !valid_image_metadata(&metadata) {
+                if !valid_image_metadata(&metadata, self.backend.image_geometry()) {
                     return Err("invalid_image_preparation_output");
                 }
                 if metadata
@@ -813,17 +827,36 @@ pub(crate) fn run_lines<B: GenerationBackend>(
             .backend
             .image_family_profile()
             .filter(|(profile, version)| {
-                matches!((*profile, *version), ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2))
+                matches!(
+                    (*profile, *version),
+                    ("qwen35-dense-bf16-merged-v1", 1) | ("qwen35-dense-bf16-merged-v2", 2) | ("gemma4-e2b-bf16-v1", 1)
+                )
             })
             .ok_or("invalid_model_config")?;
         let (model_source, model_revision) = worker.backend.image_source_identity().ok_or("invalid_model_config")?;
+        let gemma = family_profile == "gemma4-e2b-bf16-v1";
+        if (gemma && (identity.schema_version != 4 || worker.backend.image_geometry() != (16, 3)))
+            || (!gemma && (!matches!(identity.schema_version, 2 | 3) || worker.backend.image_geometry() != (16, 2)))
+        {
+            return Err("invalid_model_config");
+        }
+        let max_patches = if gemma {
+            2520
+        } else {
+            4096
+        };
+        let max_image_tokens = if gemma {
+            280
+        } else {
+            1024
+        };
         readiness["image_input"] = json!({
             "version":"mediaref-v1","transport":"owner-private-file-v1","qualified":false,"qualification":"unverified",
             "operations":["prepare_image","generate_image","discard_image"],
             "formats":["image/jpeg","image/png"],"max_images":1,
             "max_compressed_bytes":crate::media::MAX_COMPRESSED_BYTES,"max_source_pixels":32_000_000,
             "max_source_dimension":16_384,
-            "max_processed_pixels":1_048_576,"max_patches":4096,"max_image_tokens":1024,
+            "max_processed_pixels":max_patches * 256,"max_patches":max_patches,"max_image_tokens":max_image_tokens,
             "artifact_schema_version":identity.schema_version,"model_source":model_source,
             "model_revision":model_revision,"family_profile":family_profile,"family_version":family_version,
             "artifact_sha256":identity.artifact_sha256,"config_sha256":identity.config_sha256,
@@ -1027,8 +1060,18 @@ mod tests {
             self.images.then_some((self.family_profile, self.family_version))
         }
 
+        fn image_geometry(&self) -> (u32, u32) {
+            if self.family_profile == "gemma4-e2b-bf16-v1" {
+                (16, 3)
+            } else {
+                (16, 2)
+            }
+        }
+
         fn image_source_identity(&self) -> Option<(&str, Option<&str>)> {
-            self.images.then_some(if self.image_schema == 3 {
+            self.images.then_some(if self.image_schema == 4 {
+                ("google/gemma-4-E2B-it", Some("3e22461f65e89153144f8adb70e3b8c2cc9845a7"))
+            } else if self.image_schema == 3 {
                 ("local:synthetic-merged-model", None)
             } else {
                 ("Qwen/Qwen3.5-0.8B", Some("2fc06364715b967f1860aea9cf38778875588b17"))
@@ -1072,9 +1115,21 @@ mod tests {
                 },
                 PreparedImageMetadata {
                     input_tokens: 7,
-                    image_tokens: 4,
-                    grid: [1, 4, 4],
-                    processed_dimensions: [64, 64],
+                    image_tokens: if self.image_schema == 4 {
+                        1
+                    } else {
+                        4
+                    },
+                    grid: if self.image_schema == 4 {
+                        [1, 3, 3]
+                    } else {
+                        [1, 4, 4]
+                    },
+                    processed_dimensions: if self.image_schema == 4 {
+                        [48, 48]
+                    } else {
+                        [64, 64]
+                    },
                 },
             ))
         }
@@ -1334,6 +1389,40 @@ mod tests {
             );
             assert!(output.is_empty());
         }
+    }
+
+    #[test]
+    fn gemma_image_readiness_and_preparation_use_three_by_three_pooling() {
+        let root = crate::media::tests::PrivateRoot::new();
+        let mut worker = image_worker(&root);
+        worker.backend.image_schema = 4;
+        worker.backend.family_profile = "gemma4-e2b-bf16-v1";
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["image_input"]["artifact_schema_version"], 4);
+        assert_eq!(ready["image_input"]["max_image_tokens"], 280);
+        assert_eq!(ready["image_input"]["max_patches"], 2520);
+        assert_eq!(ready["image_input"]["max_processed_pixels"], 645120);
+        assert_eq!(ready["image_input"]["qualification"], "unverified");
+        let prepared = post(&mut worker, image_prepare(&root));
+        assert_eq!(prepared["image_tokens"], 1);
+        assert_eq!(prepared["grid"], json!([1, 3, 3]));
+        assert!(prepared.get("prepared_id").is_some());
+        let metadata = PreparedImageMetadata {
+            input_tokens: 7,
+            image_tokens: 1,
+            grid: [1, 3, 3],
+            processed_dimensions: [48, 48],
+        };
+        assert!(valid_image_metadata(&metadata, (16, 3)));
+        assert!(!valid_image_metadata(&metadata, (16, 2)));
+        assert!(!valid_image_metadata(&metadata, (16, 0)));
+        worker.backend.image_schema = 3;
+        assert_eq!(
+            run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut Vec::new()),
+            Err("invalid_model_config")
+        );
     }
 
     #[test]

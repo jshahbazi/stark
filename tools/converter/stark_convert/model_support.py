@@ -20,7 +20,7 @@ SCHEMA_VERSION = 1
 MODES = ("text", "decision", "vision-language")
 _QUALIFICATION = {"status": "not_assessed", "scope": "checkpoint_and_build", "calibration": "not_assessed"}
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_MLX = {"qwen3", "llama", "gemma3_text", "smollm3", "qwen3_5", "lfm2", "llamba"}
+_MLX = {"qwen3", "llama", "gemma3_text", "gemma4_text", "olmo3", "smollm3", "qwen3_5", "lfm2", "llamba"}
 _FAMILY_DEFINITIONS = (
     ("qwen3", "Qwen3 dense", "HFQwen3Config", ()),
     ("qwen2", "Qwen2 dense", "HFQwen2Config", ()),
@@ -28,6 +28,8 @@ _FAMILY_DEFINITIONS = (
     ("mistral", "Mistral dense", "HFMistralConfig", ()),
     ("gemma2", "Gemma 2 dense", "HFGemma2Config", ()),
     ("gemma3_text", "Gemma 3 text", "HFGemma3TextConfig", ()),
+    ("gemma4_text", "Gemma 4 dense PLE", "HFGemma4TextConfig", ("gemma4",)),
+    ("olmo3", "OLMo 3 dense", "HFOlmo3Config", ()),
     ("phi3", "Phi-3 dense", "HFPhi3Config", ()),
     ("granite", "Granite dense", "HFGraniteConfig", ()),
     ("smollm3", "SmolLM3 dense", "HFSmolLM3Config", ()),
@@ -46,13 +48,15 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
     classifier = architecture == "modernbert"
     modes = {}
     for mode in MODES:
-        supported = not classifier and (mode != "vision-language" or architecture == "qwen3_5")
+        supported = not classifier and (mode != "vision-language" or architecture in {"qwen3_5", "gemma4_text"})
         if classifier:
             message = "Classifier conversion is implemented; the app has no text, Decision or image workflow for it."
         elif mode == "vision-language" and not supported:
-            message = "Image input is implemented only for the supported Qwen3.5 dense BF16 family."
+            message = "Image input requires a supported native vision family and BF16 artifact."
         elif mode == "decision":
             message = "Decision scoring needs a direct-answer template, single-token labels and checkpoint checks."
+        elif mode == "vision-language" and architecture == "gemma4_text":
+            message = "Image input requires the pinned Gemma 4 E2B BF16 image artifact and local execution checks."
         elif mode == "vision-language":
             message = "Image input requires dense BF16 tensors, reviewed processing metadata and local image checks."
         else:
@@ -60,10 +64,14 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         caveats = ["tensor_and_operation_validation", "checkpoint_specific_execution"] if supported else []
         if supported and mode == "decision":
             caveats.extend(["direct_answer_template", "unique_single_token_labels", "calibration_not_inherited"])
-        if supported and mode == "vision-language":
+        if supported and mode == "vision-language" and architecture == "qwen3_5":
             caveats.extend(["qwen35_dense_bf16_geometry", "reviewed_processing_programs", "local_image_checks"])
-        if supported and architecture in {"phi3", "gemma2", "gemma3_text"}:
+        if supported and mode == "vision-language" and architecture == "gemma4_text":
+            caveats.extend(["gemma4_e2b_bf16_geometry", "pinned_processing_metadata", "local_image_checks"])
+        if supported and architecture in {"phi3", "gemma2", "gemma3_text", "gemma4_text"}:
             caveats.append("tied_embeddings_required")
+        if supported and architecture == "gemma4_text" and mode != "vision-language":
+            caveats.extend(["dense_ple_text_only", "image_and_audio_towers_excluded"])
         modes[mode] = {"status": "conditional" if supported else "unsupported", "message": message, "caveats": caveats}
     formats = ["safetensors-float"]
     if architecture in _MLX:
@@ -78,7 +86,9 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             "status": "implemented",
             "containers": [".safetensors"],
             "source_formats": formats,
-            "output_dtypes": ["bfloat16", "float16", "float32"],
+            "output_dtypes": ["bfloat16", "float32"]
+            if architecture == "olmo3"
+            else ["bfloat16", "float16", "float32"],
         },
         "modes": modes,
     }
@@ -179,7 +189,12 @@ def preflight_model(
             "metadata_unavailable",
             "Model metadata is unavailable; support has not been established.",
         )
-    if config.get("type") in ("LanguageModelConfig", "Qwen35VisionLanguageModelConfig", "ClassifierModelConfig"):
+    if config.get("type") in (
+        "LanguageModelConfig",
+        "Qwen35VisionLanguageModelConfig",
+        "Gemma4VisionLanguageModelConfig",
+        "ClassifierModelConfig",
+    ):
         return _report(
             None,
             mode,
@@ -250,7 +265,7 @@ def preflight_model(
             "unsupported_embedding_layout",
             "This family currently implements tied embeddings only.",
         )
-    if architecture != "qwen3_5" and "text_config" in config:
+    if architecture not in {"qwen3_5", "gemma4_text"} and "text_config" in config:
         return _report(
             family,
             mode,
@@ -258,7 +273,7 @@ def preflight_model(
             "unsupported_nested_architecture",
             "This family does not implement a nested text wrapper.",
         )
-    text = config.get("text_config", config) if architecture == "qwen3_5" else config
+    text = config.get("text_config", config) if architecture in {"qwen3_5", "gemma4_text"} else config
     if not isinstance(text, dict):
         return _report(family, mode, "unsupported", "invalid_model_metadata", "Nested model metadata is invalid.")
     if architecture == "qwen3_5":
@@ -271,6 +286,40 @@ def preflight_model(
                 "The nested decoder architecture is outside implemented dense coverage.",
             )
         text = {**text, **{key: value for key, value in config.items() if key != "text_config"}}
+    elif architecture == "gemma4_text":
+        if text is not config and text.get("model_type") not in (None, "gemma4_text"):
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_nested_architecture",
+                "The nested decoder architecture is outside implemented Gemma 4 text coverage.",
+            )
+        text = {**text, **{key: value for key, value in config.items() if key != "text_config"}}
+        if text.get("tie_word_embeddings") is False:
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_embedding_layout",
+                "Gemma 4 text currently requires tied embeddings.",
+            )
+        if text.get("enable_moe_block") is True:
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_moe",
+                "Gemma 4 MoE operations are outside implemented dense PLE coverage.",
+            )
+        if text.get("hidden_size_per_layer_input") == 0:
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_native_geometry",
+                "Gemma 4 text currently implements the dense PLE E2B/E4B layouts.",
+            )
     annotation = text.get("auto_map")
     phi_annotation = {
         "AutoConfig": "configuration_phi3.Phi3Config",
@@ -333,6 +382,8 @@ def preflight_model(
     warnings = []
     if config.get("vision_config") is not None and mode in {None, "text", "decision"}:
         warnings.append("Text conversion omits this checkpoint's vision tower.")
+    if architecture == "gemma4_text" and config.get("audio_config") is not None and mode in {None, "text", "decision"}:
+        warnings.append("Text conversion omits this checkpoint's audio tower.")
     if mode is not None and architecture == "qwen3_5":
         from .vision_family import _DELTA_HEAD_DIM
 
@@ -359,7 +410,39 @@ def preflight_model(
             "unsupported_vision_weight_format",
             "Image input requires merged BF16 weights; the declared MLX format is limited to text paths.",
         )
-    if mode == "vision-language":
+    if mode == "vision-language" and architecture == "gemma4_text":
+        from .adapters.gemma4_vision import GEOMETRY, TOKENS
+
+        vision = config.get("vision_config")
+        if not isinstance(vision, dict):
+            return _report(family, mode, "unsupported", "vision_tower_missing", "This checkpoint has no vision tower.")
+        if raw_architecture != "gemma4" or not isinstance(config.get("text_config"), dict):
+            return _report(
+                family, mode, "unsupported", "unsupported_vision_wrapper", "Gemma images require the full E2B wrapper."
+            )
+        if (
+            any(vision.get(key) != value for key, value in GEOMETRY.items())
+            or text.get("hidden_size") != 1536
+            or text.get("num_hidden_layers") != 35
+            or any(
+                config.get(key) != TOKENS[token]
+                for key, token in (
+                    ("image_token_id", "image"),
+                    ("boi_token_id", "vision_start"),
+                    ("eoi_token_id", "vision_end"),
+                    ("video_token_id", "video"),
+                    ("audio_token_id", "audio"),
+                )
+            )
+        ):
+            return _report(
+                family,
+                mode,
+                "unsupported",
+                "unsupported_vision_geometry",
+                "Native Gemma images require the pinned E2B BF16 vision and decoder geometry.",
+            )
+    elif mode == "vision-language":
         if not isinstance(config.get("vision_config"), dict):
             report = _report(
                 family, mode, "unsupported", "vision_tower_missing", "This checkpoint does not declare a vision tower."
@@ -724,9 +807,27 @@ def preflight_source(
                 "checkpoint_inventory_incomplete", "Metadata does not list a supported checkpoint container."
             )
         if report["status"] == "conditional" and mode == "vision-language":
-            check_vision_processing_metadata(
-                names, lambda filename, maximum: read({"repo": repo, "filename": filename}, maximum)
-            )
+            if report["family_id"] == "gemma4_text":
+                if repo != "google/gemma-4-E2B-it" or revisions[repo] != "3e22461f65e89153144f8adb70e3b8c2cc9845a7":
+                    raise UnsupportedConversion("Gemma images require the pinned official profile")
+                for filename, maximum, expected in (
+                    (
+                        "processor_config.json",
+                        65536,
+                        "32bdf45d2ad4cc29a0822ddd157a182de76644f0419a6228d151495256e9813c",
+                    ),
+                    (
+                        "chat_template.jinja",
+                        262144,
+                        "0a2c8073c878ab1da004bee933a998606537bbb62016310352c7285c3f01c5b5",
+                    ),
+                ):
+                    if hashlib.sha256(read({"repo": repo, "filename": filename}, maximum)).hexdigest() != expected:
+                        raise UnsupportedConversion("Gemma image processing identity changed")
+            else:
+                check_vision_processing_metadata(
+                    names, lambda filename, maximum: read({"repo": repo, "filename": filename}, maximum)
+                )
         report["source"] = source
         return report
     except MetadataSizeError:

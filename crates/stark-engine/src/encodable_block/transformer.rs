@@ -158,6 +158,7 @@ pub struct Transformer<B: Backend> {
     output_norm: Normalization<B>,
     model_dim: u32,
     multimodal_positions_supported: bool,
+    scalar_image_positions_supported: bool,
     residual_add: <B::Kernels as Kernels>::TensorAddScaleKernel,
 }
 
@@ -219,6 +220,17 @@ impl<B: Backend> Transformer<B> {
         Ok(Self {
             multimodal_positions_supported: !ropes.is_empty()
                 && ropes.iter().all(|rope| matches!(rope, AnyRoPEConfig::Qwen35MRoPEConfig(_))),
+            scalar_image_positions_supported: !ropes.is_empty()
+                && ropes.iter().all(|rope| {
+                    matches!(rope, AnyRoPEConfig::UnscaledRoPEConfig(_) | AnyRoPEConfig::ProportionalRoPEConfig(_))
+                })
+                && transformer_config.layer_configs.iter().all(|layer| {
+                    matches!(
+                        &layer.mixer_config,
+                        crate::config::token_mixer::AnyTokenMixerConfig::AttentionConfig(attention)
+                            if attention.is_causal
+                    ) && layer.rope_config.is_some()
+                }),
             #[cfg(feature = "rope-cache")]
             rope_tables: ropes.iter().map(super::mixer::attention::rope::RoPETableCache::new).collect(),
             #[cfg(not(feature = "rope-cache"))]
@@ -250,6 +262,10 @@ impl<B: Backend> Transformer<B> {
 
     pub(crate) fn multimodal_positions_supported(&self) -> bool {
         self.multimodal_positions_supported
+    }
+
+    pub(crate) fn scalar_image_positions_supported(&self) -> bool {
+        self.scalar_image_positions_supported
     }
 
     pub fn max_context_length(&self) -> Option<u32> {

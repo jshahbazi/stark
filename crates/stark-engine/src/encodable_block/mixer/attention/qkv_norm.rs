@@ -34,6 +34,7 @@ pub struct QKVNorm<B: Backend> {
     num_kv_heads: u32,
     projection_row_stride: u32,
     head_dim: u32,
+    full_width: bool,
 }
 
 impl<B: Backend> QKVNorm<B> {
@@ -48,6 +49,7 @@ impl<B: Backend> QKVNorm<B> {
         num_kv_heads: u32,
         projection_row_stride: u32,
         head_dim: u32,
+        full_width: bool,
     ) -> Result<Self, QKVNormError<B>> {
         let reference_profile = parameter_tree.numerical_profile() == NumericalProfile::Qwen35ReferenceBF16;
         let query = query_config
@@ -57,7 +59,11 @@ impl<B: Backend> QKVNorm<B> {
                     intermediate_data_type,
                     cfg,
                     Some(&parameter_tree.subtree("query_norm")),
-                    head_dim,
+                    if full_width {
+                        num_q_heads * head_dim
+                    } else {
+                        head_dim
+                    },
                     reference_profile,
                 )
             })
@@ -69,7 +75,11 @@ impl<B: Backend> QKVNorm<B> {
                     intermediate_data_type,
                     cfg,
                     Some(&parameter_tree.subtree("key_norm")),
-                    head_dim,
+                    if full_width {
+                        num_kv_heads * head_dim
+                    } else {
+                        head_dim
+                    },
                     reference_profile,
                 )
             })
@@ -86,6 +96,7 @@ impl<B: Backend> QKVNorm<B> {
             num_kv_heads,
             projection_row_stride,
             head_dim,
+            full_width,
         })
     }
 
@@ -198,8 +209,32 @@ impl<B: Backend> QKVNorm<B> {
         } else {
             &self.query
         };
-        let heads = [(query, 0, q_heads), (&self.key, q_heads, kv), (&self.value, q_heads + kv, kv)];
-        for (head, head_offset, head_count) in heads {
+        // The same strided RMS kernel can treat an entire projected vector as
+        // one wide head. Q/K scales then span all heads, as required by OLMo 3.
+        // Value normalization retains its ordinary per-head interpretation.
+        let heads = if self.full_width {
+            [
+                (query, 0, u32::from(q_heads > 0), q_heads * self.head_dim),
+                (
+                    &self.key,
+                    if kv > 0 {
+                        q_heads / kv
+                    } else {
+                        0
+                    },
+                    u32::from(kv > 0),
+                    kv * self.head_dim,
+                ),
+                (&self.value, q_heads + kv, kv, self.head_dim),
+            ]
+        } else {
+            [
+                (query, 0, q_heads, self.head_dim),
+                (&self.key, q_heads, kv, self.head_dim),
+                (&self.value, q_heads + kv, kv, self.head_dim),
+            ]
+        };
+        for (head, head_offset, head_count, width) in heads {
             let Some(head) = head else {
                 continue;
             };
@@ -213,7 +248,7 @@ impl<B: Backend> QKVNorm<B> {
                     buffer.reborrow(),
                     None::<&mut B::ScratchBuffer>,
                     batch_dim,
-                    self.head_dim,
+                    width,
                     input_row_stride,
                     head.config.epsilon,
                     head.config.scale_offset.unwrap_or(0.0),
@@ -229,7 +264,7 @@ impl<B: Backend> QKVNorm<B> {
                 buffer.reborrow(),
                 batch_dim,
                 input_row_stride,
-                self.head_dim,
+                width,
                 head.config.epsilon,
                 head.config.scale_offset.unwrap_or(0.0),
                 head_offset,

@@ -17,7 +17,7 @@ FUTURE = "example/future-model"
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == 13
+    assert len(matrix["families"]) == 15
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -43,6 +43,37 @@ def test_classifier_conversion_remains_distinct_from_app_modes():
     assert preflight_model(config, model_kind="classifier")["status"] == "conditional"
     for mode in model_support.MODES:
         assert preflight_model(config, mode=mode)["status"] == "unsupported"
+
+
+def test_new_text_families_do_not_imply_image_or_checkpoint_qualification():
+    for architecture in ("olmo3", "gemma4_text"):
+        config = {"model_type": architecture}
+        assert preflight_model(config, mode="text")["status"] == "conditional"
+        report = preflight_model(config, mode="vision-language")
+        assert report["status"] == "unsupported"
+        assert report["qualification"]["status"] == "not_assessed"
+
+
+def test_gemma4_wrapper_has_bounded_dense_text_coverage():
+    config = {
+        "model_type": "gemma4",
+        "text_config": {"model_type": "gemma4_text", "hidden_size_per_layer_input": 256},
+        "vision_config": {},
+        "audio_config": {},
+    }
+    report = preflight_model(config, mode="text")
+    assert report["family_id"] == "gemma4_text" and report["status"] == "conditional"
+    assert len(report["warnings"]) == 2
+    config["text_config"]["enable_moe_block"] = True
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_moe"]
+    config["text_config"]["enable_moe_block"] = False
+    config["text_config"]["hidden_size_per_layer_input"] = 0
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_native_geometry"]
+
+
+def test_gemma4_nested_architecture_cannot_masquerade_as_supported_text():
+    config = {"model_type": "gemma4", "text_config": {"model_type": "different_decoder"}}
+    assert preflight_model(config, mode="text")["reasons"] == ["unsupported_nested_architecture"]
 
 
 @pytest.mark.parametrize("source_dtype", ["float16", "float32", "bfloat16"])
@@ -239,7 +270,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == 13
+    assert len(json.loads(capsys.readouterr().out)["families"]) == 15
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]

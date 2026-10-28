@@ -12,6 +12,9 @@ pub struct AttentionConfig {
 
     pub query_norm_config: Option<NormalizationConfig>,
     pub key_norm_config: Option<NormalizationConfig>,
+    /// Normalize the complete Q/K projection before splitting into heads (OLMo 3).
+    #[serde(default)]
+    pub qk_norm_full_width: bool,
 
     pub num_heads: u32,
     pub num_groups: u32,

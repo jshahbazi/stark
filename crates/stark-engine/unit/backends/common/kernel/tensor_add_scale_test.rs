@@ -258,3 +258,43 @@ fn test_in_place_f16() {
 fn test_in_place_bf16() {
     test_in_place::<bf16>();
 }
+
+fn check_materialized_bf16_sum_then_scale<B: Backend>() {
+    let input = (0..32).map(|i| bf16::from_f32(i as f32 * 0.3 - 5.0)).collect::<Vec<_>>();
+    let bias = (0..32).map(|i| bf16::from_f32(i as f32 * 0.07 - 1.0)).collect::<Vec<_>>();
+    let scale = std::f32::consts::FRAC_1_SQRT_2;
+    let expected = input
+        .iter()
+        .zip(&bias)
+        .map(|(a, b)| {
+            let sum = bf16::from_f32(a.to_f32() + b.to_f32());
+            bf16::from_f32(sum.to_f32() * scale)
+        })
+        .collect::<Vec<_>>();
+    // This fixture distinguishes the required materialized BF16 sum from the
+    // real-arithmetic rewrite that fuses the scale before the first cast.
+    assert!(input.iter().zip(&bias).zip(&expected).any(|((a, b), expected)| {
+        bf16::from_f32((a.to_f32() + b.to_f32()) * scale).to_bits() != expected.to_bits()
+    }));
+    let context = B::Context::new().unwrap();
+    let add = <B::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::BF16, false).unwrap();
+    let multiply = <B::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::BF16, true).unwrap();
+    let input = create_buffer_with_data::<B, bf16>(&context, &input);
+    let bias = create_buffer_with_data::<B, bf16>(&context, &bias);
+    let zero = create_buffer_with_data::<B, bf16>(&context, &[bf16::ZERO]);
+    let mut output = create_buffer::<B, bf16>(&context, 32);
+    let mut command = context.create_command_buffer(None, None).unwrap();
+    add.encode(Some(&input), &bias, &mut output, 32, 32, 1.0, &mut command);
+    multiply.encode(None::<&B::GlobalBuffer>, &zero, &mut output, 1, 32, scale, &mut command);
+    command.end_encoding().submit().wait_until_completed().unwrap();
+    let actual = buffer_to_vec::<B, bf16>(&output);
+    assert!(actual.iter().zip(expected).all(|(actual, expected)| actual.to_bits() == expected.to_bits()));
+}
+
+#[stark_test]
+fn materialized_bf16_sum_then_scale_preserves_the_intermediate_cast() {
+    check_materialized_bf16_sum_then_scale::<Cpu>();
+    for_each_non_cpu_backend!(|B| {
+        check_materialized_bf16_sum_then_scale::<B>();
+    });
+}

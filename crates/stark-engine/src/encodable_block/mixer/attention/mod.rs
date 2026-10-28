@@ -142,6 +142,7 @@ impl<B: Backend> Attention<B> {
                     num_kv_heads.unwrap_or(0), // TODO: should take option
                     projection_dim,
                     config.head_dim,
+                    config.qk_norm_full_width,
                 )
             })
             .transpose()?;

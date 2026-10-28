@@ -413,6 +413,8 @@ struct ModelFamily: Identifiable {
         case "mistral": return "Mistral"
         case "gemma2": return "Gemma 2"
         case "gemma3_text": return "Gemma 3"
+        case "gemma4_text": return "Gemma 4"
+        case "olmo3": return "OLMo 3"
         case "phi3": return "Phi-3"
         case "granite": return "Granite"
         case "smollm3": return "SmolLM3"

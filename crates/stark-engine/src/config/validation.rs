@@ -144,6 +144,19 @@ pub(crate) fn validate_transformer(config: &TransformerConfig) -> Result<(), Inv
     checked_product(&[config.model_dim, config.hidden_dim])?;
     for (index, layer) in config.layer_configs.iter().enumerate() {
         use super::token_mixer::AnyTokenMixerConfig;
+        if layer.post_norm
+            && (layer.pre_mixer_norm_config.is_some()
+                || layer.pre_mlp_norm_config.has_scale
+                || layer.pre_mlp_norm_config.has_biases
+                || layer.post_mixer_norm_config.is_none()
+                || layer.post_mlp_norm_config.is_none()
+                || layer.mixer_conv_config.is_some()
+                || layer.mlp_conv_config.is_some()
+                || layer.ple_config.is_some()
+                || layer.has_post_layer_scalar)
+        {
+            return Err(InvalidInput("post-norm layers require branch norms and no pre-norm transforms"));
+        }
         // Transformer table collection includes every declared RoPE config,
         // including metadata attached to a non-attention mixer.
         if let Some(rope) = &layer.rope_config {
@@ -226,6 +239,7 @@ mod tests {
             transformer_layer::TransformerLayerConfig,
         };
         TransformerLayerConfig {
+            post_norm: false,
             pre_mixer_norm_config: Some(normalization()),
             mixer_config: AnyTokenMixerConfig::AttentionConfig(attention),
             mixer_conv_config: None,
@@ -384,6 +398,39 @@ mod tests {
     }
 
     #[stark_test]
+    fn olmo_post_norm_requires_explicit_branch_norms_and_no_pre_norm_parameters() {
+        let mut config = transformer();
+        let layer = &mut config.layer_configs[0];
+        layer.post_norm = true;
+        layer.pre_mixer_norm_config = None;
+        layer.post_mixer_norm_config = Some(normalization());
+        layer.post_mlp_norm_config = Some(normalization());
+        assert!(validate_transformer(&config).is_ok());
+        config.layer_configs[0].pre_mixer_norm_config = Some(normalization());
+        assert!(validate_transformer(&config).is_err());
+        config.layer_configs[0].pre_mixer_norm_config = None;
+        config.layer_configs[0].pre_mlp_norm_config.has_scale = true;
+        assert!(validate_transformer(&config).is_err());
+        config.layer_configs[0].pre_mlp_norm_config.has_scale = false;
+        config.layer_configs[0].post_mixer_norm_config = None;
+        assert!(validate_transformer(&config).is_err());
+        config.layer_configs[0].post_mixer_norm_config = Some(normalization());
+        config.layer_configs[0].post_mlp_norm_config = None;
+        assert!(validate_transformer(&config).is_err());
+    }
+
+    #[stark_test]
+    fn attention_projection_norm_scope_defaults_to_per_head_and_roundtrips_explicit_scope() {
+        let mut config = attention();
+        assert!(!config.qk_norm_full_width);
+        config.qk_norm_full_width = true;
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert_eq!(serialized["qk_norm_full_width"], true);
+        let decoded: AttentionConfig = serde_json::from_value(serialized).unwrap();
+        assert!(decoded.qk_norm_full_width);
+    }
+
+    #[stark_test]
     fn shared_cache_requires_compatible_earlier_owned_layer() {
         let mut config = transformer();
         let mut consumer = attention();
@@ -430,6 +477,7 @@ mod tests {
             norm_config: normalization(),
             ple_dim: 64,
             activation: serde_json::from_value(serde_json::json!({"type":"Identity"})).unwrap(),
+            reference_bf16: false,
         });
         let mut producer = PLEModelConfig {
             ple_dim: 32,
@@ -440,6 +488,7 @@ mod tests {
             input_scale: 1.0,
             linear_config: LinearConfig {},
             norm_config: normalization(),
+            reference_bf16: false,
         };
         assert!(validate_ple_layout(None, &layers).is_err());
         assert!(validate_ple_layout(Some(&producer), &layers).is_err());

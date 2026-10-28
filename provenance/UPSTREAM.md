@@ -50,6 +50,20 @@ Model weights, private fixtures, runtime executables, and host application archi
 
 ## Naming and compatibility
 
+Gemma 4 text layout and proportional RoPE conventions were independently
+implemented against Google's E2B checkpoint revision
+`3e22461f65e89153144f8adb70e3b8c2cc9845a7` and MLX-LM revision
+`1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7` (MIT, Copyright 2025 Apple Inc.).
+The production activation contract follows canonical Transformers 5.15.1
+`models/gemma4/modeling_gemma4.py`, SHA-256
+`4f874549f79deda4bb9ce7fb7d7b8e7349122be1711f733f7a4157e46ed10cc3`
+(Apache-2.0, Copyright 2026 the HuggingFace Team). Its license is preserved in
+`scripts/licenses/distribution/transformers-LICENSE`. Canonical HF BF16/FP32 and
+MLX BF16 references are separate source-bound numerical profiles; Python is used
+only by their private validators and never by native inference. The canonical
+validator uses the unchanged `tools/uv.lock`, while the MLX validation environment
+and its independent lock remain ignored under `runtime/`.
+
 Recursive Flint's native Rust forward contract follows the Apache-2.0
 `recursive-oss/rec` model module at revision
 `0e3150ca4262f572dee25c231d9ac7148414d2af`, path

@@ -19,6 +19,9 @@ pub struct TransformerLayerConvConfig {
 
 #[stark_config]
 pub struct TransformerLayerConfig {
+    /// OLMo-style branch post-normalization with unnormalized residual inputs.
+    #[serde(default)]
+    pub post_norm: bool,
     pub pre_mixer_norm_config: Option<NormalizationConfig>,
     pub mixer_config: AnyTokenMixerConfig,
     pub mixer_conv_config: Option<TransformerLayerConvConfig>,

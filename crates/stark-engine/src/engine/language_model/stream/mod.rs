@@ -67,7 +67,7 @@ impl<B: Backend> LanguageModel<B> {
             || !state.tokens.is_empty()
             || state.transformer_state.context_length() != 0
             || state.last_output_token.is_some()
-            || state.transformer_state.rotary_position_delta().is_some()
+            || state.has_multimodal_context()
         {
             return Err(LanguageModelStreamError::InvalidMultimodal);
         }

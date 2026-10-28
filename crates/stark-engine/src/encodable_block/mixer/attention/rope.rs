@@ -168,6 +168,17 @@ fn precalculate_cpu_tables(
         let inverse_frequency = 1.0 / rope_config.base().powf(channel_index as f32 / head_dim as f32);
         let inverse_frequency = match rope_config {
             AnyRoPEConfig::UnscaledRoPEConfig(_) | AnyRoPEConfig::Qwen35MRoPEConfig(_) => inverse_frequency,
+            // Independently implemented from MLX-LM's ProportionalRoPE at
+            // 1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7 (Apple, MIT).
+            // Unrotated pairs have zero frequency; retaining full head_dim here
+            // preserves Gemma 4's split-half pairing and frequency denominator.
+            AnyRoPEConfig::ProportionalRoPEConfig(config) => {
+                if channel_index < config.rotary_dim {
+                    inverse_frequency
+                } else {
+                    0.0
+                }
+            },
             AnyRoPEConfig::LinearScalingRoPEConfig(config) => inverse_frequency / config.scaling_factor,
             AnyRoPEConfig::LlamaRoPEConfig(config) => {
                 let low_frequency_wavelength = config.original_context_length as f32 / config.low_frequency_factor;
@@ -281,6 +292,50 @@ mod multimodal_tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn gemma4_proportional_rope_preserves_full_head_pairing_and_unrotated_channels() {
+        let config: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+            "type":"ProportionalRoPEConfig", "base":1000000.0,
+            "max_sequence_length":131072, "head_dim":16, "rotary_dim":4
+        }))
+        .unwrap();
+        config.validate().unwrap();
+        let positions = [0, 7, 513];
+        let (cosines, sines) = precalculate_cpu_tables(&config, &positions);
+        for (row, position) in positions.iter().enumerate() {
+            for pair in 0..8 {
+                // Independent full-width frequency oracle. A four-wide partial
+                // RoPE would pair channels 0/2 and use a different denominator;
+                // Gemma 4 instead pairs 0/8 and 1/9, leaving the other pairs.
+                let angle = if pair < 2 {
+                    f64::from(*position) / 1000000f64.powf((2 * pair) as f64 / 16.0)
+                } else {
+                    0.0
+                };
+                let index = row * 16 + pair;
+                // The engine intentionally calculates frequencies and phases in
+                // FP32. Bound phase rounding against the independent FP64 oracle.
+                let tolerance = 2e-6 + angle.abs() * f64::from(f32::EPSILON);
+                assert!((f64::from(cosines[index]) - angle.cos()).abs() < tolerance);
+                assert!((f64::from(sines[index]) - angle.sin()).abs() < tolerance);
+                assert_eq!(cosines[index].to_bits(), cosines[index + 8].to_bits());
+                assert_eq!(sines[index].to_bits(), sines[index + 8].to_bits());
+                if pair >= 2 {
+                    assert_eq!(cosines[index], 1.0);
+                    assert_eq!(sines[index], 0.0);
+                }
+            }
+        }
+        for rotary_dim in [0, 3, 18] {
+            let invalid: AnyRoPEConfig = serde_json::from_value(serde_json::json!({
+                "type":"ProportionalRoPEConfig", "base":1000000.0,
+                "max_sequence_length":131072, "head_dim":16, "rotary_dim":rotary_dim
+            }))
+            .unwrap();
+            assert!(invalid.validate().is_err());
+        }
+    }
 
     fn config() -> AnyRoPEConfig {
         serde_json::from_value(serde_json::json!({

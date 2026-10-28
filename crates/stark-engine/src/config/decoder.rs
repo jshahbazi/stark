@@ -7,6 +7,10 @@ use crate::config::{
 
 #[stark_config]
 pub struct DecoderConfig {
+    /// Admit Gemma 4 image embeddings with ordinary sequential text RoPE.
+    /// Only a validated native Gemma image artifact sets this flag.
+    #[serde(default)]
+    pub gemma4_image_embeddings: bool,
     pub embedding_config: AnyEmbeddingConfig,
     pub transformer_config: TransformerConfig,
 

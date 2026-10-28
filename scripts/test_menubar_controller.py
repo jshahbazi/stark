@@ -285,6 +285,29 @@ extension EngineController {
             for key in ["family_id", "quantization", "weight_bytes", "source_revision"] { unknown[key] = NSNull() }
             guard let descriptor = InstalledModelDisplay(unknown) else { return false }
             return descriptor.familyID == nil && descriptor.quantization == nil && descriptor.weightBytes == nil && descriptor.sourceRevision == nil
+        case "models-display-native-families":
+            for (familyID, familyName, repository) in [
+                ("olmo3", "OLMo 3", "allenai/Olmo-3-7B-Instruct"),
+                ("gemma4_text", "Gemma 4", "google/gemma-4-E2B-it")
+            ] {
+                var raw = modelDisplay("repo:" + repository, name: repository.split(separator: "/").last.map(String.init) ?? repository)
+                raw["family_id"] = familyID
+                guard ModelFamily.displayName(for: familyID) == familyName,
+                      let display = InstalledModelDisplay(raw),
+                      display.repositoryURL?.absoluteString == "https://huggingface.co/" + repository,
+                      display.familyID == familyID, display.quantization == "BF16",
+                      display.weightBytes == 1_190_000_000,
+                      display.sourceRevision == String(repeating: "a", count: 40) else { return false }
+                let inventory = ModelsInventory(
+                    models: [InstalledModel(id: familyID, name: repository, path: "/private/" + familyID,
+                                            apiID: familyID, display: display)],
+                    loadedID: "", registry: nil
+                )
+                guard inventory.groups.count == 1,
+                      inventory.groups[0].family == familyName,
+                      inventory.groups[0].name == repository.split(separator: "/").last.map(String.init) else { return false }
+            }
+            return true
         case "models-display-malformed":
             let mutations: [(String, Any)] = [
                 ("schema_version", 2), ("schema_version", true), ("group_id", ""),
@@ -1621,6 +1644,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_model_display_metadata_cannot_change_runtime_capabilities(self):
         self.exercise("models-display-event")
+
+    def test_installed_model_display_accepts_olmo3_and_gemma4_families(self):
+        self.exercise("models-display-native-families")
 
     def test_malformed_display_keeps_exact_model_name_without_guessed_badges(self):
         self.exercise("models-display-malformed")

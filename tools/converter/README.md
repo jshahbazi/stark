@@ -40,7 +40,7 @@ Some catalog profiles take tokenizer or generation metadata from another reposit
 
 ## Output
 
-The output directory contains `config.json`, `tokenizer.json`, `model.safetensors` and `conversion.json`. The receipt records the source revision and content hashes, converter inputs, dependency lock, emitted file hashes, workspace use and the native-loading status. BF16 is the default output dtype and the only one the engine loads; F16 and F32 outputs are conversion-only and are marked runtime-blocked. The converter stages into a private temporary directory and publishes with an atomic no-replace rename, so a failed or interrupted conversion leaves no partial output.
+The output directory contains `config.json`, `tokenizer.json`, `model.safetensors` and `conversion.json`. The receipt records the source revision and content hashes, converter inputs, dependency lock, emitted file hashes, workspace use and the native-loading status. BF16 is the default floating output and activation precision. Supported MLX adapters preserve affine packed 4-bit or 8-bit matrix storage separately; the engine may use BF16 activations with those packed matrices. F16 and F32 activation outputs remain conversion-only. The converter stages into a private temporary directory and publishes with an atomic no-replace rename, so a failed or interrupted conversion leaves no partial output.
 
 A successful conversion validates the complete supported layout. It does not run the model. Text conversions report `native_loading: "unverified"` unless the exact artifact matches a stored qualification record. Vision conversion reports the applicable unverified layout/family status or a matching exact record (see [qualification](#catalog-coverage-and-qualification)).
 
@@ -104,10 +104,10 @@ stark-convert [SOURCE] [options]
 | `--revision REV` | branch, tag or 40-hex commit | Hugging Face revision, resolved to a commit. For a local directory it must be a 40-hex commit |
 | `--repo ID` | catalog identity | Treat a local directory as this catalog model; omit with `--metadata-profile hf-generic` |
 | `--metadata-profile hf-generic` | | Use the checkpoint's own metadata for a model that is not in the catalog. Cannot be combined with a catalog `--repo` or with `--require-native-support` |
-| `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
+| `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `gemma4_text`, `olmo3`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
-| `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
-| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the pinned Qwen3.5-0.8B BF16 checkpoint or the supported merged-BF16 [family profile](../../docs/VISION_FAMILY_CONTRACT.md) |
+| `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Floating tensor and activation dtype. Supported MLX quantized matrices retain their packed affine 4-bit/8-bit representation independently |
+| `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for pinned Qwen3.5 BF16 sources, the supported merged-BF16 [Qwen3.5 family](../../docs/VISION_FAMILY_CONTRACT.md), or the pinned Gemma 4 E2B BF16 image profile |
 | `--chunk-mib N` | 1 through 1024, default 8 | Live transformation workspace in MiB. Does not bound total process memory |
 | `--offline` | | Do not contact Hugging Face; every file must be local or covered by a source manifest |
 | `--source-manifest PATH` | | Replay a previously written manifest |
@@ -125,7 +125,7 @@ The command prints one JSON object on success and `{"status":"error","error_cate
 
 ## Catalog coverage and qualification
 
-The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus five Stark extensions. Adapters and metadata profiles implement 90 of them (43 dense language profiles, 40 MLX profiles, two ModernBERT classifier profiles, and the five extensions):
+The declarative [catalog](stark_convert/catalog.json) records 110 reference model identities from the pinned Lalamo inventory plus six Stark extensions. Adapters and metadata profiles cover 92 identities: 43 existing dense language profiles, 40 MLX profiles, two ModernBERT classifier profiles, the five existing extensions, plus Gemma 4 and OLMo 3:
 
 | Adapter | Implemented identities |
 | --- | --- |
@@ -143,13 +143,15 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | Gemma 2 | Extension `google/gemma-2-2b-it` |
 | Gemma 3 text | `google/gemma-3-1b-it`, `google/functiongemma-270m-it`, `EssentialAI/rnj-1-instruct` |
 | Gemma 3 text MLX | `mlx-community/gemma-3-1b-it-{4bit,8bit}`; multimodal 4B and 27B variants are unsupported |
+| Gemma 4 text | `google/gemma-4-E2B-it`; dense PLE E2B/E4B text layouts. E2B affine Q4 conversion emits 901 tensors in a 2.605 GB packed artifact. A separate schema-4 BF16 image artifact supports E2B only. No audio/video, E4B image, 31B, 26B MoE or unified 12B support |
+| OLMo 3 | Extension `allenai/Olmo-3-7B-Instruct`; dense text profile with MLX affine Q4/Q8 matrix imports |
 | Phi | `microsoft/Phi-4-mini-instruct` (tied Phi3 layout with LongRoPE; untied Phi3 is unsupported) |
 | Granite | `ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct` |
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 | ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router` (both repositories currently inaccessible) |
 
-Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
+Implementation is tracked per architecture and matrix format; qualification is tracked per exact checkpoint, floating activation dtype, config, output hash and engine build. The current engine has BF16 activation paths and supported affine packed 4-bit/8-bit matrix paths; each adapter and exact checkpoint still requires its own qualification. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`. `--require-native-support` requires an exact match in the applicable catalog. The Gemma 4 image path is restricted to the official E2B BF16 profile and has separate reference and worker validation gates; Gemma 4 text or quantized conversion does not grant image support. See [OLMo 3 and Gemma 4 support](../../docs/OLMO3_GEMMA4.md) for its exact scope and source-pinned commands.
 
 Vision mode uses a separate [execution catalog](stark_convert/vision_runtime_qualifications.json).
 Its records bind all five artifact files and the generation worker to the
@@ -175,8 +177,10 @@ uv run --project tools/converter --locked stark-convert Qwen/Qwen2.5-Coder-0.5B-
 The `vision-language` artifact mode is tracked separately in the
 [native image implementation contract](../../docs/MULTIMODAL_IMPLEMENTATION.md).
 It validates and retains the full vision tower, processor and template for the
-pinned checkpoint or the merged BF16 dense Qwen3.5 family. New family artifacts
-use config-derived version 2: supported decoder/tower dimensions and tensor
+pinned Qwen3.5 checkpoint, the merged BF16 dense Qwen3.5 family, or the pinned
+Gemma 4 E2B BF16 checkpoint. Gemma uses a separate schema-4 artifact and
+`gemma4-e2b-bf16-v1` family profile; it does not use the Qwen3.5 schema. New Qwen
+family artifacts use config-derived version 2: supported decoder/tower dimensions and tensor
 shapes come from validated configuration within operation, indexing and storage
 bounds. Previously converted fixed version-1 0.8B artifacts remain readable.
 Both require recognized tokenizer, template and processor forms. Version 2
@@ -187,15 +191,32 @@ intentionally differ for some combining-mark text; conversion preserves the
 selected program. Formatting/key-order equivalence cannot admit an arbitrary
 new program. Schema 2 and version 1 retain their original tokenizer gate. The
 worker, CLI, Local API and Swift app support
-one PNG/JPEG image after passing host evidence checks. Default Qwen3.5 conversions
-remain text-only. A model's size or repository name does not establish support;
+one PNG/JPEG image after passing host evidence checks. Gemma image conversion is
+limited to E2B BF16; affine quantized weights apply only to supported text matrix
+paths. Default Qwen3.5 conversions remain text-only. A model's size or repository name does not establish support;
 its complete graph and weights must pass admission and its local execution
 checks must pass before images are enabled. MoE, LoRA-only repositories,
 quantized vision weights, unrecognized operations and new architectures require
 additional support. The
 [local signed-package replay](../../docs/archive/runs/2026-10-27-qwen35-swift-packaged-app.md)
 covers the earlier exact-tuple Swift and GUI checks. Public notarized release
-qualification remains pending.
+qualification remains pending. Gemma's feature-reference check passes its stated
+2% gate on three images, while full generation-worker end-to-end validation and
+performance measurement remain pending.
+
+Convert the pinned official Gemma 4 E2B image checkpoint with:
+
+```sh
+uv run --project tools/converter --locked stark-convert google/gemma-4-E2B-it \
+  --revision 3e22461f65e89153144f8adb70e3b8c2cc9845a7 \
+  --artifact-mode vision-language \
+  --output models/gemma-4-e2b-image
+```
+
+This exact-source conversion writes `processor_config.json` as the artifact's
+`preprocessor_config.json` and emits the schema-4 profile. Conversion does not
+execute the model or establish full worker validation; see the [Gemma 4 support
+page](../../docs/OLMO3_GEMMA4.md).
 
 Convert a self-contained merged vision checkpoint with:
 
@@ -210,7 +231,8 @@ Vision mode selects the family profile automatically from a supported complete
 checkpoint. Use a local source path plus `--offline` for a downloaded folder. The converter
 uses the checkpoint's own metadata; it does not borrow sidecars from the official
 model. Family conversion performs structural validation. Installation checks
-execution on the current Mac before registering a schema-3 model. See the
+execution on the current Mac before registering a schema-3 Qwen3.5 or schema-4
+Gemma 4 model. See the
 [complete family boundary](../../docs/VISION_FAMILY_CONTRACT.md).
 
 A fine-tune of a supported architecture converts through its adapter without a catalog entry:
@@ -241,7 +263,7 @@ Generic conversions record `catalogued=false` and the chosen architecture and pr
 
 ## MLX checkpoints
 
-MLX conversion repacks an existing affine 4-bit or 8-bit checkpoint without requantizing. Packed 32-bit words become U8 tensors with identical payload bytes; scales and biases are cast, fused, transposed and padded to Stark's group and output layout; embedding planes keep their layout. Every compressed matrix needs a complete plane triplet, fused groups must share representation and dtype, and the catalog binds each identity to its declared bit width. Supported MLX families are Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma 3 text and LFM2 with groups 16, 32, 64 and 128; quantized Qwen2, Mistral, Granite and Gemma 2 are unsupported.
+MLX conversion repacks an existing affine 4-bit or 8-bit checkpoint without requantizing. Packed 32-bit words become U8 tensors with identical payload bytes; scales and biases are cast, fused, transposed and padded to Stark's group and output layout; embedding planes keep their layout. Every compressed matrix needs a complete plane triplet, fused groups must share representation and dtype, and the catalog binds each identity to its declared bit width. Supported MLX families are Qwen3, Qwen3.5 text, OLMo 3, Llama, LLaMBA, SmolLM3, Gemma 3 text, Gemma 4 text and LFM2. Supported group sizes are 16, 32, 64 and 128; the OLMo 3 and Gemma 4 profiles currently admit affine group size 64. Quantized Qwen2, Mistral, Granite and Gemma 2 are unsupported. Gemma 4 affine Q4/Q8 conversion is text-only; Gemma image conversion requires BF16 source matrices.
 
 ```sh
 uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.8B-MLX-4bit \

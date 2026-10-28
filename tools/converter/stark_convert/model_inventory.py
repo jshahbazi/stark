@@ -14,6 +14,7 @@ from ._build_metadata import open_regular
 from .hybrid_prepare import prepared_identity
 from .model_support import normalize_architecture
 from .streaming import authorize_source_path
+from .vision_runtime import VISION_MODEL_TYPES
 
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 MAX_HEADER_BYTES = 1024 * 1024
@@ -244,7 +245,7 @@ def model_display(model):
     try:
         config = _small_file(root, "config.json")
         parsed = _json(config)
-        if isinstance(parsed, dict) and parsed.get("type") == "Qwen35VisionLanguageModelConfig":
+        if isinstance(parsed, dict) and parsed.get("type") in VISION_MODEL_TYPES:
             result["artifact_mode"] = "vision-language"
         elif isinstance(parsed, dict) and parsed.get("type") in {"LanguageModelConfig", "ClassifierModelConfig"}:
             result["artifact_mode"] = "text"
@@ -252,7 +253,7 @@ def model_display(model):
         if (
             not isinstance(parsed, dict)
             or parsed.get("type")
-            not in {"LanguageModelConfig", "Qwen35VisionLanguageModelConfig", "ClassifierModelConfig"}
+            not in {"LanguageModelConfig", "ClassifierModelConfig", *VISION_MODEL_TYPES}
             or not isinstance(receipt, dict)
         ):
             return result
