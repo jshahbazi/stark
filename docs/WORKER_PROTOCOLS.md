@@ -51,6 +51,24 @@ Each tag names the exact request and reply shape documented on the per-worker pa
 
 Image readiness describes implemented functionality and loaded identity. Its `qualified: false` field leaves the evidence decision to the host. A matching [execution catalog](../tools/converter/stark_convert/vision_runtime_qualifications.json) record enables the exact schema-2 tuple as `reference_verified`. The [family path](VISION_FAMILY_CONTRACT.md) enables an admitted compatible model as `locally_tested` after bounded automatic execution checks. Both bind all five artifact-file hashes, the worker hash observed before launch and checked again at readiness, the Metal device and macOS version; local receipts additionally bind the actual family/version, admitted vocabulary, checker and Python dependency identities. Current readers accept fixed version-1 and config-derived version-2 families; older readers reject the unknown version-2 profile. [Generation](GENERATION.md#image-qualification) defines the evidence levels and scope.
 
+## GPU memory telemetry
+
+An owning host can opt into a separate, private telemetry pipe by setting
+`STARK_GPU_MEMORY_FD` to an inherited writable, nonblocking FIFO descriptor of 3
+or higher. Both workers remove the variable before loading a model and sample
+Metal's `MTLDevice.currentAllocatedSize` about once a second, beginning before
+model loading. Each telemetry line contains only `{"gpu_memory_bytes":N}`,
+where `N` is the current allocation in bytes. It includes Metal resources in the
+worker process, excludes CPU-only allocations and other applications, and can
+decrease when resources are released. It is independent of the scoring
+readiness field `peak_memory_bytes`.
+
+Telemetry never enters the request/reply stream or changes its framing. The
+worker closes the telemetry descriptor on exit; an unavailable Metal device,
+invalid pipe or failed write disables reporting without failing inference.
+Hosts must tolerate unavailable measurements and keep the pipe private. Without
+the variable, workers create no telemetry thread.
+
 ## Error classes
 
 Every error reply carries a fixed, content-free `error` code. The codes fall into three classes:

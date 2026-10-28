@@ -6,6 +6,7 @@ mod decompression;
 mod error;
 mod heaps;
 mod kernel;
+pub mod memory_usage;
 mod metal_extensions;
 
 pub use backend::Metal;
