@@ -1233,6 +1233,8 @@ extension EngineController {
             return !engine.supportsImages && engine.imageVerification == "unverified"
         case "image-install-check-clears":
             try! engine.attachImage(bytes: imageBytes)
+            engine.apply(["event": "gpu_memory", "model_id": "fixture-model", "mode": "chat", "gpu_memory_bytes": 4096])
+            guard engine.gpuMemoryBytes == 4096 else { return false }
             let image = engine.draftImage!
             engine.messages = [ChatMessage(text: "synthetic image turn", isUser: true, image: image)]
             engine.conversationImage = image
@@ -1241,6 +1243,7 @@ extension EngineController {
             engine.state = "installing"
             engine.apply(["event": "image_check", "state": "checking"])
             return engine.state == "installing" && engine.busy && engine.loadedID.isEmpty && engine.loadedMode == nil &&
+                engine.gpuMemoryBytes == nil && engine.gpuMemoryText == "GPU memory —" &&
                 !engine.supportsImages && engine.imageVerification == "unverified" &&
                 engine.messages.isEmpty && engine.draftImage == nil && engine.conversationImage == nil &&
                 staged().isEmpty && engine.message == "Checking image support on this Mac…"

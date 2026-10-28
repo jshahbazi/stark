@@ -1245,6 +1245,7 @@ final class EngineController: ObservableObject {
         case "image_check":
             guard state == "installing", event["state"] as? String == "checking" else { return }
             loadedID = ""; loadedMode = nil; supportsImages = false; imageVerification = "unverified"
+            gpuMemoryBytes = nil
             clearConversation(); clearDecision()
             message = "Checking image support on this Mac…"
         case "decision":
