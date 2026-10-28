@@ -1,0 +1,16 @@
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -326,7 +326,12 @@
+             .values()
+             .try_fold(0usize, |total, &bytes| total.checked_add(bytes))
+             .ok_or(Error::Invalid("Metal bank inventory overflow"))?;
+-        let budget = (super::weight_metal::recommended_working_set()? / 4 * 3).saturating_sub(MAX_STATIC_VIEW_BYTES);
++        let recommended = super::weight_metal::recommended_working_set()?;
++        let budget = if std::env::var_os("STARK_HYBRID_FULL_BANKS").is_some_and(|value| value == "1") {
++            recommended.saturating_sub(MAX_STATIC_VIEW_BYTES + 4 * 1024 * 1024 * 1024)
++        } else {
++            (recommended / 4 * 3).saturating_sub(MAX_STATIC_VIEW_BYTES)
++        };
+         // Kernel view offsets are u32 even on devices whose buffer length
+         // limit is larger. Larger banks keep the per-selected-range path.
+         let max_buffer_length = super::weight_metal::max_buffer_length()?.min(u32::MAX as usize);

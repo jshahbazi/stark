@@ -1,0 +1,406 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/bank_residency.rs b/crates/stark-engine/src/engine/hybrid/bank_residency.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/bank_residency.rs
+@@ -0,0 +1,253 @@
++//! Best-effort Metal preparation of admitted immutable weight banks.
++//! Each residency set holds at most 5% of the recommended working set, with
++//! at most 32 sets. A residency request is an OS hint, not physical page pinning.
++//!
++//! The sharding policy follows the public MLX allocator design; this lease and
++//! accounting implementation is original Stark code. See benchmark provenance.
++
++use std::sync::{Arc, Mutex};
++
++use metal::{MTLBuffer, MTLCommandBuffer, MTLDevice, MTLDeviceExt, MTLResidencySet, MTLResidencySetDescriptor};
++use objc2::{rc::Retained, runtime::ProtocolObject};
++
++use super::{Error, Result};
++
++const MAX_SHARDS: usize = 32;
++type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
++
++struct Pool {
++    shards: Vec<Arc<ResidencyShard>>,
++}
++
++pub(super) struct BankResidency {
++    device: Retained<ProtocolObject<dyn MTLDevice>>,
++    shard_budget: usize,
++    total_budget: usize,
++    pool: Mutex<Pool>,
++}
++
++pub(super) struct ResidencyShard {
++    set: Retained<ProtocolObject<dyn MTLResidencySet>>,
++    bytes: Mutex<usize>,
++}
++
++/// The manager and active views own shards; a shard owns no leases. Releasing
++/// the last view of a buffer removes that buffer from its actual shard, even
++/// after the manager or its cache entry has been dropped.
++pub(super) struct BankAllocation {
++    shard: Arc<ResidencyShard>,
++    buffer: Buffer,
++    bytes: usize,
++}
++
++impl BankAllocation {
++    pub(super) fn shard(&self) -> &Arc<ResidencyShard> {
++        &self.shard
++    }
++}
++
++impl Drop for BankAllocation {
++    fn drop(&mut self) {
++        let mut bytes = self.shard.bytes.lock().unwrap_or_else(|error| error.into_inner());
++        self.shard.set.remove_allocation(self.buffer.as_ref());
++        self.shard.set.commit();
++        *bytes -= self.bytes;
++    }
++}
++
++impl ResidencyShard {
++    fn new(device: &ProtocolObject<dyn MTLDevice>) -> Result<Self> {
++        let descriptor = MTLResidencySetDescriptor::new();
++        descriptor.set_initial_capacity(64);
++        let set = device
++            .new_residency_set_with_descriptor(&descriptor)
++            .map_err(|_| Error::Unsupported("Metal bank residency unavailable"))?;
++        // A single standing request covers later commits, which update the
++        // resident set. Pair it with end_residency when the last owner drops.
++        set.request_residency();
++        Ok(Self {
++            set,
++            bytes: Mutex::new(0),
++        })
++    }
++
++    pub(super) fn use_in(
++        &self,
++        command: &ProtocolObject<dyn MTLCommandBuffer>,
++    ) {
++        command.use_residency_set(&self.set);
++    }
++}
++
++impl Drop for ResidencyShard {
++    fn drop(&mut self) {
++        self.set.end_residency();
++        self.set.remove_all_allocations();
++        self.set.commit();
++    }
++}
++
++impl BankResidency {
++    pub(super) fn new(admitted_bytes: usize) -> Result<Self> {
++        let device = <dyn MTLDevice>::system_default().ok_or(Error::Unsupported("Metal device unavailable"))?;
++        let shard_budget = device.recommended_max_working_set_size() as usize / 20;
++        Self::with_limits(device, shard_budget, admitted_bytes)
++    }
++
++    fn with_limits(
++        device: Retained<ProtocolObject<dyn MTLDevice>>,
++        shard_budget: usize,
++        total_budget: usize,
++    ) -> Result<Self> {
++        if shard_budget == 0 {
++            return Err(Error::Unsupported("Metal residency shard budget unavailable"));
++        }
++        // Establish availability before model readiness, preserving the
++        // caller's optional-residency fallback on unsupported Metal devices.
++        let initial = Arc::new(ResidencyShard::new(&device)?);
++        Ok(Self {
++            device,
++            shard_budget,
++            total_budget,
++            pool: Mutex::new(Pool {
++                shards: vec![initial],
++            }),
++        })
++    }
++
++    /// A buffer larger than one shard, or a full pool, keeps its ordinary
++    /// mapped-buffer path. Optional residency hints never enlarge admission.
++    pub(super) fn add(
++        self: &Arc<Self>,
++        buffer: &Buffer,
++    ) -> Result<Option<Arc<BankAllocation>>> {
++        let resource: &ProtocolObject<dyn metal::MTLResource> = buffer.as_ref();
++        let bytes = buffer.length().max(metal::MTLResource::allocated_size(resource));
++        if bytes == 0 || bytes > self.shard_budget {
++            return Ok(None);
++        }
++        let mut pool = self.pool.lock().map_err(|_| Error::Invalid("Metal residency pool update failed"))?;
++        let mut total = 0usize;
++        let mut selected = None;
++        for shard in &pool.shards {
++            let used_guard = shard.bytes.lock().map_err(|_| Error::Invalid("Metal residency shard update failed"))?;
++            // MappedSlice clones share their existing lease. A repeated add of
++            // the same buffer gets no second lease: two independent drops
++            // must never remove one another's set membership.
++            if shard.set.contains_allocation(buffer.as_ref()) {
++                return Ok(None);
++            }
++            let used = *used_guard;
++            total = total.checked_add(used).ok_or(Error::Invalid("Metal residency accounting overflow"))?;
++            if selected.is_none() && used <= self.shard_budget - bytes {
++                selected = Some(Arc::clone(shard));
++            }
++        }
++        if total.checked_add(bytes).is_none_or(|sum| sum > self.total_budget) {
++            return Ok(None);
++        }
++        let shard = match selected {
++            Some(shard) => shard,
++            None if pool.shards.len() < MAX_SHARDS => {
++                let Ok(shard) = ResidencyShard::new(&self.device) else {
++                    return Ok(None);
++                };
++                let shard = Arc::new(shard);
++                pool.shards.push(Arc::clone(&shard));
++                shard
++            },
++            None => return Ok(None),
++        };
++        {
++            let mut used = shard.bytes.lock().map_err(|_| Error::Invalid("Metal residency shard update failed"))?;
++            shard.set.add_allocation(buffer.as_ref());
++            shard.set.commit();
++            *used += bytes;
++            super::profile::record("native.metal.bank_residency.shard_bytes", 0.0, *used);
++        }
++        let allocation = Arc::new(BankAllocation {
++            shard,
++            buffer: buffer.clone(),
++            bytes,
++        });
++        super::profile::record("native.metal.bank_residency.bytes", 0.0, total + bytes);
++        super::profile::record("native.metal.bank_residency.shards", 0.0, pool.shards.len());
++        Ok(Some(allocation))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use metal::MTLResourceOptions;
++    use stark_engine_macros::stark_test;
++
++    use super::*;
++
++    fn fixture(
++        shard_budget: usize,
++        total_budget: usize,
++    ) -> (Retained<ProtocolObject<dyn MTLDevice>>, Arc<BankResidency>) {
++        let device = <dyn MTLDevice>::system_default().unwrap();
++        let residency = Arc::new(BankResidency::with_limits(device.clone(), shard_budget, total_budget).unwrap());
++        (device, residency)
++    }
++
++    #[stark_test]
++    fn residency_membership_lasts_until_last_view_lease() {
++        let (device, residency) = fixture(32_768, 65_536);
++        let buffer = device.new_buffer(16_384, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
++        let lease = residency.add(&buffer).unwrap().unwrap();
++        assert!(residency.add(&buffer).unwrap().is_none());
++        let shard = Arc::downgrade(lease.shard());
++        assert_eq!(lease.shard.set.allocation_count(), 1);
++        let active_view = Arc::clone(&lease);
++        drop(lease);
++        assert_eq!(shard.upgrade().unwrap().set.allocation_count(), 1);
++        drop(active_view);
++        assert_eq!(shard.upgrade().unwrap().set.allocation_count(), 0);
++        let lease = residency.add(&buffer).unwrap().unwrap();
++        let shard = Arc::downgrade(lease.shard());
++        drop(residency);
++        assert!(shard.upgrade().is_some());
++        drop(lease);
++        assert!(shard.upgrade().is_none(), "last view retained its residency shard");
++    }
++
++    #[stark_test]
++    fn residency_shards_pack_bounded_buffers_and_reuse_released_capacity() {
++        let (device, residency) = fixture(32_768, 65_536);
++        let make = |bytes| device.new_buffer(bytes, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
++        let a = residency.add(&make(16_384)).unwrap().unwrap();
++        let b = residency.add(&make(16_384)).unwrap().unwrap();
++        let c = residency.add(&make(16_384)).unwrap().unwrap();
++        assert!(Arc::ptr_eq(a.shard(), b.shard()));
++        assert!(!Arc::ptr_eq(a.shard(), c.shard()));
++        let d = residency.add(&make(16_384)).unwrap().unwrap();
++        assert!(residency.add(&make(16_384)).unwrap().is_none());
++        assert!(residency.add(&make(32_769)).unwrap().is_none());
++        drop(a);
++        let replacement = residency.add(&make(16_384)).unwrap().unwrap();
++        assert!(Arc::ptr_eq(b.shard(), replacement.shard()));
++        let pool = residency.pool.lock().unwrap();
++        assert_eq!(pool.shards.len(), 2);
++        assert!(pool.shards.iter().all(|shard| *shard.bytes.lock().unwrap() <= 32_768));
++        drop(pool);
++        drop((b, c, d, replacement));
++        assert!(residency.pool.lock().unwrap().shards.iter().all(|shard| shard.set.allocation_count() == 0));
++    }
++
++    #[stark_test]
++    fn residency_pool_never_exceeds_thirty_two_shards() {
++        let (device, residency) = fixture(16_384, 16_384 * 33);
++        let mut leases = Vec::new();
++        for _ in 0..MAX_SHARDS {
++            let buffer = device.new_buffer(16_384, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
++            leases.push(residency.add(&buffer).unwrap().unwrap());
++        }
++        let overflow = device.new_buffer(16_384, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
++        assert!(residency.add(&overflow).unwrap().is_none());
++        assert_eq!(residency.pool.lock().unwrap().shards.len(), MAX_SHARDS);
++        leases.pop();
++        assert!(residency.add(&overflow).unwrap().is_some());
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -46,6 +46,7 @@
+     offset: usize,
+     length: usize,
+     registered_length: usize,
++    residency: Option<Arc<super::bank_residency::BankAllocation>>,
+ }
+
+ impl MappedSlice {
+@@ -67,7 +68,16 @@
+             offset,
+             length,
+             registered_length: self.registered_length,
++            residency: self.residency.clone(),
+         })
++    }
++
++    pub(super) fn with_residency(
++        mut self,
++        residency: &Arc<super::bank_residency::BankResidency>,
++    ) -> Result<Self> {
++        self.residency = residency.add(&self.buffer)?;
++        Ok(self)
+     }
+ }
+
+@@ -133,7 +143,26 @@
+         offset,
+         length,
+         registered_length: mapped_length,
++        residency: None,
+     })
++}
++
++fn use_weight_residency(
++    command: &ProtocolObject<dyn MTLCommandBuffer>,
++    operations: &[MappedOperation<'_>],
++) {
++    let mut used = Vec::<&Arc<super::bank_residency::ResidencyShard>>::new();
++    for matrix in operations.iter().flat_map(|operation| &operation.matrices) {
++        let views =
++            std::iter::once(&matrix.codes).chain(matrix.planes.iter().flat_map(|(scales, biases)| [scales, biases]));
++        for allocation in views.filter_map(|view| view.residency.as_ref()) {
++            let set = allocation.shard();
++            if !used.iter().any(|old| Arc::ptr_eq(old, set)) {
++                set.use_in(command);
++                used.push(set);
++            }
++        }
++    }
+ }
+
+ impl MappedOperation<'_> {
+@@ -507,6 +536,7 @@
+         let execute = profile::Scope::new("native.metal.execute");
+         let encode = profile::Scope::new("native.metal.encode");
+         let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal KDA graph command allocation failed"))?;
++        use_weight_residency(&command, operations);
+         let encoding =
+             command.compute_command_encoder().ok_or(Error::Invalid("Metal KDA graph encoder allocation failed"))?;
+         for (index, offset) in [(0, 0), (1, inner), (2, 2 * inner), (5, 5 * inner)] {
+@@ -756,6 +786,7 @@
+         let execute = profile::Scope::new("native.metal.execute");
+         let encode = profile::Scope::new("native.metal.encode");
+         let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal HC command allocation failed"))?;
++        use_weight_residency(&command, operations);
+         let encoding = command.compute_command_encoder().ok_or(Error::Invalid("Metal HC encoder allocation failed"))?;
+         Self::encode_ffn_matrix(&encoding, &operations[0], &parameters[0], &pipelines[0], &input, &reduced);
+         encoding.set_compute_pipeline_state(&activation_pipeline);
+@@ -937,6 +968,7 @@
+         let execute = profile::Scope::new("native.metal.execute");
+         let encode = profile::Scope::new("native.metal.encode");
+         let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal FFN command allocation failed"))?;
++        use_weight_residency(&command, operations);
+         let concurrent = std::env::var_os("STARK_HYBRID_CONCURRENT_FFN").is_none_or(|value| value != "0");
+         let encoding = command
+             .compute_command_encoder_with_dispatch_type(if concurrent {
+@@ -1153,6 +1185,7 @@
+         let execute = profile::Scope::new("native.metal.execute");
+         let encode = profile::Scope::new("native.metal.encode");
+         let command = self.queue.command_buffer().ok_or(Error::Invalid("Metal command allocation failed"))?;
++        use_weight_residency(&command, operations);
+         let encoding = command.compute_command_encoder().ok_or(Error::Invalid("Metal encoder allocation failed"))?;
+         for (index, operation) in operations.iter().enumerate() {
+             let parameters = &parameters[index];
+@@ -1525,6 +1558,7 @@
+                 offset: 0,
+                 length: bytes.len(),
+                 registered_length: bytes.len(),
++                residency: None,
+             },
+             planes: None,
+         }
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -182,6 +182,7 @@
+     registered_bytes: usize,
+     entries: HashMap<StaticViewKey, super::weight_metal::MappedSlice>,
+     order: VecDeque<StaticViewKey>,
++    residency: Option<Arc<super::bank_residency::BankResidency>>,
+ }
+
+ #[cfg(feature = "metal")]
+@@ -192,6 +193,7 @@
+             registered_bytes: 0,
+             entries: HashMap::new(),
+             order: VecDeque::new(),
++            residency: None,
+         }
+     }
+
+@@ -332,6 +334,9 @@
+         if bytes <= budget && spans.values().all(|&bytes| bytes <= max_buffer_length) {
+             let cache = self.bank_views.get_mut().map_err(|_| Error::Invalid("Metal bank view cache failed"))?;
+             cache.limit = bytes;
++            if std::env::var_os("STARK_HYBRID_BANK_RESIDENCY").is_some_and(|value| value == "1") {
++                cache.residency = super::bank_residency::BankResidency::new(bytes).ok().map(Arc::new);
++            }
+         }
+         Ok(())
+     }
+@@ -673,6 +678,11 @@
+         }
+         cache.reserve(registered, "native.metal.bank_cache.eviction");
+         let view = mapping.metal_slice(tensor.offset, tensor.size)?;
++        let view = if let Some(residency) = &cache.residency {
++            view.with_residency(residency)?
++        } else {
++            view
++        };
+         let result = view.subslice(start, length)?;
+         cache.registered_bytes += registered;
+         cache.order.push_back(key);
+diff --git a/crates/stark-engine/src/engine/hybrid/mod.rs b/crates/stark-engine/src/engine/hybrid/mod.rs
+--- a/crates/stark-engine/src/engine/hybrid/mod.rs
++++ b/crates/stark-engine/src/engine/hybrid/mod.rs
+@@ -3,6 +3,8 @@
+ //! These models carry distinct recurrent state, sparse attention and residual
+ //! streams. They deliberately do not enter the dense decoder's artifact path.
+
++#[cfg(feature = "metal")]
++mod bank_residency;
+ pub mod glm;
+ #[cfg(feature = "metal")]
+ mod glm_metal;

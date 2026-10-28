@@ -8,6 +8,13 @@ Measured results, each bound to the source revision, build and host named inside
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
+**Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
+GPU decode graphs measured Qwen at 22.94 tok/s versus 11.21 staged, and GLM at
+9.04 versus 8.13, on Apple M5 Max. Five fresh requests per mode use the same
+binary and retain matching completion hashes. See the
+[decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md). Earlier stage-chaining
+and kernel measurements remain historical records for their named builds.
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -24,6 +31,9 @@ Measured results, each bound to the source revision, build and host named inside
 
 | Study | Outcome |
 | --- | --- |
+| [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current original-format checkpoint results: Qwen 2.05x, GLM 11.1% faster warm decode on the short matched workload |
+| [Native GLM and Qwen graph and kernels](GLM_QWEN_NATIVE_GRAPH_2026_10_28.md) | Earlier stage-chaining study; superseded throughput, source-bound validation retained |
+| [Native GLM and Qwen optimization](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md) | Initial no-copy and batching study; build identities and validation remain source-bound historical evidence |
 | [MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) | Two decode changes accepted after bitwise validation; the throughput they produced is included in the current result |
 | [DeepInfer resource reuse](DEEPINFER_ADOPTION_2026_10_21.md) | Two experiments measured and reverted; patches retained under the archive |
 | [Qwen3 GGUF import experiment](QWEN3_GGUF_IMPORT_EXPERIMENT.md) | Experimental Q8_0 import route; see the [converter guide](../../tools/converter/README.md#experimental-qwen3-gguf-import) |

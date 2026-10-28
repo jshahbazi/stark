@@ -70,6 +70,25 @@ pub fn main() {
             // write FD is transferred exclusively to the sampler.
             _gpu_memory_sampler = unsafe { stark_engine::backends::metal::memory_usage::start_from_environment() };
             let media = staging.as_deref().map(crate::media::MediaStore::open).transpose()?;
+            let hybrid = if media.is_none() {
+                match stark_engine::engine::hybrid::recognizes(&path) {
+                    Ok(hybrid) => hybrid,
+                    // Preserve the ordinary loader's established unavailable-
+                    // config error while keeping malformed metadata bounded.
+                    Err(stark_engine::engine::hybrid::Error::Io(_)) => false,
+                    Err(_) => return Err("invalid_model_config"),
+                }
+            } else {
+                false
+            };
+            if hybrid {
+                if media.is_some() {
+                    return Err("images_not_supported");
+                }
+                let backend = crate::hybrid::HybridBackend::load(&path, cancellation)?;
+                let mut worker = crate::generation::GenerationWorker::new_with_media(backend, None)?;
+                return crate::generation::run_lines(&mut worker, &mut io::stdin().lock(), &mut output);
+            }
             let backend = if media.is_some() {
                 crate::native::NativeBackend::load_vision(&path, cancellation)?
             } else {

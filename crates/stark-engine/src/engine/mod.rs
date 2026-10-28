@@ -12,6 +12,8 @@ use crate::{
 };
 
 pub mod classifier_model;
+#[cfg(unix)]
+pub mod hybrid;
 pub mod language_model;
 pub mod vision;
 

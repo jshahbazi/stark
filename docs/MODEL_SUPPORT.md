@@ -6,6 +6,14 @@ tab in the menu bar app's **Manage Models** window consume that registry. A fami
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
+The original-format [native hybrid path](NATIVE_HYBRID_MODELS.md) separately
+loads GLM-5.3-Flash UD-Q2_K_XL and Qwen3.8-Flash-Next mixed MLX 4/8-bit weights.
+Prepare those pinned downloads with its helper, then import the prepared local
+folder. Their original sources are not offered by the ordinary converter's
+family catalogue or source preflight. The native loader validates their tensors;
+generic Decision use still requires a direct-answer template and checkpoint
+checks.
+
 Neither result establishes that a complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the

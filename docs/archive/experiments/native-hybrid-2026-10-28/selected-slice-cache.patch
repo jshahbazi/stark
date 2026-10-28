@@ -1,0 +1,227 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -218,6 +218,8 @@
+     static_views: Mutex<StaticViewCache>,
+     #[cfg(feature = "metal")]
+     bank_views: Mutex<StaticViewCache>,
++    #[cfg(feature = "metal")]
++    selected_views: Mutex<StaticViewCache>,
+ }
+
+ impl Weights {
+@@ -244,6 +246,8 @@
+             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
+             #[cfg(feature = "metal")]
+             bank_views: Mutex::new(StaticViewCache::new(0)),
++            #[cfg(feature = "metal")]
++            selected_views: Mutex::new(StaticViewCache::new(0)),
+         };
+         let mut splits = BTreeMap::new();
+         for path in &paths {
+@@ -332,6 +336,12 @@
+         if bytes <= budget && spans.values().all(|&bytes| bytes <= max_buffer_length) {
+             let cache = self.bank_views.get_mut().map_err(|_| Error::Invalid("Metal bank view cache failed"))?;
+             cache.limit = bytes;
++        } else {
++            // A rejected complete inventory can still reuse immutable ranges
++            // that have actually been selected. It shares the bank allowance,
++            // never the activation/decision cache, and never requests residency.
++            self.selected_views.get_mut().map_err(|_| Error::Invalid("Metal selected view cache failed"))?.limit =
++                budget;
+         }
+         Ok(())
+     }
+@@ -653,7 +663,7 @@
+         let mut cache = self.bank_views.lock().map_err(|_| Error::Invalid("Metal bank view cache failed"))?;
+         if cache.limit == 0 {
+             drop(cache);
+-            return self.metal_view(tensor.file, tensor.offset + start, length, false);
++            return self.selected_view(tensor.file, tensor.offset + start, length);
+         }
+         let key = StaticViewKey {
+             file: tensor.file,
+@@ -669,7 +679,7 @@
+         let registered = mapping.metal_span(tensor.offset, tensor.size)?.1;
+         if registered > cache.limit {
+             drop(cache);
+-            return self.metal_view(tensor.file, tensor.offset + start, length, false);
++            return self.selected_view(tensor.file, tensor.offset + start, length);
+         }
+         cache.reserve(registered, "native.metal.bank_cache.eviction");
+         let view = mapping.metal_slice(tensor.offset, tensor.size)?;
+@@ -680,6 +690,43 @@
+         super::profile::record("native.metal.bank_cache.miss", 0.0, registered);
+         super::profile::record("native.metal.bank_cache.registered_bytes", 0.0, cache.registered_bytes);
+         Ok(result)
++    }
++
++    /// Reuse only immutable source ranges already selected by a model whose
++    /// complete bank inventory did not fit. Entries own mapped buffer views;
++    /// activations, router choices and probabilities never enter this cache.
++    #[cfg(feature = "metal")]
++    fn selected_view(
++        &self,
++        file: usize,
++        offset: usize,
++        length: usize,
++    ) -> Result<super::weight_metal::MappedSlice> {
++        let mapping = &self.files[file];
++        let key = StaticViewKey {
++            file,
++            offset,
++            length,
++        };
++        let mut cache = self.selected_views.lock().map_err(|_| Error::Invalid("Metal selected view cache failed"))?;
++        if let Some(view) = cache.entries.get(&key) {
++            super::profile::record("native.metal.expert_cache.hit", 0.0, 0);
++            super::profile::record("native.metal.expert_cache.registered_bytes", 0.0, cache.registered_bytes);
++            return Ok(view.clone());
++        }
++        let registered = mapping.metal_span(offset, length)?.1;
++        super::profile::record("native.metal.expert_cache.miss", 0.0, registered);
++        if registered > cache.limit {
++            drop(cache);
++            return mapping.metal_slice(offset, length);
++        }
++        cache.reserve(registered, "native.metal.expert_cache.eviction");
++        let view = mapping.metal_slice(offset, length)?;
++        cache.registered_bytes += registered;
++        cache.order.push_back(key);
++        cache.entries.insert(key, view.clone());
++        super::profile::record("native.metal.expert_cache.registered_bytes", 0.0, cache.registered_bytes);
++        Ok(view)
+     }
+
+     #[cfg(feature = "metal")]
+@@ -2008,6 +2055,7 @@
+         let weights = Weights::open(&fixture.0).unwrap();
+         let weak = Arc::downgrade(&weights.files[0]);
+         let input = vec![1.0; 32];
++        assert_eq!(weights.selected_views.lock().unwrap().limit, 0);
+         assert_eq!(weights.expert_matvec("experts", 2, &input).unwrap(), vec![96.0; 2]);
+         assert_eq!(
+             weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
+@@ -2041,6 +2089,122 @@
+             std::thread::sleep(std::time::Duration::from_millis(1));
+         }
+         assert!(weak.upgrade().is_none(), "whole-bank views retained their source mapping after drop");
++    }
++
++    #[cfg(feature = "metal")]
++    #[stark_test]
++    fn selected_view_cache_reuses_duplicate_experts_and_accounts_rounded_spans() {
++        struct DisableProfile;
++        impl Drop for DisableProfile {
++            fn drop(&mut self) {
++                super::super::profile::enable(false);
++            }
++        }
++        let _disable = DisableProfile;
++        super::super::profile::reset();
++        super::super::profile::enable(true);
++        let fixture = Fixture::new();
++        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
++        safetensors(&fixture.0.join("model.safetensors"), &[("experts", "F32", vec![4, 2, 32], data)]);
++        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
++        let weights = Weights::open(&fixture.0).unwrap();
++        let tensor = weights.tensor("experts").unwrap();
++        let matrix_bytes = tensor.size / tensor.shape[0];
++        let registered = weights.files[tensor.file].metal_span(tensor.offset, matrix_bytes).unwrap().1;
++        *weights.bank_views.lock().unwrap() = StaticViewCache::new(0);
++        *weights.selected_views.lock().unwrap() = StaticViewCache::new(2 * registered);
++        let weak = Arc::downgrade(&weights.files[0]);
++        let input = vec![1.0; 32];
++        assert_eq!(
++            weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
++            [128.0, 128.0, 64.0, 64.0, 128.0, 128.0]
++        );
++        assert_eq!(weights.selected_matvec("experts", &[1, 0], &input.repeat(2)).unwrap(), [64.0, 64.0, 32.0, 32.0]);
++        {
++            let cache = weights.selected_views.lock().unwrap();
++            assert_eq!(cache.entries.len(), 2);
++            assert_eq!(cache.order.len(), 2);
++            assert_eq!(
++                cache.registered_bytes,
++                cache.entries.values().map(|view| view.registered_bytes()).sum::<usize>()
++            );
++            assert!(cache.registered_bytes <= cache.limit);
++        }
++        assert!(weights.bank_views.lock().unwrap().entries.is_empty());
++        assert!(weights.static_views.lock().unwrap().entries.is_empty());
++        let counters = super::super::profile::snapshot();
++        assert_eq!(counters["native.metal.expert_cache.hit"].calls, 2);
++        assert_eq!(counters["native.metal.expert_cache.miss"].calls, 3);
++        assert_eq!(counters["native.metal.expert_cache.eviction"].calls, 1);
++        assert!(!counters.contains_key("native.metal.static_cache.eviction"));
++        drop(weights);
++        for _ in 0..100 {
++            if weak.upgrade().is_none() {
++                break;
++            }
++            std::thread::sleep(std::time::Duration::from_millis(1));
++        }
++        assert!(weak.upgrade().is_none(), "selected cache retained its source mapping after drop");
++    }
++
++    #[cfg(feature = "metal")]
++    #[stark_test]
++    fn selected_view_cache_preserves_evicted_active_views_and_zero_budget_fallback() {
++        let fixture = Fixture::new();
++        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
++        safetensors(&fixture.0.join("model.safetensors"), &[("experts", "F32", vec![4, 2, 32], data)]);
++        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
++        let weights = Weights::open(&fixture.0).unwrap();
++        let tensor = weights.tensor("experts").unwrap();
++        let bytes = tensor.size / tensor.shape[0];
++        let registered = weights.files[tensor.file].metal_span(tensor.offset, bytes).unwrap().1;
++        *weights.bank_views.lock().unwrap() = StaticViewCache::new(0);
++        *weights.selected_views.lock().unwrap() = StaticViewCache::new(registered);
++        let active = weights.bank_view(tensor, 0, bytes).unwrap();
++        let replacement = weights.bank_view(tensor, bytes, bytes).unwrap();
++        assert_eq!(weights.selected_views.lock().unwrap().entries.len(), 1);
++        assert_eq!(weights.selected_views.lock().unwrap().registered_bytes, registered);
++        let input = vec![1.0; 32];
++        let operation = |codes| super::super::weight_metal::MappedOperation {
++            matrices: vec![super::super::weight_metal::MappedMatrix {
++                codes,
++                planes: None,
++            }],
++            inputs: input.as_slice(),
++            rows: 2,
++            columns: 32,
++            rows_per_batch: 0,
++            format: super::super::weight_metal::MatrixFormat::Packed(0),
++        };
++        let active_operation = operation(active);
++        assert_eq!(
++            super::super::weight_metal::mapped_many(std::slice::from_ref(&active_operation)).unwrap(),
++            [vec![32.0; 2]]
++        );
++        assert_eq!(super::super::weight_metal::mapped_many(&[operation(replacement)]).unwrap(), [vec![64.0; 2]]);
++        *weights.selected_views.lock().unwrap() = StaticViewCache::new(0);
++        assert_eq!(weights.expert_matvec("experts", 2, &input).unwrap(), [96.0; 2]);
++        {
++            let cache = weights.selected_views.lock().unwrap();
++            assert!(cache.entries.is_empty());
++            assert!(cache.order.is_empty());
++            assert_eq!(cache.registered_bytes, 0);
++        }
++        let weak = Arc::downgrade(&weights.files[0]);
++        drop(weights);
++        assert!(weak.upgrade().is_some(), "active evicted view lost its source mapping");
++        assert_eq!(
++            super::super::weight_metal::mapped_many(std::slice::from_ref(&active_operation)).unwrap(),
++            [vec![32.0; 2]]
++        );
++        drop(active_operation);
++        for _ in 0..100 {
++            if weak.upgrade().is_none() {
++                break;
++            }
++            std::thread::sleep(std::time::Duration::from_millis(1));
++        }
++        assert!(weak.upgrade().is_none(), "active selected view retained its mapping after drop");
+     }
+
+     #[cfg(feature = "metal")]

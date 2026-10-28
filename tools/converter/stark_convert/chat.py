@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from ._build_metadata import ConversionError, file_hash, open_regular
@@ -177,7 +178,9 @@ def load_template(model, *, expected_hashes=None):
                 )
             ):
                 raise ValueError
-        environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+        environment = ImmutableSandboxedEnvironment(
+            extensions=["jinja2.ext.loopcontrols"], trim_blocks=True, lstrip_blocks=True
+        )
 
         def raise_exception(_message):
             raise ChatError("The model's chat template rejected this conversation.")
@@ -185,7 +188,7 @@ def load_template(model, *, expected_hashes=None):
         environment.globals["raise_exception"] = raise_exception
         template = environment.from_string(source)
         return codec, template
-    except (OSError, ValueError, KeyError, TypeError, ConversionError):
+    except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):
         raise ChatError("Cannot read chat metadata; use a converted language model with a chat template.") from None
 
 

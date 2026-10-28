@@ -64,9 +64,14 @@ struct ScoreResult {
 }
 
 struct NativeBackend {
-    engine: Arc<Engine<Metal>>,
-    model: LanguageModel<Metal>,
+    engine: Option<Arc<Engine<Metal>>>,
+    model: NativeModel,
     vocab_size: usize,
+}
+
+enum NativeModel {
+    Dense(Box<LanguageModel<Metal>>),
+    Hybrid(Box<stark_engine::engine::hybrid::Model>),
 }
 
 struct NativeScores {
@@ -204,6 +209,15 @@ impl NativeBackend {
         let config: Value =
             serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
                 .map_err(|_| "invalid_model_config")?;
+        if matches!(config.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")) {
+            let model = stark_engine::engine::hybrid::Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
+            let vocab_size = model.vocab_size();
+            return Ok(Self {
+                engine: None,
+                model: NativeModel::Hybrid(Box::new(model)),
+                vocab_size,
+            });
+        }
         let vocab_size = config
             .get("decoder_config")
             .and_then(|decoder| decoder.get("vocab_size"))
@@ -213,8 +227,8 @@ impl NativeBackend {
         let engine = Engine::<Metal>::new().map_err(|_| "metal_initialization_failed")?;
         let model = engine.load_language_model(path).map_err(|_| "model_load_failed")?;
         Ok(Self {
-            engine,
-            model,
+            engine: Some(engine),
+            model: NativeModel::Dense(Box::new(model)),
             vocab_size,
         })
     }
@@ -225,28 +239,62 @@ impl ScoringBackend for NativeBackend {
         self.vocab_size
     }
     fn max_context_length(&self) -> Option<u32> {
-        self.model.max_context_length()
+        match &self.model {
+            NativeModel::Dense(model) => model.max_context_length(),
+            NativeModel::Hybrid(model) => Some(model.max_context_length()),
+        }
     }
     fn peak_memory_usage(&self) -> Option<usize> {
-        self.engine.peak_memory_usage()
+        self.engine.as_ref().and_then(|engine| engine.peak_memory_usage())
     }
     fn tokenize(
         &mut self,
         text: String,
         special: bool,
     ) -> Result<Vec<u32>, &'static str> {
-        self.model
-            .tokenizer()
-            .encode(text, special)
-            .map(|encoding| encoding.get_ids().to_vec())
-            .map_err(|_| "tokenization_failed")
+        let tokenizer = match &self.model {
+            NativeModel::Dense(model) => model.tokenizer(),
+            NativeModel::Hybrid(model) => model.tokenizer(),
+        };
+        tokenizer.encode(text, special).map(|encoding| encoding.get_ids().to_vec()).map_err(|_| "tokenization_failed")
     }
     fn score(
         &mut self,
         input: &[u32],
         context: u32,
     ) -> Result<NativeScores, &'static str> {
-        self.model
+        let NativeModel::Dense(model) = &self.model else {
+            let NativeModel::Hybrid(model) = &mut self.model else {
+                unreachable!()
+            };
+            let started = Instant::now();
+            model.reset();
+            let state_creation_seconds = started.elapsed().as_secs_f64();
+            let prefill = Instant::now();
+            let result = (|| {
+                if input.is_empty() || input.len() > context as usize || context > model.max_context_length() {
+                    return Err("context_overflow");
+                }
+                let mut logits = Vec::new();
+                for (index, &token) in input.iter().enumerate() {
+                    if index + 1 == input.len() {
+                        logits = model.step(token).map_err(|_| "native_scoring_failed")?;
+                    } else {
+                        model.ingest(token).map_err(|_| "native_scoring_failed")?;
+                    }
+                }
+                Ok(NativeScores {
+                    logits,
+                    state_creation_seconds,
+                    prefill_seconds: prefill.elapsed().as_secs_f64(),
+                    // The hybrid step includes its vocabulary projection.
+                    readout_seconds: 0.0,
+                })
+            })();
+            model.reset();
+            return result;
+        };
+        model
             .score_next_token(input, context)
             .map(|scores| NativeScores {
                 logits: scores.logits,
