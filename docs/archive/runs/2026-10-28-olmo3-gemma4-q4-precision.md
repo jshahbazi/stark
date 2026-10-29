@@ -1,6 +1,6 @@
 # OLMo 3 and Gemma 4 Q4 precision investigation
 
-Investigation dates: 2026-10-28 through 2026-10-29. Pre-repair branch revision: `9257d80ae6fab1c83439c46c845326bbebfcb0c7`. Both families pass the serialized stock-MLX numerical suites with unchanged gates. Fresh native, CPU and canonical BF16/image regressions also pass. Final repair revision, refreshed worker qualification and matched performance results: pending.
+Investigation dates: 2026-10-28 through 2026-10-29. Pre-repair branch revision: `9257d80ae6fab1c83439c46c845326bbebfcb0c7`. Final production implementation: `598b3f6eaddf2b0b87a08032b92d2e26e4288358`. Both families pass their 14-case stock-MLX numerical suites with unchanged gates. Fresh native, CPU, worker and canonical BF16/image checks pass. The [final matched comparison](../../benchmarks/OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) measures OLMo at 1.0155 times MLX's work rate and Gemma at 0.9785 times on the pinned pp512/tg128 workload. Gemma retains a 2.15% work-rate gap on this host.
 
 This record tracks repairs to the affine-Q4 numerical failures and the measured MLX performance gap. The [original native validation record](2026-10-28-olmo3-gemma4-native.md) remains unchanged, including its passing BF16 results, failed Q4 gates and diagnostic timings. This investigation does not change acceptance tolerances. Primitive agreement and diagnostic controls are recorded separately from complete model qualification.
 
@@ -189,21 +189,21 @@ Both tested v5 artifacts were produced through the normal converter CLI with fre
 
 The CLI reports and artifact receipts contain identical JSON values with different serialization. Worker and benchmark receipts bind the exact bytes of each artifact's `conversion.json`.
 
-## Remaining qualification and benchmark status
+## Final qualification and benchmark status
 
 | Required evidence | OLMo Q4 | Gemma Q4 |
 | --- | --- | --- |
-| Final repair revision | Pending | Pending |
+| Production implementation revision (C3) | `598b3f6e` | `598b3f6e` |
 | Normal-CLI v5 converted-artifact identities | Verified above | Verified above |
 | Stock-MLX numerical suite, five cases, unchanged gates | Pass, 5/5 | Pass, 5/5 |
 | Stock-MLX teacher-forced sequence suite, nine positions from context 512 through 640 | Pass, 9/9 | Pass, 9/9 |
-| Generation/scoring workers, exact replay, restart and cache-failure recovery | Pending | Pending |
+| Generation/scoring workers, exact replay, restart and cache-failure recovery | Pass, 2 generation and 2 scoring cases | Pass, 2 generation and 2 scoring cases |
 | Canonical BF16 text and Gemma image regressions | Pass, 5/5 text | Pass, 5/5 text and 3/3 images |
-| Full physical native unit suite | Pass, 709 tests | Pass, 709 tests |
-| Accepted quiet matched benchmark and output-hash agreement | Pending | Pending |
+| Full physical native unit suite | Pass, 715 tests | Pass, 715 tests |
+| Accepted quiet matched benchmark and output-hash agreement | Pass, all 4 paired blocks | Pass, all 4 paired blocks |
 | Native/CPU, policy, Ruff and format checks | Pass, recorded below | Pass, recorded below |
 
-The pending rows require their own completed, source-bound receipts. Numerical qualification does not fill the worker, regression or performance rows. New benchmark results must state their implementation/binary identity and precision policy; earlier diagnostic measurements remain historical.
+The final normalization section below binds these results to its production binaries and separate numerical, worker, regression and performance receipts. Earlier diagnostic measurements and failed numerical results remain historical.
 
 ## Selected aggregate receipt identities
 
@@ -296,3 +296,98 @@ Fresh canonical regressions pass all five BF16 text cases for each family and al
 | `q4-repair/olmo3-cached-attention-v3-parity5.json` | `4d7c8646b948cf77d6bde7080d206fd38049522e2291380037aad510c551e781` |
 | `q4-repair/olmo3-cached-attention-v3-parity9.json` | `2562ecc02dd6a58afd902d13f72df90d51d71bfb831970073f74f36647e12274` |
 | `q4-repair/final-canonical-regressions-v2-receipt.json` | `a1b939674286c032753a94e8ba125075f2bd4ee7dae264f595ec0e96f755bd65` |
+
+## C2 worker qualification
+
+Fresh real-worker checks bind numerical implementation revision `2e96ec8672398fae1887f6160cea5f598151a010`. Generation and scoring workers were built separately with locked Rust 1.98.1. Every validation process completed successfully, with GPU work serialized through the OS lock. The earlier worker and numerical receipts remain unchanged.
+
+The generation worker SHA256 is `77358fd17074bf76ecc69b0d95db8f59cd66daa1ab925609c8d1d96e0ccfd2d8`; the scoring worker SHA256 is `7ca13f3c7ea57849759670c9274a17ddc1e9016ba2ca14bc3e8ae49c78f97e13`.
+
+| Validation | Cases passed | Recorded lifecycle checks |
+| --- | ---: | --- |
+| OLMo Q4 generation | 2/2 | Exact replay, invalid-request recovery and restart replay |
+| OLMo Q4 scoring | 2/2 | Exact cache replay, clearing after failure and invalidation by an intervening request |
+| Gemma Q4 generation | 2/2 | Exact replay, invalid-request recovery and restart replay |
+| Gemma Q4 scoring | 2/2 | Exact cache replay, clearing after failure and invalidation by an intervening request |
+| Gemma canonical BF16 image worker | 3/3 | Reference agreement, prepared-input single use, fresh/restart replay, malformed-image recovery, counterfactual image response and staging cleanup |
+| Gemma image client | 2/2 | Cold and cached checks with staging cleanup |
+
+The image checks use the separately qualified BF16 image artifact, with weight SHA256 `5c26289c1536f6afda47e62616c02ae63df489dc5c37d6034624413b2fd75993` and configuration SHA256 `9acc540130bd576271650c3805467141136570ffc4111c186e317442cc3dc762`. They do not extend the Q4 text-artifact qualification to quantized vision weights.
+
+Matched performance was pending at the C2 worker handoff. The following C3 qualification and its separate matched comparison record the subsequent normalization optimization and measured remaining gap.
+
+| Worker receipt, relative to ignored `runtime/olmo3-gemma4/` | SHA256 |
+| --- | --- |
+| `q4-repair/cached-qk-v2-workers-receipt.json` | `26cb2b17a3e12e445dd0229431cf2d23b4d58dd63913a5211fa655e20b098d2f` |
+| `q4-repair/cached-qk-v2-olmo3-workers.json` | `fa5bb727a25a7712c5e6eb45f01ed64b11c78dec2d390d0e4e8a6691e5090df2` |
+| `q4-repair/cached-qk-v2-gemma4-workers.json` | `a12bec1780dc07d5d6419acfb4e7ef19fa7fac051f41ca9b1f0917047380f517` |
+| `q4-repair/cached-qk-v2-gemma4-image-workers.json` | `175de3ea6a825f89ae175f8b590011b46fbae042f320b787f0ec308ca7098d76` |
+| `q4-repair/cached-qk-v2-gemma4-image-client.json` | `7af813bf6a0c785bbef724337d9dd8d3db0c377fc56cf2e540e080bb07f734be` |
+
+## Production normalization optimization and final qualification
+
+Production revision `598b3f6eaddf2b0b87a08032b92d2e26e4288358` reuses the existing source RMS kernel for contiguous single-token Q/K buffer ranges. OLMo's packed 4,096-element normalization previously emulated 32 logical reduction groups in one hardware SIMD group. The ordinary normalization kernel runs those groups in parallel while retaining the source four-value reduction and BF16 materialization. Gemma batches its eight query-head rows or single key-head row at width 256 or 512. Shared-KV consumers normalize their query rows only.
+
+The route remains restricted to the explicit BF16 source policy, learned scales, `OnlyNormalization`, zero scale offset and the qualified shapes. Multi-token rows, weightless V, canonical BF16 profiles and other shapes retain their previous routing. Model-free CPU and Metal controls cover original-versus-parallel output bits, separate gain vectors, owner/shared layouts, key-only and skipped-query operations, legacy exclusions, padding and untouched channels. No private performance switch or timestamp instrumentation remains in the production route.
+
+The frozen stable comparison binary has SHA256 `be192964f8765cdca31711397140c760651b569789f2b2929c9d71e6fd6a9c2c`; the stable timing binary is `ca1ad5a405afb30c88a6a29b8cef34d213c11a039ae8c08267f880f969b35e51`. The nightly physical-test binary is `503475f5e9698dffdec7c86afcf8ce012246a643d63eff3dc39ad461d3727b67`. Rust 1.98.1 generation and optimized scoring workers were built separately: `b20bbc8b337f64b2d1d46ee279fd2e858a8e45f193ab05432090486530586f71` and `8761ea9557757297eed4413ee6c03ab89fb71e1ccbc3169b8e64ab1279f88953` respectively.
+
+All GPU validation processes used the OS lock and completed before their next dependent step. The quiet timing campaigns began after model qualification and CPU/build work released their resources. Their final source and artifacts remained unchanged.
+
+| Final evidence | OLMo 3 7B Q4 | Gemma 4 E2B Q4 |
+| --- | ---: | ---: |
+| Strict numerical cases, original gates | 14/14 | 14/14 |
+| Next-token greedy agreement | 14/14 | 14/14 |
+| Full-vocabulary bit-exact cases | 13/14 | 14/14 |
+| pp512/tg128 output agreement with stock MLX | All runs | All runs |
+| Generation worker cases with recovery/replay/restart | 2/2 | 2/2 |
+| Scoring worker cases with consecutive-cache replay, invalidation and failure clearing | 2/2 | 2/2 |
+| Canonical BF16 text regressions | 5/5 | 5/5 |
+
+The non-exact OLMo case remains the 4,101-token input: raw RMSE `0.0971913874`, centered RMSE `0.0358055215`, centered maximum absolute error `0.184105578` and KL `0.00000172058`. It passes the existing gates. Gemma's complete 129-forward trajectory matches all 4,902 component hashes, including embedding, every layer, final hidden state and logits. Public stream, manual generation and teacher-forced execution all retain output hash `03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1`. The matched OLMo stream retains `a71d52d60eff63c4060c047d2d0b756655facee0cc6892ec3cfaa6d3a9462561`.
+
+All ten canonical BF16 text output hashes equal the preserved earlier runs. The three canonical HF image cases pass, with complete aggregate metrics bytes unchanged. Fresh BF16 image workers pass all three lifecycle cases; cold and cached image-client checks pass both cases. This image evidence remains bound to the separate BF16 vision artifact. Maximum scoring-worker absolute error is `0.1875` for OLMo and zero for Gemma under the unchanged `0.75` bound.
+
+The full native unit binary passes 715 tests, with 54 ignored. The CPU/grammar configuration passes 474 unit tests, seven integration tests and three doctests, with 21 ignored. Repository policy, staged-file policy, nightly format, Ruff and diff checks pass. The benchmark guard suite passes all 15 tests. The unchanged converter suite retains its earlier 5,065-pass/90-skip evidence.
+
+One final worker attempt selected `gemma4-workers-final-fixture` instead of the Q4 reference fixture and failed `score_reference_error_exceeds_tolerance`. Its failed aggregate remains preserved. The correct `gemma4-q4-reference` rerun passes without changing production source, reference values or tolerances. The consolidated numerical summary also corrects an obsolete private-switch scope label copied into its first summary; the underlying production-binary reports remain unchanged.
+
+### Measured performance and experiment disposition
+
+The final quiet comparison includes every accepted block from four independent loads per engine, one warmup and three measured requests per load. Every request has 512 input tokens, 128 returned tokens, 128 decode forwards and a final lookahead drain. Loading is excluded. The rate counts all 640 work tokens per complete request and is not a standalone decode rate.
+
+| Model | C2 precision-matched baseline, s | C3 production, s | MLX, s | Paired C3/baseline work-rate ratio | Paired C3/MLX work-rate ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| OLMo 3 7B | 1.567938 | 1.259285 | 1.277698 | 1.241573 | 1.015542 |
+| Gemma 4 E2B | 0.646835 | 0.627277 | 0.614090 | 1.031643 | 0.978486 |
+
+Times are medians of process medians; ratios are medians of paired ratios. Paired request-latency reductions are 19.46% for OLMo and 3.07% for Gemma. The earlier C2 baseline's MLX rate ratios were 0.8157 and 0.9489 in these same final campaigns. These measurements qualify the recorded M5 Max, checkpoints and text workload. Gemma remains 2.15% behind MLX by paired work rate.
+
+| Investigation | Disposition |
+| --- | --- |
+| Parallel contiguous Q/K RMS | Retained after bitwise controls, full numerical suites and matched end-to-end improvement |
+| Scale-plane transpose, direct-nibble dequantization and full pointer QMV adaptation | Preserved privately; no material measured end-to-end improvement, not promoted |
+| Model-owned source RoPE frequency cache | Bitwise controls pass; OLMo screen improves only about 0.36%, not promoted |
+| Removing two identity scatter copies from cached Gemma D512 attention | Same-input scores, probabilities and outputs exact; end-to-end gain only 0.63–0.72%, not promoted |
+| Eliminating supposedly redundant KV acceptance copies | Hypothesis rejected: the benchmark's existing state acceptance already avoids those copies |
+| Private Metal 4 timestamp instrumentation | Diagnostic only, removed; counter observation adds substantial request cost |
+
+Private timestamp controls attribute roughly 2.52 ms per decode forward to the earlier OLMo Q/K normalization and roughly 0.13 ms after parallelization. Every measured normalization span is valid; incomplete entries correspond to empty acceptance spans. Instrumented request times are excluded from the performance comparison. The source-pointer experiment's CPU subnormal disagreement was separately classified against actual stock MLX; that source control agrees with the candidate's flush-to-zero pattern. It was still rejected on end-to-end performance evidence.
+
+### Final aggregate identities
+
+Paths below remain private under ignored `runtime/olmo3-gemma4/`. The public [benchmark aggregate dataset](../../benchmarks/olmo3-gemma4-q4-repaired-2026-10-29.json) publishes the final counts, timings, source/artifact identities and output hashes without runtime payloads.
+
+| Receipt | SHA256 |
+| --- | --- |
+| `q4-repair/final-normalization-v1/build-receipt.json` | `7d0724731f2aa5509bb1dc0a6d6ddbf130645b58545254d8fd883d4f25b10f52` |
+| `q4-repair/final-normalization-v1/qualification-agent-v1/qualification-summary-v2.json` | `b4dcaa80a2d5cfb65a69296a5a4baaf90961a233751f30a481cb0ee17ee8a435` |
+| `q4-repair/final-normalization-v1/root-qualification-final-receipt.json` | `6ce31d1067c585577d9c711618a2ef2c00479743cf4cae3d0fd88aaa00508750` |
+| `q4-repair/final-normalization-v1/matched-campaigns-v2-receipt.json` | `141807393c4f2cae5bad5d6fa5472b26a48dbef07ab86e42d1e3b1bfb30d7862` |
+| Final OLMo campaign aggregate | `99dfb0f37d615e085ae0db2271ad0453120148da9bc8a2937b9e11d72e44bdad` |
+| Final Gemma campaign aggregate | `ab1d0ceb5997ab0479da20763d5bd62ac0d184c3625c032d65f30c0afb189919` |
+| `q4-repair/stage-timestamps-v5/olmo3-inline-precise-v1.json`, instrumented diagnostic | `daada24c96755f3d797ce651cbb1465261bd2953d08cdf5af968d55128f21d5f` |
+| `q4-repair/stage-timestamps-v6/olmo3-wide-precise-v1.json`, instrumented diagnostic | `eb8bbc41d5c792c0009d46181081ea51e82acbc07db4d76c48b53df31f3735e9` |
+| `q4-repair/gemma4-small-head-qkv-v1/final-receipt-v1.json`, preliminary screen | `6ac8e7fa896e0b1dd133e6cb3422c4d520b9200d1552048752486b60f9da34a0` |
+| `q4-repair/direct-cached-sdpa-v1/rejected-screen-v1.json`, rejected screen | `83b5bc10f94371919ab63b44cf109a79f2114d44ccb997a8db3d00109b234a83` |
+| Public benchmark dataset | `082113e5ed0f2608f938eb0999d7ff427ac49c9b8ee172bf4b1436b938d305d1` |
