@@ -49,3 +49,30 @@ fn ring_accept_over_capacity_keeps_last() {
     assert_eq!(accept(&mut state, &[0, 1, 2]), [(3, 0), (4, 1)]);
     assert_eq!(state.view().ring_params().unwrap().ring_offset, 0);
 }
+
+#[stark_test]
+fn source_ring_origin_tracks_bulk_temporal_reset_and_survives_single_updates() {
+    // MLX-LM RotatingKVCache's bulk update is temporal; the next M=1
+    // update trims to the window and overwrites slot zero. Later M=1 updates
+    // keep that physical origin, even while the native ring offset advances.
+    let mut state = KVCacheState::ring(512);
+    accept(&mut state, &(0..516).collect::<Vec<_>>());
+    assert_eq!(state.view().source_ring_origin(), 4);
+    assert_eq!(state.view().ring_params().unwrap().ring_offset, 4);
+    accept(&mut state, &[0]);
+    accept(&mut state, &[0]);
+    assert_eq!(state.view().source_ring_origin(), 4);
+    assert_eq!(state.view().ring_params().unwrap().ring_offset, 6);
+    accept(&mut state, &[0, 1, 2]);
+    assert_eq!(state.view().source_ring_origin(), 9);
+    assert_eq!(state.view().ring_params().unwrap().ring_offset, 9);
+
+    let mut fresh = KVCacheState::ring(512);
+    accept(&mut fresh, &(0..511).collect::<Vec<_>>());
+    assert_eq!(fresh.view().source_ring_origin(), 0);
+    accept(&mut fresh, &[0]);
+    accept(&mut fresh, &[0]);
+    assert_eq!(fresh.view().source_ring_origin(), 0);
+    assert_eq!(fresh.view().ring_params().unwrap().ring_offset, 1);
+    assert_eq!(KVCacheState::ring(512).view().source_ring_origin(), 0);
+}

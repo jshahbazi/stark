@@ -72,6 +72,17 @@ fn scoring_cache_only_requested(
 }
 
 impl<B: Backend> TransformerState<B> {
+    #[cfg(test)]
+    pub(crate) fn attention_state_for_test(
+        &self,
+        layer_index: usize,
+    ) -> Option<&crate::encodable_block::mixer::attention::AttentionState<B>> {
+        match self.layer_states.get(layer_index)? {
+            TransformerLayerStateType::Owned(state) => (state.as_ref() as &dyn std::any::Any).downcast_ref(),
+            TransformerLayerStateType::Shared(source) => self.attention_state_for_test(*source as usize),
+        }
+    }
+
     /// Allow the final attention layer to skip its query path for prompt
     /// chunks whose logits are not read. Only `score_next_token` opts a state
     /// in; the pruning additionally requires a flat batch, no requested output

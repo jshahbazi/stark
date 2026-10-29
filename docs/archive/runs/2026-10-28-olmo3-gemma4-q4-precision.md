@@ -1,6 +1,6 @@
 # OLMo 3 and Gemma 4 Q4 precision investigation
 
-Investigation dates: 2026-10-28 through 2026-10-29. Pre-repair branch revision: `9257d80ae6fab1c83439c46c845326bbebfcb0c7`. Both families pass the final serialized stock-MLX numerical suites with unchanged gates. Final repair revision, worker and regression qualification, and matched performance results: pending.
+Investigation dates: 2026-10-28 through 2026-10-29. Pre-repair branch revision: `9257d80ae6fab1c83439c46c845326bbebfcb0c7`. Both families pass the serialized stock-MLX numerical suites with unchanged gates. Fresh native, CPU and canonical BF16/image regressions also pass. Final repair revision, refreshed worker qualification and matched performance results: pending.
 
 This record tracks repairs to the affine-Q4 numerical failures and the measured MLX performance gap. The [original native validation record](2026-10-28-olmo3-gemma4-native.md) remains unchanged, including its passing BF16 results, failed Q4 gates and diagnostic timings. This investigation does not change acceptance tolerances. Primitive agreement and diagnostic controls are recorded separately from complete model qualification.
 
@@ -106,6 +106,16 @@ The remaining 23-token Gemma case exposed one valid BF16 QK-score disagreement i
 
 This dense QK repair is restricted to the explicit materialized BF16 source profile, D=512, eight query heads and one KV head, query rows 9 through 1,023, an MXU-capable device, and the audited source split predicate after wide-vector exclusion. The inner dimension is 512 with two 256-element K partitions. Quantized source QMM retains its separately validated BF16 partial-scratch and typed-reduction policy. Independent source-QK routing and rounding tests pass; these controls do not broaden qualification to other dense shapes.
 
+### Cached trajectory: physical window order and dense-wide QK
+
+The initial precision repair at `b53320a1122358ef95740d6178e0ef6d5429ca97` passes both 14-case suites and the bounded generation/scoring worker checks described below. The longer matched benchmark nevertheless exposes a Gemma output-hash disagreement across 128 returned tokens. A separate stock-MLX cached trajectory locates the first difference at absolute input position 512, local layer 8, after an exact 511-token prefill and exact first cached step.
+
+All prepared Q/K/V values agree. The source replaces its rotating-cache slot before attention; native storage appends the pending suffix and masks the old slot until acceptance. Those representations contain identical visible values, but distribute them differently across the source online F32 reduction. The old 513-entry representation differs in one of 2,048 BF16 attention values. Compacting those same native buffers into the source physical 512-entry order eliminates the difference. The native repair instead maps the source traversal onto the existing storage without a KV copy. It records the source origin after multi-token acceptance and retains that origin across M=1 accepts. Independent powers-of-two cancellation controls cover origins 0, 4 and 511, later single-token phases, pre-wrap state and legacy negative controls.
+
+The corrected ring makes the first eight source forwards exact through all 35 layers and logits. The next difference, at absolute position 519 in global layer 4, is separate: all prepared operands agree, but two of 4,160 BF16 QK scores differ, leading to one probability and four of 4,096 attention-output differences. The value product is exact when given source probabilities. Switching the generic dense engine or scratch precision does not reproduce the source. An F64 classification favors the source score at one boundary and the earlier native score at the other; this is a compatibility repair for the declared arithmetic profile.
+
+The source collapses eight D512 query heads into M=8 and selects its dense `GemvWide` kernel before GEMM. A bounded native adaptation preserves its staged float4 dots, four query vectors per group, local accumulation and halving shuffles before the BF16 score store. The new production route makes all 4,160 scores and probabilities and all 4,096 attention outputs exact on the causal control. It is restricted to the validated BF16 source profile, one query, eight query heads, one KV head, unit scale, no ring or sliding window, 2 through 1,023 keys, and the qualified MXU-capable host path. The complete public 512-input/128-return stream then matches the stock-MLX output hash `03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1` in all four repeated runs of binary SHA256 `90daa697db02c3ec7077e2e00d6361538ff4df6dd34d85c52a07e5b9e1ae05ca`. Those runs establish output agreement; their timings are excluded because other CPU work was active.
+
 ### GPU rotary coefficients, precise powers and YaRN prescaling
 
 The earlier native path calculated sine/cosine tables on the CPU. The source calculates GPU frequencies and uses fast GPU trigonometric functions. An explicit source preparation path reproduces those operations for the supported unscaled, proportional and YaRN configurations. OLMo YaRN also materializes its weak BF16 attention factor before rotation; folding the wider factor into a CPU trigonometric coefficient changes the result.
@@ -146,7 +156,7 @@ The comparison driver snapshots benchmark executables and the MLX harness before
 
 Sequence-reference protocol `dense-q4-sequence-v3-cache-state-only-prefill` now matches the benchmark's discarded prefix readout and cache-state-only prefill evaluation. Cached-generation-trajectory references and freshly recomputed-prefix references carry separate profile labels. Fresh native prefill comparisons must use the recomputed profile; cached trajectory diagnostics retain their original meaning. Earlier v1/v2 receipts remain unchanged.
 
-## Completed numerical qualification
+## Initial repaired numerical qualification
 
 The final stable Metal comparison binary is `source-qk-safe-v1-dense-parity`, SHA256 `f7940b16e2afda301fc104d583e2003cae1a6dc93a7e15cf4caf7e507a10176e`. The corresponding physical-control test binary is `source-qk-safe-vector-v2-test`, SHA256 `a693948c970a7d967da20233ecded91991c5d64adf33822f4f89a8c3657cf391`. These immutable binary identities bind the numerical results before the final repair commit is assigned.
 
@@ -174,7 +184,10 @@ Both tested v5 artifacts were produced through the normal converter CLI with fre
 | Weights SHA256 | `86eca5f98623ae556c4af1e681529579c10fac9bc710801bf6d182679a265400` | `6b340c2c5de885e6a29fd72671cd89ab878d7d582863a6ef1775ee4da81038ea` |
 | Configuration SHA256 | `6c55239ab67ac5c3bb7bc6605d507123657c4187a1f69d105c1e7d2726af2dc1` | `db1850dce7370c6cb797f703e48609e4b112eebb8d18ff86ce0f1bb6628875e0` |
 | Source manifest SHA256 | `c973ee635c50c06eb17be245d101f6e3ea7b7f735937b1b927d4cff7f38d2ba4` | `b657d8531553412e4d04bdd14f4fa771571a07a2e021af95819df090c22d61ae` |
-| Conversion receipt SHA256 | `34b05ebe4ce0aaf9d452becd238323066f07da98fac374ae10e28073e56e9ffb` | `1362c2458c6c9f0b10bc9e1fc29607f83732048c2ab94c9220b4d86ea890e7a5` |
+| CLI conversion report SHA256 | `34b05ebe4ce0aaf9d452becd238323066f07da98fac374ae10e28073e56e9ffb` | `1362c2458c6c9f0b10bc9e1fc29607f83732048c2ab94c9220b4d86ea890e7a5` |
+| Artifact `conversion.json` SHA256 | `c67580f7a4fc15c213b228ba30f8a8b4cde32e2f3882876593e4cdf65fc4e3c1` | `b248e76393ba22adba4877b300661a43f8560f7c63e5c5b8518aed3899289b62` |
+
+The CLI reports and artifact receipts contain identical JSON values with different serialization. Worker and benchmark receipts bind the exact bytes of each artifact's `conversion.json`.
 
 ## Remaining qualification and benchmark status
 
@@ -185,10 +198,10 @@ Both tested v5 artifacts were produced through the normal converter CLI with fre
 | Stock-MLX numerical suite, five cases, unchanged gates | Pass, 5/5 | Pass, 5/5 |
 | Stock-MLX teacher-forced sequence suite, nine positions from context 512 through 640 | Pass, 9/9 | Pass, 9/9 |
 | Generation/scoring workers, exact replay, restart and cache-failure recovery | Pending | Pending |
-| Existing BF16/F32 reference and Gemma image regressions | Pending | Pending |
-| Full physical native unit suite | Pending | Pending |
+| Canonical BF16 text and Gemma image regressions | Pass, 5/5 text | Pass, 5/5 text and 3/3 images |
+| Full physical native unit suite | Pass, 709 tests | Pass, 709 tests |
 | Accepted quiet matched benchmark and output-hash agreement | Pending | Pending |
-| Required Rust/Python/policy/format checks | Pending | Pending |
+| Native/CPU, policy, Ruff and format checks | Pass, recorded below | Pass, recorded below |
 
 The pending rows require their own completed, source-bound receipts. Numerical qualification does not fill the worker, regression or performance rows. New benchmark results must state their implementation/binary identity and precision policy; earlier diagnostic measurements remain historical.
 
@@ -238,3 +251,48 @@ All paths below are relative to ignored `runtime/olmo3-gemma4/`. Only aggregate 
 | `q4-repair/gemma4-native-prefill22-layer24-production-qk-v1/report.json` | `9f6f22833c30aa031d36e7452aa67dd5b549f2901d8b5a9e152d3ba0e6885dd0` |
 | `q4-repair/gemma4-prefill22-layer24-qk-f64-control-v1.json` | `10eb92c271a6e6f861883977c9deabe5c91dab3acb8e3d716db9d1af50d457ea` |
 | `q4-repair/source-qk-safe-vector-v2-qk-guards.log` | `cae975169101be6caaa8e621a50083971267fa0e340faa0ee75e92e426181983` |
+
+## Gemma cached-trajectory completion
+
+The source Ring traversal and dense-wide QK repairs have a separate completed numerical run. The earlier table remains bound to its earlier binaries. The new Metal comparison binary is `source-cached-qk-wide-v1-dense-parity`, SHA256 `85eb60f8113de59c7462de949bb0ab7c4f58df85f68ae073bf7980ed91b802fd`. It uses the unchanged v5 artifact identities above and the same pinned stock-MLX references and `gemma4-canonical-bf16-v4` acceptance policy.
+
+| Gemma suite | Strict cases passed | Greedy agreement | Full-vocabulary bit-exact cases | Maximum centered RMSE | Maximum centered absolute error | Maximum reference-to-native KL |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Original lengths 1, 19, 23, 129 and 517 | 5/5 | 5/5 | 5/5 | 0 | 0 | 0 |
+| Fresh-prefix sequence positions 512 through 640, step 16 | 9/9 | 9/9 | 9/9 | 0 | 0 | 0 |
+
+The cached-trajectory check is separate from those fresh-prefix scores. After a 511-token cache prime, it compares 129 single-token forwards at absolute input positions 511 through 639, including the final lookahead. Every forward matches the source at embedding, all 35 layer outputs, final hidden state and all 262,144 logits: 4,902 of 4,902 component hashes agree, with no differing forward. The source reference with detailed step-8 capture independently preserves all 4,902 component hashes from the earlier source reference.
+
+The trajectory test first validates the public stream and then requires its manual unforced decoder sequence to match that stream. Both, and the teacher-forced trajectory, match stock MLX across all 128 returned choices with SHA256 `03f17cff595a19aba064fb7ddf00547b52fd0cdf3c908b77db96f2727aba52a1`. The executed trajectory binary is `source-cached-qk-wide-v1-test`, SHA256 `13f551f7b368585eb81f2d2c730f57a6e2341b87048a2748c4fb9722f6f82a23`. Its receipt binds the executable, native weights/configuration, private input identities and compiled harness/Ring/cache-host identities. The aggregate receipt also records the frozen QK and fallback source identities. Later helper revisions add those two source identities as embedded fields and default to the current source output hash; historical immutable variants retain an explicit expected-hash override.
+
+The public stream driver, SHA256 `90daa697db02c3ec7077e2e00d6361538ff4df6dd34d85c52a07e5b9e1ae05ca`, repeats the 512-input/128-return request four times. Every run returns the source hash, performs 128 decode forwards and finishes at context 640. These runs establish output identity; their timings remain excluded because concurrent CPU work was active.
+
+These results qualify the tested E2B affine W4/group-64 artifact with BF16 activations on the recorded M5 Max host. They do not establish other checkpoints, architectures, arbitrary contexts or task quality. Worker, canonical BF16/image, complete native-suite and quiet performance checks retain their own source-bound receipts.
+
+All receipt paths below are relative to ignored `runtime/olmo3-gemma4/`. The aggregate contains counts and identities only; input vectors, generated sequences and tensors remain private.
+
+| Completion receipt | SHA256 |
+| --- | --- |
+| `q4-repair/gemma4-final-numerical-qualification-v1.json` | `87165d907d3b89c558bbf3ca78964ee589e474beafba276e1a9cab832fbe4848` |
+| `q4-repair/gemma4-source-ring-qk-wide-v1-parity5.json` | `deb70e576865c4123ae6ff13ca022653173c17f3e70db37627b11efa11ba5b5c` |
+| `q4-repair/gemma4-source-ring-qk-wide-v1-parity9-v3.json` | `c5cf10ab3487a34855260b8f9232e0f9052f42b6df7ac3e125739eef7af46806` |
+| `q4-repair/gemma4-cached-trajectory-source-v2/trajectory-reference.json` | `207f935247b48f7b6b3836be22959720589c17c49944b421eab833197551dae0` |
+| `q4-repair/gemma4-cached-trajectory-native-qk-wide-v4/trajectory-native.json` | `5a7af4fc943f45894cccdfc6badf6c9ad901fb4c30e5cd4d3334c547caf78012` |
+| `q4-repair/gemma4-qk-wide-trajectory-comparison-v4.json` | `086678f61ba67394ed47a558ecd06a22a123bfedae5eddc96386207f9f02a715` |
+| `q4-repair/gemma4-qk-wide-source128-profile-v1.json` | `e4e8c9ad4003dfb3475e7575e96421f52bf974d972244efd236181eb07272c94` |
+| `q4-repair/gemma4-step8-global4-qk-wide-v1/report.json` | `461e45de14227146b1be3e57d6b4dbbc9a76a57fcb8cddcd1edeb7d39d427a0c` |
+
+## Cached-attention regression checks
+
+The corrected native suite passes 709 tests with zero failures and 54 ignored tests, using binary SHA256 `8eca6ab13c368f76de50021b40915562207e782d633b1860541565913c645c30`. The CPU/grammar configuration passes 472 unit tests, seven integration tests and three doctests, with zero failures and 21 ignored tests. Repository policy, Ruff and pinned-nightly formatting checks pass. An earlier full native run passed 708 tests and failed one newly added dispatch test because its fixture retained ring/window settings while asserting the flat global route. That test setup was corrected; the failed run remains preserved separately with log SHA256 `4fdaad737fe4799dbe29db88c9f7184c512455fb186abaed4b93c1df170350f6`.
+
+A fresh OLMo run with comparison binary `85eb60f8113de59c7462de949bb0ab7c4f58df85f68ae073bf7980ed91b802fd` passes all 14 unchanged gates, with 13 full-vocabulary exact cases and all 14 greedy choices matching. The 4,101-token errors remain identical to the initial repaired run. Gemma's later qualification above passes all 14 cases exactly.
+
+Fresh canonical regressions pass all five BF16 text cases for each family and all three HF Gemma image cases. All ten full-vocabulary text hashes and the complete image metrics bytes equal their preserved earlier runs. Complete weight files for the three native artifacts were freshly hashed against their conversion receipts. These checks bind the actual comparison and image-test binaries; worker and quiet performance qualification remain separate.
+
+| New aggregate receipt, relative to ignored `runtime/olmo3-gemma4/` | SHA256 |
+| --- | --- |
+| `q4-repair/cached-attention-v3-numerical-regression-receipt.json` | `2b5c2a4c6fdef2b11bf755335a56581905b7f77ebfc9fb5ab444fd94b0ef6e4b` |
+| `q4-repair/olmo3-cached-attention-v3-parity5.json` | `4d7c8646b948cf77d6bde7080d206fd38049522e2291380037aad510c551e781` |
+| `q4-repair/olmo3-cached-attention-v3-parity9.json` | `2562ecc02dd6a58afd902d13f72df90d51d71bfb831970073f74f36647e12274` |
+| `q4-repair/final-canonical-regressions-v2-receipt.json` | `a1b939674286c032753a94e8ba125075f2bd4ee7dae264f595ec0e96f755bd65` |

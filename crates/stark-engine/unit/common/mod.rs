@@ -20,6 +20,9 @@ mod bench_cold_pool_test;
 mod model_loading_bench;
 
 #[cfg(backend = "metal")]
+#[path = "../engine/gemma4_cached_trajectory.rs"]
+mod gemma4_cached_trajectory;
+#[cfg(backend = "metal")]
 #[path = "../engine/gemma4_precision.rs"]
 mod gemma4_precision;
 #[cfg(backend = "metal")]

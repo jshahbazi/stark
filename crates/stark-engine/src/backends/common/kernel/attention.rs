@@ -42,9 +42,38 @@ pub struct AttentionKernelConfig {
 }
 
 impl AttentionKernelConfig {
+    /// Qualified cached D512 source QK route. MLX collapses the eight query
+    /// heads into M=8 and uses its dense wide-vector kernel before GEMM.
+    /// Keep this adaptation on the audited MXU-capable source profile.
+    pub fn source_cached_qk_wide_lanes(
+        self,
+        rows: u32,
+        keys: u32,
+        supports_mxu: bool,
+    ) -> Option<u32> {
+        if !supports_mxu
+            || !self.materialize_prefill_scores
+            || self.validate_prefill_materialization().is_err()
+            || self.head_dim != 512
+            || self.num_q_heads != 8
+            || self.num_groups != 1
+            || self.is_kv_cache_ring
+            || self.sliding_window_size.is_some()
+            || rows != 1
+            || !(2..1024).contains(&keys)
+        {
+            return None;
+        }
+        Some(if keys <= 64 {
+            32
+        } else {
+            16
+        })
+    }
+
     /// Qualified MLX NAX QK split: BF16 operands, F32 partitions/reduction,
-    /// followed by one BF16 score store. Small decode vectors retain their
-    /// earlier dense-wide route; multiple KV groups cannot collapse to one batch.
+    /// followed by one BF16 score store. Multiple KV groups cannot collapse
+    /// to one batch, and short cached vectors have a separate wide route.
     pub fn source_nax_qk_split_parts(
         self,
         rows: u32,
@@ -258,6 +287,60 @@ mod materialized_tests {
             assert!(!legacy.materializes_scores_for_geometry(rows, keys));
         }
         assert!(!config(true).materializes_scores_for_geometry(1, 512));
+    }
+
+    #[stark_test]
+    fn source_cached_qk_wide_policy_preserves_small_rows_tails_and_legacy_dispatch() {
+        let source = AttentionKernelConfig {
+            head_dim: 512,
+            num_q_heads: 8,
+            is_kv_cache_ring: false,
+            sliding_window_size: None,
+            ..config(true)
+        };
+        for (keys, expected) in
+            [(1, None), (2, Some(32)), (64, Some(32)), (65, Some(16)), (520, Some(16)), (1023, Some(16)), (1024, None)]
+        {
+            assert_eq!(source.source_cached_qk_wide_lanes(1, keys, true), expected);
+        }
+        assert_eq!(source.source_cached_qk_wide_lanes(2, 520, true), None);
+        assert_eq!(source.source_cached_qk_wide_lanes(1, 520, false), None);
+        for other in [
+            AttentionKernelConfig {
+                materialize_prefill_scores: false,
+                ..source
+            },
+            AttentionKernelConfig {
+                head_dim: 256,
+                ..source
+            },
+            AttentionKernelConfig {
+                num_groups: 2,
+                ..source
+            },
+            AttentionKernelConfig {
+                num_q_heads: 16,
+                ..source
+            },
+            AttentionKernelConfig {
+                data_type: DataType::F32,
+                ..source
+            },
+            AttentionKernelConfig {
+                scale: Some(0.5),
+                ..source
+            },
+            AttentionKernelConfig {
+                is_kv_cache_ring: true,
+                ..source
+            },
+            AttentionKernelConfig {
+                sliding_window_size: Some(512),
+                ..source
+            },
+        ] {
+            assert_eq!(other.source_cached_qk_wide_lanes(1, 520, true), None);
+        }
     }
 
     #[stark_test]

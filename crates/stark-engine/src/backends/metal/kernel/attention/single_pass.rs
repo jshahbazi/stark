@@ -94,7 +94,7 @@ impl AttentionSinglePass {
             config.data_type,
         )?;
         macro_rules! encode_vector {
-            ($kernel:expr) => {
+            ($kernel:expr $(, $source_origin:expr)?) => {
                 $kernel.encode(
                     arguments.queries,
                     arguments.keys,
@@ -107,6 +107,7 @@ impl AttentionSinglePass {
                     config.head_dim,
                     config.num_groups * config.head_dim,
                     arguments.cache.ring_params(),
+                    $($source_origin,)?
                     config.scale.unwrap_or(1.0 / (config.head_dim as f32).sqrt()),
                     arguments.trie,
                     config.sliding_window_size,
@@ -127,7 +128,7 @@ impl AttentionSinglePass {
             && arguments.cache.prefix_len() + arguments.suffix_length < 1024;
         if source {
             let kernel = self.get_or_create_source(command_buffer.context())?;
-            encode_vector!(kernel);
+            encode_vector!(kernel, arguments.cache.source_ring_origin());
         } else {
             let kernel = self.get_or_create(command_buffer.context(), arguments.trie.is_some())?;
             encode_vector!(kernel);

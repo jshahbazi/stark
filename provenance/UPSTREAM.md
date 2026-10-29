@@ -78,6 +78,15 @@ source-profile markers select this path; other vector configurations retain
 their existing kernels. F32 score, probability and output accumulation precede
 the final BF16 materialization.
 
+Source sliding-window M=1 attention also preserves the physical traversal of
+MLX-LM's `RotatingKVCache` at revision
+`1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7`, path `mlx_lm/models/cache.py`,
+SHA-256 `c96cb169fd5e0ec4584a162dd61dc62ab08ccdca03a9850f8a491ce6809145e6`.
+Native cache storage still appends a pending suffix before acceptance. A scalar
+origin records the source order after bulk acceptance; the source vector kernel
+maps that order onto existing storage and substitutes the pending overwrite.
+This preserves the source F32 online reduction without copying the KV cache.
+
 The materialized source-attention QK product also preserves the source dense
 split-K precision when its host predicate selects two partitions. For the
 qualified BF16 D512 geometry with eight query heads and one KV head, the
@@ -86,6 +95,15 @@ then casts each score once to BF16. This applies to source prefill rows 9
 through 1,023 after excluding the source wide-vector case and checking the
 source split predicate. The adaptation is in `attention/fallback.rs` and
 `matmul/mod.rs`; it does not change quantized QMM or other dense products.
+
+The cached D512 QK route separately adapts `gemv.h`'s `GemvWide` schedule in
+`attention/source_cached_qk.metal`. On the qualified MXU-capable BF16 source
+profile, one query with eight heads collapses to M=8, with one KV head, no ring
+or sliding window, and 2 through 1,023 keys. The source uses four query vectors
+per group and 32 reduction lanes for at most 64 keys, otherwise 16 lanes.
+The native adaptation preserves staged float4 dots, local accumulation and
+halving shuffles before its BF16 score store. Other fallback products retain
+their existing route.
 
 These are native Rust/Metal paths; MLX remains a private validation dependency.
 Precision changes are qualified against matching source-bound references,
@@ -127,6 +145,8 @@ The inspected MLX source files have the following SHA-256 hashes:
 | Source path | SHA-256 |
 | --- | --- |
 | `mlx/backend/metal/kernels/quantized.h` | `8e2ca65d8d8dafe67b97120d1127d54ce57032f621bdba161e54a0bc4a948b8c` |
+| `mlx/backend/metal/kernels/gemv.h` | `296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65` |
+| `mlx/backend/metal/kernels/gemv.metal` | `0bd8bde0c867a17c345a3651f9f0a6c2909e0c74e76ea2a08f373fe4dcafaeda` |
 | `mlx/backend/metal/quantized.cpp` | `36b79607ee01bc213511dcdad590b2dc3b96099300551cbc3e7e6c7e13ba5982` |
 | `mlx/backend/metal/kernels/bf16_math.h` | `1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496` |
 | `mlx/backend/metal/kernels/reduction/reduce_col.h` | `800868c1eafbf2b85980731a6303942d2d1061023f6d465f2b996642126cdc62` |

@@ -674,7 +674,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
         return Err("source_identity");
     }
     let rows = receipt["identity"]["actual_projection_rows"].as_u64().ok_or("rows_missing")? as usize;
-    if !(9..1024).contains(&rows) {
+    if !(1..1024).contains(&rows) {
         return Err("source_rows");
     }
     let read = |name: &str| -> Result<Vec<f32>, &'static str> {
@@ -696,12 +696,18 @@ fn attention_stages_probe() -> Result<(), &'static str> {
     };
     let context = <Metal as Backend>::Context::new().map_err(|_| "context")?;
     let q = read("actual_q_rope")?;
-    let k = read("actual_k_rope_native")?;
-    let v = read("actual_v_norm")?;
+    let k = read("actual_attention_keys_native")?;
+    let v = read("actual_attention_values_native")?;
     let head_dim = q.len() / (8 * rows);
+    if !matches!(head_dim, 256 | 512) {
+        return Err("head_dimension");
+    }
+    let sequence = k.len() / head_dim;
     if !matches!(head_dim, 256 | 512)
         || q.len() != 8 * rows * head_dim
-        || k.len() != rows * head_dim
+        || k.len() != sequence * head_dim
+        || sequence < rows
+        || (rows == 1 && head_dim != 512)
         || v.len() != k.len()
     {
         return Err("source_shape");
@@ -743,7 +749,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                 cache: if head_dim == 256 {
                     KVCacheView::ring(0, 0)
                 } else {
-                    KVCacheView::full(0)
+                    KVCacheView::full((sequence - rows) as u32)
                 },
             },
             &mut commands,
@@ -781,7 +787,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                     gather_indices: None::<&<Metal as Backend>::ScratchBuffer>,
                     m: 8 * rows as u32,
                     n: head_dim as u32,
-                    k: rows as u32,
+                    k: sequence as u32,
                 },
                 &mut commands,
             )
@@ -810,7 +816,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                 DataType::BF16
             };
             let mut product = commands
-                .allocate_scratch_for_shape(&[8 * rows as u32, rows as u32], output_dtype)
+                .allocate_scratch_for_shape(&[8 * rows as u32, sequence as u32], output_dtype)
                 .map_err(|_| "qk_scratch")?;
             let mut kernel = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::new(
                 &context,
@@ -830,7 +836,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                 8 * rows
             };
             for batch in 0..batches {
-                let output_begin = batch * batch_rows * rows * output_dtype.size_in_bytes();
+                let output_begin = batch * batch_rows * sequence * output_dtype.size_in_bytes();
                 let arguments = MatmulArguments {
                     a: MatmulA::FullPrecision {
                         values: &q,
@@ -841,12 +847,13 @@ fn attention_stages_probe() -> Result<(), &'static str> {
                     },
                     b_leading_dimension: Some(head_dim as u32),
                     b_transpose: true,
-                    d: (&mut product)
-                        .subrange_mut(output_begin..output_begin + batch_rows * rows * output_dtype.size_in_bytes()),
+                    d: (&mut product).subrange_mut(
+                        output_begin..output_begin + batch_rows * sequence * output_dtype.size_in_bytes(),
+                    ),
                     d_transform: MatmulDOps::none(),
                     gather_indices: None::<&<Metal as Backend>::ScratchBuffer>,
                     m: batch_rows as u32,
-                    n: rows as u32,
+                    n: sequence as u32,
                     k: head_dim as u32,
                 };
                 if name == "qk_split2_f32" {
@@ -892,7 +899,7 @@ fn attention_stages_probe() -> Result<(), &'static str> {
         let mut error = Vec::new();
         let mut excluded = 0;
         for (i, (&a, &b)) in native.iter().zip(&reference).enumerate() {
-            if (name == "scores" || name.starts_with("qk_")) && i % rows > (i / rows) % rows {
+            if (name == "scores" || name.starts_with("qk_")) && i % sequence > sequence - rows + (i / sequence) % rows {
                 excluded += 1;
                 continue;
             }
@@ -965,11 +972,15 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
     };
     let context = <Metal as Backend>::Context::new().map_err(|_| "context")?;
     let q = read("actual_q_rope")?;
-    let k = read("actual_attention_keys_native")?;
-    let v = read("actual_attention_values_native")?;
+    let mut k = read("actual_attention_keys_native")?;
+    let mut v = read("actual_attention_values_native")?;
     let expected = read("actual_attention_output")?;
-    let sequence = receipt["identity"]["actual_position_offset"].as_u64().ok_or("prefix_missing")? as usize + 1;
+    let absolute_position = receipt["identity"]["actual_position_offset"].as_u64().ok_or("prefix_missing")? as usize;
     let head_dim = q.len() / 8;
+    if !matches!(head_dim, 256 | 512) {
+        return Err("source_head_dimension");
+    }
+    let mut sequence = k.len() / head_dim;
     if !matches!(head_dim, 256 | 512)
         || q.len() != 8 * head_dim
         || k.len() != sequence * head_dim
@@ -977,6 +988,65 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
         || expected.len() != q.len()
     {
         return Err("source_shape");
+    }
+    let mut layout = "source-physical";
+    let mut cache_view = KVCacheView::full(sequence as u32 - 1);
+    let mut ring = false;
+    let mut window = None;
+    let mut native_cache_identity = None;
+    if let Some(path) = std::env::var_os("STARK_GEMMA_NATIVE_CACHE_PATH") {
+        let path = PathBuf::from(path);
+        let metadata_bytes = fs::read(path.join("cache-view.json")).map_err(|_| "cache_metadata")?;
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata_bytes).map_err(|_| "cache_json")?;
+        if head_dim != 256
+            || absolute_position != 512
+            || metadata["layer_index"] != 8
+            || metadata["step"] != 1
+            || metadata["rows"] != 513
+            || metadata["prefix_rows"] != 512
+            || metadata["ring_offset"] != 0
+            || metadata["ring_length"] != 512
+            || metadata["element_dim"] != 256
+        {
+            return Err("cache_geometry");
+        }
+        let parent = path.parent().ok_or("cache_parent")?;
+        let trajectory_bytes = fs::read(parent.join("trajectory-native.json")).map_err(|_| "cache_receipt")?;
+        let trajectory: serde_json::Value =
+            serde_json::from_slice(&trajectory_bytes).map_err(|_| "cache_receipt_json")?;
+        let entries = trajectory["modes"][1]["steps"][1]["components"].as_array().ok_or("cache_components")?;
+        let read_native = |name: &str| -> Result<Vec<f32>, &'static str> {
+            let bytes = fs::read(path.join(format!("{name}.f32"))).map_err(|_| "cache_tensor")?;
+            if bytes.len() != 513 * 256 * 4
+                || !entries
+                    .iter()
+                    .any(|e| e["component"] == name && e["sha256"] == format!("{:x}", Sha256::digest(&bytes)))
+            {
+                return Err("cache_hash");
+            }
+            let values: Vec<f32> = bytes.as_chunks::<4>().0.iter().map(|x| f32::from_le_bytes(*x)).collect();
+            if values.iter().any(|&x| !x.is_finite() || bf16::from_f32(x).to_f32() != x) {
+                return Err("cache_dtype");
+            }
+            Ok(values)
+        };
+        k = read_native("native_cache_keys")?;
+        v = read_native("native_cache_values")?;
+        native_cache_identity = Some(format!("{:x}", Sha256::digest(&trajectory_bytes)));
+        if std::env::var_os("STARK_GEMMA_CACHE_COMPACT_SOURCE_ORDER").is_some() {
+            let compact =
+                |a: &[f32]| -> Vec<f32> { a[512 * 256..].iter().chain(a[256..512 * 256].iter()).copied().collect() };
+            k = compact(&k);
+            v = compact(&v);
+            sequence = 512;
+            layout = "native-compacted-source-order";
+        } else {
+            sequence = 513;
+            cache_view = KVCacheView::ring(512, 0);
+            ring = true;
+            window = Some(512);
+            layout = "native-physical-prefix-plus-suffix";
+        }
     }
     let to_buffer = |values: &[f32]| {
         crate::tests::helpers::create_buffer_with_data::<Metal, bf16>(
@@ -992,9 +1062,9 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
         num_groups: 1,
         num_q_heads: 8,
         has_sinks: false,
-        is_kv_cache_ring: false,
+        is_kv_cache_ring: ring,
         is_causal: true,
-        sliding_window_size: None,
+        sliding_window_size: window,
         scale: Some(1.0),
         data_type: DataType::BF16,
         materialize_prefill_scores: true,
@@ -1012,7 +1082,7 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
                 suffix_length: 1,
                 trie: None::<&<Metal as Backend>::ConstantBuffer>,
                 sinks: None,
-                cache: KVCacheView::full(sequence as u32 - 1),
+                cache: cache_view,
             },
             &mut commands,
         )
@@ -1024,7 +1094,7 @@ fn cached_vector_attention_probe() -> Result<(), &'static str> {
     let error: Vec<_> = native.iter().zip(&expected).map(|(&a, &b)| f64::from(a) - f64::from(b)).collect();
     let bytes: Vec<_> = native.iter().flat_map(|x| x.to_le_bytes()).collect();
     let report = serde_json::json!({"backend":"metal","acceptance":"diagnostic-only","source_layer":receipt["identity"]["actual_layer_index"],
-        "prefix_tokens":sequence-1,"head_dim":head_dim,"elements":native.len(),"different":error.iter().filter(|x|**x!=0.0).count(),
+        "prefix_tokens":cache_view.prefix_len(),"source_absolute_position":absolute_position,"layout":layout,"attention_sequence_length":sequence,"native_cache_receipt_sha256":native_cache_identity,"head_dim":head_dim,"elements":native.len(),"different":error.iter().filter(|x|**x!=0.0).count(),
         "rmse":(error.iter().map(|x|x*x).sum::<f64>()/error.len() as f64).sqrt(),"max_abs":error.iter().map(|x|x.abs()).fold(0.0,f64::max),
         "native_sha256":format!("{:x}",Sha256::digest(&bytes)),"fixture_receipt_sha256":format!("{:x}",Sha256::digest(&receipt_bytes))});
     private_write(&output, &serde_json::to_vec(&report).map_err(|_| "report_encode")?).map_err(|_| "report_write")?;

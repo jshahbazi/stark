@@ -42,6 +42,7 @@ fn checked_preparation_rows(
 pub struct KVCacheView {
     prefix_len: u32,
     ring: Option<RingParams>,
+    source_ring_origin: u32,
 }
 
 impl KVCacheView {
@@ -49,6 +50,7 @@ impl KVCacheView {
         Self {
             prefix_len,
             ring: None,
+            source_ring_origin: 0,
         }
     }
 
@@ -62,7 +64,21 @@ impl KVCacheView {
                 ring_offset: offset,
                 ring_length: prefix_len,
             }),
+            source_ring_origin: 0,
         }
+    }
+
+    pub(crate) fn with_source_ring_origin(
+        mut self,
+        origin: u32,
+    ) -> Self {
+        assert!(origin < self.prefix_len || (origin == 0 && self.prefix_len == 0));
+        self.source_ring_origin = origin;
+        self
+    }
+
+    pub fn source_ring_origin(self) -> u32 {
+        self.source_ring_origin
     }
 
     pub fn prefix_len(self) -> u32 {
@@ -82,6 +98,9 @@ enum KVCacheState {
         offset: u32,
         length: u32,
         capacity: u32,
+        /// Source RotatingKVCache puts each multi-token update in temporal
+        /// order, then retains that physical origin across single-token updates.
+        source_origin: u32,
     },
 }
 
@@ -98,6 +117,7 @@ impl KVCacheState {
             offset: 0,
             length: 0,
             capacity,
+            source_origin: 0,
         }
     }
 
@@ -109,8 +129,9 @@ impl KVCacheState {
             Self::Ring {
                 offset,
                 length,
-                capacity: _,
-            } => KVCacheView::ring(*length, *offset),
+                source_origin,
+                ..
+            } => KVCacheView::ring(*length, *offset).with_source_ring_origin(*source_origin),
         }
     }
 
@@ -158,6 +179,7 @@ impl KVCacheState {
                 offset,
                 length,
                 capacity,
+                source_origin,
             } => {
                 let count = accepted_indices.len() as u32;
                 let mut copies = Vec::with_capacity(accepted_indices.len().min(*capacity as usize));
@@ -178,6 +200,12 @@ impl KVCacheState {
                     } else {
                         *offset = (*offset + 1) % *capacity;
                     }
+                }
+                if accepted_indices.len() > 1 {
+                    // The next source M=1 update trims the bulk cache to the
+                    // window and overwrites its first slot. No native KV data
+                    // is moved; this scalar maps the source traversal to it.
+                    *source_origin = *offset;
                 }
                 copies
             },

@@ -555,3 +555,6 @@ fn dense_q4_cold_tile_sweep() {
         serde_json::json!({"scope":"synthetic-cold-q4-g64-tile-sweep-v2","working_set_bytes":256usize<<20,"cases":rows})
     );
 }
+
+#[path = "source_layout_profile.rs"]
+mod source_layout_profile;

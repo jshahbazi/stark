@@ -36,6 +36,7 @@ KERNEL(SourceAttentionSinglePass)(
     const constant uint& v_head_stride,
     const constant uint& v_seq_stride,
     const constant RingParams& ring_params OPTIONAL(is_kv_cache_ring),
+    const constant uint& source_ring_origin,
     const constant float& scale,
     const device TrieNode* trie OPTIONAL(is_trie),
     const constant uint& sliding_window_size OPTIONAL(is_sliding_window),
@@ -60,9 +61,6 @@ KERNEL(SourceAttentionSinglePass)(
   constexpr uint value_dim = HEAD_DIM;
   constexpr uint qk_elements_per_thread = HEAD_DIM / HEAD_BLOCK_SIZE;
   constexpr uint value_elements_per_thread = value_dim / HEAD_BLOCK_SIZE;
-  uint inner_k_stride = SEQUENCE_BLOCK_SIZE * int(k_seq_stride);
-  uint inner_v_stride = SEQUENCE_BLOCK_SIZE * int(v_seq_stride);
-
   typedef float U;
 
   thread U q[qk_elements_per_thread];
@@ -75,15 +73,27 @@ KERNEL(SourceAttentionSinglePass)(
 
   const uint prefix_length = sequence_length - suffix_length;
 
+  // Source RotatingKVCache overwrites its next physical slot before attention.
+  // Native storage appends the suffix until accept. Read a virtual source ring
+  // without mutating either cache or changing which logical keys are visible.
+  const bool source_full_ring = is_kv_cache_ring && is_sliding_window &&
+      suffix_length == 1 && prefix_length == sliding_window_size;
+  const uint visible_sequence_length = source_full_ring ? prefix_length : sequence_length;
+  // The source M=1 path has no array mask: its cache already contains exactly
+  // the visible keys. Avoid a per-key ring modulo when that invariant holds.
+  const bool source_all_visible = is_causal && !is_trie && suffix_length == 1 &&
+      (source_full_ring ||
+       (!is_kv_cache_ring && (!is_sliding_window || sequence_length <= sliding_window_size)) ||
+       (is_kv_cache_ring && is_sliding_window && ring_params.ring_offset == 0 &&
+        sequence_length <= sliding_window_size));
+
   const uint suffix_position = is_kv_cache_ring ? uint(ring_params.ring_length) : prefix_length;
 
   const uint query_position = is_trie ? suffix_position + trie[q_seq_idx].height : suffix_position + q_seq_idx;
 
   queries += q_offset * HEAD_DIM + thread_context.simd_lane_id * qk_elements_per_thread;
-  keys += kv_head_idx * k_head_stride + thread_context.simdgroup_index * k_seq_stride +
-          thread_context.simd_lane_id * qk_elements_per_thread;
-  values += kv_head_idx * v_head_stride + thread_context.simdgroup_index * v_seq_stride +
-            thread_context.simd_lane_id * value_elements_per_thread;
+  keys += kv_head_idx * k_head_stride + thread_context.simd_lane_id * qk_elements_per_thread;
+  values += kv_head_idx * v_head_stride + thread_context.simd_lane_id * value_elements_per_thread;
 
   out += o_offset * value_dim + thread_context.simdgroup_index * value_elements_per_thread;
 
@@ -105,8 +115,16 @@ KERNEL(SourceAttentionSinglePass)(
   }
 
   // For each key
-  for (uint i = thread_context.simdgroup_index; i < sequence_length; i += SEQUENCE_BLOCK_SIZE) {
-    if (should_use_key(
+  for (uint i = thread_context.simdgroup_index; i < visible_sequence_length; i += SEQUENCE_BLOCK_SIZE) {
+    uint key_index = i;
+    if (source_full_ring) {
+      const uint rotated_index = source_ring_origin + i;
+      key_index = rotated_index >= prefix_length ? rotated_index - prefix_length : rotated_index;
+      if (key_index == ring_params.ring_offset) {
+        key_index = prefix_length;
+      }
+    }
+    if (source_all_visible || should_use_key(
             ring_params,
             trie,
             sliding_window_size,
@@ -114,7 +132,7 @@ KERNEL(SourceAttentionSinglePass)(
             prefix_length,
             suffix_position,
             query_position,
-            i,
+            key_index,
             is_kv_cache_ring,
             is_causal,
             is_trie,
@@ -122,7 +140,7 @@ KERNEL(SourceAttentionSinglePass)(
         )) {
       // Read the key
       for (uint j = 0; j < qk_elements_per_thread; j++) {
-        k[j] = keys[j];
+        k[j] = keys[ulong(key_index) * k_seq_stride + j];
       }
 
       // Compute the i-th score
@@ -142,13 +160,10 @@ KERNEL(SourceAttentionSinglePass)(
 
       // Update the output accumulator
       for (uint j = 0; j < value_elements_per_thread; j++) {
-        o[j] = o[j] * factor + exp_score * values[j];
+        o[j] = o[j] * factor + exp_score * values[ulong(key_index) * v_seq_stride + j];
       }
     }
 
-    // Move the pointers to the next kv
-    keys += inner_k_stride;
-    values += inner_v_stride;
   }
 
   // Each thread has a partial part of the output so we need to combine them.

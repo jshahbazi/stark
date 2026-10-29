@@ -16,6 +16,7 @@ use crate::{
             error::MetalError,
             kernel::{
                 AttentionFallbackScatterScoresMetalKernel, AttentionFallbackScatterValuesMetalKernel, MetalKernels,
+                SourceCachedQKMetalKernel,
             },
         },
     },
@@ -28,6 +29,7 @@ struct SourceQK {
     config: AttentionKernelConfig,
     matmul: Mutex<<MetalKernels as Kernels>::MatmulKernel>,
     cast: <MetalKernels as Kernels>::VisionCastBF16Kernel,
+    cached_wide: [SourceCachedQKMetalKernel; 2],
 }
 
 pub struct AttentionFallback {
@@ -95,6 +97,10 @@ impl AttentionFallback {
                     DataType::F32,
                 )?),
                 cast: <<MetalKernels as Kernels>::VisionCastBF16Kernel as VisionCastBF16Kernel>::new(context)?,
+                cached_wide: [
+                    SourceCachedQKMetalKernel::new(context, 16)?,
+                    SourceCachedQKMetalKernel::new(context, 32)?,
+                ],
             })
         } else {
             None
@@ -187,6 +193,16 @@ impl AttentionFallback {
 
         for group_index in 0..self.num_groups {
             if let Some(source) = &self.source_qk
+                && let Some(lanes) = source.config.source_cached_qk_wide_lanes(suffix_length, sequence_length, true)
+            {
+                source.cached_wide[usize::from(lanes == 32)].encode(
+                    arguments.queries,
+                    arguments.keys,
+                    &mut group_scores,
+                    sequence_length,
+                    command_buffer,
+                );
+            } else if let Some(source) = &self.source_qk
                 && source.config.source_nax_qk_split_parts(suffix_length, sequence_length, true).is_some()
             {
                 // MLX NAX split-K keeps dense BF16 operands, F32 partials and

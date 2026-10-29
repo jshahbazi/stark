@@ -5,7 +5,9 @@ use crate::{array::ArrayElement, backends::common::kernel::AttentionKernelConfig
 
 mod gemm_test;
 mod kernel_test;
+mod source_cached_qk_test;
 mod source_qk_test;
+mod source_ring_order_test;
 
 fn default_attention_config<T: ArrayElement>(
     head_dim: usize,
