@@ -440,6 +440,31 @@ class BundleConstructionTests(unittest.TestCase):
                 with self.assertRaisesRegex(distribution.BuildError, "path_invalid"):
                     distribution.supplemental_notices(package, source)
 
+    def test_locked_objc2_metal_supplemental_notices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary)
+            (source / ".cargo_vcs_info.json").write_text(
+                json.dumps(
+                    {
+                        "git": {"sha1": "7b1abfd750a2cacaea71d6a56ecfb83cb7de560b"},
+                        "path_in_vcs": "framework-crates/objc2-metal",
+                    }
+                )
+            )
+            paths, provenance = distribution.supplemental_notices(
+                {
+                    "name": "objc2-metal",
+                    "version": "0.3.2",
+                    "repository": "https://github.com/madsmtm/objc2",
+                },
+                source,
+            )
+            self.assertEqual(
+                {path.name for path in paths},
+                {"objc2-LICENSE.md", "objc2-LICENSE-MIT.txt", "objc2-LICENSE-ZLIB.txt"},
+            )
+            self.assertEqual(provenance["license"], "Zlib OR Apache-2.0 OR MIT")
+
     def test_native_and_vendored_licenses_are_copied_into_distribution_notices(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

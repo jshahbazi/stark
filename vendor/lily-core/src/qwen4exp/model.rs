@@ -3334,7 +3334,8 @@ impl Qwen4ExpModel {
             pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.mlp_hc, s)?;
             pass.profile_stage(crate::metal::stage_profile::Phase::Moe)?;
-            decode_moe(
+            let fuse_injection = !crate::ablate::on(crate::ablate::Group::Inject);
+            let injected = decode_moe(
                 ctx,
                 pass,
                 &moe_dims(cfg),
@@ -3346,14 +3347,33 @@ impl Qwen4ExpModel {
                     mlp_gate: &s.mlp_gate,
                     mlp_up: &s.mlp_up,
                     mlp_act: &s.mlp_act,
+                    hc_injection: fuse_injection.then_some(
+                        crate::kernels::moe::HcInjection {
+                            hyper: &s.hyper,
+                            logits: &s.hc.inj,
+                            groups: g,
+                        },
+                    ),
                 },
                 &s.moe,
             )?;
-            pass.level_barrier(&[&s.branch_out])?;
-            if !crate::ablate::on(crate::ablate::Group::Inject) {
-                pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
-                hc_inject_bf16(ctx, pass, &s.hyper, &s.branch_out, &s.hc.inj, h, g)?;
-                pass.level_barrier(&[&s.hyper])?;
+            if injected {
+                pass.level_barrier(&[&s.branch_out, &s.hyper])?;
+            } else {
+                pass.level_barrier(&[&s.branch_out])?;
+                if !crate::ablate::on(crate::ablate::Group::Inject) {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
+                    hc_inject_bf16(
+                        ctx,
+                        pass,
+                        &s.hyper,
+                        &s.branch_out,
+                        &s.hc.inj,
+                        h,
+                        g,
+                    )?;
+                    pass.level_barrier(&[&s.hyper])?;
+                }
             }
         }
 

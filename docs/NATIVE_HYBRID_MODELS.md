@@ -140,8 +140,17 @@ falling back to partition selection after 1,024 replacements. Larger bounded
 top-k uses partition selection. Full-vocabulary sampling uses three stable
 11-bit radix passes over packed F32 keys and IDs. These preserve the existing
 F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
+For at least 65,536 candidates, a lazily created worker-owned pool computes
+independent F64 exponentials on at most four available CPUs. Probability sums,
+filtering and draws retain their serial order. Small lists and failed pool
+startup use serial mapping; pool tasks finish before the readout can be reused.
 HC decode computes the scaled BF16 activation once in the down kernel and
 reuses it in an up/mix kernel retaining the original single-row dot order.
+MoE decode's down/combine row owner also performs the following HC injection,
+preserving the BF16 branch boundary and both output dependencies. This removes
+48 separate injection dispatches per token. The original kernels remain
+available for numerical controls. The [fusion and sampling study](benchmarks/QWEN38_FUSION_2026_10_29.md)
+separates component timings from complete-model throughput.
 For Q4 GDN input projections with four convolution taps and an even output
 width, projection and convolution share one dispatch, preserving the BF16
 projection boundary, tap order and window updates. Other layouts retain

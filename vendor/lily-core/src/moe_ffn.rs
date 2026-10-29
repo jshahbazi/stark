@@ -628,6 +628,8 @@ pub(crate) struct DecodeMoeIo<'a> {
     pub mlp_gate: &'a Tensor,
     pub mlp_up: &'a Tensor,
     pub mlp_act: &'a Tensor,
+    /// If present, fuse the final branch's HC write into its projection.
+    pub hc_injection: Option<moe::HcInjection<'a>>,
 }
 
 /// The decode MoE FFN, fully on-GPU: router GEMV + softmax/top-k kernel,
@@ -635,7 +637,7 @@ pub(crate) struct DecodeMoeIo<'a> {
 /// the shared expert through the dense-MLP scratch, and the score-weighted
 /// combine into `io.out`. Encoded for a concurrent pass: every inter-level
 /// data edge is marked with a barrier except the final write, which the
-/// caller orders.
+/// caller orders. Returns whether the optional HC stream write was encoded.
 pub(crate) fn decode_moe(
     ctx: &MetalContext,
     pass: &ComputePass<'_>,
@@ -643,7 +645,7 @@ pub(crate) fn decode_moe(
     moe_w: &MoeWeights,
     io: &DecodeMoeIo<'_>,
     ms: &MoeScratch,
-) -> Result<()> {
+) -> Result<bool> {
     let inter = dims.moe_intermediate;
     // The shared expert reads only `x` and writes only its own scratch, so
     // its whole chain is independent of the router and of the expert gathers;
@@ -651,7 +653,7 @@ pub(crate) fn decode_moe(
     let shared = &moe_w.shared;
 
     if crate::ablate::on(crate::ablate::Group::Moe) {
-        return Ok(());
+        return Ok(false);
     }
     // Level 0 — everything whose only input is `x`.
     if !crate::ablate::on(crate::ablate::Group::Router) {
@@ -687,7 +689,7 @@ pub(crate) fn decode_moe(
     };
 
     if crate::ablate::on(crate::ablate::Group::Gather) {
-        return Ok(());
+        return Ok(false);
     }
     moe::moe_gather_gemv_gate_up(
         ctx,
@@ -705,7 +707,22 @@ pub(crate) fn decode_moe(
     pass.level_barrier(&[&ms.act, &ms.shared_out])?;
 
     if crate::ablate::on(crate::ablate::Group::Down) {
-        return Ok(());
+        return Ok(false);
+    }
+    if let Some(injection) = io.hc_injection {
+        moe::moe_gather_gemv_down_combine_inject(
+            ctx,
+            pass,
+            &moe_w.expert_down,
+            dims.hidden,
+            &ms.act,
+            slots,
+            &ms.scores,
+            Some((&ms.shared_out, &ms.shared_gate)),
+            io.out,
+            injection,
+        )?;
+        return Ok(true);
     }
     moe::moe_gather_gemv_down_combine(
         ctx,
@@ -717,5 +734,6 @@ pub(crate) fn decode_moe(
         &ms.scores,
         Some((&ms.shared_out, &ms.shared_gate)),
         io.out,
-    )
+    )?;
+    Ok(false)
 }

@@ -2,9 +2,12 @@
 
 use std::{hint::black_box, path::PathBuf, time::Instant};
 
+use sha2::{Digest, Sha256};
 use stark_engine::engine::hybrid::{Model, math};
 
-use super::{descending_sample_key, sample, sampling_indices};
+use super::{
+    ProbabilityMapper, descending_sample_key, probability_values, sample, sample_with_mapper, sampling_indices,
+};
 use crate::generation::Sampling;
 
 fn timed_order(
@@ -172,6 +175,136 @@ fn private_model_selection_cpu_benchmark() {
         "bounded_top20_median_ms": median(&bounded_times) * 1000.0,
         "all_index_orders_equal": true,
         "passed": true,
+    });
+    println!("{report}");
+    std::panic::set_hook(previous_hook);
+}
+
+fn probability_filter_state(
+    probabilities: &[f64],
+    top_p: Option<f32>,
+    min_p: Option<f32>,
+) -> (u64, usize, u64) {
+    let total = probabilities.iter().sum::<f64>();
+    let mut kept = 0;
+    let mut cumulative = 0.0;
+    for &p in probabilities {
+        if kept > 0
+            && (min_p.is_some_and(|minimum| p < minimum as f64)
+                || top_p.is_some_and(|limit| cumulative / total >= limit as f64))
+        {
+            break;
+        }
+        cumulative += p;
+        kept += 1;
+    }
+    (total.to_bits(), kept, cumulative.to_bits())
+}
+
+/// Map and complete-sampler timings use the same live readout. The pool is
+/// warmed outside timing; every draw is checked against the serial sampler.
+#[test]
+#[ignore = "requires the complete private model, public corpus and exclusive GPU slot"]
+fn private_model_probability_cpu_benchmark() {
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| eprintln!("private probability benchmark failed")));
+    let model_path = PathBuf::from(std::env::var_os("STARK_LILY_TEST_MODEL_PATH").expect("model path required"));
+    let corpus_path = PathBuf::from(std::env::var_os("STARK_SAMPLE_CORPUS_PATH").expect("corpus path required"));
+    let corpus = std::fs::read_to_string(corpus_path).unwrap_or_else(|_| panic!("corpus unavailable"));
+    let mut model = Model::load(&model_path).unwrap_or_else(|_| panic!("model unavailable"));
+    let encoded = model.tokenizer().encode(corpus, false).unwrap_or_else(|_| panic!("corpus tokenization failed"));
+    assert!(encoded.len() >= 4096, "corpus is too short");
+    let input = &encoded.get_ids()[..4096];
+    for &token in &input[..input.len() - 1] {
+        model.ingest(token).unwrap_or_else(|_| panic!("prefill admission failed"));
+    }
+    let mut logits = model.step(input[input.len() - 1]).unwrap_or_else(|_| panic!("prefill failed"));
+    let sampling = Sampling::Stochastic {
+        temperature: 1.0,
+        top_k: None,
+        top_p: Some(0.95),
+        min_p: None,
+    };
+    let mut mapper = ProbabilityMapper::default();
+    let warm_indices = sampling_indices(&logits, None).unwrap_or_else(|_| panic!("warm selection failed"));
+    black_box(mapper.map(&logits, &warm_indices, logits[warm_indices[0]], 1.0));
+    assert!(mapper.pool.is_some(), "parallel probability pool unavailable");
+    let threads = mapper.pool.as_ref().unwrap().current_num_threads();
+    let mut rng = 42;
+    let mut map_times = [Vec::with_capacity(256), Vec::with_capacity(256)];
+    let mut sampler_times = [Vec::with_capacity(256), Vec::with_capacity(256)];
+    let mut reference_hash = Sha256::new();
+    let mut candidate_hash = Sha256::new();
+    let mut token_hash = Sha256::new();
+    let mut probability_elements = 0;
+    let mut filter_cases = 0;
+    for step in 0usize..256 {
+        let indices = sampling_indices(&logits, None).unwrap_or_else(|_| panic!("selection failed"));
+        let max = logits[indices[0]];
+        let mut mapped = [None, None];
+        let mut draws = [None, None];
+        for order in 0..2 {
+            let route = (step + order) % 2;
+            let started = Instant::now();
+            let probabilities = if route == 0 {
+                probability_values(&logits, &indices, max, 1.0, None)
+            } else {
+                mapper.map(&logits, &indices, max, 1.0)
+            };
+            map_times[route].push(started.elapsed().as_secs_f64());
+            mapped[route] = Some(black_box(probabilities));
+        }
+        let reference = mapped[0].as_ref().unwrap();
+        let candidate = mapped[1].as_ref().unwrap();
+        assert!(reference.len() == candidate.len(), "probability map length changed");
+        assert!(reference.iter().zip(candidate).all(|(a, b)| a.to_bits() == b.to_bits()), "probability bits changed");
+        for (top_p, min_p) in [(Some(0.95), None), (Some(0.5), Some(0.000001)), (None, None)] {
+            assert!(
+                probability_filter_state(reference, top_p, min_p) == probability_filter_state(candidate, top_p, min_p),
+                "serial sum/filter state changed"
+            );
+            filter_cases += 1;
+        }
+        for (&a, &b) in reference.iter().zip(candidate) {
+            reference_hash.update(a.to_bits().to_le_bytes());
+            candidate_hash.update(b.to_bits().to_le_bytes());
+        }
+        probability_elements += reference.len();
+        for order in 0..2 {
+            let route = (step + order) % 2;
+            let mut draw_rng = rng;
+            let started = Instant::now();
+            let token = if route == 0 {
+                sample(&logits, &sampling, &mut draw_rng)
+            } else {
+                sample_with_mapper(&logits, &sampling, &mut draw_rng, Some(&mut mapper))
+            }
+            .unwrap_or_else(|_| panic!("sampling failed"));
+            sampler_times[route].push(started.elapsed().as_secs_f64());
+            draws[route] = Some((black_box(token), draw_rng));
+        }
+        assert!(draws[0] == draws[1], "serial CDF, seeded token or RNG changed");
+        let (token, next_rng) = draws[0].unwrap();
+        rng = next_rng;
+        token_hash.update(token.to_le_bytes());
+        if step + 1 < 256 {
+            logits = model.step(token).unwrap_or_else(|_| panic!("decode failed"));
+        }
+    }
+    let mean_ms = |values: &[f64]| values.iter().sum::<f64>() * 1000.0 / values.len() as f64;
+    let report = serde_json::json!({
+        "scope": "qwen38_private_probability_mapping",
+        "input_tokens": input.len(), "readouts": 256, "vocabulary": model.vocab_size(),
+        "comparison_order": "alternating_ab_ba", "pool_threads": threads,
+        "serial_map_mean_ms": mean_ms(&map_times[0]), "parallel_map_mean_ms": mean_ms(&map_times[1]),
+        "serial_map_median_ms": median(&map_times[0]) * 1000.0, "parallel_map_median_ms": median(&map_times[1]) * 1000.0,
+        "serial_sampler_mean_ms": mean_ms(&sampler_times[0]), "parallel_sampler_mean_ms": mean_ms(&sampler_times[1]),
+        "serial_sampler_median_ms": median(&sampler_times[0]) * 1000.0, "parallel_sampler_median_ms": median(&sampler_times[1]) * 1000.0,
+        "exact_probability_elements": probability_elements, "exact_filter_states": filter_cases,
+        "reference_probability_sha256": format!("{:x}", reference_hash.finalize()),
+        "parallel_probability_sha256": format!("{:x}", candidate_hash.finalize()),
+        "seeded_token_bytes_sha256": format!("{:x}", token_hash.finalize()),
+        "all_probability_bits_and_draws_equal": true, "passed": true,
     });
     println!("{report}");
     std::panic::set_hook(previous_hook);

@@ -48,6 +48,36 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     }
   });
 }
+const modelTabs = [...document.querySelectorAll('[data-model-group]')];
+function selectModelGroup(tab) {
+  for (const item of modelTabs) {
+    const selected = item === tab;
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.getElementById(item.dataset.modelGroup).hidden = !selected;
+  }
+}
+for (const tab of modelTabs) {
+  tab.addEventListener('click', () => selectModelGroup(tab));
+  tab.addEventListener('keydown', (event) => {
+    const index = modelTabs.indexOf(tab);
+    const next = event.key === 'ArrowRight' ? (index + 1) % modelTabs.length
+      : event.key === 'ArrowLeft' ? (index + modelTabs.length - 1) % modelTabs.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? modelTabs.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectModelGroup(modelTabs[next]);
+    modelTabs[next].focus();
+  });
+}
+function selectLinkedModelGroup() {
+  const linked = modelTabs.find(tab => '#' + tab.dataset.modelGroup === location.hash);
+  selectModelGroup(linked || modelTabs[0]);
+}
+if (modelTabs.length) {
+  selectLinkedModelGroup();
+  window.addEventListener('hashchange', selectLinkedModelGroup);
+}
 const engineRows = [...document.querySelectorAll('[data-engine-rates]')];
 const workloadSelect = document.querySelector('#benchmark-workload');
 const viewButtons = [...document.querySelectorAll('[data-view]')];
