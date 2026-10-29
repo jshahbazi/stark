@@ -46,7 +46,7 @@ impl<B: Backend> dyn Mlp<B> {
             AnyMLPConfig::DenseMLPConfig(dense_config) => {
                 let (up_projection, up_input_hadamard_factors) = <dyn Linear<B>>::new_with_input_rht(
                     model_dimension,
-                    [2 * hidden_dimension],
+                    [hidden_dimension, hidden_dimension],
                     dense_config.has_up_biases,
                     context,
                     data_type,

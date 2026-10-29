@@ -1,3 +1,5 @@
+// Source-score scaling follows MLX v0.32.3 steel_attention_nax.h.
+// Copyright © 2024-26 Apple Inc.; MIT license: LICENSE.mlx-reference.
 #include <metal_stdlib>
 #include "../common/dsl.h"
 #include "../common/thread_context.h"
@@ -15,6 +17,49 @@ using namespace stark::matmul;
 using namespace stark::attention;
 using namespace stark::ring;
 using namespace stark::trie;
+
+// Keep the complete source finish in Safe math, including its final BF16
+// materialization, so callers cannot reassociate the reciprocal and product.
+template <typename T>
+inline T source_attention_finish(float value, float sum) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+  const float reciprocal = 1.0f / sum;
+  const float normalized = value * reciprocal;
+  return T(normalized);
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
+// MLX v0.32.3 steel/attn/nax.h (Apple, MIT) reduces each 16-column
+// fragment with a paired local tree, then XOR 1/8, adding each fragment
+// into the already rescaled running mass. The generic reducer intentionally
+// retains its historical local and cross-fragment accumulation order.
+template <typename FragmentType>
+inline void source_attention_sum_rows(thread FragmentType& tile, thread float* mass) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+  using Ops = typename FragmentType::FragmentOpsType;
+  static_assert(Ops::THREAD_ELEMENT_COLS == 4 && Ops::THREAD_ELEMENT_ROWS == 2);
+  METAL_PRAGMA_UNROLL
+  for (ushort row = 0; row < FragmentType::ROW_FRAGMENTS; ++row) {
+    METAL_PRAGMA_UNROLL
+    for (ushort col = 0; col < FragmentType::COL_FRAGMENTS; ++col) {
+      const thread auto& values = tile.fragment_at(row, col);
+      METAL_PRAGMA_UNROLL
+      for (ushort i = 0; i < Ops::THREAD_ELEMENT_ROWS; ++i) {
+        const ushort base = i * Ops::THREAD_ELEMENT_COLS;
+        const float lane_sum = (values[base] + values[base + 1]) + (values[base + 2] + values[base + 3]);
+        const float quad_sum = lane_sum + simd_shuffle_xor(lane_sum, ushort(1));
+        const float group_sum = quad_sum + simd_shuffle_xor(quad_sum, ushort(8));
+        const ushort index = row * Ops::THREAD_ELEMENT_ROWS + i;
+        mass[index] = mass[index] + group_sum;
+      }
+    }
+  }
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
 
 template <typename T>
 struct TransformScale {
@@ -36,11 +81,13 @@ struct AttentionGemmLayout {
   STARK_CONST int KV_SMEM_SIZE = USE_MXU ? 1 : (int(BK) * (int(BD) + ROW_PADDING_ELEMENTS));
 };
 
-template <typename T, uint BK, uint BD, bool USE_MXU>
+template <typename T, uint BK, uint BD, bool USE_MXU, bool SOURCE_SCORE_SCALE>
 VARIANTS(T, float, bfloat)
 VARIANTS(BK, 16, 32)
 VARIANTS(BD, 64, 128, 256)
 VARIANTS(USE_MXU, false, true)
+VARIANTS(SOURCE_SCORE_SCALE, false, true)
+CONSTRAINT(!SOURCE_SCORE_SCALE || USE_MXU)
 CONSTRAINT(!USE_MXU || BK == 32)
 CONSTRAINT(!USE_MXU || T != "float")
 CONSTRAINT(!USE_MXU || BD != 256)
@@ -139,13 +186,15 @@ KERNEL(AttentionGemm)(
     if (ragged_q) {
       q_src = q_src.bounded(params.q_rem - simdgroup_row_base, FRAGMENT_ROWS);
     }
-    const InputType query_scale = static_cast<InputType>(params.scale * M_LOG2E_F);
     METAL_PRAGMA_UNROLL
     for (short dd = 0; dd < HEAD_DIM_FRAGMENTS; dd++) {
       query_frags[dd].load_from(thread_context.simd_lane_id, q_src.advanced(dd * head_dim_fragment_stride));
-      query_frags[dd].map_coords(thread_context.simd_lane_id, [&](short, short, InputType v) {
-        return v * query_scale;
-      });
+      if constexpr (!SOURCE_SCORE_SCALE) {
+        const InputType query_scale = static_cast<InputType>(params.scale * M_LOG2E_F);
+        query_frags[dd].map_coords(thread_context.simd_lane_id, [&](short, short, InputType v) {
+          return v * query_scale;
+        });
+      }
     }
   } else {
     using QueryLoader = ThreadgroupLoader<
@@ -161,7 +210,9 @@ KERNEL(AttentionGemm)(
     } else {
       query_loader.load_unsafe();
     }
-    query_loader.apply_inplace_op(TransformScale<T>(static_cast<T>(params.scale * M_LOG2E_F)));
+    if constexpr (!SOURCE_SCORE_SCALE) {
+      query_loader.apply_inplace_op(TransformScale<T>(static_cast<T>(params.scale * M_LOG2E_F)));
+    }
     threadgroup_barrier(mem_flags::mem_threadgroup);
   }
 
@@ -222,6 +273,13 @@ KERNEL(AttentionGemm)(
       key_source.load(key_fragment, dd * head_dim_fragment_stride);
       simdgroup_barrier(mem_flags::mem_none);
       fragment_mma(score_fragment, query_frags[q_idx], key_fragment);
+    }
+
+    if constexpr (SOURCE_SCORE_SCALE) {
+      // MLX v0.32.3 steel_attention_nax.h scales its F32 QK accumulator,
+      // keeping the stored BF16 query unchanged before the dot product.
+      const float score_scale = params.scale * M_LOG2E_F;
+      score_fragment.map([&](AccumType value) { return value * score_scale; });
     }
 
     const int k_rem = params.k_rem;
@@ -287,11 +345,15 @@ KERNEL(AttentionGemm)(
 
     score_fragment.map_rows(new_max, [](AccumType v, AccumType m) { return fast::exp2(v - m); });
 
-    AccumType block_sum[ROWS_PER_LANE];
-    score_fragment.row_reduce(block_sum, AccumType(0), [](AccumType a, AccumType b) { return a + b; });
-    METAL_PRAGMA_UNROLL
-    for (int r = 0; r < ROWS_PER_LANE; ++r) {
-      sum_score[r] += block_sum[r];
+    if constexpr (SOURCE_SCORE_SCALE) {
+      source_attention_sum_rows(score_fragment, sum_score);
+    } else {
+      AccumType block_sum[ROWS_PER_LANE];
+      score_fragment.row_reduce(block_sum, AccumType(0), [](AccumType a, AccumType b) { return a + b; });
+      METAL_PRAGMA_UNROLL
+      for (int r = 0; r < ROWS_PER_LANE; ++r) {
+        sum_score[r] += block_sum[r];
+      }
     }
 
     METAL_PRAGMA_UNROLL
@@ -316,14 +378,23 @@ KERNEL(AttentionGemm)(
     }
   }
 
-  AccumType inv_sum[ROWS_PER_LANE];
-  METAL_PRAGMA_UNROLL
-  for (int r = 0; r < ROWS_PER_LANE; ++r) {
-    inv_sum[r] = AccumType(1) / sum_score[r];
-  }
-  METAL_PRAGMA_UNROLL
-  for (int c = 0; c < OUTPUT_CHUNKS; ++c) {
-    output_chunks[c].map_rows(inv_sum, [](AccumType v, AccumType s) { return v * s; });
+  if constexpr (SOURCE_SCORE_SCALE) {
+    METAL_PRAGMA_UNROLL
+    for (int c = 0; c < OUTPUT_CHUNKS; ++c) {
+      output_chunks[c].map_rows(sum_score, [](AccumType value, AccumType sum) {
+        return float(source_attention_finish<T>(value, sum));
+      });
+    }
+  } else {
+    AccumType inv_sum[ROWS_PER_LANE];
+    METAL_PRAGMA_UNROLL
+    for (int r = 0; r < ROWS_PER_LANE; ++r) {
+      inv_sum[r] = AccumType(1) / sum_score[r];
+    }
+    METAL_PRAGMA_UNROLL
+    for (int c = 0; c < OUTPUT_CHUNKS; ++c) {
+      output_chunks[c].map_rows(inv_sum, [](AccumType v, AccumType s) { return v * s; });
+    }
   }
 
   o += int64_t(simdgroup_row_base) * params.o_strides[2];

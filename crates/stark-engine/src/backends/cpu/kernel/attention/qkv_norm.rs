@@ -28,6 +28,7 @@ pub fn qkv_norm<
     full_layer: bool,
     #[specialize] in_place: bool,
     #[specialize] has_scales: bool,
+    #[specialize] mlx_bf16_reduction: bool,
 ) {
     let qkvg_input = match in_place {
         true => qkvg_output as *const InputT,
@@ -50,6 +51,39 @@ pub fn qkv_norm<
             for i in 0..head_dim {
                 let input_val = unsafe { AccumT::from(*qkvg_input.add(offset + i)).unwrap() };
                 total_sum = total_sum + input_val * input_val;
+            }
+            if mlx_bf16_reduction {
+                assert!(
+                    std::any::TypeId::of::<InputT>() == std::any::TypeId::of::<bf16>()
+                        && std::any::TypeId::of::<OutputT>() == std::any::TypeId::of::<bf16>()
+                        && !full_layer
+                        && head_dim <= 4096
+                );
+                let mut partials = [0.0f32; 1024];
+                for (lane, accum) in partials.iter_mut().enumerate() {
+                    for j in 0..4 {
+                        let i = lane * 4 + j;
+                        if i < head_dim {
+                            let x = unsafe { (*qkvg_input.add(offset + i)).to_f32().unwrap() };
+                            *accum += x * x;
+                        }
+                    }
+                }
+                fn simd_sum(values: &mut [f32]) -> f32 {
+                    let mut step = 16;
+                    while step > 0 {
+                        for lane in 0..step {
+                            values[lane] += values[lane + step];
+                        }
+                        step /= 2;
+                    }
+                    values[0]
+                }
+                let mut groups = [0.0f32; 32];
+                for (group, lanes) in partials.chunks_exact_mut(32).enumerate() {
+                    groups[group] = simd_sum(lanes);
+                }
+                total_sum = AccumT::from(simd_sum(&mut groups)).unwrap();
             }
             let mean_square: AccumT = total_sum / head_dim_accum;
             let rms_norm = AccumT::from((mean_square + epsilon).to_f32().unwrap().sqrt().recip()).unwrap();

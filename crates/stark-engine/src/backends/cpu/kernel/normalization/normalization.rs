@@ -41,7 +41,18 @@ pub fn normalization<
     #[specialize] scale_output: bool,
     #[specialize] has_biases: bool,
     #[specialize] has_scales: bool,
+    #[specialize] mlx_bf16_reduction: bool,
 ) {
+    assert!(
+        !mlx_bf16_reduction
+            || (std::any::TypeId::of::<InputT>() == std::any::TypeId::of::<bf16>()
+                && std::any::TypeId::of::<OutputT>() == std::any::TypeId::of::<bf16>()
+                && !full_layer
+                && !subtract_mean
+                && !use_hadamard
+                && !has_biases
+                && element_count <= 4096)
+    );
     assert_eq!(shortcut.is_some(), copy_to_shortcut);
     assert_eq!(hadamard_factors.is_some(), use_hadamard);
     assert_eq!(biases.is_some(), has_biases);
@@ -84,6 +95,38 @@ pub fn normalization<
                 sum = sum + accum_val;
             }
             sum_sq = sum_sq + accum_val * accum_val;
+        }
+        if mlx_bf16_reduction {
+            let mut partials = [0.0f32; 1024];
+            for (lane, accum) in partials.iter_mut().enumerate() {
+                for j in 0..4 {
+                    let i = lane * 4 + j;
+                    if i < element_count {
+                        let value = if residual_add {
+                            unsafe { *shortcut.unwrap().add(batch_offset + i) }
+                        } else {
+                            unsafe { *input.add(batch_offset + i) }
+                        };
+                        let x = value.to_f32().unwrap();
+                        *accum += x * x;
+                    }
+                }
+            }
+            fn simd_sum(values: &mut [f32]) -> f32 {
+                let mut offset = 16;
+                while offset > 0 {
+                    for lane in 0..offset {
+                        values[lane] += values[lane + offset];
+                    }
+                    offset /= 2;
+                }
+                values[0]
+            }
+            let mut groups = [0.0f32; 32];
+            for (group, lanes) in partials.chunks_exact_mut(32).enumerate() {
+                groups[group] = simd_sum(lanes);
+            }
+            sum_sq = AccumT::from(simd_sum(&mut groups)).unwrap();
         }
         let mean = if subtract_mean {
             sum / element_count_accum

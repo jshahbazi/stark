@@ -40,6 +40,7 @@ pub struct GemvSpecialization {
     gathered: bool,
     signed_codes: bool,
     full_tile: bool,
+    materialized_source: bool,
 }
 
 impl GemvSpecialization {
@@ -142,6 +143,7 @@ impl GemvSpecialization {
             gathered: shape.gathered,
             signed_codes: shape.signed_codes,
             full_tile: full_tile(shape, tile),
+            materialized_source: false,
         };
         Some(specialization)
     }
@@ -176,6 +178,7 @@ impl GemvSpecialization {
             self.reduction_lanes,
             self.group_lanes,
             self.num_simdgroups,
+            self.materialized_source,
             self.output_transform,
             self.gathered,
             self.signed_codes,
@@ -262,6 +265,43 @@ impl GemvKernel {
         }
     }
 
+    /// Production selection applies measured row batching. Explicit kernel
+    /// probes keep the supplied row tile so comparisons remain meaningful.
+    pub fn encode_selected(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        mut specialization: GemvSpecialization,
+        output_work: &MatmulOutputWork,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MatmulError<Metal>> {
+        if arguments.m == 1
+            && specialization.output_transform.is_empty()
+            && arguments.b.quantized().is_some_and(|quantized| {
+                quantized.params.materializes_affine_input_sum()
+                    && quantized.params.layout() == QuantParamsLayout::GroupOutput
+            })
+            && let Some(tile) = policy::source_projection_tile(
+                command_buffer.context().gpu_core_count,
+                command_buffer.context().apple_gpu_family,
+                specialization.group_size,
+                arguments.n,
+                arguments.k,
+            )
+        {
+            specialization.num_simdgroups = tile.num_simdgroups;
+            specialization.output_row_tile = tile.output_row_tile();
+            specialization.full_tile = arguments.n.is_multiple_of(specialization.output_row_tile);
+        }
+        self.encode(arguments, specialization, output_work, command_buffer)
+    }
+
     pub fn encode(
         &mut self,
         arguments: MatmulArguments<
@@ -272,7 +312,7 @@ impl GemvKernel {
             impl BufferMut<Backend = Metal>,
             impl BufferRef<Backend = Metal>,
         >,
-        specialization: GemvSpecialization,
+        mut specialization: GemvSpecialization,
         output_work: &MatmulOutputWork,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<(), MatmulError<Metal>> {
@@ -309,6 +349,24 @@ impl GemvKernel {
         };
 
         let a = a.subrange(a_offset..);
+        let materialize_affine_input_sum =
+            m == 1 && b.quantized().is_some_and(|quantized| quantized.params.materializes_affine_input_sum());
+        specialization.materialized_source = materialize_affine_input_sum;
+        if materialize_affine_input_sum && (!n.is_multiple_of(8) || !k.is_multiple_of(512)) {
+            // MLX v0.32.3 qmv uses one W4 word (eight values) per lane for
+            // these generic shapes; its fast route uses two. This changes
+            // the F32 reduction order as well as the amount of work per lane.
+            if specialization.bits != 4
+                || specialization.b_prologue != GemmBPrologueKind::ScaleBiasDequant
+                || !matches!(specialization.group_size, 16 | 32 | 64 | 128)
+            {
+                return Err(MatmulError::UnsupportedLayout {
+                    path: "source BF16 W4 generic lane geometry",
+                });
+            }
+            specialization.group_lanes = specialization.group_size / 8;
+            specialization.input_aligned = k.is_multiple_of(256);
+        }
         let (scales, biases, zero_points, scale_strides, zero_point_strides) =
             b.quantized().map_or((None, None, None, Default::default(), Default::default()), |quantized| {
                 (

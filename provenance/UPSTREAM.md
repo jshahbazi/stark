@@ -46,6 +46,117 @@ Qwen/Hugging Face 2025 attribution, pinned source hashes, and adaptation scope
 are included in the distribution notice manifest and copied through its notice
 collector. Existing text artifacts retain the Legacy execution profile.
 
+The explicit BF16 affine-Q4 source profile adapts MLX v0.32.3 at
+[`64ea011cb65f14d9ce2737e60db9a4ae91ed7441`](https://github.com/ml-explore/mlx/tree/64ea011cb65f14d9ce2737e60db9a4ae91ed7441).
+Its native QMV arithmetic preserves BF16 four-value bias sums, four-product
+F32 subtotals, affine contribution order and the source's eight- or
+sixteen-value lane geometry. The source-wide QMV, QMM dispatch and split-K
+reduction adaptations retain the original projection widths and typed partial
+sum boundaries. Source BF16 D64/D128 MXU attention applies the F32 scale
+to accumulated QK scores and uses the source prefill threshold above eight
+queries, while preserving stored BF16 queries. Its NAX mass reduction pairs
+four lane values, reduces lanes with XOR 1 and 8, and adds each 16-column
+fragment directly into the rescaled running mass. Existing profiles retain
+their declared arithmetic policies. The source finish preserves the F32
+reciprocal and product in Safe math through the final BF16 materialization.
+
+The explicit RMS source policy follows contiguous four-value lane reads,
+F32 SIMD reduction and the source reciprocal square root. It materializes
+normalized BF16 values before the scale multiplication. The BF16 fallback
+attention source policy uses a global row maximum followed by the source F32
+exponential reduction and BF16 probabilities before the value product. The
+source softmax precision option specifies F32 accumulation; its exponential
+remains the explicit source `fast::exp` operation.
+
+Source BF16 vector attention uses a separate Safe, contraction-enabled kernel
+in `crates/stark-engine/src/backends/metal/kernel/attention/source_single_pass.metal`,
+selected by `single_pass.rs`. This follows the pinned `sdpa_vector.h` arithmetic
+and its precompiled `-fno-fast-math` build policy while retaining the inherited
+vector geometry and masking. Its scope is a single flat causal query, fewer
+than 1,024 keys, head dimension 64, 128 or 256, and no sinks. The existing
+source-profile markers select this path; other vector configurations retain
+their existing kernels. F32 score, probability and output accumulation precede
+the final BF16 materialization.
+
+The materialized source-attention QK product also preserves the source dense
+split-K precision when its host predicate selects two partitions. For the
+qualified BF16 D512 geometry with eight query heads and one KV head, the
+MXU path retains two 256-element K partitions and their reduction in F32,
+then casts each score once to BF16. This applies to source prefill rows 9
+through 1,023 after excluding the source wide-vector case and checking the
+source split predicate. The adaptation is in `attention/fallback.rs` and
+`matmul/mod.rs`; it does not change quantized QMM or other dense products.
+
+These are native Rust/Metal paths; MLX remains a private validation dependency.
+Precision changes are qualified against matching source-bound references,
+with failed and successful runs recorded separately. Operand agreement does
+not establish model-level qualification; the latter is recorded separately.
+
+The explicit source RoPE coefficient path is enabled only for the existing BF16
+MLX affine-Q4 profile (`materialize_affine_input_sum`) and currently implements
+Unscaled, Proportional, and YaRN configurations. It computes coefficients from
+absolute scalar positions in the attention preparation kernels; the legacy
+precalculated CPU tables remain available for other profiles and configurations.
+Plain RoPE uses the source F32 host `log2(base)` coefficient. Custom
+Proportional and YaRN frequencies request `metal::precise::pow`, and rotation
+uses the source F32 operation order with explicit fast sine and cosine. YaRN
+first multiplies the BF16 input by its weak BF16 magnitude scalar and stores
+BF16 before rotation. The frequency and prepared-operand controls are source
+bound; model-level qualification is recorded separately.
+The native adaptation is in `crates/stark-engine/src/encodable_block/mixer/attention/rope.rs`
+and `crates/stark-engine/src/backends/metal/kernel/attention/attention_prepare.metal`.
+It follows the MLX v0.32.3 RoPE implementation at the revision above and
+MLX-LM `models/rope_utils.py` at
+[`1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7`](https://github.com/ml-explore/mlx-lm/tree/1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7),
+SHA-256 `ccba2f0c7b246c008a1188dc3760c162bdd906b15a1c490461dee4be64bc62df`.
+The Apple copyright and MIT notice are preserved in `LICENSE.mlx-reference`.
+
+MLX's precompiled array-power kernel calls generic `metal::pow` under
+`-fno-fast-math`. The Metal standard library selects that default during
+preprocessing, so a function-local Safe pragma in a native build does not
+change the earlier function selection. The retained compiler check records
+preprocessor SHA-256 `a10bbc2d990a5fc03bc59666de845e5ce4844e529a56e60fa1b044aa9e7ce535`
+for the native Metal 4 default and
+`d2892c0a851151d93e2e54b9f55ae7da343561ac03fc81c9e6a1d26ca562a43a`
+with `-fno-fast-math`, with different fast-math macro states. The source path
+therefore requests precise power explicitly. These hashes identify the checked
+compiler outputs; source-bound operator and model validation remain separate.
+
+The inspected MLX source files have the following SHA-256 hashes:
+
+| Source path | SHA-256 |
+| --- | --- |
+| `mlx/backend/metal/kernels/quantized.h` | `8e2ca65d8d8dafe67b97120d1127d54ce57032f621bdba161e54a0bc4a948b8c` |
+| `mlx/backend/metal/quantized.cpp` | `36b79607ee01bc213511dcdad590b2dc3b96099300551cbc3e7e6c7e13ba5982` |
+| `mlx/backend/metal/kernels/bf16_math.h` | `1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496` |
+| `mlx/backend/metal/kernels/reduction/reduce_col.h` | `800868c1eafbf2b85980731a6303942d2d1061023f6d465f2b996642126cdc62` |
+| `mlx/backend/metal/reduce.cpp` | `401674953ae6ea7cfb94cd1d675d4a7321af58143373b6343ea2442516f42f43` |
+| `mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h` | `e576cbbe13a8fe5fda7b630422f6083faac6114fbf2aad3970323932b1e6cc44` |
+| `mlx/backend/metal/kernels/steel/attn/nax.h` | `fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec` |
+| `mlx/backend/metal/kernels/sdpa_vector.h` | `f52c8da21f2c31f3f77168d326a49815fc29bde4b573883896a8eb3298f11508` |
+| `mlx/backend/metal/kernels/scaled_dot_product_attention.metal` | `16cc1ff6c99ac606fffec8e35efb3a40101de37aab82db4f2186ae8ac201cc5c` |
+| `mlx/backend/metal/scaled_dot_product_attention.cpp` | `4eaca28cbe1d192a3137a970b2f4d7cdecaba67a1f448b0b0b5f0309b6b3961e` |
+| `mlx/backend/metal/matmul.cpp` | `21e0172e3b5af6d9d07d7b36d543fefcc5ba3edce2aa67a84be432fe8221e27a` |
+| `mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_splitk_nax.h` | `9486b177261f657bceae6437a18d412a0e361c3e6b418c78b4c067b463c84597` |
+| `mlx/backend/metal/kernels/rope.metal` | `2b35221ebea033ff43100b85eaaddec5c0e34e3cfd52e7c692573764b2b7d0ab` |
+| `mlx/backend/metal/rope.cpp` | `9ec2d2f298381af6445b1e2281dd90521988861ed170a602944ec0f1fca17ecc` |
+| `mlx/fast_primitives.h` | `8ce8bd4933452246e81702f16798d9d816f162e9f75e905e562acedc7c95f112` |
+| `mlx/backend/metal/kernels/softmax.h` | `cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051` |
+| `mlx/backend/metal/kernels/softmax.metal` | `d19231c66973edc3944f12529d1cc393029e7f7262b914907c710ef9dbcb39e2` |
+| `mlx/backend/metal/softmax.cpp` | `e0f8028a3a41659ff85cf6d2b9f318dff50f85ab61b3f0260bb535f3980deffa` |
+| `mlx/backend/metal/kernels/rms_norm.metal` | `b2e04e377fdad1d645581f9beeaf9cbb06d1ad32926161e06cbc15240caf12bf` |
+| `mlx/backend/metal/normalization.cpp` | `01bc537389638efe43a9bedeeb2008484864772022ac56e106a3f9911bcaa1aa` |
+| `mlx/backend/metal/kernels/defines.h` | `a6c2c824e855078cd092fd9592457616f995755f0e865475c3f006a3f5d6bf1d` |
+| `mlx/backend/metal/kernels/binary_ops.h` | `6dbe789faafbf7259f411c7fab7c0fcdd192df47a78f8f0bd408228f7a30e5c7` |
+| `mlx/backend/metal/kernels/CMakeLists.txt` | `984c577264fc62a280bad4c41c4d06982a252cb08bea1cdcede32c4c9cc1493e` |
+| `mlx/backend/common/metal_kernel.h` | `b64ca4cebcba530d8ec1e0a0f23b57313507a37d05e3615ded3796b563cc83fc` |
+
+The Apple copyright and complete MIT notice are preserved in
+[`LICENSE.mlx-reference`](../LICENSE.mlx-reference), copied into standalone
+distribution notices and refreshed menu bar app overlays. The distribution
+source inventory includes this notice, and packaged image qualification
+requires its delivered hash.
+
 Model weights, private fixtures, runtime executables, and host application archives are excluded. The original pinned upstream README is stored verbatim as [UPSTREAM_README.md](UPSTREAM_README.md); its relative links refer to the upstream tree and are not expected to resolve here. The current build and validation receipts identify the complete standalone source and executable hashes.
 
 ## Naming and compatibility

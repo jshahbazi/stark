@@ -25,7 +25,8 @@ template <
     uint OUTPUT_ROW_TILE,
     uint REDUCTION_LANES,
     uint GROUP_LANES,
-    uint NUM_SIMDGROUPS>
+    uint NUM_SIMDGROUPS,
+    bool MATERIALIZED_SOURCE>
 VARIANTS(AT, bfloat, float)
 VARIANTS(BT, bfloat, float)
 VARIANTS(DT, bfloat, float)
@@ -45,6 +46,10 @@ VARIANTS(OUTPUT_ROW_TILE, 1, 2, 4, 8, 16, 32, 64)
 VARIANTS(REDUCTION_LANES, 8, 16, 32)
 VARIANTS(GROUP_LANES, 1, 2, 4, 8, 16)
 VARIANTS(NUM_SIMDGROUPS, 2, 4, 8)
+VARIANTS(MATERIALIZED_SOURCE, false, true)
+CONSTRAINT(!MATERIALIZED_SOURCE ||
+    (BITS == 4 && INPUT_ROW_TILE == 1 && AT == "bfloat" && BT == "bfloat" && DT == "bfloat" &&
+     B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant))
 
 CONSTRAINT((B_PROLOGUE == GemmBPrologueKind::FullPrecision) == (BITS == 0))
 CONSTRAINT((BITS == 0) == (GROUP_SIZE == 0))
@@ -99,13 +104,16 @@ CONSTRAINT(
       OUTPUT_ROW_TILE == 4 * NUM_SIMDGROUPS || OUTPUT_ROW_TILE == 8 * NUM_SIMDGROUPS)))
 CONSTRAINT(REDUCTION_LANES % GROUP_LANES == 0)
 CONSTRAINT(BITS == 0 || GROUP_SIZE % GROUP_LANES == 0)
-CONSTRAINT(BITS != 4 || (GROUP_SIZE / GROUP_LANES) % 16 == 0)
+#define SOURCE_W4_EIGHT_VALUE_LANE                                                                                   \
+  (MATERIALIZED_SOURCE && BITS == 4 && INPUT_ROW_TILE == 1 && AT == "bfloat" && BT == "bfloat" && DT == "bfloat" &&     \
+   B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant && GROUP_SIZE / GROUP_LANES == 8)
+CONSTRAINT(BITS != 4 || (GROUP_SIZE / GROUP_LANES) % 16 == 0 || SOURCE_W4_EIGHT_VALUE_LANE)
 CONSTRAINT(BITS != 8 || (GROUP_SIZE / GROUP_LANES) % 8 == 0)
 CONSTRAINT(BITS != 0 || REDUCTION_LANES == 32)
 CONSTRAINT(
     BITS == 0 || INPUT_ROW_TILE > 1 || (BITS == 4 &&
      ((GROUP_SIZE == 16 && GROUP_LANES == 1) || (GROUP_SIZE == 32 && GROUP_LANES == 2) ||
-      (GROUP_SIZE == 64 && GROUP_LANES == 4) || (GROUP_SIZE == 128 && GROUP_LANES == 8))) ||
+      (GROUP_SIZE == 64 && GROUP_LANES == 4) || (GROUP_SIZE == 128 && GROUP_LANES == 8) || SOURCE_W4_EIGHT_VALUE_LANE)) ||
     (BITS == 8 &&
      ((GROUP_SIZE == 16 && GROUP_LANES == 2) || (GROUP_SIZE == 32 && GROUP_LANES == 4) ||
       (GROUP_SIZE == 64 && GROUP_LANES == 8) || (GROUP_SIZE == 128 && GROUP_LANES == 16))))
@@ -171,7 +179,7 @@ KERNEL(Gemv)(
     if constexpr (BITS == 0) {
       FullPrecisionBSource<Tile, AT, BT, DT, INPUT_ALIGNED, FullTile>::accumulate(result, ops, params, tile);
     } else {
-      QuantBSource<Tile, AT, BT, DT, B_PROLOGUE, GROUP_SIZE, BITS, INPUT_ALIGNED, FullTile>::accumulate(
+      QuantBSource<Tile, AT, BT, DT, B_PROLOGUE, GROUP_SIZE, BITS, INPUT_ALIGNED, FullTile, MATERIALIZED_SOURCE>::accumulate(
           result,
           ops,
           params,

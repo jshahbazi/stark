@@ -108,6 +108,9 @@ impl<B: Backend> QKVNorm<B> {
         head_dim: u32,
         reference_profile: bool,
     ) -> Result<Head<B>, QKVNormError<B>> {
+        config
+            .validate_mlx_bf16_reduction(intermediate_data_type, head_dim, false)
+            .map_err(|error| QKVNormError::BackendError(error.into()))?;
         let reference = if reference_profile {
             if intermediate_data_type != DataType::BF16
                 || config.subtract_mean
@@ -147,6 +150,7 @@ impl<B: Backend> QKVNorm<B> {
             DataType::F32,
             true,
             scales.is_some(),
+            config.mlx_bf16_reduction,
         )
         .map_err(QKVNormError::BackendError)?;
         Ok(Head {

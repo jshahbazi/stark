@@ -30,11 +30,13 @@ pub struct AttentionGemm {
     is_causal: bool,
     is_sliding_window: bool,
     has_sinks: bool,
+    config: AttentionKernelConfig,
 }
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 struct AttentionGemmKey {
     use_mxu: bool,
+    source_score_scale: bool,
     align_q: bool,
     align_k: bool,
     is_trie: bool,
@@ -77,6 +79,7 @@ impl AttentionGemm {
             is_causal: config.is_causal,
             is_sliding_window: config.sliding_window_size.is_some(),
             has_sinks: config.has_sinks,
+            config: *config,
         }
     }
 
@@ -98,6 +101,7 @@ impl AttentionGemm {
                 bk,
                 self.head_dim,
                 key.use_mxu,
+                key.source_score_scale,
                 key.align_q,
                 key.align_k,
                 self.is_kv_cache_ring,
@@ -109,6 +113,14 @@ impl AttentionGemm {
             entry.insert(kernel);
         }
         Ok(MutexGuard::map(kernels, |kernels| kernels.get_mut(&key).expect("kernel was just initialized")))
+    }
+
+    pub(super) fn uses_source_mxu_prefill(
+        &self,
+        rows: u32,
+        supports_mxu: bool,
+    ) -> bool {
+        self.config.uses_source_mxu_prefill(rows, supports_mxu)
     }
 
     pub fn encode(
@@ -123,13 +135,81 @@ impl AttentionGemm {
         >,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        let source_scale = arguments.trie.is_none()
+            && self.uses_source_mxu_prefill(arguments.suffix_length, command_buffer.context().supports_mxu);
+        self.encode_variant(arguments, command_buffer, None, source_scale)
+    }
+
+    #[cfg(test)]
+    pub(super) fn encode_forced_mxu_for_test(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        if self.data_type != DataType::BF16
+            || !matches!(self.head_dim, 64 | 128)
+            || !command_buffer.context().supports_mxu
+        {
+            return Err(crate::backends::common::InvalidInput("forced attention MXU variant is unsupported").into());
+        }
+        let source_scale = arguments.trie.is_none() && self.uses_source_mxu_prefill(arguments.suffix_length, true);
+        self.encode_variant(arguments, command_buffer, Some(true), source_scale)
+    }
+
+    #[cfg(test)]
+    pub(super) fn encode_source_scale_for_test(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
+        if self.data_type != DataType::BF16
+            || !matches!(self.head_dim, 64 | 128)
+            || !command_buffer.context().supports_mxu
+        {
+            return Err(
+                crate::backends::common::InvalidInput("source attention score scaling requires BF16 MXU").into()
+            );
+        }
+        self.encode_variant(arguments, command_buffer, Some(true), true)
+    }
+
+    fn encode_variant(
+        &self,
+        arguments: AttentionArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+        force_mxu: Option<bool>,
+        source_score_scale: bool,
+    ) -> Result<<Metal as Backend>::ScratchBuffer, MetalError> {
         let mut output = command_buffer
             .allocate_scratch_for_shape(&[arguments.suffix_length, self.num_q_heads, self.head_dim], self.data_type)?;
 
-        let use_mxu = arguments.suffix_length >= 64
-            && matches!(self.data_type, DataType::BF16)
-            && matches!(self.head_dim, 64 | 128)
-            && command_buffer.context().supports_mxu;
+        let use_mxu = force_mxu.unwrap_or(
+            (arguments.suffix_length >= 64 || source_score_scale)
+                && matches!(self.data_type, DataType::BF16)
+                && matches!(self.head_dim, 64 | 128)
+                && command_buffer.context().supports_mxu,
+        );
         let (bq, bk) = if use_mxu {
             (64, 32)
         } else {
@@ -157,6 +237,7 @@ impl AttentionGemm {
         );
         let key = AttentionGemmKey {
             use_mxu,
+            source_score_scale,
             align_q: params.q_rem == 0,
             align_k: params.k_rem == 0,
             is_trie: arguments.trie.is_some(),

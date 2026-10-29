@@ -1,6 +1,8 @@
 pub mod gemm;
 mod gemv;
 mod qmv;
+mod source_prefill;
+mod source_segments;
 
 use metal::MTLGPUFamily;
 
@@ -9,6 +11,7 @@ use self::{
     gemm::{GemmPlan, GemmProblem},
     gemv::{GemvKernel, GemvSpecialization},
     qmv::QmvRoute,
+    source_prefill::SourceWideQmv,
 };
 use crate::{
     backends::{
@@ -36,6 +39,8 @@ pub struct MatmulMetalKernel {
     weights_data_type: DataType,
     input_data_type: DataType,
     output_data_type: DataType,
+    source_wide: SourceWideQmv,
+    source_scatter: Option<super::SourceScatterRowsMetalKernel>,
 }
 
 enum MatmulDispatch {
@@ -88,6 +93,56 @@ fn supports_integer_right_operand(shape: &MatmulShape) -> bool {
 }
 
 impl MatmulMetalKernel {
+    pub(crate) fn encode_source_qk_split(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        if self.weights_data_type != DataType::BF16
+            || self.input_data_type != DataType::BF16
+            || self.output_data_type != DataType::F32
+            || !shape.a_full_precision
+            || shape.b_prologue != GemmBPrologueKind::FullPrecision
+            || !shape.b_transpose
+            || shape.k != 512
+            || shape.gathered
+            || !shape.d_transform.is_empty()
+            || !(shape.m as u64 * shape.n as u64).is_multiple_of(4)
+        {
+            return Err(MatmulError::IncompatibleA {
+                path: "SourceQK",
+                reason: "requires dense BF16 operands and F32 split output",
+            }
+            .into());
+        }
+        let context = command_buffer.context();
+        let mut plan = GemmProblem::new(
+            shape,
+            self.weights_data_type,
+            self.output_data_type,
+            context.supports_mxu,
+            context.apple_gpu_family,
+        )
+        .select_plan();
+        if plan.engine != gemm::GemmEngine::Mxu {
+            return Err(MatmulError::IncompatibleA {
+                path: "SourceQK",
+                reason: "requires an MXU-capable device",
+            }
+            .into());
+        }
+        plan.split_k = 2;
+        self.gemm.encode_plan(arguments, plan, &self.output_work, command_buffer)
+    }
+
     fn prefer_gemm_over_gemv(
         shape: MatmulShape,
         plan: GemmPlan,
@@ -204,6 +259,8 @@ impl MatmulKernel for MatmulMetalKernel {
             weights_data_type,
             input_data_type,
             output_data_type,
+            source_wide: SourceWideQmv::new(),
+            source_scatter: None,
         })
     }
 
@@ -273,13 +330,33 @@ impl MatmulKernel for MatmulMetalKernel {
         >,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<(), MetalError> {
+        arguments.validate_affine_input_sum_policy(
+            self.weights_data_type,
+            self.input_data_type,
+            self.output_data_type,
+        )?;
+        if arguments.m > 1 && arguments.b.quantized().is_some_and(|q| q.params.materializes_affine_input_sum()) {
+            return self.encode_source_segments(arguments, command_buffer);
+        }
+        let materialize_affine_input_sum =
+            arguments.m == 1 && arguments.b.quantized().is_some_and(|q| q.params.materializes_affine_input_sum());
         let shape = MatmulShape::from_arguments(&arguments);
         let plan = match self.select_dispatch(&shape, command_buffer.context()) {
             MatmulDispatch::Gemv(gemv) => {
-                return self.gemv.encode(arguments, gemv, &self.output_work, command_buffer).map_err(MetalError::from);
+                return self
+                    .gemv
+                    .encode_selected(arguments, gemv, &self.output_work, command_buffer)
+                    .map_err(MetalError::from);
             },
             MatmulDispatch::Gemm(plan) => plan,
         };
+
+        if materialize_affine_input_sum {
+            return Err(MatmulError::<Metal>::UnsupportedLayout {
+                path: "single-row BF16 affine input sums require GEMV",
+            }
+            .into());
+        }
 
         // TODO: remove after GatherGEMM is supported
         if arguments.gather_indices.is_some() {
@@ -297,6 +374,27 @@ impl MatmulKernel for MatmulMetalKernel {
 
 #[cfg(test)]
 impl MatmulMetalKernel {
+    pub fn encode_with_gemm_split_for_test(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        engine: gemm::GemmEngine,
+        split_k: u32,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        let mut plan = self.gemm.select_plan_for_engine(&shape, engine, command_buffer.context())?;
+        assert!(split_k > 0 && shape.k.is_multiple_of(split_k));
+        plan.split_k = split_k;
+        self.gemm.encode_plan(arguments, plan, &self.output_work, command_buffer)
+    }
+
     pub fn encode_with_gemm_engine(
         &mut self,
         arguments: MatmulArguments<

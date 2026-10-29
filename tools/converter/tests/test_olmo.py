@@ -62,6 +62,7 @@ def test_olmo_preserves_projection_norms_postnorm_and_bounded_payloads(tmp_path,
     configs = plan.decoder_config["transformer_config"]["layer_configs"]
     assert [layer["mixer_config"]["sliding_window_size"] for layer in configs] == [16, 16, 16, None]
     assert [layer["rope_config"]["type"] for layer in configs] == ["UnscaledRoPEConfig"] * 3 + ["YARNRoPEConfig"]
+    assert "separate_prefill_last_token" not in plan.decoder_config
     assert configs[-1]["rope_config"]["truncate"] is True
     for layer in configs:
         assert layer["post_norm"] is True
@@ -69,6 +70,7 @@ def test_olmo_preserves_projection_norms_postnorm_and_bounded_payloads(tmp_path,
         assert layer["pre_mlp_norm_config"]["has_scale"] is False
         assert layer["mixer_config"]["qk_norm_full_width"] is True
         assert layer["post_mixer_norm_config"]["upcast_mode"] == "full_layer"
+        assert "materialize_sigmoid" not in layer["mlp_config"]["activation"]
     output = tmp_path / "converted.safetensors"
     stats = write_plan(plan, output, chunk_bytes=96)
     assert stats["peak_buffer_bytes"] <= 96
@@ -169,9 +171,10 @@ def test_olmo_default_attention_pattern_and_unscaled_rope(tmp_path):
 
 
 @pytest.mark.parametrize("bits", [4, 8])
-def test_olmo_affine_mlx_planes_preserve_packing_and_whole_projection_norms(tmp_path, bits):
+@pytest.mark.parametrize("group_size", [16, 32, 64, 128])
+def test_olmo_affine_mlx_planes_preserve_packing_and_whole_projection_norms(tmp_path, bits, group_size):
     source = tmp_path / "source"
-    config, tensors = mlx_dense_fixture(source, "llama", bits=bits)
+    config, tensors = mlx_dense_fixture(source, "llama", bits=bits, group_size=group_size)
     config.update(
         model_type="olmo3", architectures=["Olmo3ForCausalLM"], sliding_window=16, layer_types=["full_attention"]
     )
@@ -182,12 +185,37 @@ def test_olmo_affine_mlx_planes_preserve_packing_and_whole_projection_norms(tmp_
     (source / "config.json").write_text(json.dumps(config))
     save_mlx_fixture(source, tensors)
     plan = build_olmo3_plan(source)
+    source_q4 = bits == 4 and group_size == 64
+    assert plan.decoder_config.get("separate_prefill_last_token", False) is source_q4
+    layer = plan.decoder_config["transformer_config"]["layer_configs"][0]
+    upcast = "only_normalization" if source_q4 else "full_layer"
+    assert layer["post_mixer_norm_config"]["upcast_mode"] == upcast
+    assert layer["post_mlp_norm_config"]["upcast_mode"] == upcast
+    assert layer["mixer_config"]["query_norm_config"]["upcast_mode"] == upcast
+    assert layer["mixer_config"]["key_norm_config"]["upcast_mode"] == upcast
+    assert plan.decoder_config["transformer_config"]["output_norm_config"]["upcast_mode"] == upcast
+    for name in ("post_mixer_norm_config", "post_mlp_norm_config"):
+        assert layer[name].get("mlx_bf16_reduction", False) is source_q4
+    assert (
+        plan.decoder_config["transformer_config"]["output_norm_config"].get("mlx_bf16_reduction", False) is source_q4
+    )
+    # Packed Q/K uses the independently qualified source reduction policy.
+    for name in ("query_norm_config", "key_norm_config"):
+        assert layer["mixer_config"][name].get("mlx_bf16_reduction", False) is source_q4
+    assert not layer["pre_mlp_norm_config"].get("mlx_bf16_reduction", False)
+    assert (
+        plan.decoder_config["transformer_config"]["layer_configs"][0]["mlp_config"]["activation"].get(
+            "materialize_sigmoid", False
+        )
+        is source_q4
+    )
     destination = tmp_path / "output.safetensors"
     stats = write_plan(plan, destination, chunk_bytes=96)
     assert stats["peak_buffer_bytes"] <= 96
     metadata, converted = read_safetensors_header(destination)
     prefix = "decoder.transformer.layers.0.mixer.qkvg_projection.weights"
     assert json.loads(metadata[prefix + ".spec"])["bits"] == bits
+    assert json.loads(metadata[prefix + ".spec"]).get("materialize_affine_input_sum", False) is source_q4
     assert tensor_bytes(converted[prefix + ".weights"]) == b"".join(
         tensors[src + f".self_attn.{name}_proj.weight"][1].tobytes() for name in ("q", "k", "v")
     )

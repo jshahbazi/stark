@@ -40,6 +40,7 @@ pub fn input_embedding_lookup<T: ArrayElement + Float>(
     #[optional(table_kind == EmbeddingTableKind::Quantized)]
     quantization_method: Option<QuantizationMethod>,
     #[specialize] use_hadamard: bool,
+    #[specialize] materialize_dequant: bool,
 ) {
     let factors = if use_hadamard {
         hadamard_factors
@@ -105,7 +106,12 @@ pub fn input_embedding_lookup<T: ArrayElement + Float>(
                         },
                     };
                     // Ordinary quantization rounds to T before the transform.
-                    T::from((scale * code + bias) * input_scale).unwrap().to_f32().unwrap()
+                    let dequantized = scale * code + bias;
+                    if materialize_dequant {
+                        (T::from(dequantized).unwrap() * dense_scale).to_f32().unwrap()
+                    } else {
+                        T::from(dequantized * input_scale).unwrap().to_f32().unwrap()
+                    }
                 },
                 EmbeddingTableKind::D4S4 => {
                     let row_scales = scales.expect("D4S4 lookup requires row scales");

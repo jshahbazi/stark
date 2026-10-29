@@ -265,6 +265,8 @@ Generic conversions record `catalogued=false` and the chosen architecture and pr
 
 MLX conversion repacks an existing affine 4-bit or 8-bit checkpoint without requantizing. Packed 32-bit words become U8 tensors with identical payload bytes; scales and biases are cast, fused, transposed and padded to Stark's group and output layout; embedding planes keep their layout. Every compressed matrix needs a complete plane triplet, fused groups must share representation and dtype, and the catalog binds each identity to its declared bit width. Supported MLX families are Qwen3, Qwen3.5 text, OLMo 3, Llama, LLaMBA, SmolLM3, Gemma 3 text, Gemma 4 text and LFM2. Supported group sizes are 16, 32, 64 and 128; the OLMo 3 and Gemma 4 profiles currently admit affine group size 64. Quantized Qwen2, Mistral, Granite and Gemma 2 are unsupported. Gemma 4 affine Q4/Q8 conversion is text-only; Gemma image conversion requires BF16 source matrices.
 
+For OLMo 3 and Gemma 4 imported W4/group-64 matrices with BF16 activations, conversion automatically emits explicit MLX-compatible precision metadata. The runtime preserves source BF16 materialization and reduction boundaries while retaining F32 accumulation in the audited kernels. Reconvert older Q4 artifacts to obtain those settings. Q8 import coverage and BF16 image qualification remain separate. See the [source precision policy and pinned conversion commands](../../docs/OLMO3_GEMMA4.md#affine-q4-source-precision) and the [dated Q4 investigation](../../docs/archive/runs/2026-10-28-olmo3-gemma4-q4-precision.md) for evidence and qualification limits.
+
 ```sh
 uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.8B-MLX-4bit \
   --output models/qwen35-0.8b-4bit

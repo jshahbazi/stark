@@ -80,6 +80,44 @@ fn run_interleaved<T: ArrayElement + Float, B: Backend>(
     buffer_to_vec::<B, T>(&output)
 }
 
+#[stark_test]
+fn materialized_sigmoid_bf16_matches_independent_scalar_boundary_oracle() {
+    let mut input = interleaved_input::<bf16>(ActivationType::SILUMaterializedSigmoid);
+    let mut expected = Vec::new();
+    for row in 0..input.batch_dim as usize {
+        for channel in 0..input.gated_dim as usize {
+            let index = row * input.gated_dim as usize + channel;
+            let gate = bf16::from_f32((index as f32 - 256.0) / 32.0);
+            let value = bf16::from_f32((index as f32 * 0.137).sin() * 2.0);
+            let base = row * 2 * input.gated_dim as usize + channel;
+            input.fused_up[base] = value;
+            input.fused_up[base + input.gated_dim as usize] = gate;
+            // Independent F64 scalar arithmetic, rounded at the BF16
+            // boundaries identified by pinned MLX 0.32.3's source controls.
+            let round = |value: f64| bf16::from_f32(value as f32).to_f64();
+            let exponential = round(gate.to_f64().abs().exp());
+            let denominator = round(1.0 + exponential);
+            let lower = round(1.0 / denominator);
+            let sigmoid = if gate.to_f32() < 0.0 {
+                lower
+            } else {
+                round(1.0 - lower)
+            };
+            let activated = round(gate.to_f64() * sigmoid);
+            expected.push(bf16::from_f32((value.to_f64() * activated) as f32));
+        }
+    }
+    let mut legacy = interleaved_input::<bf16>(ActivationType::SILU);
+    legacy.fused_up.clone_from(&input.fused_up);
+    let legacy_output = run_interleaved::<bf16, Cpu>(&legacy, false);
+    assert!(legacy_output.iter().zip(&expected).filter(|(a, b)| a != b).count() > 64);
+    for_each_backend!(|B| {
+        let actual = run_interleaved::<bf16, B>(&input, false);
+        let mismatches = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+        assert_eq!(mismatches, 0, "materialized sigmoid boundary mismatch");
+    });
+}
+
 fn interleaved_test<T: ArrayElement + Float + Debug + Display>(act_type: ActivationType) {
     let eps = if matches!(T::data_type(), DataType::BF16) {
         0.02f32

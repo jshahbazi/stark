@@ -139,6 +139,12 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     local_rope = {**global_rope, "type": "UnscaledRoPEConfig"}
     local_rope = {key: local_rope[key] for key in ("type", "base", "max_sequence_length", "head_dim")}
     quantization = parse_mlx_quantization(config)
+    source_q4 = (
+        quantization is not None
+        and quantization.bits == 4
+        and quantization.group_size == 64
+        and target_dtype == "BF16"
+    )
     tensors = load_checkpoint(source)
     validate_planning_layers(layers, tensors)
     expected: set[str] = set()
@@ -181,7 +187,13 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
                 plan_mlx_matrix(out, sources, dtype=target_dtype, layout=layout, quantization=quantization)
             )
             metadata[out + ".spec"] = json.dumps(
-                {"type": "MLXSpec", "bits": quantization.bits, "group_size": quantization.group_size, "layout": layout}
+                {
+                    "type": "MLXSpec",
+                    "bits": quantization.bits,
+                    "group_size": quantization.group_size,
+                    "layout": layout,
+                    **({"materialize_affine_input_sum": True} if source_q4 else {}),
+                }
             )
             used_mlx = True
             return
@@ -256,10 +268,14 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
     normalization = {
         "epsilon": epsilon,
         "scale_offset": None,
-        "upcast_mode": "full_layer",
+        "upcast_mode": "only_normalization" if source_q4 else "full_layer",
         "subtract_mean": False,
         "has_scale": True,
         "has_biases": False,
+    }
+    regular_normalization = {
+        **normalization,
+        **({"mlx_bf16_reduction": True} if source_q4 else {}),
     }
     layer_configs = []
     for kind in layer_types:
@@ -272,8 +288,8 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
                     "type": "AttentionConfig",
                     "qkvg_projection_config": {},
                     "out_projection_config": {},
-                    "query_norm_config": normalization,
-                    "key_norm_config": normalization,
+                    "query_norm_config": regular_normalization,
+                    "key_norm_config": regular_normalization,
                     "qk_norm_full_width": True,
                     "num_heads": heads,
                     "num_groups": groups,
@@ -289,7 +305,7 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
                     "normalize_values": False,
                     "is_kv_sharing": False,
                 },
-                "post_mixer_norm_config": normalization,
+                "post_mixer_norm_config": regular_normalization,
                 # The post-norm execution mode uses an ordinary residual add here.
                 # Keep the legacy required config field explicitly parameter-free.
                 "pre_mlp_norm_config": {**normalization, "has_scale": False},
@@ -297,13 +313,17 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
                 "mlp_config": {
                     "type": "DenseMLPConfig",
                     "linear_config": {},
-                    "activation": {"type": "SiLU", "alpha": 1.0},
+                    "activation": {
+                        "type": "SiLU",
+                        "alpha": 1.0,
+                        **({"materialize_sigmoid": True} if source_q4 else {}),
+                    },
                     "has_up_biases": False,
                     "has_down_biases": False,
                     "gate_clipping": None,
                     "up_clipping": None,
                 },
-                "post_mlp_norm_config": normalization,
+                "post_mlp_norm_config": regular_normalization,
                 "hidden_dim": None,
                 "ple_config": None,
                 "has_post_layer_scalar": False,
@@ -313,6 +333,7 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
         )
     return ConversionPlan(
         {
+            **({"separate_prefill_last_token": True} if source_q4 else {}),
             "embedding_config": {
                 "type": "TiedEmbeddingConfig" if tied else "UntiedEmbeddingConfig",
                 "input_scale": None,
@@ -321,7 +342,7 @@ def build_olmo3_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan
             },
             "transformer_config": {
                 "layer_configs": layer_configs,
-                "output_norm_config": normalization,
+                "output_norm_config": regular_normalization,
                 "model_dim": model_dim,
                 "hidden_dim": hidden_dim,
             },

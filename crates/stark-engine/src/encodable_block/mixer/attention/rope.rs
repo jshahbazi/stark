@@ -7,6 +7,187 @@ pub struct PrecalculatedRoPE<B: Backend> {
     pub cosines: B::ConstantBuffer,
     pub sines: B::ConstantBuffer,
     pub dim: u32,
+    /// Absolute scalar positions for an explicitly selected GPU coefficient path.
+    pub source_positions: Option<B::ConstantBuffer>,
+    pub source_parameters: Option<SourceRoPEParameters>,
+    pub source_yarn_parameters: Option<B::ConstantBuffer>,
+}
+
+#[derive(Clone, Copy)]
+pub struct SourceRoPEParameters {
+    /// log2(base) for ordinary RoPE, raw base for explicit proportional frequencies.
+    pub base: f32,
+    pub rotary_dim: u32,
+    pub proportional: bool,
+    pub yarn: bool,
+}
+
+impl SourceRoPEParameters {
+    fn from_config(config: &AnyRoPEConfig) -> Option<Self> {
+        match config {
+            AnyRoPEConfig::UnscaledRoPEConfig(config) => Some(Self {
+                base: config.base.log2(),
+                rotary_dim: config.head_dim,
+                proportional: false,
+                yarn: false,
+            }),
+            AnyRoPEConfig::ProportionalRoPEConfig(config) => Some(Self {
+                base: config.base,
+                rotary_dim: config.rotary_dim,
+                proportional: true,
+                yarn: false,
+            }),
+            AnyRoPEConfig::YARNRoPEConfig(config) => Some(Self {
+                base: config.base,
+                rotary_dim: config.head_dim,
+                proportional: true,
+                yarn: true,
+            }),
+            _ => None,
+        }
+    }
+}
+
+// MLX-LM YarnRoPE uses Python double arithmetic for these scalar controls.
+// Array frequency arithmetic and rotation stay in the selected backend.
+fn source_yarn_values(config: &AnyRoPEConfig) -> Option<[f32; 4]> {
+    let AnyRoPEConfig::YARNRoPEConfig(config) = config else {
+        return None;
+    };
+    let dim = f64::from(config.head_dim);
+    let base = f64::from(config.base);
+    let context = f64::from(config.original_context_length);
+    let correction =
+        |beta: f32| dim * (context / (f64::from(beta) * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base.ln());
+    let mut low = correction(config.beta_fast);
+    let mut high = correction(config.beta_slow);
+    if config.truncate {
+        low = low.floor();
+        high = high.ceil();
+    }
+    let low = low.max(0.0);
+    let mut high = high.min(dim - 1.0);
+    if low == high {
+        high += 0.001;
+    }
+    let factor = f64::from(config.scaling_factor);
+    let mscale = if factor <= 1.0 {
+        1.0
+    } else {
+        0.1 * factor.ln() + 1.0
+    };
+    let weak_bf16_mscale = half::bf16::from_f32(mscale as f32).to_f32();
+    Some([config.scaling_factor, low as f32, high as f32, weak_bf16_mscale])
+}
+
+#[cfg(test)]
+mod source_yarn_tests {
+    use serde_json::json;
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    fn config() -> AnyRoPEConfig {
+        serde_json::from_value(json!({
+            "type":"YARNRoPEConfig", "base":500000.0, "max_sequence_length":65536,
+            "head_dim":128, "scaling_factor":8.0, "original_context_length":8192,
+            "beta_fast":32.0, "beta_slow":1.0, "truncate":true
+        }))
+        .unwrap()
+    }
+
+    #[stark_test]
+    fn source_yarn_controls_preserve_python_scalars_and_bf16_weak_scale() {
+        let config = config();
+        let source = SourceRoPEParameters::from_config(&config).unwrap();
+        assert!(source.proportional && source.yarn);
+        assert_eq!(source.base, 500000.0);
+        assert_eq!(source.rotary_dim, 128);
+        assert_eq!(source_yarn_values(&config).unwrap(), [8.0, 18.0, 35.0, 1.2109375]);
+        // An independent input at angle zero distinguishes the source's
+        // BF16 scalar multiply from folding unrounded magnitude into cosines.
+        let source_value = half::bf16::from_f32(1.25 * 1.2109375);
+        let legacy_value = half::bf16::from_f32(1.25 * (0.1 * 8.0f32.ln() + 1.0));
+        assert_eq!(source_value.to_f32(), 1.515625);
+        assert_eq!(legacy_value.to_f32(), 1.5078125);
+    }
+
+    #[cfg(feature = "cpu")]
+    fn run_prescale<B: Backend>() {
+        use half::bf16;
+
+        use crate::{
+            backends::common::{
+                CommandBufferExecutable, CommandBufferPending, Context, Kernels, kernel::AttentionPrepareKernel,
+            },
+            data_type::DataType,
+            tests::helpers::{buffer_to_vec, create_buffer, create_buffer_with_data},
+        };
+
+        let context = B::Context::new().unwrap();
+        let input = vec![bf16::from_f32(1.25); 3 * 128];
+        let packed = create_buffer_with_data::<B, bf16>(&context, &input);
+        for enabled in [false, true] {
+            let prepare = <B::Kernels as Kernels>::AttentionPrepareKernel::new(
+                &context,
+                DataType::BF16,
+                DataType::F32,
+                true,
+                true,
+                false,
+                enabled,
+                enabled,
+                enabled,
+            )
+            .unwrap();
+            let mut queries = create_buffer::<B, bf16>(&context, 128);
+            let mut keys = create_buffer::<B, bf16>(&context, 128);
+            let mut values = create_buffer::<B, bf16>(&context, 128);
+            let mut command = context.create_command_buffer(None, None).unwrap();
+            let rope = PrecalculatedRoPE::<B>::precalculate(&config(), &[0], &mut command).unwrap();
+            let parameters = enabled.then_some(rope.source_parameters.unwrap());
+            prepare.encode(
+                &packed,
+                &mut queries,
+                Some(&mut keys),
+                Some(&mut values),
+                Some(&rope.cosines),
+                Some(&rope.sines),
+                parameters.and(rope.source_positions.as_ref()),
+                parameters.map(|p| p.base),
+                parameters.map(|p| p.rotary_dim),
+                parameters.and(rope.source_yarn_parameters.as_ref()),
+                1,
+                Some(1),
+                128,
+                Some(128),
+                Some(0),
+                3 * 128,
+                1,
+                &mut command,
+            );
+            drop(rope);
+            command.end_encoding().submit().wait_until_completed().unwrap();
+            let expected = bf16::from_f32(if enabled {
+                1.515625
+            } else {
+                1.5078125
+            });
+            for output in [&queries, &keys] {
+                assert!(buffer_to_vec::<B, bf16>(output).iter().all(|&value| value == expected));
+            }
+            assert_eq!(buffer_to_vec::<B, bf16>(&values), vec![bf16::from_f32(1.25); 128]);
+        }
+    }
+
+    #[cfg(feature = "cpu")]
+    #[stark_test]
+    fn source_yarn_prepare_materializes_bf16_input_before_rotating() {
+        use crate::{backends::cpu::Cpu, tests::helpers::for_each_non_cpu_backend};
+
+        run_prescale::<Cpu>();
+        for_each_non_cpu_backend!(|B| run_prescale::<B>());
+    }
 }
 
 /// Model-owned CPU constants only: no tokens, sequence identity or GPU storage.
@@ -39,10 +220,18 @@ impl RoPETableCache {
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<PrecalculatedRoPE<B>, B::Error> {
         self.with_tables(token_positions, |cosines, sines| {
+            let source_parameters = SourceRoPEParameters::from_config(&self.config);
             Ok(PrecalculatedRoPE {
                 cosines: command_buffer.allocate_constant_from_slice(cosines)?,
                 sines: command_buffer.allocate_constant_from_slice(sines)?,
                 dim: *self.config.head_dim(),
+                source_positions: source_parameters
+                    .map(|_| command_buffer.allocate_constant_from_slice(token_positions))
+                    .transpose()?,
+                source_parameters,
+                source_yarn_parameters: source_yarn_values(&self.config)
+                    .map(|parameters| command_buffer.allocate_constant_from_slice(&parameters))
+                    .transpose()?,
             })
         })
     }
@@ -125,6 +314,9 @@ impl<B: Backend> PrecalculatedRoPE<B> {
             cosines: command_buffer.allocate_constant_from_slice(&cosines)?,
             sines: command_buffer.allocate_constant_from_slice(&sines)?,
             dim: *rope_config.head_dim(),
+            source_positions: None,
+            source_parameters: None,
+            source_yarn_parameters: None,
         })
     }
 
@@ -134,11 +326,19 @@ impl<B: Backend> PrecalculatedRoPE<B> {
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<Self, B::Error> {
         let (cosines, sines) = precalculate_cpu_tables(rope_config, token_positions);
+        let source_parameters = SourceRoPEParameters::from_config(rope_config);
 
         Ok(Self {
             cosines: command_buffer.allocate_constant_from_slice(&cosines)?,
             sines: command_buffer.allocate_constant_from_slice(&sines)?,
             dim: *rope_config.head_dim(),
+            source_positions: source_parameters
+                .map(|_| command_buffer.allocate_constant_from_slice(token_positions))
+                .transpose()?,
+            source_parameters,
+            source_yarn_parameters: source_yarn_values(rope_config)
+                .map(|parameters| command_buffer.allocate_constant_from_slice(&parameters))
+                .transpose()?,
         })
     }
 }
@@ -450,6 +650,9 @@ mod multimodal_tests {
             true,
             true,
             false,
+            false,
+            false,
+            false,
         )
         .unwrap();
         let input = (0..3 * 256).map(|index| bf16::from_f32((index % 31) as f32 / 32.0 - 0.5)).collect::<Vec<_>>();
@@ -468,6 +671,10 @@ mod multimodal_tests {
             Some(&mut values),
             Some(&coefficients.cosines),
             Some(&coefficients.sines),
+            None::<&B::GlobalBuffer>,
+            None,
+            None,
+            None::<&B::GlobalBuffer>,
             1,
             Some(1),
             256,

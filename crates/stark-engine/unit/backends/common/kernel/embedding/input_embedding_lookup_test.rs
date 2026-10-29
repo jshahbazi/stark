@@ -113,6 +113,7 @@ fn lookup<B: Backend, T: ArrayElement + Float>(
         mode,
         method,
         use_hadamard,
+        false,
     )
     .unwrap();
     let token_ids = create_buffer_with_data::<B, u32>(context, &TOKEN_IDS);
@@ -184,4 +185,81 @@ fn input_embedding_lookup_f32(
     #[case] use_hadamard: bool,
 ) {
     check::<f32>(table_kind, quantization, use_hadamard);
+}
+
+fn materialized_affine_lookup<B: Backend>(materialize: bool) -> Vec<bf16> {
+    let context = <B as Backend>::Context::new().unwrap();
+    let context = context.as_ref();
+    let values = pattern(MODEL_DIM / 2, 37);
+    let scales: Vec<bf16> = [0.0033, 0.0071, 0.0123, 0.0271].map(bf16::from_f32).to_vec();
+    let biases: Vec<bf16> = [-0.03, -0.05, -0.07, -0.11].map(bf16::from_f32).to_vec();
+    let kernel = <<B as Backend>::Kernels as Kernels>::InputEmbeddingLookupKernel::new(
+        context,
+        bf16::data_type(),
+        Quantized,
+        Some(32),
+        Some(U4),
+        Some(ScaleBias),
+        false,
+        materialize,
+    )
+    .unwrap();
+    let token_ids = create_buffer_with_data::<B, u32>(context, &[0]);
+    let values = create_buffer_with_data::<B, u8>(context, &values);
+    let scales = create_buffer_with_data::<B, bf16>(context, &scales);
+    let biases = create_buffer_with_data::<B, bf16>(context, &biases);
+    let mut output = create_buffer::<B, bf16>(context, MODEL_DIM as usize);
+    let mut command_buffer = context.create_command_buffer(None, None).unwrap();
+    let none: Option<&B::GlobalBuffer> = None;
+    kernel.encode(
+        &token_ids,
+        &values,
+        Some(&scales),
+        none,
+        Some(&biases),
+        none,
+        none,
+        none,
+        none,
+        &mut output,
+        1,
+        1,
+        MODEL_DIM,
+        39.25,
+        &mut command_buffer,
+    );
+    submit_command_buffer(command_buffer);
+    buffer_to_vec::<B, bf16>(&output)
+}
+
+#[stark_test]
+fn affine_embedding_materializes_before_non_power_of_two_scale() {
+    // FP64 independently evaluates each exact affine value before the explicit
+    // BF16 casts. The chosen scale distinguishes a materialized embedding from
+    // a fused dequantization/scale expression.
+    let packed = pattern(MODEL_DIM / 2, 37);
+    let scales = [0.0033, 0.0071, 0.0123, 0.0271].map(bf16::from_f32);
+    let biases = [-0.03, -0.05, -0.07, -0.11].map(bf16::from_f32);
+    let oracle = |materialize| -> Vec<bf16> {
+        (0..MODEL_DIM as usize)
+            .map(|column| {
+                let code = (packed[column / 2] >> (4 * (column % 2))) & 15;
+                let affine = scales[column / 32].to_f64() * code as f64 + biases[column / 32].to_f64();
+                let value = if materialize {
+                    bf16::from_f64(affine).to_f64()
+                } else {
+                    affine
+                };
+                bf16::from_f64(value * 39.25)
+            })
+            .collect()
+    };
+    assert_ne!(oracle(false), oracle(true), "fixture must distinguish the BF16 materialization boundary");
+    for materialize in [false, true] {
+        let expected = oracle(materialize);
+        assert_eq!(materialized_affine_lookup::<Cpu>(materialize), expected);
+        for_each_non_cpu_backend!(|B| {
+            assert_eq!(materialized_affine_lookup::<B>(materialize), expected);
+        });
+    }
 }

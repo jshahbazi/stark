@@ -207,6 +207,7 @@ mod tests {
             epsilon: 1e-6,
             scale_offset: None,
             upcast_mode: super::super::normalization::UpcastMode::FullLayer,
+            mlx_bf16_reduction: false,
             subtract_mean: false,
             has_scale: false,
             has_biases: false,

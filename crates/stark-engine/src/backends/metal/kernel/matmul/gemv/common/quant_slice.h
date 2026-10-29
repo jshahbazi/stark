@@ -8,6 +8,26 @@
 namespace stark {
 namespace gemm {
 
+inline float materialized_bf16_quad_sum(float a, float b, float c, float d) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+  const float first = float(bfloat(a + b));
+  const float second = float(bfloat(first + c));
+  return float(bfloat(second + d));
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
+inline float materialized_affine_dot_quad(
+    float prior, const thread float* input, const thread float* weights
+) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+  return prior + (input[0] * weights[0] + input[1] * weights[1] + input[2] * weights[2] + input[3] * weights[3]);
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
 template <
     typename Tile,
     typename AT,
@@ -17,7 +37,8 @@ template <
     uint GROUP_SIZE,
     uint BITS,
     bool INPUT_ALIGNED,
-    bool FULL_TILE>
+    bool FULL_TILE,
+    bool MATERIALIZED_SOURCE>
 struct QuantSlice {
   using U = float;
 
@@ -86,7 +107,7 @@ public:
       const thread OutputTile<Tile, FULL_TILE>& tile,
       uint group_offset,
       uint batch_remaining,
-      const thread QuantMetadata<Tile, AT, BT, DT, B_PROLOGUE, BITS>& metadata
+      const thread QuantMetadata<Tile, AT, BT, DT, B_PROLOGUE, BITS, MATERIALIZED_SOURCE>& metadata
   ) const thread {
     float partial[Tile::INPUT_ROWS][Tile::ROWS_PER_LANE] = {{0}};
     float input_sum[Tile::INPUT_ROWS] = {0};
@@ -107,16 +128,33 @@ public:
         float input_values[CHUNK_VALUES];
         QuantChunk<BITS>::template load<INPUT_ALIGNED>(input, input_values, k, params.in_vec_size, input_row);
         if constexpr (B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant) {
-          METAL_PRAGMA_UNROLL
-          for (uint i = 0; i < CHUNK_VALUES; i++) {
-            input_sum[I] += input_values[i];
+          if constexpr (MATERIALIZED_SOURCE) {
+              // MLX 0.32.3 (64ea011c), quantized.h load_vector: each
+              // four-input BF16 sum precedes its F32 bias correction.
+              METAL_PRAGMA_UNROLL
+              for (uint i = 0; i < CHUNK_VALUES; i += 4) {
+                input_sum[I] += materialized_bf16_quad_sum(
+                    input_values[i], input_values[i + 1], input_values[i + 2], input_values[i + 3]);
+              }
+          } else {
+            METAL_PRAGMA_UNROLL
+            for (uint i = 0; i < CHUNK_VALUES; i++) input_sum[I] += input_values[i];
           }
         }
         Tile::for_each_output_row([&](auto output_index) STARK_ALWAYS_INLINE {
           constexpr uint R = decltype(output_index)::value;
-          METAL_PRAGMA_UNROLL
-          for (uint i = 0; i < CHUNK_VALUES; i++) {
-            partial[I][R] = fma(input_values[i], weight_values[R][i], partial[I][R]);
+          if constexpr (MATERIALIZED_SOURCE) {
+              // qdot groups four products before adding to its F32 prior in
+              // both MLX's fast sixteen-value and generic eight-value lanes.
+              METAL_PRAGMA_UNROLL
+              for (uint i = 0; i < CHUNK_VALUES; i += 4) {
+                partial[I][R] = materialized_affine_dot_quad(partial[I][R], input_values + i, weight_values[R] + i);
+              }
+          } else {
+            METAL_PRAGMA_UNROLL
+            for (uint i = 0; i < CHUNK_VALUES; i++) {
+              partial[I][R] = fma(input_values[i], weight_values[R][i], partial[I][R]);
+            }
           }
         });
       });

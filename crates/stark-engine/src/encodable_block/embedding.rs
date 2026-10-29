@@ -80,7 +80,14 @@ impl<B: Backend> Embedding<B> {
         let (tying, readout_input_hadamard_factors) = match config {
             AnyEmbeddingConfig::TiedEmbeddingConfig(_) => {
                 let embedding_tree = parameter_tree.subtree("embedding");
-                let table = EmbeddingTable::load(context, &embedding_tree, vocab_size, model_dim, data_type)?;
+                let table = EmbeddingTable::load(
+                    context,
+                    &embedding_tree,
+                    vocab_size,
+                    model_dim,
+                    data_type,
+                    *config.materialize_dequant(),
+                )?;
                 if table.as_matrix().is_none() {
                     return Err(EmbeddingError::UnsupportedConfiguration("tied embeddings need a matrix table".into()));
                 }
@@ -112,8 +119,14 @@ impl<B: Backend> Embedding<B> {
             },
             AnyEmbeddingConfig::UntiedEmbeddingConfig(_) => {
                 let input_embedding_tree = parameter_tree.subtree("input_embedding");
-                let input_table =
-                    EmbeddingTable::load(context, &input_embedding_tree, vocab_size, model_dim, data_type)?;
+                let input_table = EmbeddingTable::load(
+                    context,
+                    &input_embedding_tree,
+                    vocab_size,
+                    model_dim,
+                    data_type,
+                    *config.materialize_dequant(),
+                )?;
                 let output_embedding_tree = parameter_tree.subtree("output_embedding");
                 let output_embedding_spec = output_embedding_tree.metadata("spec")?;
                 let output = UntiedReadout::load(
@@ -138,9 +151,13 @@ impl<B: Backend> Embedding<B> {
         let logit_scale = config.logit_scale().unwrap_or(1.0);
         let logit_soft_cap = *config.logit_soft_cap();
         let logit_transform = if logit_scale != 1.0 || logit_soft_cap.is_some() {
-            let kernel =
-                <B::Kernels as Kernels>::LogitTransformKernel::new(context, data_type, logit_soft_cap.is_some())
-                    .map_err(EmbeddingError::BackendError)?;
+            let kernel = <B::Kernels as Kernels>::LogitTransformKernel::new(
+                context,
+                data_type,
+                logit_soft_cap.is_some(),
+                *config.materialize_soft_cap(),
+            )
+            .map_err(EmbeddingError::BackendError)?;
             Some(LogitTransform {
                 scale: logit_scale,
                 soft_cap: logit_soft_cap,

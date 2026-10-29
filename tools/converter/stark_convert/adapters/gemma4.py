@@ -77,12 +77,15 @@ def normalize_gemma4_config(config: dict) -> dict:
     }
 
 
-def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPlan:
+def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16", precision_profile: str = "auto") -> ConversionPlan:
     """Export E2B/E4B text inference without importing modality towers.
 
     Official multimodal wrappers and MLX-LM text exports have explicit, distinct
     namespaces. Every original tensor remains source-bound in the plan, including
     omitted declared towers and redundant shared-layer K/V weights.
+    Imported MLX W4/group64 BF16 sources select their declared tensor arithmetic;
+    full-precision sources retain canonical HF arithmetic. Explicit profiles
+    remain available for independently recorded controls.
     """
     outer = read_json(source / "config.json")
     wrapper = outer.get("model_type") == "gemma4"
@@ -110,6 +113,21 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
         raise UnsupportedConversion("Gemma 4 text exports require BF16, F16 or F32")
     target = _DTYPES[dtype]
     quantization = parse_mlx_quantization(outer)
+    if precision_profile not in {"auto", "canonical", "mlx-bf16"}:
+        raise UnsupportedConversion("Gemma 4 precision profile is outside coverage")
+    mlx_bf16 = precision_profile == "mlx-bf16" or (
+        precision_profile == "auto"
+        and quantization is not None
+        and quantization.bits == 4
+        and quantization.group_size == 64
+        and target == "BF16"
+    )
+    if mlx_bf16 and (
+        quantization is None or quantization.bits != 4 or quantization.group_size != 64 or target != "BF16"
+    ):
+        raise UnsupportedConversion(
+            "Gemma 4 MLX BF16 profile requires imported W4/group64 matrices and BF16 activations"
+        )
     if wrapper and parse_mlx_quantization(config) not in (None, quantization):
         raise ConversionError("Gemma 4 wrapper and text quantization disagree")
     if set(config) - _KEYS:
@@ -257,6 +275,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
                 "bits": quantization.bits,
                 "group_size": quantization.group_size,
             }
+            if mlx_bf16 and quantization.bits == 4:
+                spec["materialize_affine_input_sum"] = True
         else:
             cast = any(value.dtype != target for value in values)
             kind = ("fuse_cast" if cast else "fuse") if len(values) > 1 else ("cast" if cast else "copy")
@@ -299,12 +319,20 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
     norm_config = {
         "epsilon": epsilon,
         "scale_offset": None,
-        "upcast_mode": "full_layer",
+        "upcast_mode": "only_normalization" if mlx_bf16 else "full_layer",
         "subtract_mean": False,
         "has_scale": True,
         "has_biases": False,
     }
+    # Packed Q/K normalization preserves the source logical SIMD subtotals;
+    # transformer/PLE/output RMS uses the corresponding contiguous row policy.
+    head_norm_config = norm_config.copy()
+    if mlx_bf16:
+        norm_config["mlx_bf16_reduction"] = True
+        head_norm_config["mlx_bf16_reduction"] = True
     activation = {"type": "GELU", "approximate": True}
+    if mlx_bf16:
+        activation["materialize_polynomial"] = True
     mlp = {
         "type": "DenseMLPConfig",
         "linear_config": {},
@@ -366,8 +394,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             "type": "AttentionConfig",
             "qkvg_projection_config": {},
             "out_projection_config": {},
-            "query_norm_config": norm_config,
-            "key_norm_config": norm_config if owner is None else None,
+            "query_norm_config": head_norm_config,
+            "key_norm_config": head_norm_config if owner is None else None,
             "num_heads": heads,
             "num_groups": groups,
             "head_dim": width,
@@ -382,6 +410,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             "normalize_values": True,
             "is_kv_sharing": owner is not None,
         }
+        if mlx_bf16:
+            mixer["materialize_prefill_scores"] = True
         layers.append(
             {
                 "pre_mixer_norm_config": norm_config,
@@ -427,6 +457,8 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             "input_scale": _activation_scalar(math.sqrt(dim), target),
             "logit_soft_cap": softcap,
             "logit_scale": None,
+            "materialize_dequant": target == "BF16",
+            "materialize_soft_cap": target == "BF16",
         },
         "transformer_config": {
             "layer_configs": layers,
@@ -441,11 +473,10 @@ def build_gemma4_plan(source: Path, *, dtype: str = "bfloat16") -> ConversionPla
             "num_layers": count,
             "ple_vocab_size": ple_vocab,
             "ple_embed_scale": _activation_scalar(math.sqrt(ple_dim), target),
-            # Canonical HF keeps these Python scalars in FP32 opmath, unlike
-            # its explicit dtype-cast token-embedding scale buffers. MLX uses
-            # weak BF16 scalars here; that is a separate numerical profile.
-            "model_projection_scale": _activation_scalar(dim**-0.5, "F32"),
-            "input_scale": _activation_scalar(2**-0.5, "F32"),
+            # Canonical HF keeps these Python scalars in FP32 opmath; the
+            # declared MLX affine-source profile uses weak BF16 coefficients.
+            "model_projection_scale": _activation_scalar(dim**-0.5, "BF16" if mlx_bf16 else "F32"),
+            "input_scale": _activation_scalar(2**-0.5, "BF16" if mlx_bf16 else "F32"),
             "linear_config": {},
             "norm_config": norm_config,
             "reference_bf16": target == "BF16",

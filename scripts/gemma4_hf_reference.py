@@ -36,6 +36,10 @@ def metrics(left, right) -> dict:
     return {
         "max_abs_error": float(np.abs(error).max()),
         "rmse": float(np.sqrt(np.mean(error**2))),
+        "mean_error": float(error.mean()),
+        "centered_rmse": float(np.sqrt(np.mean(centered**2))),
+        "centered_max_abs_error": float(np.abs(centered).max()),
+        "reference_centered_rms": float(np.sqrt(np.mean(reference_centered**2))),
         "centered_relative_l2": float(
             np.linalg.norm(centered) / max(np.linalg.norm(reference_centered), 1e-30)
         ),
@@ -47,7 +51,14 @@ def metrics(left, right) -> dict:
 
 
 def generate(
-    source: Path, cases_path: Path, output: Path, indices: list[int], *, attention: str
+    source: Path,
+    cases_path: Path,
+    output: Path,
+    indices: list[int],
+    *,
+    attention: str,
+    mlx_affine: bool = False,
+    affine_linear_opmath: bool = False,
 ) -> dict:
     import numpy as np
     import torch
@@ -91,22 +102,120 @@ def generate(
     finally:
         torch.set_default_dtype(previous_dtype)
     expected = set(model.state_dict())
-    source_prefix = (
-        "model.language_model." if outer.get("model_type") == "gemma4" else "model."
-    )
     state = {}
+    affine_linears = set()
+    readout_weight = None
     weight_path = source / "model.safetensors"
     with safe_open(str(weight_path), framework="pt", device="cpu") as weights:
+        source_names = set(weights.keys())
+        prefixes = (
+            ("model.language_model.", "language_model.model.")
+            if outer.get("model_type") == "gemma4"
+            else ("model.",)
+        )
+        candidates = [
+            prefix
+            for prefix in prefixes
+            if prefix + "embed_tokens.weight" in source_names
+        ]
+        if len(candidates) != 1:
+            raise ValueError("canonical_text_namespace_mismatch")
+        source_prefix = candidates[0]
+        quantization = outer.get("quantization", outer.get("quantization_config"))
+        if mlx_affine:
+            if (
+                not isinstance(quantization, dict)
+                or quantization.get("mode", "affine") != "affine"
+            ):
+                raise ValueError("canonical_affine_configuration_required")
+            bits, group_size = quantization.get("bits"), quantization.get("group_size")
+            if bits not in (4, 8) or group_size not in (16, 32, 64, 128):
+                raise ValueError("canonical_affine_geometry_unsupported")
+        elif quantization is not None:
+            raise ValueError("packed_source_requires_explicit_affine_reference")
         for name in weights.keys():  # noqa: SIM118 - safetensors exposes keys(), not mapping iteration
             if name.startswith(source_prefix):
                 destination = "model." + name.removeprefix(source_prefix)
                 if destination in expected:
-                    state[destination] = weights.get_tensor(name)
-    state["lm_head.weight"] = state["model.embed_tokens.weight"]
+                    packed = weights.get_tensor(name)
+                    if packed.dtype in (torch.uint32, torch.int32):
+                        if not mlx_affine or not name.endswith(".weight"):
+                            raise ValueError("unexpected_packed_canonical_tensor")
+                        stem = name.removesuffix(".weight")
+                        scales = weights.get_tensor(stem + ".scales")
+                        biases = weights.get_tensor(stem + ".biases")
+                        rows, columns = model.state_dict()[destination].shape
+                        if (
+                            packed.shape != (rows, columns * bits // 32)
+                            or scales.shape != (rows, columns // group_size)
+                            or biases.shape != scales.shape
+                        ):
+                            raise ValueError("canonical_affine_plane_shape_mismatch")
+                        is_embedding = destination in (
+                            "model.embed_tokens.weight",
+                            "model.embed_tokens_per_layer.weight",
+                        )
+                        dense = torch.empty(
+                            (rows, columns),
+                            dtype=torch.float32
+                            if affine_linear_opmath
+                            else torch.bfloat16,
+                        )
+                        shifts = torch.arange(0, 32, bits, dtype=torch.int64)
+                        for row in range(0, rows, 1024):
+                            tile = packed[row : row + 1024].to(torch.int64)
+                            codes = (
+                                ((tile[..., None] >> shifts) & ((1 << bits) - 1))
+                                .reshape(-1, columns)
+                                .float()
+                            )
+                            values = codes * scales[
+                                row : row + 1024
+                            ].float().repeat_interleave(group_size, dim=1)
+                            values += (
+                                biases[row : row + 1024]
+                                .float()
+                                .repeat_interleave(group_size, dim=1)
+                            )
+                            dense[row : row + 1024] = values.to(dense.dtype)
+                        if affine_linear_opmath and is_embedding:
+                            state[destination] = dense.to(torch.bfloat16)
+                            if destination == "model.embed_tokens.weight":
+                                readout_weight = dense
+                        else:
+                            state[destination] = dense
+                            if affine_linear_opmath:
+                                affine_linears.add(destination.removesuffix(".weight"))
+                    else:
+                        state[destination] = packed
+    state["lm_head.weight"] = (
+        readout_weight
+        if readout_weight is not None
+        else state["model.embed_tokens.weight"]
+    )
+    if readout_weight is not None:
+        affine_linears.add("lm_head")
     if set(state) != expected:
         raise ValueError("canonical_text_weight_inventory_mismatch")
     model.load_state_dict(state, strict=True, assign=True)
     del state
+    if affine_linear_opmath:
+        # An independent affine-opmath control keeps exact FP32 q*s+b weights
+        # for each linear product, then casts its result to activation dtype.
+        # Embedding lookup still materializes BF16 values before input scaling.
+        # This intentionally differs from BF16-dequantized dense-weight control.
+        import types
+
+        def affine_forward(module, hidden_states):
+            return torch.nn.functional.linear(
+                hidden_states.float(), module.weight.float(), None
+            ).to(hidden_states.dtype)
+
+        for name in affine_linears:
+            module = model.get_submodule(name)
+            if not isinstance(module, torch.nn.Linear) or module.bias is not None:
+                raise ValueError("affine_opmath_requires_biasless_linear")
+            module.forward = types.MethodType(affine_forward, module)
     model.eval()
     output.mkdir(parents=True)
     reports = []
@@ -213,6 +322,14 @@ def generate(
         "input_cases_sha256": digest(cases_path),
         "selected_case_indices": indices,
         "batching": "native-score-1024-trailing-shared-layer-split",
+        "weight_policy": (
+            "mlx-affine-float32-linear-opmath-bfloat16-embedding"
+            if affine_linear_opmath
+            else "mlx-affine-float32-dequantized-then-bfloat16"
+            if mlx_affine
+            else "source-bfloat16"
+        ),
+        "activation_policy": "canonical-hf-bfloat16-with-float32-control",
         "profiles": reports,
         "bf16_to_float32_control": [
             {"input_tokens": len(case["tokens"]), **metrics(a, b)}
@@ -232,7 +349,19 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--case-indices", default="0,3")
     parser.add_argument("--attention", choices=("eager", "sdpa"), default="sdpa")
+    parser.add_argument(
+        "--mlx-affine",
+        action="store_true",
+        help="Independently reconstruct packed affine matrices in FP32, then round weights to BF16",
+    )
+    parser.add_argument(
+        "--affine-linear-opmath",
+        action="store_true",
+        help="Control FP32 affine weights/products with BF16 linear outputs and embedding lookup",
+    )
     args = parser.parse_args()
+    if args.affine_linear_opmath and not args.mlx_affine:
+        parser.error("--affine-linear-opmath requires --mlx-affine")
     try:
         result = generate(
             args.source.resolve(),
@@ -240,6 +369,8 @@ def main() -> int:
             args.output.resolve(),
             [int(value) for value in args.case_indices.split(",")],
             attention=args.attention,
+            mlx_affine=args.mlx_affine,
+            affine_linear_opmath=args.affine_linear_opmath,
         )
     except Exception:  # noqa: BLE001 - validation must never emit prompts or exception dumps
         print(json.dumps({"passed": False, "error": "gemma4_hf_reference_failed"}))

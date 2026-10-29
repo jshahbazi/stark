@@ -61,6 +61,14 @@ fn load_biases<B: Backend>(
 }
 
 impl<B: Backend> LinearMatmul<B> {
+    pub(super) fn set_source_output_widths(
+        &mut self,
+        widths: &[u32],
+    ) -> Result<(), LinearMatmulError<B>> {
+        self.matrix.set_source_output_widths(widths)?;
+        Ok(())
+    }
+
     /// Loads a linear over any parsed spec — full precision, MLX or Int. Hybrid
     /// compositions live in the wrappers, not here.
     pub fn load(

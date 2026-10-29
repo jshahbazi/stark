@@ -385,7 +385,7 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
 
                 let mut output_tokens = None;
                 let mut output_norm = None;
-                let split_logits_row = model.decoder.prefill_cache_skips_trailing_layers();
+                let split_logits_row = model.decoder.prefill_requires_separate_logits_row();
                 let hidden_feature_layer_indices =
                     model.speculator.as_ref().map(|speculator| speculator.hidden_feature_layer_indices());
                 #[cfg(test)]

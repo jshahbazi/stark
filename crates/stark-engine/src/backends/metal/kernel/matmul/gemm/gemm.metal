@@ -35,7 +35,8 @@ template <
     uint BITS,
     uint GROUP_SIZE,
     GemmAPrologueKind A_PROLOGUE,
-    uint A_GROUP_SIZE>
+    uint A_GROUP_SIZE,
+    bool SOURCE_F32_FRAGMENTS>
 VARIANTS(AT, bfloat, float)
 VARIANTS(BT, bfloat, float)
 VARIANTS(DT, bfloat, float)
@@ -68,6 +69,8 @@ VARIANTS(
     GemmAPrologueKind::FullPrecision,
     GemmAPrologueKind::Int8Symmetric)
 VARIANTS(A_GROUP_SIZE, 0, 32, 64, 128)
+VARIANTS(SOURCE_F32_FRAGMENTS, false, true)
+CONSTRAINT(!SOURCE_F32_FRAGMENTS || (!USE_MXU && AT == "bfloat" && BT == "bfloat" && DT == "bfloat" && BITS == 4 && GROUP_SIZE == 64 && B_PROLOGUE == GemmBPrologueKind::ScaleBiasDequant && A_PROLOGUE == GemmAPrologueKind::FullPrecision && TRANSPOSE_B))
 CONSTRAINT(
     USE_MXU ==
     (GEMM_TILING == GemmTiling::Tile16x32x256_Simdgroups1x1 ||
@@ -176,7 +179,7 @@ KERNEL(Gemm)(
         thread_context
     );
   } else {
-    using Core = SimdgroupMmaCore<DT, GEMM_TILING, TRANSPOSE_B, LeftOperand, RightOperand>;
+    using Core = SimdgroupMmaCore<DT, GEMM_TILING, TRANSPOSE_B, LeftOperand, RightOperand, SOURCE_F32_FRAGMENTS>;
     Core::run(
         left_storage,
         right_storage,

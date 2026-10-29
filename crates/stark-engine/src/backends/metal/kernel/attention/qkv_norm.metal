@@ -5,6 +5,26 @@
 using namespace metal;
 #define GRAIN_SIZE 4
 
+// Source profile follows MLX v0.32.3 rms_norm.metal (Apple Inc., MIT).
+// Copyright 2024 Apple Inc. Notice retained in LICENSE.mlx-reference.
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(on)
+template <typename InputT>
+METAL_FUNC float source_qkv_four(const device InputT* input, uint base, uint count) {
+  float accum = 0.0f;
+  for (uint j=0;j<4;++j) {
+    const float x=base+j<count ? float(input[base+j]) : 0.0f;
+    accum += x*x;
+  }
+  return accum;
+}
+METAL_FUNC float source_qkv_inverse(float sum,uint count,float epsilon) {
+  const float mean=sum/float(count);
+  return metal::precise::rsqrt(mean+epsilon);
+}
+#pragma METAL fp math_mode(fast)
+#pragma METAL fp contract(on)
+
 // QKV norm: normalize per-head vectors (small head_dim) efficiently.
 //
 // Strategy:
@@ -31,7 +51,8 @@ PUBLIC KERNEL(QKVNorm)(
     const uint head_idx GROUPS(head_count),
     const uint lane_id THREADS(METAL_SIMD_SIZE),
     const bool in_place SPECIALIZE,
-    const bool has_scales SPECIALIZE
+    const bool has_scales SPECIALIZE,
+    const bool mlx_bf16_reduction SPECIALIZE
 ) {
   if (in_place) {
     qkvg_input = (const device InputT*)qkvg_output;
@@ -50,6 +71,20 @@ PUBLIC KERNEL(QKVNorm)(
 
   AccumT partial_sum = static_cast<AccumT>(0.0f);
 
+  AccumT rms_norm;
+  if (mlx_bf16_reduction) {
+    // Emulate the source logical SIMD groups in one hardware SIMD group.
+    // Each logical group reduces four contiguous values/lane; lane g then
+    // contributes group g's subtotal to the source final padded reduction.
+    float selected = 0.0f;
+    for (uint group=0;group<(element_count+127)/128;++group) {
+      const uint base=group*128+lane_id*4;
+      const float group_sum=simd_sum(source_qkv_four(input_data,base,element_count));
+      if (lane_id==group) selected=group_sum;
+    }
+    const float total=simd_sum(selected);
+    rms_norm=source_qkv_inverse(total,element_count,epsilon);
+  } else {
   // Sum of squares: each lane processes GRAIN_SIZE elements per iteration.
   for (uint base_i = lane_id * GRAIN_SIZE; base_i < element_count; base_i += METAL_SIMD_SIZE * GRAIN_SIZE) {
     AccumT vals[GRAIN_SIZE];
@@ -67,7 +102,9 @@ PUBLIC KERNEL(QKVNorm)(
 
   // RMS factor.
   AccumT mean_square = static_cast<AccumT>(total_sum) / static_cast<AccumT>(element_count);
-  AccumT rms_norm = rsqrt(mean_square + static_cast<AccumT>(epsilon));
+  rms_norm = rsqrt(mean_square + static_cast<AccumT>(epsilon));
+
+  }
 
   // Normalize + scale.
   for (uint base_i = lane_id * GRAIN_SIZE; base_i < element_count; base_i += METAL_SIMD_SIZE * GRAIN_SIZE) {

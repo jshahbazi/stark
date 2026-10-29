@@ -40,6 +40,7 @@ pub struct Decoder<B: Backend> {
     transformer: Transformer<B>,
     data_type: DataType,
     gemma4_image_embeddings: bool,
+    separate_prefill_last_token: bool,
 }
 
 /// A validated chunk of projected image rows. No public transport accepts this.
@@ -143,6 +144,7 @@ impl<B: Backend> Decoder<B> {
             transformer,
             data_type,
             gemma4_image_embeddings: config.gemma4_image_embeddings,
+            separate_prefill_last_token: config.separate_prefill_last_token,
         })
     }
 
@@ -175,6 +177,10 @@ impl<B: Backend> Decoder<B> {
 
     pub fn prefill_cache_skips_trailing_layers(&self) -> bool {
         self.transformer.prefill_cache_skips_trailing_layers()
+    }
+
+    pub fn prefill_requires_separate_logits_row(&self) -> bool {
+        self.separate_prefill_last_token || self.prefill_cache_skips_trailing_layers()
     }
 
     pub fn create_empty_state(

@@ -5,6 +5,7 @@ use crate::{array::ArrayElement, backends::common::kernel::AttentionKernelConfig
 
 mod gemm_test;
 mod kernel_test;
+mod source_qk_test;
 
 fn default_attention_config<T: ArrayElement>(
     head_dim: usize,
@@ -22,5 +23,7 @@ fn default_attention_config<T: ArrayElement>(
         sliding_window_size: None,
         scale: Some(1.0 / (head_dim as f32).sqrt()),
         data_type: T::data_type(),
+        materialize_prefill_scores: false,
+        source_bf16_prefill: false,
     }
 }

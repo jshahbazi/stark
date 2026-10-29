@@ -5,7 +5,7 @@ use super::*;
 use crate::{
     backends::common::{
         gpu_types::gemm::{GemmBPrologueKind, GemmDTransform},
-        kernel::matmul::{MatmulShape, QuantParamsLayout},
+        kernel::matmul::{MatmulB, MatmulShape, QuantParamsLayout},
     },
     data_type::DataType,
 };
@@ -369,4 +369,189 @@ fn qwen35_tile8_preserves_group_major_affine_outputs() {
             outputs[0].iter().zip(&outputs[1]).all(|(baseline, candidate)| baseline.to_bits() == candidate.to_bits())
         );
     }
+}
+
+#[stark_test]
+fn source_tiles_are_scoped_to_measured_affine_projections() {
+    for (n, k, simdgroups, rows) in [
+        (4096, 4096, 4, 2),
+        (12288, 4096, 2, 4),
+        (22016, 4096, 8, 2),
+        (4096, 11008, 4, 2),
+        (100278, 4096, 2, 4),
+        (12288, 1536, 2, 4),
+    ] {
+        let tuned = GemvTile::quantized(simdgroups, rows, 1, 32, 4);
+        assert_eq!(source_projection_tile(40, MTLGPUFamily::Apple10, 64, n, k), Some(tuned));
+        for (cores, family, group) in
+            [(29, MTLGPUFamily::Apple10, 64), (40, MTLGPUFamily::Apple9, 64), (40, MTLGPUFamily::Apple10, 32)]
+        {
+            assert_eq!(source_projection_tile(cores, family, group, n, k), None);
+        }
+    }
+    for (n, k) in [(4096, 4096), (12288, 4096), (22016, 4096), (4096, 11008)] {
+        assert_eq!(quantized(40, MTLGPUFamily::Apple10, 4, 64, 1, n, k), Some(GemvTile::quantized(8, 4, 1, 32, 4)));
+    }
+    assert_eq!(source_projection_tile(40, MTLGPUFamily::Apple10, 64, 262144, 1536), None);
+}
+
+#[stark_test]
+fn olmo3_tile8_preserves_every_projection_output_bit() {
+    use half::bf16;
+
+    use super::super::kernel::{GemvKernel, GemvSpecialization};
+    use crate::{
+        backends::{
+            common::{
+                CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+                gpu_types::QuantizationMethod,
+            },
+            metal::{Metal, kernel::matmul::MatmulOutputWork},
+        },
+        tests::{
+            helpers::buffer_to_vec,
+            matmul::{QuantBuffers, QuantInput, quant_arguments},
+        },
+    };
+    let context = crate::tests::util::shared_metal_context();
+    let output_work = MatmulOutputWork::new(&context, DataType::BF16, DataType::BF16).unwrap();
+    let mut kernel = GemvKernel::new(DataType::BF16, DataType::BF16, DataType::BF16);
+    for (n, k) in [(4096, 4096), (12288, 4096), (22016, 4096), (4096, 11008)] {
+        let input = QuantInput::<bf16>::new(1, k, n, 64, 4, QuantizationMethod::ScaleBias, 89).with_group_output();
+        let mut buffers = QuantBuffers::<Metal, bf16>::allocate(&context, &input);
+        for materialize_input_sum in [false, true] {
+            let mut outputs = Vec::new();
+            for groups in [8, 2] {
+                let mut command_buffer = context.create_command_buffer(None, None).unwrap();
+                let mut arguments = quant_arguments(&mut buffers, &input);
+                if let MatmulB::Quantized(quantized) = &mut arguments.b {
+                    quantized.params = quantized.params.with_materialized_affine_input_sum(materialize_input_sum);
+                }
+                let shape = MatmulShape::from_arguments(&arguments);
+                let specialization = GemvSpecialization::select_tile(
+                    &shape,
+                    DataType::BF16,
+                    DataType::BF16,
+                    DataType::BF16,
+                    GemvTile::quantized(groups, 4, 1, 32, 4),
+                )
+                .unwrap();
+                kernel.encode(arguments, specialization, &output_work, &mut command_buffer).unwrap();
+                command_buffer.end_encoding().submit().wait_until_completed().unwrap();
+                outputs.push(buffer_to_vec::<Metal, bf16>(&buffers.y));
+            }
+            assert!(
+                outputs[0].iter().zip(&outputs[1]).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "projection tile changed BF16 output bits"
+            );
+        }
+    }
+}
+
+/// Development-only cold-weight sweep for the dense Q4 projection geometries.
+/// Timings and hashes are aggregate-only; synthetic tensors never leave memory.
+#[stark_test]
+#[ignore]
+fn dense_q4_cold_tile_sweep() {
+    use half::bf16;
+
+    use super::super::kernel::{GemvKernel, GemvSpecialization};
+    use crate::{
+        backends::{
+            common::{
+                CommandBufferCompleted, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+                gpu_types::QuantizationMethod,
+            },
+            metal::{Metal, kernel::matmul::MatmulOutputWork},
+        },
+        tests::{
+            cold_pool::ColdPool,
+            helpers::buffer_to_vec,
+            matmul::{QuantBuffers, QuantInput, quant_arguments},
+        },
+    };
+
+    let context = crate::tests::util::shared_metal_context();
+    let output_work = MatmulOutputWork::new(&context, DataType::BF16, DataType::BF16).unwrap();
+    let mut kernel = GemvKernel::new(DataType::BF16, DataType::BF16, DataType::BF16);
+    let mut rows = Vec::new();
+    for (n, k) in [
+        (12288, 4096),
+        (4096, 4096),
+        (22016, 4096),
+        (4096, 11008),
+        (100278, 4096),
+        (2048, 1536),
+        (2560, 1536),
+        (4096, 1536),
+        (5120, 1536),
+        (12288, 1536),
+        (24576, 1536),
+        (1536, 2048),
+        (1536, 4096),
+        (1536, 6144),
+        (1536, 12288),
+        (262144, 1536),
+    ] {
+        let input = QuantInput::<bf16>::new(1, k, n, 64, 4, QuantizationMethod::ScaleBias, 83).with_group_output();
+        let mut pool =
+            ColdPool::new(input.weight_buffer_bytes(), || QuantBuffers::<Metal, bf16>::allocate(&context, &input));
+        for materialize_input_sum in [false, true] {
+            let mut baseline = None::<Vec<bf16>>;
+            // Use only geometries emitted by gemv.metal's specialization constraints.
+            for (num_simdgroups, results) in [(2, 1), (2, 2), (2, 4), (4, 2), (4, 4), (4, 8), (8, 2), (8, 4), (8, 8)] {
+                if num_simdgroups == 8 && results == 8 && !k.is_multiple_of(512) {
+                    continue;
+                }
+                let mut times = Vec::new();
+                // Initialize the complete 256 MiB cold pool before measuring.
+                // Each submission completes before the next is encoded, so
+                // independent synthetic projections cannot overlap on the GPU.
+                for sample in 0..18 {
+                    let buffers = pool.next_mut();
+                    let mut command_buffer = context.create_command_buffer(None, None).unwrap();
+                    let mut arguments = quant_arguments(buffers, &input);
+                    if let MatmulB::Quantized(quantized) = &mut arguments.b {
+                        quantized.params = quantized.params.with_materialized_affine_input_sum(materialize_input_sum);
+                    }
+                    let shape = MatmulShape::from_arguments(&arguments);
+                    let specialization = GemvSpecialization::select_tile(
+                        &shape,
+                        DataType::BF16,
+                        DataType::BF16,
+                        DataType::BF16,
+                        GemvTile::quantized(num_simdgroups, results, 1, 32, 4),
+                    )
+                    .unwrap();
+                    kernel.encode(arguments, specialization, &output_work, &mut command_buffer).unwrap();
+                    let completed = command_buffer.end_encoding().submit().wait_until_completed().unwrap();
+                    if sample >= 3 {
+                        times.push(completed.gpu_execution_time().as_secs_f64());
+                    }
+                    if sample == 0 {
+                        let output = buffer_to_vec::<Metal, bf16>(&buffers.y);
+                        if let Some(expected) = &baseline {
+                            assert!(
+                                output.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+                                "tile changed synthetic output bits"
+                            );
+                        } else {
+                            baseline = Some(output);
+                        }
+                    }
+                }
+                times.sort_by(f64::total_cmp);
+                rows.push(serde_json::json!({
+                    "n":n,"k":k,"num_simdgroups":num_simdgroups,"results_per_simdgroup":results,
+                    "materialize_affine_input_sum":materialize_input_sum,
+                    "median_gpu_seconds":times[times.len()/2],"min_gpu_seconds":times[0],
+                    "max_gpu_seconds":times[times.len()-1],"measured_runs":times.len(),"bitwise_equal":true,
+                }));
+            }
+        }
+    }
+    println!(
+        "{}",
+        serde_json::json!({"scope":"synthetic-cold-q4-g64-tile-sweep-v2","working_set_bytes":256usize<<20,"cases":rows})
+    );
 }

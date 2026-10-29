@@ -25,7 +25,9 @@ contract checks; they do not load a model or establish image execution.
 Worker overlays also refresh the native license inventory using Rust 1.98.1 and
 the current locked Cargo dependency metadata through the existing distribution
 notice collector. This includes the native image decoder dependencies and the
-verified PyTorch, SLEEF, Arm, GGML and Transformers adaptation notices. The old
+verified PyTorch, SLEEF, Arm, GGML, Transformers and MLX adaptation notices.
+The MLX notice is retained as `share/stark/licenses/LICENSE.mlx-reference` and
+is required by the packaged image qualification checks. The old
 CLI runtime's notice files are retained, while current notices and their Cargo
 lock identity are recorded in the app manifest. Building the app therefore needs
 the pinned Rust toolchain even when the worker executables already exist.

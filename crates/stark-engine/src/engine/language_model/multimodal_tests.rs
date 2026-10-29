@@ -38,6 +38,38 @@ const SPECIAL_IDS: ImageTokenIds = ImageTokenIds {
     video: 4,
 };
 
+#[stark_test]
+fn separate_prefill_last_token_aligns_stream_and_scoring_cpu() {
+    use crate::backends::cpu::Cpu;
+    for split in [false, true] {
+        let fixture = TinyModel::new(128);
+        let path = fixture.directory.join("config.json");
+        if split {
+            let mut config: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            config["decoder_config"]["separate_prefill_last_token"] = json!(true);
+            fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+        }
+        let engine = Engine::<Cpu>::new().unwrap();
+        let model = engine.load_language_model(&fixture.directory).unwrap();
+        assert_eq!(model.decoder.prefill_requires_separate_logits_row(), split);
+        let prompt = [5u32, 6, 7, 8];
+        let scores = model.score_next_token(&prompt, 64).unwrap();
+        let expected = greedy(&scores.logits);
+        let mut state = model.create_empty_state(Some(64), 0).unwrap();
+        let options = LanguageModelStreamOptions {
+            sampling_method: SamplingMethod::Greedy,
+            ..model.default_stream_options()
+        };
+        let tokens: Vec<u64> = prompt.into_iter().map(u64::from).collect();
+        let mut stream = model.stream(&tokens, &mut state, options).unwrap();
+        let actual = stream.next().unwrap().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stream.metrics().num_tokens_prefilled, 4);
+        // Both decoder parts belong to one logical prefill batch.
+        assert_eq!(stream.metrics().num_prefill_forward_passes, 1);
+    }
+}
+
 struct TinyModel {
     directory: PathBuf,
     model_dim: u32,

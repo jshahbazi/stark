@@ -95,6 +95,7 @@ impl<B: Backend> EmbeddingTable<B> {
         vocab_size: u32,
         embedding_dim: u32,
         data_type: DataType,
+        materialize_dequant: bool,
     ) -> Result<Self, EmbeddingTableError<B>> {
         if !matches!(data_type, DataType::F32 | DataType::BF16) {
             return Err(EmbeddingTableError::UnsupportedConfiguration(format!(
@@ -146,8 +147,17 @@ impl<B: Backend> EmbeddingTable<B> {
         let mode = quantization.map(|info| info.mode);
         let method = quantization.map(|info| info.method);
         let use_hadamard = output_hadamard_factors.is_some();
-        let lookup = LookupKernel::<B>::new(context, data_type, table_kind, group_size, mode, method, use_hadamard)
-            .map_err(EmbeddingTableError::BackendError)?;
+        let lookup = LookupKernel::<B>::new(
+            context,
+            data_type,
+            table_kind,
+            group_size,
+            mode,
+            method,
+            use_hadamard,
+            materialize_dequant,
+        )
+        .map_err(EmbeddingTableError::BackendError)?;
 
         Ok(Self {
             storage,

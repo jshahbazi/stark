@@ -23,6 +23,7 @@ fn run_key_value_row_stride_test<B: Backend>() {
         epsilon: EPSILON,
         scale_offset: None,
         upcast_mode: UpcastMode::OnlyNormalization,
+        mlx_bf16_reduction: false,
         subtract_mean: false,
         has_scale: false,
         has_biases: false,
@@ -81,6 +82,7 @@ fn run_full_projection_norm_test<B: Backend>() {
         epsilon: 1e-6,
         scale_offset: None,
         upcast_mode: UpcastMode::FullLayer,
+        mlx_bf16_reduction: false,
         subtract_mean: false,
         has_scale: false,
         has_biases: false,
@@ -179,4 +181,20 @@ fn run_projected_key_value_exact<B: Backend>() {
 #[stark_test]
 fn test_projected_key_value_norm_retains_offsets_and_dead_channels() {
     for_each_backend!(|B| run_projected_key_value_exact::<B>());
+}
+
+#[stark_test]
+fn packed_qkv_rejects_mlx_reduction_for_unqualified_dtype() {
+    use crate::backends::cpu::Cpu;
+    let context = create_context::<Cpu>();
+    let config = NormalizationConfig {
+        epsilon: 1e-6,
+        scale_offset: None,
+        upcast_mode: UpcastMode::OnlyNormalization,
+        mlx_bf16_reduction: true,
+        subtract_mean: false,
+        has_scale: false,
+        has_biases: false,
+    };
+    assert!(QKVNorm::<Cpu>::build_head(&context, DataType::F32, config, None, 128, false).is_err());
 }

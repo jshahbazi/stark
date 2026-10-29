@@ -11,21 +11,24 @@ from stark_convert.adapters.gemma4 import _activation_scalar, build_gemma4_plan,
 from stark_convert.streaming import ConversionError, UnsupportedConversion, read_safetensors_header, write_plan
 
 
-def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=16, sanitized=False):
+def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=16, sanitized=False, group64=False):
     path.mkdir()
+    dim = 64 if group64 else dim
+    local_dim, global_dim = (256, 512) if group64 else (8, 16)
+    ple_dim, intermediate_dim = (64, 64) if group64 else (16, 32)
     config = {
         "model_type": "gemma4_text",
         "architectures": ["Gemma4ForCausalLM"],
         "hidden_size": dim,
-        "intermediate_size": 32,
+        "intermediate_size": intermediate_dim,
         "num_hidden_layers": 6,
         "num_attention_heads": 2,
         "num_key_value_heads": 1,
-        "head_dim": 8,
-        "global_head_dim": 16,
+        "head_dim": local_dim,
+        "global_head_dim": global_dim,
         "vocab_size": 32,
         "vocab_size_per_layer_input": 32,
-        "hidden_size_per_layer_input": 16,
+        "hidden_size_per_layer_input": ple_dim,
         "num_kv_shared_layers": 2,
         "rms_norm_eps": 1e-6,
         "max_position_embeddings": 1024,
@@ -60,14 +63,14 @@ def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=
         tensors[name] = ("BF16", values.astype(ml_dtypes.bfloat16))
 
     add(prefix + ".embed_tokens.weight", (32, dim))
-    add(prefix + ".embed_tokens_per_layer.weight", (32, 96))
-    add(prefix + ".per_layer_model_projection.weight", (96, dim))
-    add(prefix + ".per_layer_projection_norm.weight", (16,))
+    add(prefix + ".embed_tokens_per_layer.weight", (32, 6 * ple_dim))
+    add(prefix + ".per_layer_model_projection.weight", (6 * ple_dim, dim))
+    add(prefix + ".per_layer_projection_norm.weight", (ple_dim,))
     add(prefix + ".norm.weight", (dim,))
     for layer in range(6):
         src = prefix + f".layers.{layer}"
-        width = 8 if layer % 2 == 0 else 16
-        intermediate = 64 if double_wide and layer >= 4 else 32
+        width = local_dim if layer % 2 == 0 else global_dim
+        intermediate = intermediate_dim * (2 if double_wide and layer >= 4 else 1)
         for name in (
             "input_layernorm",
             "post_attention_layernorm",
@@ -87,8 +90,8 @@ def gemma4_fixture(path, *, wrapper=True, double_wide=True, redundant=True, dim=
         add(src + ".mlp.up_proj.weight", (intermediate, dim))
         add(src + ".mlp.gate_proj.weight", (intermediate, dim))
         add(src + ".mlp.down_proj.weight", (dim, intermediate))
-        add(src + ".per_layer_input_gate.weight", (16, dim))
-        add(src + ".per_layer_projection.weight", (dim, 16))
+        add(src + ".per_layer_input_gate.weight", (ple_dim, dim))
+        add(src + ".per_layer_projection.weight", (dim, ple_dim))
     if wrapper:
         modality_root = "" if sanitized else "model."
         add(modality_root + "vision_tower.test.weight", (16, 16))
@@ -116,9 +119,12 @@ def test_gemma4_native_topology_and_payloads(tmp_path, wrapper, redundant, doubl
     assert all(layer["has_post_layer_scalar"] and layer["ple_config"] for layer in layers)
     assert all(layer["ple_config"]["reference_bf16"] for layer in layers)
     assert plan.decoder_config["ple_model_config"]["reference_bf16"] is True
+    assert plan.decoder_config["embedding_config"]["materialize_dequant"] is True
+    assert plan.decoder_config["embedding_config"]["materialize_soft_cap"] is True
     assert plan.decoder_config["ple_model_config"]["input_scale"] == 0.7071067690849304
     assert all(layer["mixer_config"]["scale"] == 1.0 for layer in layers)
     assert all(layer["mixer_config"]["normalize_values"] for layer in layers)
+    assert all("materialize_prefill_scores" not in layer["mixer_config"] for layer in layers)
     assert plan.decoder_config["ple_model_config"]["ple_embed_scale"] == 4.0
     assert plan.source_tensors == len(tensors)
     assert len(plan.input_tensors) == len(tensors)
@@ -282,7 +288,7 @@ def test_gemma4_affine_matrices_preserve_packed_words_and_source_binding(tmp_pat
                 np.full((rows, columns // 16), value, dtype=ml_dtypes.bfloat16),
             )
     save_tensors(source / "model.safetensors", tensors)
-    plan = build_gemma4_plan(source)
+    plan = build_gemma4_plan(source, precision_profile="canonical")
     output = tmp_path / "output.safetensors"
     stats = write_plan(plan, output, chunk_bytes=96)
     metadata, converted = read_safetensors_header(output)
@@ -310,3 +316,67 @@ def test_gemma4_affine_matrices_preserve_packed_words_and_source_binding(tmp_pat
         "bits": bits,
         "group_size": 16,
     }
+    automatic = build_gemma4_plan(source)
+    automatic_layer = automatic.decoder_config["transformer_config"]["layer_configs"][0]
+    assert automatic_layer["pre_mixer_norm_config"]["upcast_mode"] == "full_layer"
+    with pytest.raises(UnsupportedConversion, match="W4/group64"):
+        build_gemma4_plan(source, precision_profile="mlx-bf16")
+
+
+def test_gemma4_group64_source_precision_profile_is_explicit_and_automatic(tmp_path):
+    source = tmp_path / "source"
+    config, tensors = gemma4_fixture(source, wrapper=False, redundant=False, group64=True)
+    config["quantization"] = {"bits": 4, "group_size": 64}
+    (source / "config.json").write_text(json.dumps(config))
+    for name, (_, array) in list(tensors.items()):
+        if array.ndim != 2:
+            continue
+        rows, columns = array.shape
+        tensors[name] = ("U32", np.zeros((rows, columns // 8), dtype="<u4"))
+        for plane, value in (("scales", 0.125), ("biases", -0.25)):
+            tensors[name.removesuffix(".weight") + "." + plane] = (
+                "BF16",
+                np.full((rows, columns // 64), value, dtype=ml_dtypes.bfloat16),
+            )
+    save_tensors(source / "model.safetensors", tensors)
+    mlx_plan = build_gemma4_plan(source, precision_profile="mlx-bf16")
+    ple = mlx_plan.decoder_config["ple_model_config"]
+    assert ple["input_scale"] == _activation_scalar(2**-0.5, "BF16")
+    assert ple["model_projection_scale"] == _activation_scalar(64**-0.5, "BF16")
+    layer = mlx_plan.decoder_config["transformer_config"]["layer_configs"][0]
+    assert layer["mlp_config"]["activation"]["materialize_polynomial"] is True
+    assert layer["ple_config"]["activation"]["materialize_polynomial"] is True
+    assert layer["pre_mixer_norm_config"]["upcast_mode"] == "only_normalization"
+    assert layer["mixer_config"]["query_norm_config"]["upcast_mode"] == "only_normalization"
+    assert layer["mixer_config"]["query_norm_config"]["mlx_bf16_reduction"] is True
+    assert layer["mixer_config"]["key_norm_config"]["mlx_bf16_reduction"] is True
+    assert all(
+        layer[key]["mlx_bf16_reduction"] is True
+        for key in ("pre_mixer_norm_config", "post_mixer_norm_config", "pre_mlp_norm_config", "post_mlp_norm_config")
+    )
+    assert layer["ple_config"]["norm_config"]["mlx_bf16_reduction"] is True
+    assert mlx_plan.decoder_config["ple_model_config"]["norm_config"]["mlx_bf16_reduction"] is True
+    assert mlx_plan.decoder_config["transformer_config"]["output_norm_config"]["mlx_bf16_reduction"] is True
+    assert layer["mixer_config"]["materialize_prefill_scores"] is True
+    spec = json.loads(mlx_plan.metadata["decoder.embedding.embedding.spec"])
+    assert spec["materialize_affine_input_sum"] is True
+    automatic = build_gemma4_plan(source)
+    automatic_layer = automatic.decoder_config["transformer_config"]["layer_configs"][0]
+    assert automatic_layer["pre_mixer_norm_config"]["upcast_mode"] == "only_normalization"
+    assert automatic_layer["mixer_config"]["materialize_prefill_scores"] is True
+    canonical = build_gemma4_plan(source, precision_profile="canonical")
+    assert "mlx_bf16_reduction" not in canonical.decoder_config["transformer_config"]["output_norm_config"]
+    assert all(
+        "materialize_prefill_scores" not in layer["mixer_config"]
+        for layer in canonical.decoder_config["transformer_config"]["layer_configs"]
+    )
+    with pytest.raises(UnsupportedConversion, match="BF16"):
+        build_gemma4_plan(source, dtype="float32", precision_profile="mlx-bf16")
+
+
+@pytest.mark.parametrize("profile,dtype", [("unknown", "bfloat16"), ("mlx-bf16", "bfloat16"), ("mlx-bf16", "float32")])
+def test_gemma4_source_precision_profiles_fail_closed(tmp_path, profile, dtype):
+    source = tmp_path / "source"
+    gemma4_fixture(source)
+    with pytest.raises(UnsupportedConversion, match="precision profile|requires imported"):
+        build_gemma4_plan(source, dtype=dtype, precision_profile=profile)

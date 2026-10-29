@@ -51,6 +51,7 @@ fn get_output<
         false,
         false,
         scales.is_some(),
+        false,
     )
     .expect("Failed to create NormalizationKernel");
 
@@ -331,4 +332,70 @@ fn reference_rms<B: Backend>() {
 fn test_reference_rms_bf16_source_cascade_packed_and_residual() {
     reference_rms::<Cpu>();
     for_each_non_cpu_backend!(|B| reference_rms::<B>());
+}
+
+fn source_rms_boundary<B: Backend>() {
+    // Exact public powers, not model inputs. Source FP32 hierarchy gives
+    // sum=1526.50244140625; the legacy Metal hierarchy gives1526.5023193359375.
+    // The probe161/128 lies across the BF16 normalization midpoint, so output
+    // bits16289/16290 distinguish the reduction policies at equal epsilon.
+    let powers = [
+        2, 2, 2, 1, 0, -1, -1, -1, -2, -2, -3, -3, -4, -4, -4, -5, -5, -6, -7, -8, -8, -11, -11, -11, -12, -12, -13,
+        -13, -13,
+    ];
+    let mut input = vec![bf16::ONE; 1536];
+    for i in 0..64 {
+        input[(i * 37 + 102) % 1536] = bf16::ZERO;
+    }
+    for (i, power) in powers.into_iter().enumerate() {
+        input[(i * 37 + 102) % 1536] = bf16::from_f32(2.0f32.powi(power));
+    }
+    input[1535] = bf16::from_f32(161.0 / 128.0);
+    let context = B::Context::new().unwrap();
+    let input = create_buffer_with_data::<B, bf16>(&context, &input);
+    for (source, expected) in [(false, 16290u16), (true, 16289), (false, 16290)] {
+        let kernel = <<B as Backend>::Kernels as Kernels>::NormalizationKernel::new(
+            &context,
+            DataType::BF16,
+            DataType::F32,
+            DataType::BF16,
+            DataType::F32,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            source,
+        )
+        .unwrap();
+        let mut output = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::ZERO; 1536]);
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        kernel.encode(
+            Some(&input),
+            None::<&B::GlobalBuffer>,
+            None::<&B::GlobalBuffer>,
+            &mut output,
+            None::<&mut B::GlobalBuffer>,
+            None::<&B::GlobalBuffer>,
+            1,
+            1536,
+            1e-6,
+            0.0,
+            1.0,
+            &mut commands,
+        );
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        assert_eq!(buffer_to_vec::<B, bf16>(&output)[1535].to_bits(), expected, "source RMS boundary");
+    }
+}
+
+#[stark_test]
+fn mlx_bf16_rms_public_midpoint_distinguishes_reduction_and_legacy_default() {
+    source_rms_boundary::<Cpu>();
+    for_each_non_cpu_backend!(|B| source_rms_boundary::<B>());
 }

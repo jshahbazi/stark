@@ -12,7 +12,7 @@ use crate::{
             Backend, BufferMut, BufferRef, CommandBufferEncoding,
             gpu_types::{
                 GemmParams,
-                gemm::{GemmAPrologueKind, GemmAlignment, GemmBPrologueKind, GemmDTransform},
+                gemm::{GemmAPrologueKind, GemmAlignment, GemmBPrologueKind, GemmDTransform, GemmTiling},
             },
             kernel::matmul::{
                 Int8CodeLayout, MatmulA, MatmulArguments, MatmulB, MatmulDOps, MatmulError, MatmulShape,
@@ -24,7 +24,7 @@ use crate::{
             command_buffer::MetalCommandBufferEncoding,
             context::MetalContext,
             error::MetalError,
-            kernel::{GemmMetalKernel, GemmSplitKReduceMetalKernel},
+            kernel::{GemmMetalKernel, GemmSplitKReduceMetalKernel, SourceBF16SplitReduceMetalKernel},
         },
     },
     data_type::DataType,
@@ -36,7 +36,12 @@ pub struct GemmKernel {
     output_data_type: DataType,
     kernels: HashMap<GemmSpecialization, GemmMetalKernel>,
     split_k_reduce: HashMap<GemmDTransform, GemmSplitKReduceMetalKernel>,
+    source_split_k_reduce: Option<SourceBF16SplitReduceMetalKernel>,
 }
+
+#[cfg(test)]
+#[path = "../../../../../../unit/backends/metal/kernel/matmul/gemm/precision_test.rs"]
+mod precision_tests;
 
 impl GemmKernel {
     pub fn new(
@@ -50,6 +55,7 @@ impl GemmKernel {
             output_data_type,
             kernels: HashMap::new(),
             split_k_reduce: HashMap::new(),
+            source_split_k_reduce: None,
         }
     }
 
@@ -74,6 +80,7 @@ impl GemmKernel {
                     specialization.b_group_size.unwrap_or(0),
                     specialization.a_prologue,
                     specialization.a_group_size.unwrap_or(0),
+                    specialization.source_f32_fragments,
                     specialization.output_transform,
                     specialization.alignment,
                     specialization.signed_codes,
@@ -109,6 +116,62 @@ impl GemmKernel {
             context.supports_mxu,
             context.apple_gpu_family,
         )
+    }
+
+    pub(crate) fn encode_source_qmm(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        output_work: &MatmulOutputWork,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        // The declared source QMM uses 32x32x32 tiles and a 2x2 SIMDgroup
+        // BlockMMA. Keep its accumulation schedule independently of MXU policy.
+        let mut plan = GemmPlan {
+            engine: GemmEngine::Simdgroup,
+            tiling: GemmTiling::Tile32x32x32_Simdgroups2x2,
+            split_k: 1,
+        };
+        if arguments.m <= 1 {
+            return Err(MatmulError::<Metal>::UnsupportedLayout {
+                path: "source BF16 QMM requires multiple rows",
+            }
+            .into());
+        }
+        // MLX v0.32.3 quantized.cpp qmm_splitk: use original logical
+        // projection dimensions, target 512 32x32 tiles, and whole groups.
+        let tiles = shape.m.div_ceil(32).saturating_mul(shape.n.div_ceil(32));
+        let alignment = shape.b_group_size.unwrap_or(0).max(32);
+        let mut partitions = (512 / tiles.max(1)).max(1).min(shape.k / alignment);
+        while partitions > 1 && !shape.k.is_multiple_of(partitions * alignment) {
+            partitions -= 1;
+        }
+        if partitions > 256 {
+            return Err(MatmulError::<Metal>::UnsupportedLayout {
+                path: "source QMM two-pass reduction is outside coverage",
+            }
+            .into());
+        }
+        if partitions == 1 && command_buffer.context().supports_mxu {
+            // MLX qmm_splitk falls through to qmm_nax when there is only
+            // one partition. NAX retains BF16 operands and F32 accumulators.
+            // Match its BM32/64, BN64, BK64 logical group schedule.
+            plan.engine = GemmEngine::Mxu;
+            plan.tiling = if shape.m <= 32 {
+                GemmTiling::Tile32x64x256_Simdgroups2x2
+            } else {
+                GemmTiling::Tile64x64x256_Simdgroups2x2
+            };
+        }
+        plan.split_k = partitions.max(1);
+        self.encode_plan(arguments, plan, output_work, command_buffer)
     }
 
     #[cfg(test)]
@@ -204,6 +267,25 @@ impl GemmKernel {
         let use_mxu = plan.engine == GemmEngine::Mxu;
 
         let is_quant = quantized.is_some();
+        let source_bf16_affine = quantized.as_ref().is_some_and(|q| q.params.materializes_affine_input_sum());
+        if source_bf16_affine
+            && !(m > 1
+                && self.weights_data_type == DataType::BF16
+                && self.input_data_type == DataType::BF16
+                && self.output_data_type == DataType::BF16
+                && matches!(&a, MatmulA::FullPrecision { .. })
+                && shape.b_prologue == GemmBPrologueKind::ScaleBiasDequant
+                && shape.b_bits == Some(4)
+                && shape.b_group_size == Some(64)
+                && shape.b_transpose
+                && !shape.signed_codes
+                && output_transform.is_empty())
+        {
+            return Err(MatmulError::<Metal>::UnsupportedLayout {
+                path: "source BF16 QMM supports unbiased unsigned W4/group64",
+            }
+            .into());
+        }
         if !is_quant && !matches!(&a, MatmulA::FullPrecision { .. }) {
             return Err(MatmulError::IncompatibleA {
                 path: "Gemm",
@@ -267,6 +349,7 @@ impl GemmKernel {
                 plan,
                 output_transform,
                 output_bias,
+                source_bf16_affine,
                 command_buffer,
             )?;
             if let Some(factors) = rht_factors {
@@ -304,7 +387,7 @@ impl GemmKernel {
         }
         params.use_morton = use_morton;
 
-        let specialization = GemmSpecialization::from_plan(
+        let mut specialization = GemmSpecialization::from_plan(
             plan,
             shape,
             self.weights_data_type,
@@ -313,6 +396,7 @@ impl GemmKernel {
             a_prologue,
             a_group_size,
         )?;
+        specialization.source_f32_fragments = source_bf16_affine && !use_mxu;
         let kernel = self.get_or_create(command_buffer.context(), specialization)?;
         kernel.encode(
             a_full_precision,
@@ -351,6 +435,7 @@ impl GemmKernel {
         plan: GemmPlan,
         output_transform: GemmDTransform,
         output_bias: Option<impl BufferRef<Backend = Metal>>,
+        source_bf16_affine: bool,
         command_buffer: &mut MetalCommandBufferEncoding,
     ) -> Result<(), MetalError> {
         let (m, n, k) = (shape.m, shape.n, shape.k);
@@ -377,7 +462,7 @@ impl GemmKernel {
         let base_gy = m.div_ceil(tiling.block_m());
         let alignment =
             GemmAlignment::new(m.is_multiple_of(tiling.block_m()), n.is_multiple_of(tiling.block_n()), true);
-        let part_spec = GemmSpecialization::from_plan(
+        let mut part_spec = GemmSpecialization::from_plan(
             plan,
             shape,
             self.weights_data_type,
@@ -386,6 +471,7 @@ impl GemmKernel {
             a_prologue,
             a_group_size,
         )?;
+        part_spec.source_f32_fragments = source_bf16_affine && plan.engine == GemmEngine::Simdgroup;
 
         let elem = (m as usize) * (n as usize);
         let slice_bytes = elem * self.output_data_type.size_in_bytes();
@@ -411,6 +497,20 @@ impl GemmKernel {
             split_k,
             command_buffer,
         );
+
+        if source_bf16_affine {
+            if self.source_split_k_reduce.is_none() {
+                self.source_split_k_reduce = Some(SourceBF16SplitReduceMetalKernel::new(command_buffer.context())?);
+            }
+            self.source_split_k_reduce.as_ref().unwrap().encode(
+                &temp,
+                d.reborrow(),
+                elem as u32,
+                split_k,
+                command_buffer,
+            );
+            return Ok(());
+        }
 
         debug_assert_eq!(elem % 4, 0, "split-K reduce requires M*N divisible by 4");
         let group_count = ((elem as u32) / 4).div_ceil(256);

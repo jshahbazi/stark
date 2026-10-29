@@ -16,11 +16,12 @@ template <
     uint GROUP_SIZE,
     uint BITS,
     bool INPUT_ALIGNED,
-    bool FULL_TILE>
+    bool FULL_TILE,
+    bool MATERIALIZED_SOURCE>
 struct QuantBSource {
   using U = float;
-  using Slice = QuantSlice<Tile, AT, BT, DT, B_PROLOGUE, GROUP_SIZE, BITS, INPUT_ALIGNED, FULL_TILE>;
-  using Metadata = QuantMetadata<Tile, AT, BT, DT, B_PROLOGUE, BITS>;
+  using Slice = QuantSlice<Tile, AT, BT, DT, B_PROLOGUE, GROUP_SIZE, BITS, INPUT_ALIGNED, FULL_TILE, MATERIALIZED_SOURCE>;
+  using Metadata = QuantMetadata<Tile, AT, BT, DT, B_PROLOGUE, BITS, MATERIALIZED_SOURCE>;
 
   static METAL_FUNC void accumulate(
       thread U (&result)[Tile::INPUT_ROWS][Tile::ROWS_PER_LANE],

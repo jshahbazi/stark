@@ -102,6 +102,15 @@ impl<B: Backend> WeightMatrix<B> {
         input_dim: u32,
         data_type: DataType,
     ) -> Result<Self, WeightMatrixError<B>> {
+        let materialize_affine_input_sum = matches!(&spec,
+            AnyWeightMatrixSpec::MLXSpec(spec) if spec.materialize_affine_input_sum);
+        if materialize_affine_input_sum
+            && !matches!(&spec, AnyWeightMatrixSpec::MLXSpec(spec) if spec.bits == 4 && data_type == DataType::BF16)
+        {
+            return Err(WeightMatrixError::UnsupportedConfiguration(
+                "materialized affine input sums require BF16 W4 matrices".into(),
+            ));
+        }
         let ParsedWeightSpec {
             layout,
             quantization: quantization_info,
@@ -138,7 +147,8 @@ impl<B: Backend> WeightMatrix<B> {
 
         let values =
             tree.leaf("weights")?.validate(&[rows, columns / packing_divisor], storage_data_type)?.read_buffer()?;
-        let params = QuantParams::new(params_layout, rows, groups);
+        let params = QuantParams::new(params_layout, rows, groups)
+            .with_materialized_affine_input_sum(materialize_affine_input_sum);
         let load_plane =
             |name: &str, shape: [u32; 2], storage_type: DataType| -> Result<B::GlobalBuffer, WeightMatrixError<B>> {
                 Ok(tree.leaf(name)?.validate(&shape, storage_type)?.read_buffer()?)
@@ -215,6 +225,20 @@ impl<B: Backend> WeightMatrix<B> {
         quantized.prepare_a8_storage(&mut self.values)
     }
 
+    pub fn set_source_output_widths(
+        &mut self,
+        widths: &[u32],
+    ) -> Result<(), WeightMatrixError<B>> {
+        if let Some(quantized) = self.quantized.as_mut().filter(|matrix| matrix.params.materializes_affine_input_sum())
+        {
+            quantized.params = quantized
+                .params
+                .with_source_output_widths(widths)
+                .map_err(|message| WeightMatrixError::UnsupportedConfiguration(message.into()))?;
+        }
+        Ok(())
+    }
+
     pub fn a8_signed_codes(&self) -> Option<bool> {
         self.quantized.as_ref().map(|quantized| quantized.info.mode != QuantizationMode::U4)
     }
@@ -225,6 +249,9 @@ impl<B: Backend> Quantized<B> {
         &mut self,
         values: impl BufferMut<Buffer: BufferCpuAccessible>,
     ) -> bool {
+        if self.params.materializes_affine_input_sum() {
+            return false;
+        }
         if self.params.layout() != QuantParamsLayout::GroupOutput {
             return false;
         }

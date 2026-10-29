@@ -193,6 +193,86 @@ fn test_gelu_bf16() {
     test_activation::<bf16>(ActivationType::GELUApprox, false);
 }
 
+#[stark_test]
+fn materialized_gelu_preserves_bf16_polynomial_primitives() {
+    let data: Vec<bf16> = (-128..=128).map(|i| bf16::from_f32(i as f32 / 32.0)).collect();
+    let round = |x: f64| bf16::from_f64(x).to_f64();
+    let expected: Vec<bf16> = data
+        .iter()
+        .map(|x| {
+            let x = x.to_f64();
+            let cubic = round(x * x * x);
+            let term = round(round(0.044715) * cubic);
+            let inner = round(x + term);
+            let argument = round(round((2.0 / std::f64::consts::PI).sqrt()) * inner);
+            let activated = round(argument.tanh());
+            bf16::from_f64(round(0.5 * x) * round(1.0 + activated))
+        })
+        .collect();
+    let input = Input {
+        data: data.into_boxed_slice(),
+        act_type: ActivationType::GELUMaterializedPolynomial,
+        in_place: false,
+    };
+    let canonical: Vec<bf16> = input.data.iter().map(|x| ActivationType::GELUApprox.activate(*x)).collect();
+    assert_ne!(canonical, expected, "fixture must distinguish the source polynomial profile");
+    assert_eq!(get_output::<bf16, Cpu>(&input), expected);
+    for_each_non_cpu_backend!(|B| {
+        assert_eq!(get_output::<bf16, B>(&input), expected);
+    });
+}
+
+#[stark_test]
+fn gelu_source_profile_preserves_legacy_config_defaults() {
+    use crate::config::activation::AnyActivation;
+    let canonical: AnyActivation = serde_json::from_str(r#"{"type":"GELU","approximate":true}"#).unwrap();
+    let source: AnyActivation =
+        serde_json::from_str(r#"{"type":"GELU","approximate":true,"materialize_polynomial":true}"#).unwrap();
+    assert_eq!(canonical.act_type(), ActivationType::GELUApprox);
+    assert_eq!(source.act_type(), ActivationType::GELUMaterializedPolynomial);
+}
+
+#[stark_test]
+#[ignore]
+fn materialized_gelu_matches_source_quantized_first_layer_inputs() {
+    use std::{fs, path::PathBuf};
+
+    use sha2::{Digest, Sha256};
+    let root = PathBuf::from(
+        std::env::var_os("STARK_GEMMA4_PRIMITIVE_FIXTURE_PATH").expect("missing private primitive fixture"),
+    );
+    let receipt: serde_json::Value = serde_json::from_slice(&fs::read(root.join("receipt.json")).unwrap()).unwrap();
+    assert_eq!(receipt["device"], "gpu");
+    assert_eq!(receipt["identity"]["mlx"], "0.32.3");
+    assert_eq!(receipt["identity"]["mlx_lm_revision"], "1f7057ca530f8a594d4aab50bac41a2ed5e5c5c7");
+    let read = |name: &str| -> Vec<bf16> {
+        let bytes = fs::read(root.join(format!("{name}.f32"))).unwrap();
+        let row = receipt["operations"].as_array().unwrap().iter().find(|row| row["operation"] == name).unwrap();
+        assert_eq!(format!("{:x}", Sha256::digest(&bytes)), row["sha256"].as_str().unwrap());
+        assert_eq!(bytes.len() % 4, 0);
+        bytes.as_chunks::<4>().0.iter().map(|value| bf16::from_f32(f32::from_le_bytes(*value))).collect()
+    };
+    for prefix in ["actual_mlp", "actual_ple"] {
+        let input = Input {
+            data: read(&format!("{prefix}_gate_input")).into_boxed_slice(),
+            act_type: ActivationType::GELUMaterializedPolynomial,
+            in_place: false,
+        };
+        let expected = read(&format!("{prefix}_gelu"));
+        let check = |actual: Vec<bf16>| {
+            assert_eq!(actual.len(), expected.len());
+            let different = actual.iter().zip(&expected).filter(|(a, b)| a != b).count();
+            let maximum =
+                actual.iter().zip(&expected).map(|(a, b)| (a.to_f32() - b.to_f32()).abs()).fold(0.0f32, f32::max);
+            assert!(different == 0, "source GELU mismatch: count={different}/{}, max_abs={maximum}", expected.len());
+        };
+        check(get_output::<bf16, Cpu>(&input));
+        for_each_non_cpu_backend!(|B| {
+            check(get_output::<bf16, B>(&input));
+        });
+    }
+}
+
 // Exact GELU out-of-place tests
 #[stark_test]
 fn test_gelu_exact_f32() {

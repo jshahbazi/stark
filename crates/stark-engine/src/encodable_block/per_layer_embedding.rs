@@ -67,6 +67,7 @@ impl<B: Backend> PerLayerEmbedding<B> {
             config.ple_vocab_size,
             total_ple_dim,
             data_type,
+            config.reference_bf16,
         )?;
 
         let model_projection = <dyn Linear<B>>::new(

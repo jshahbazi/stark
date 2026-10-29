@@ -141,7 +141,7 @@ impl<B: Backend> dyn Linear<B> {
             spec @ (AnyWeightMatrixSpec::FullPrecisionSpec(_)
             | AnyWeightMatrixSpec::MLXSpec(_)
             | AnyWeightMatrixSpec::IntSpec(_)) => {
-                let block = LinearMatmul::load(
+                let mut block = LinearMatmul::load(
                     context,
                     spec,
                     input_dimension,
@@ -153,6 +153,7 @@ impl<B: Backend> dyn Linear<B> {
                     has_biases.then_some(parameter_tree),
                     None,
                 )?;
+                block.set_source_output_widths(output_dimensions.as_ref())?;
                 Ok(Box::new(block))
             },
             AnyWeightMatrixSpec::HybridSpec(HybridSpec {
