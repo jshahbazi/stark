@@ -51,6 +51,7 @@ SOURCE_PATHS = (
     ".cargo",
     "crates",
     "vendor/cxx",
+    "vendor/lily-core",
     "tools/converter",
     "apps/menu-bar",
     "LICENSE",
@@ -516,6 +517,9 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "tools/converter/LICENSE.lalamo",
         "vendor/cxx/LICENSE-MIT",
         "vendor/cxx/LICENSE-APACHE",
+        "vendor/lily-core/LICENSE",
+        "vendor/lily-core/NOTICE",
+        "vendor/lily-core/UPSTREAM.md",
     ):
         destination = notices / name
         destination.parent.mkdir(parents=True, exist_ok=True)

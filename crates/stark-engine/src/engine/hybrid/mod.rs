@@ -3,10 +3,13 @@
 //! These models carry distinct recurrent state, sparse attention and residual
 //! streams. They deliberately do not enter the dense decoder's artifact path.
 
+pub mod activity;
 pub mod flint;
 pub mod glm;
 #[cfg(feature = "metal")]
 mod glm_metal;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+mod lily;
 pub mod math;
 pub mod profile;
 pub mod qwen;
@@ -85,6 +88,13 @@ enum Forward {
     Flint(flint::FlintModel),
     Glm(glm::GlmModel),
     Qwen(qwen::QwenModel),
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    Lily(Box<lily::LilyModel>),
+}
+
+fn mixed_precision_checkpoint(config: &Value) -> bool {
+    config.get("model_type").and_then(Value::as_str) == Some("qwen4_exp")
+        && config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
 }
 
 pub struct Model {
@@ -97,8 +107,6 @@ pub struct Model {
 
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
-        #[cfg(feature = "metal")]
-        weight_metal::initialize()?;
         let outer = config(path)?;
         let text = outer.get("text_config").unwrap_or(&outer);
         let vocab_size = text
@@ -147,12 +155,31 @@ impl Model {
         if eos.is_empty() {
             return Err(Error::Invalid("EOS IDs"));
         }
-        let weights = weights::Weights::open(path)?;
-        let forward = match outer.get("model_type").and_then(Value::as_str) {
-            Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
-            Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
-            Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
-            _ => return Err(Error::Unsupported("architecture")),
+        let (forward, max_context) = if mixed_precision_checkpoint(&outer) {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            {
+                let model = lily::LilyModel::load(path)?;
+                if model.vocab_size() != vocab_size || model.position() != 0 {
+                    return Err(Error::Invalid("mixed precision metadata mismatch"));
+                }
+                let context = max_context.min(model.max_context() as u32);
+                (Forward::Lily(Box::new(model)), context)
+            }
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            {
+                return Err(Error::Unsupported("mixed precision checkpoint requires macOS Metal"));
+            }
+        } else {
+            #[cfg(feature = "metal")]
+            weight_metal::initialize()?;
+            let weights = weights::Weights::open(path)?;
+            let forward = match outer.get("model_type").and_then(Value::as_str) {
+                Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
+                Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
+                Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
+                _ => return Err(Error::Unsupported("architecture")),
+            };
+            (forward, max_context)
         };
         Ok(Self {
             forward,
@@ -183,6 +210,8 @@ impl Model {
             Forward::Flint(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
             Forward::Qwen(model) => model.reset(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.reset(),
         }
     }
 
@@ -197,6 +226,8 @@ impl Model {
                 Forward::Flint(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
                 Forward::Qwen(model) => model.step(token),
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                Forward::Lily(model) => model.step(token),
             }
             .and_then(|logits| {
                 if logits.len() != self.vocab_size || logits.iter().any(|x| !x.is_finite()) {
@@ -225,12 +256,106 @@ impl Model {
                 Forward::Flint(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
                 Forward::Qwen(model) => model.ingest(token),
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                Forward::Lily(model) => model.ingest(token),
             }
         };
         if result.is_err() {
             self.reset();
         }
         result
+    }
+
+    /// A native GPU greedy readout is available for the mixed-precision core.
+    pub fn supports_greedy_readout(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if matches!(self.forward, Forward::Lily(_)) {
+            return true;
+        }
+        false
+    }
+
+    /// Opt-in aggregate GPU stage timestamps for the BF16 backend. Profiling
+    /// perturbs execution and is never enabled for production rate comparisons.
+    pub fn set_bf16_stage_profiling(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.set_stage_profiling(enabled),
+            _ => {
+                let _ = enabled;
+                Err(Error::Unsupported("BF16 stage profiling unavailable"))
+            },
+        }
+    }
+
+    /// The mixed-precision backend can overlap encoding around a host sampler.
+    pub fn supports_sampled_decode(&self) -> bool {
+        self.supports_greedy_readout()
+    }
+
+    /// Continue a validated full-logit readout using the caller's sampler.
+    /// The callback runs only for requested draws; cleanup never samples.
+    pub fn sampled_decode<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        sample: impl FnMut(&[f32]) -> Result<u32> + 'a,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.sampled_decode(first, remaining, sample)?)),
+            _ => {
+                let _ = (first, remaining, sample);
+                Err(Error::Unsupported("native sampled stream unavailable"))
+            },
+        }
+    }
+
+    pub fn step_greedy(
+        &mut self,
+        token: u32,
+    ) -> Result<u32> {
+        let result = if token as usize >= self.vocab_size {
+            Err(Error::Invalid("token ID"))
+        } else {
+            match &mut self.forward {
+                #[cfg(all(feature = "metal", target_os = "macos"))]
+                Forward::Lily(model) => model.step_greedy(token),
+                _ => Err(Error::Unsupported("native greedy readout unavailable")),
+            }
+        };
+        if result.is_err() {
+            self.reset();
+        }
+        result
+    }
+    /// Continue an already validated greedy draw within one serialized request.
+    /// Dropping the iterator drains submitted work before the model is reusable.
+    pub fn greedy_decode(
+        &mut self,
+        first: u32,
+        remaining: usize,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + '_>> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.greedy_decode(first, remaining)?)),
+            _ => {
+                let _ = (first, remaining);
+                Err(Error::Unsupported("native greedy stream unavailable"))
+            },
+        }
+    }
+
+    /// Includes failures found while draining an early-dropped greedy stream.
+    pub fn is_fenced(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.is_fenced();
+        }
+        false
     }
 }
 
@@ -239,6 +364,17 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn mixed_precision_selection_requires_explicit_architecture_and_format() {
+        assert!(mixed_precision_checkpoint(&serde_json::json!({
+            "model_type": "qwen4_exp", "lily": {"format": "qwen4_exp-affine-v1"}
+        })));
+        assert!(!mixed_precision_checkpoint(&serde_json::json!({"model_type": "qwen4_exp"})));
+        assert!(!mixed_precision_checkpoint(&serde_json::json!({
+            "model_type": "flint", "lily": {"format": "qwen4_exp-affine-v1"}
+        })));
+    }
 
     #[stark_test]
     fn generation_eos_supplements_primary_end_of_text_without_duplicates() {

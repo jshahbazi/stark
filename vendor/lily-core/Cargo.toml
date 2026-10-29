@@ -1,0 +1,31 @@
+[package]
+name = "stark_lily_core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0"
+description = "Stark's vendored in-process Qwen Metal core from Lily"
+repository = "https://github.com/fabiogreter/lily-qwen3.8-flash-next"
+publish = false
+autobins = false
+
+[lib]
+name = "stark_lily_core"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { version = "=1.0.103", features = [] }
+bytemuck = { version = "=1.25.0", features = ["extern_crate_alloc"] }
+half = { version = "=2.7.1", features = ["bytemuck"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["preserve_order"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "=0.6.2"
+libc = "=0.2.190"
+objc2 = "=0.6.4"
+objc2-foundation = "=0.3.2"
+objc2-metal = "=0.3.2"
+
+# This vendored package can be checked independently of Stark.
+[workspace]

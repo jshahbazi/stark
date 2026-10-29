@@ -29,6 +29,10 @@ pub fn enable(enabled: bool) {
     ENABLED.store(enabled, Ordering::Relaxed);
 }
 
+pub fn enabled() -> bool {
+    ENABLED.load(Ordering::Relaxed)
+}
+
 pub fn reset() {
     COUNTERS.get_or_init(Mutex::default).lock().unwrap().clear();
 }

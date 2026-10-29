@@ -4,6 +4,10 @@
 
 use super::*;
 
+#[path = "decode_graph_counters.rs"]
+mod counters;
+use counters::EncoderTiming;
+
 #[derive(Clone)]
 pub(crate) struct DeviceVector {
     pub buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -47,6 +51,8 @@ impl DeviceVector {
 pub(crate) struct DecodeGraph {
     command: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     encoding: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+    encoding_dispatch: MTLDispatchType,
+    encoder_timing: Option<EncoderTiming>,
     failure: DeviceVector,
     // Explicit ownership complements Metal's retained command references,
     // including immutable mappings with deallocators retaining their files.
@@ -55,15 +61,60 @@ pub(crate) struct DecodeGraph {
     encode_scope: Option<profile::Scope>,
     scratch: Vec<(Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     scratch_bytes: usize,
+    single_encoder: bool,
+    serial_projection_levels: bool,
+    byte_loads: bool,
+    vector8: bool,
+    scalar_uint_loads: bool,
+    factored_affine: bool,
+    projection_level: bool,
+    projection_checks: Vec<DeviceVector>,
+    separate_finite: bool,
+    phase_timing: bool,
 }
 
 impl DecodeGraph {
     pub fn new() -> Result<Self> {
+        Self::new_with_encoder(false)
+    }
+
+    /// A Qwen-only experimental transport. Every dependent dispatch inserts
+    /// an explicit buffer barrier; projection levels admit independent work.
+    pub fn new_parallel() -> Result<Self> {
+        Self::new_with_encoder(true)
+    }
+
+    fn new_with_encoder(single_encoder: bool) -> Result<Self> {
+        let phase_timing = std::env::var_os("STARK_QWEN38_PHASE_TIMING").is_some_and(|value| value == "1");
+        let encoder_timing = std::env::var_os("STARK_QWEN38_ENCODER_TIMING").is_some_and(|value| value == "1");
+        Self::new_with_timing(single_encoder, phase_timing, encoder_timing)
+    }
+
+    fn new_with_timing(
+        single_encoder: bool,
+        phase_timing: bool,
+        encoder_timing: bool,
+    ) -> Result<Self> {
+        if phase_timing && encoder_timing {
+            return Err(Error::Invalid("native timing modes cannot be combined"));
+        }
         objc2::rc::autoreleasepool(|_| {
             let executor = executor()?;
             let command = executor.queue.command_buffer().ok_or(Error::Invalid("decode command allocation failed"))?;
-            let encoding =
-                command.compute_command_encoder().ok_or(Error::Invalid("decode encoder allocation failed"))?;
+            let dispatch = if single_encoder {
+                MTLDispatchType::CONCURRENT
+            } else {
+                MTLDispatchType::SERIAL
+            };
+            let mut encoder_timing = encoder_timing.then(|| EncoderTiming::new(executor.device.clone())).transpose()?;
+            let encoding = if let Some(timing) = &mut encoder_timing {
+                Some(timing.encoder(&command, dispatch)?)
+            } else if single_encoder {
+                command.compute_command_encoder_with_dispatch_type(dispatch)
+            } else {
+                command.compute_command_encoder()
+            }
+            .ok_or(Error::Invalid("decode encoder allocation failed"))?;
             let scratch = executor
                 .device
                 .new_buffer(1024 * 1024, MTLResourceOptions::STORAGE_MODE_SHARED)
@@ -77,6 +128,8 @@ impl DecodeGraph {
             Ok(Self {
                 command,
                 encoding,
+                encoding_dispatch: dispatch,
+                encoder_timing,
                 failure: DeviceVector {
                     buffer: scratch.clone(),
                     offset: 0,
@@ -87,6 +140,17 @@ impl DecodeGraph {
                 encode_scope: Some(profile::Scope::new("native.metal.encode")),
                 scratch: vec![(scratch, 256)],
                 scratch_bytes: 1024 * 1024,
+                single_encoder,
+                serial_projection_levels: std::env::var_os("STARK_QWEN38_SERIAL_LEVELS")
+                    .is_some_and(|value| value == "1"),
+                byte_loads: std::env::var_os("STARK_HYBRID_BYTE_LOADS").is_some_and(|value| value == "1"),
+                vector8: std::env::var_os("STARK_HYBRID_VECTOR8").is_some_and(|value| value == "1"),
+                scalar_uint_loads: std::env::var_os("STARK_HYBRID_SCALAR_UINT_LOADS").is_some_and(|value| value == "1"),
+                factored_affine: std::env::var_os("STARK_HYBRID_FACTORED_AFFINE").is_some_and(|value| value == "1"),
+                projection_level: false,
+                projection_checks: Vec::new(),
+                separate_finite: std::env::var_os("STARK_HYBRID_SEPARATE_FINITE").is_some_and(|value| value == "1"),
+                phase_timing,
             })
         })
     }
@@ -152,6 +216,19 @@ impl DecodeGraph {
 
     pub fn encoder(&self) -> &ProtocolObject<dyn MTLComputeCommandEncoder> {
         &self.encoding
+    }
+
+    /// The legacy transport gets dependency ordering from serial encoders and
+    /// encoder transitions. The single concurrent encoder requires a barrier
+    /// before every dependent dispatch. Callers inside a projection level own
+    /// the contract that their projections have no dependencies on each other.
+    fn order_dispatch(&self) {
+        if let Some(timing) = &self.encoder_timing {
+            timing.mark_dispatch();
+        }
+        if self.single_encoder && !self.projection_level {
+            self.encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        }
     }
 
     /// Graph-owned outputs share aligned backing allocations. Persistent model
@@ -245,6 +322,7 @@ impl DecodeGraph {
             vectors.len(),
         );
         self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
+        self.order_dispatch();
         self.encoding.dispatch_threads(
             MTLSize {
                 width: grid,
@@ -264,7 +342,57 @@ impl DecodeGraph {
         &mut self,
         input: &DeviceVector,
     ) -> Result<()> {
+        if self.projection_level {
+            input.validate()?;
+            self.projection_checks.push(input.clone());
+            return Ok(());
+        }
         self.kernel("hybrid_graph_finite", &[input], &[input.len as u32], input.len, 256)
+    }
+
+    /// Encode independent projections together. Inputs must have been produced
+    /// before this level; no projection may consume another projection's output.
+    /// The dependency-level schedule follows Lily's design at e22d58f, expressed
+    /// with Stark's tracked Metal encoder and unchanged F32 operators.
+    pub fn begin_projection_level(&mut self) -> Result<()> {
+        if self.projection_level {
+            return Err(Error::Invalid("nested decode projection level"));
+        }
+        if !self.serial_projection_levels {
+            if self.single_encoder {
+                self.order_dispatch();
+            } else {
+                self.switch_dispatch(MTLDispatchType::CONCURRENT)?;
+            }
+            self.projection_level = true;
+        }
+        Ok(())
+    }
+
+    pub fn end_projection_level(&mut self) -> Result<()> {
+        if self.serial_projection_levels {
+            return Ok(());
+        }
+        if !self.projection_level {
+            return Err(Error::Invalid("decode projection level not active"));
+        }
+        // All projection outputs become visible before deferred finite scans.
+        // Scans retain the same sticky status and run before dependent work.
+        self.encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        self.projection_level = false;
+        let checks = std::mem::take(&mut self.projection_checks);
+        let has_checks = !checks.is_empty();
+        for input in checks {
+            self.check_finite(&input)?;
+        }
+        if has_checks {
+            self.encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+        }
+        if !self.single_encoder {
+            self.switch_dispatch(MTLDispatchType::SERIAL)?;
+        }
+        profile::record("native.metal.graph.projection_levels", 0.0, 1);
+        Ok(())
     }
 
     pub fn copy_into(
@@ -419,11 +547,57 @@ impl DecodeGraph {
         operation: &MappedOperation<'_>,
         input: &DeviceVector,
     ) -> Result<DeviceVector> {
+        if self.single_encoder && operation.matrices.len() > 1 {
+            return Err(Error::Invalid("single encoder requires one mapped matrix per dispatch"));
+        }
         input.validate()?;
         let parameters = operation.parameters_for_input(input.len)?;
         let output = self.scratch(operation.rows * operation.matrices.len())?;
-        let pipeline = executor()?.pipeline(operation.format)?;
-        self.check_finite(input)?;
+        let executor = executor()?;
+        let checked = matches!(operation.format, MatrixFormat::Affine { .. }) && !self.separate_finite;
+        let typed = checked
+            && !self.byte_loads
+            && operation.matrices.iter().all(|matrix| matrix.aligned_affine_loads(operation.format));
+        let chunk32 = typed && !self.vector8 && operation.columns.is_multiple_of(32);
+        let uint4 = chunk32
+            && !self.scalar_uint_loads
+            && operation.matrices.iter().all(|matrix| matrix.codes.offset.is_multiple_of(16));
+        let pipeline = if uint4 && self.factored_affine {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_graph_affine_matvec_factored",
+                &executor.factored_matrix_pipelines,
+            )?
+        } else if uint4 {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_graph_affine_matvec_chunk32_uint4",
+                &executor.uint4_matrix_pipelines,
+            )?
+        } else if chunk32 {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_graph_affine_matvec_chunk32",
+                &executor.chunk32_matrix_pipelines,
+            )?
+        } else if typed {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_graph_affine_matvec_uint",
+                &executor.typed_matrix_pipelines,
+            )?
+        } else if checked {
+            executor.cached_pipeline(
+                operation.format,
+                "hybrid_graph_affine_matvec_vector8",
+                &executor.checked_matrix_pipelines,
+            )?
+        } else {
+            executor.pipeline(operation.format)?
+        };
+        if !checked {
+            self.check_finite(input)?;
+        }
         // Routed experts write disjoint row ranges. Preserve their previous
         // concurrent execution inside this command instead of serializing the
         // independent GEMVs when joining surrounding decode stages.
@@ -432,6 +606,10 @@ impl DecodeGraph {
         if concurrent {
             self.switch_dispatch(MTLDispatchType::CONCURRENT)?;
         }
+        if checked {
+            self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
+        }
+        self.order_dispatch();
         Executor::encode_matrix_at(
             &self.encoding,
             operation,
@@ -452,7 +630,9 @@ impl DecodeGraph {
                 self.resources.extend([scales.buffer.clone(), biases.buffer.clone()]);
             }
         }
-        self.check_finite(&output)?;
+        if !checked {
+            self.check_finite(&output)?;
+        }
         Ok(output)
     }
 
@@ -460,13 +640,19 @@ impl DecodeGraph {
         &mut self,
         dispatch: MTLDispatchType,
     ) -> Result<()> {
+        if self.single_encoder {
+            return Err(Error::Invalid("single decode encoder cannot switch dispatch type"));
+        }
         self.encoding.end_encoding();
         self.encoding_ended = true;
-        let encoding = self
-            .command
-            .compute_command_encoder_with_dispatch_type(dispatch)
-            .ok_or(Error::Invalid("decode encoder transition failed"))?;
+        let encoding = if let Some(timing) = &mut self.encoder_timing {
+            Some(timing.encoder(&self.command, dispatch)?)
+        } else {
+            self.command.compute_command_encoder_with_dispatch_type(dispatch)
+        }
+        .ok_or(Error::Invalid("decode encoder transition failed"))?;
         self.encoding = encoding;
+        self.encoding_dispatch = dispatch;
         self.encoding_ended = false;
         Ok(())
     }
@@ -511,14 +697,49 @@ impl DecodeGraph {
             format,
         }
         .parameters_for_input(columns)?;
+        let typed = !self.byte_loads && matrix.aligned_affine_loads(format);
+        let chunk32 = typed && !self.vector8 && columns.is_multiple_of(32);
+        let uint4 = chunk32 && !self.scalar_uint_loads && matrix.codes.offset.is_multiple_of(16);
         let name = match format {
             MatrixFormat::Packed(_) => "hybrid_graph_packed_indexed",
             MatrixFormat::Affine {
                 ..
+            } if uint4 && self.factored_affine => "hybrid_graph_affine_indexed_factored",
+            MatrixFormat::Affine {
+                ..
+            } if uint4 => "hybrid_graph_affine_indexed_chunk32_uint4",
+            MatrixFormat::Affine {
+                ..
+            } if chunk32 => "hybrid_graph_affine_indexed_chunk32",
+            MatrixFormat::Affine {
+                ..
+            } if typed => "hybrid_graph_affine_indexed_uint",
+            MatrixFormat::Affine {
+                ..
             } => "hybrid_graph_affine_indexed",
         };
-        let pipeline = executor.cached_pipeline(format, name, &executor.indexed_pipelines)?;
-        self.check_finite(input)?;
+        let pipeline = executor.cached_pipeline(
+            format,
+            name,
+            if uint4 && self.factored_affine {
+                &executor.factored_indexed_pipelines
+            } else if uint4 {
+                &executor.uint4_indexed_pipelines
+            } else if chunk32 {
+                &executor.chunk32_indexed_pipelines
+            } else if typed {
+                &executor.typed_indexed_pipelines
+            } else {
+                &executor.indexed_pipelines
+            },
+        )?;
+        // Indexed affine GEMV reports its own nonfinite, unclipped reduction.
+        // Packed kernels retain the separate scans.
+        let checked = matches!(format, MatrixFormat::Affine { .. }) && !self.separate_finite;
+        if !checked {
+            self.check_finite(input)?;
+        }
+        self.order_dispatch();
         self.encoding.set_compute_pipeline_state(&pipeline);
         self.encoding.set_buffer(Some(&matrix.codes.buffer), matrix.codes.offset, 0);
         self.encoding.set_buffer(Some(&input.buffer), input.offset, 1);
@@ -554,7 +775,9 @@ impl DecodeGraph {
             output.buffer.clone(),
             indices.buffer.clone(),
         ]);
-        self.check_finite(&output)?;
+        if !checked {
+            self.check_finite(&output)?;
+        }
         Ok(output)
     }
 
@@ -624,10 +847,12 @@ impl DecodeGraph {
         input: &DeviceVector,
         state: &mut QwenGdnState,
     ) -> Result<DeviceVector> {
+        self.begin_projection_level()?;
         let projections = ["in_proj_qkv", "in_proj_z", "in_proj_a", "in_proj_b"]
             .iter()
             .map(|name| weights.encode_matvec(self, &format!("{prefix}.{name}.weight"), input))
             .collect::<Result<Vec<_>>>()?;
+        self.end_projection_level()?;
         let g = &state.geometry;
         let width = 2 * g.key_heads * g.key_dim + g.value_heads * g.value_dim;
         if projections[0].len != width
@@ -659,6 +884,7 @@ impl DecodeGraph {
         }
         e.set_bytes(NonNull::from(&state.parameters).cast(), std::mem::size_of_val(&state.parameters), 4);
         e.set_buffer(Some(&self.failure.buffer), 0, 6);
+        self.order_dispatch();
         e.dispatch_threads(
             MTLSize {
                 width,
@@ -695,6 +921,7 @@ impl DecodeGraph {
             );
         }
         e.set_bytes(NonNull::from(&state.parameters).cast(), std::mem::size_of_val(&state.parameters), 8);
+        self.order_dispatch();
         e.dispatch_threadgroups(
             MTLSize {
                 width: g.value_heads,
@@ -715,10 +942,59 @@ impl DecodeGraph {
         weights.encode_matvec(self, &format!("{prefix}.out_proj.weight"), &result)
     }
 
+    /// Diagnostic only. Encoder timing labels stage samples in one command;
+    /// legacy phase timing splits commands and adds synchronous completions.
+    pub fn diagnostic_checkpoint(
+        &mut self,
+        name: &'static str,
+    ) -> Result<()> {
+        if !self.phase_timing && self.encoder_timing.is_none() {
+            return Ok(());
+        }
+        if self.projection_level {
+            return Err(Error::Invalid("phase boundary inside projection level"));
+        }
+        self.encoding.end_encoding();
+        self.encoding_ended = true;
+        if let Some(timing) = &mut self.encoder_timing {
+            timing.label_completed(name);
+            self.encoding = timing.encoder(&self.command, self.encoding_dispatch)?;
+            self.encoding_ended = false;
+            return Ok(());
+        }
+        drop(self.encode_scope.take());
+        self.command.commit();
+        self.command.wait_until_completed();
+        if self.command.status() != MTLCommandBufferStatus::Completed {
+            return Err(Error::Invalid("phase command failed"));
+        }
+        profile::record(name, self.command.gpu_end_time() - self.command.gpu_start_time(), 0);
+        let command = executor()?.queue.command_buffer().ok_or(Error::Invalid("phase command allocation failed"))?;
+        let encoding = if self.single_encoder {
+            command.compute_command_encoder_with_dispatch_type(MTLDispatchType::CONCURRENT)
+        } else {
+            command.compute_command_encoder()
+        }
+        .ok_or(Error::Invalid("phase encoder allocation failed"))?;
+        self.command = command;
+        self.encoding = encoding;
+        self.encoding_dispatch = if self.single_encoder {
+            MTLDispatchType::CONCURRENT
+        } else {
+            MTLDispatchType::SERIAL
+        };
+        self.encoding_ended = false;
+        self.encode_scope = Some(profile::Scope::new("native.metal.encode"));
+        Ok(())
+    }
+
     pub fn finish(
         mut self,
         outputs: &[DeviceVector],
     ) -> Result<Vec<Vec<f32>>> {
+        if self.projection_level {
+            return Err(Error::Invalid("unfinished decode projection level"));
+        }
         for output in outputs {
             output.validate()?;
         }
@@ -726,6 +1002,9 @@ impl DecodeGraph {
         self.encoding_ended = true;
         drop(self.encode_scope.take());
         let execute = profile::Scope::new("native.metal.execute");
+        if let Some(timing) = &mut self.encoder_timing {
+            timing.start_clock();
+        }
         {
             let _scope = profile::Scope::new("native.metal.submit");
             self.command.commit();
@@ -743,6 +1022,9 @@ impl DecodeGraph {
         // sticky across every operator, including masked intermediate errors.
         if unsafe { *self.failure.buffer.contents().as_ptr().cast::<u32>() } != 0 {
             return Err(Error::Invalid("nonfinite decode graph intermediate"));
+        }
+        if let Some(timing) = &self.encoder_timing {
+            timing.complete(self.command.gpu_end_time() - self.command.gpu_start_time())?;
         }
         let mut results = Vec::with_capacity(outputs.len());
         for output in outputs {
@@ -774,10 +1056,94 @@ impl Drop for DecodeGraph {
 }
 
 #[cfg(test)]
+#[path = "decode_graph_typed_tests.rs"]
+mod typed_load_tests;
+
+#[cfg(test)]
+#[path = "decode_graph_parallel_tests.rs"]
+mod parallel_transport_tests;
+
+#[cfg(test)]
+#[path = "decode_graph_chunk32_tests.rs"]
+mod chunk32_tests;
+
+#[cfg(test)]
+#[path = "decode_graph_factored_tests.rs"]
+mod factored_tests;
+
+#[cfg(test)]
 mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn projection_levels_preserve_packed_outputs_and_order_deferred_checks() {
+        let (rows, columns) = (13, 64);
+        let values = (0..rows * columns).map(|i| ((i * 13 % 101) as f32 - 50.0) / 51.0).collect::<Vec<_>>();
+        let codes = buffer(executor().unwrap(), bytemuck::cast_slice(&values)).unwrap();
+        let matrix = MappedMatrix {
+            codes: MappedSlice {
+                buffer: codes,
+                offset: 0,
+                length: values.len() * 4,
+                registered_length: values.len() * 4,
+            },
+            planes: None,
+        };
+        let input = DecodeGraph::upload(&(0..columns).map(|i| (i as f32 - 15.0) / 20.0).collect::<Vec<_>>()).unwrap();
+        let mut expected = None;
+        for serial in [true, false] {
+            let mut graph = DecodeGraph::new().unwrap();
+            graph.serial_projection_levels = serial;
+            graph.begin_projection_level().unwrap();
+            if !serial {
+                assert!(graph.begin_projection_level().is_err());
+            }
+            let mut outputs = Vec::new();
+            for _ in 0..4 {
+                outputs.push(
+                    graph
+                        .mapped(
+                            &MappedOperation {
+                                matrices: vec![matrix.clone()],
+                                inputs: &[],
+                                rows,
+                                columns,
+                                rows_per_batch: 0,
+                                format: MatrixFormat::Packed(0),
+                            },
+                            &input,
+                        )
+                        .unwrap(),
+                );
+            }
+            graph.end_projection_level().unwrap();
+            assert!(graph.projection_checks.is_empty());
+            let combined = graph.add(&outputs[0], &outputs[3]).unwrap();
+            outputs.push(combined);
+            let actual = graph.finish(&outputs).unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&actual, expected);
+            } else {
+                expected = Some(actual);
+            }
+        }
+
+        let mut invalid = DecodeGraph::new().unwrap();
+        invalid.serial_projection_levels = false;
+        let input = DecodeGraph::zeros(1).unwrap();
+        // Deliberately poison test storage to exercise deferred validation.
+        unsafe { input.buffer.contents().as_ptr().cast::<f32>().write(f32::NAN) };
+        invalid.begin_projection_level().unwrap();
+        invalid.check_finite(&input).unwrap();
+        invalid.end_projection_level().unwrap();
+        assert!(invalid.finish(&[]).is_err());
+        let mut unfinished = DecodeGraph::new().unwrap();
+        unfinished.serial_projection_levels = false;
+        unfinished.begin_projection_level().unwrap();
+        assert!(unfinished.finish(&[]).is_err());
+    }
 
     #[stark_test]
     fn deferred_graph_preserves_grouped_f32_math_and_device_views() {
@@ -882,6 +1248,73 @@ mod tests {
         let value =
             recovered.add(&DecodeGraph::upload(&[2.0]).unwrap(), &DecodeGraph::upload(&[3.0]).unwrap()).unwrap();
         assert_eq!(recovered.finish(&[value]).unwrap()[0], [5.0]);
+    }
+
+    #[stark_test]
+    fn checked_affine_projection_preserves_bits_and_rejects_hidden_nonfinite_values() {
+        let (rows, columns) = (9, 32);
+        let codes = vec![0xffu8; rows * columns / 2];
+        let scales = bytemuck::cast_slice(&vec![0.5f32; rows]).to_vec();
+        let biases = bytemuck::cast_slice(&vec![-0.25f32; rows]).to_vec();
+        let view = |bytes: &[u8]| MappedSlice {
+            buffer: buffer(executor().unwrap(), bytes).unwrap(),
+            offset: 0,
+            length: bytes.len(),
+            registered_length: bytes.len(),
+        };
+        let matrix = MappedMatrix {
+            codes: view(&codes),
+            planes: Some((view(&scales), view(&biases))),
+        };
+        let operation = MappedOperation {
+            matrices: vec![matrix.clone()],
+            inputs: &[],
+            rows,
+            columns,
+            rows_per_batch: 0,
+            format: MatrixFormat::Affine {
+                scale_dtype: 0,
+                bits: 4,
+                group: 32,
+            },
+        };
+        let input = (0..columns).map(|i| (i as f32 - 15.0) / 20.0).collect::<Vec<_>>();
+        let expected = mlx_matvec(&codes, &scales, &biases, 0, 4, 32, rows, columns, &input).unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        // Isolate finite-check/load fusion from the separately qualified
+        // chunk32 reduction schedule.
+        graph.vector8 = true;
+        graph.begin_projection_level().unwrap();
+        let output = graph.mapped(&operation, &DecodeGraph::upload(&input).unwrap()).unwrap();
+        graph.end_projection_level().unwrap();
+        assert_eq!(graph.finish(&[output]).unwrap()[0], expected);
+        for indexed in [false, true] {
+            for poison in [f32::MAX, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let input = DecodeGraph::zeros(columns).unwrap();
+                // Owned test storage has no submitted users. Poison one lane
+                // without passing through upload's independent host checks.
+                unsafe { input.buffer.contents().as_ptr().cast::<f32>().add(31).write(poison) };
+                let projected = if indexed {
+                    graph
+                        .indexed(
+                            &matrix,
+                            operation.format,
+                            [1, rows, columns],
+                            &DecodeGraph::upload(&[0.0]).unwrap(),
+                            1,
+                            &input,
+                            false,
+                        )
+                        .unwrap()
+                } else {
+                    graph.mapped(&operation, &input).unwrap()
+                };
+                let clipped =
+                    graph.swiglu(&projected, &DecodeGraph::upload(&vec![1.0; rows]).unwrap(), Some(1.0)).unwrap();
+                assert!(graph.finish(&[clipped]).is_err());
+            }
+        }
     }
 
     #[stark_test]
@@ -1026,6 +1459,7 @@ mod tests {
                         };
                         let expected = mapped_many(&[operation]).unwrap().remove(0);
                         let mut selected_graph = DecodeGraph::new().unwrap();
+                        selected_graph.vector8 = true;
                         let selected_input = selected_graph.upload_into(&inputs).unwrap();
                         let selected_output = selected_graph
                             .mapped(
@@ -1046,6 +1480,7 @@ mod tests {
                             "concurrent selected projection changed F32 arithmetic"
                         );
                         let mut graph = DecodeGraph::new().unwrap();
+                        graph.vector8 = true;
                         let ids = DecodeGraph::upload(&[0.0, f32::from_bits(3), f32::from_bits(0), f32::from_bits(2)])
                             .unwrap();
                         let mut uploaded = vec![0.0; 7];

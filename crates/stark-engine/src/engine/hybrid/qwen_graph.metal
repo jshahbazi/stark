@@ -121,6 +121,67 @@ kernel void qwen_graph_qsa_prepare(device const float *index_projection [[buffer
 
 // Sparse QSA visibility. A single scalar invocation intentionally preserves the
 // Rust pooling, per-head dot, and stable top-k order for the first graph version.
+kernel void qwen_graph_qsa_prepare_parallel(device const float *index_projection [[buffer(0)]],
+    device const float *query_gate [[buffer(1)]], device const float *key_input [[buffer(2)]],
+    device const float *value_input [[buffer(3)]], device const float *query_norm [[buffer(4)]],
+    device const float *key_norm [[buffer(5)]], device float *index_cache [[buffer(6)]],
+    device float *query_cache [[buffer(7)]], device float *key_cache [[buffer(8)]],
+    device float *value_cache [[buffer(9)]], device float *gates [[buffer(10)]],
+    constant uint *p [[buffer(11)]], device atomic_uint *failure [[buffer(30)]],
+    uint task [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint count = p[0], index_heads = p[1], index_dim = p[2], heads = p[3];
+    uint dim = p[4], kv_heads = p[5], rotary_dim = p[6], position = p[7];
+    if (count == 0 || position + 1 != count) {
+        if (!tid) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    if (task == 0) {
+        for (uint i = tid; i < (index_heads + 1) * index_dim; i += 256) {
+            if (!isfinite(index_projection[i])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+            if (i < index_dim) index_cache[position * index_dim + i] = index_projection[index_heads * index_dim + i];
+        }
+        return;
+    }
+    bool is_query = task <= heads;
+    uint head = is_query ? task - 1 : task - heads - 1;
+    if (!is_query && head >= kv_heads) return;
+    uint src = head * dim * (is_query ? 2 : 1);
+    uint dst = is_query ? head * dim : position * kv_heads * dim + head * dim;
+    device const float *input = is_query ? query_gate : key_input;
+    device const float *norm = is_query ? query_norm : key_norm;
+    device float *output = is_query ? query_cache : key_cache;
+    threadgroup float partial[8], scale;
+    float sum = 0.0f;
+    for (uint i = tid; i < dim; i += 256) { float x = input[src + i]; sum += x * x; }
+    sum = simd_sum(sum);
+    if (!lane) partial[sg] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        sum = simd_sum(lane < 8 ? partial[lane] : 0.0f);
+        if (!lane) scale = 1.0f / sqrt(sum / float(dim) + as_type<float>(p[8]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < dim; i += 256) {
+        float x = input[src + i] * scale * norm[i];
+        if (i < rotary_dim) {
+            uint half_width = rotary_dim / 2;
+            uint r = i < half_width ? i : i - half_width;
+            uint partner = i < half_width ? i + half_width : i - half_width;
+            float y = input[src + partner] * scale * norm[partner];
+            float phase = float(position) * pow(as_type<float>(p[9]), -2.0f * float(r) / float(rotary_dim));
+            float cosine;
+            float sine = sincos(phase, cosine);
+            x = i < half_width ? x * cosine - y * sine : y * sine + x * cosine;
+        }
+        output[dst + i] = x;
+        float companion = is_query ? query_gate[src + dim + i] : value_input[head * dim + i];
+        if (is_query) gates[dst + i] = companion;
+        else value_cache[dst + i] = companion;
+        if (!isfinite(x) || !isfinite(companion)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    }
+}
+
 kernel void qwen_graph_qsa_visible(device const float *index_projection [[buffer(0)]],
     device const float *index_cache [[buffer(1)]], device const float *query_norm [[buffer(2)]],
     device const float *key_norm [[buffer(3)]], device uint *visible_mask [[buffer(4)]],
@@ -238,6 +299,164 @@ kernel void qwen_graph_qsa_visible(device const float *index_projection [[buffer
     }
 }
 
+inline float qwen_graph_qsa_pooled_component(device const float *index_cache,
+    uint block, uint ratio, uint dim, uint channel) {
+    float pooled = 0.0f;
+    for (uint token = block * ratio; token < (block + 1) * ratio; ++token) {
+        pooled += index_cache[token * dim + channel] / float(ratio);
+    }
+    return pooled;
+}
+
+// Completed pooled keys are immutable. Normalize and rotate a key only when
+// its block completes; a query is normalized and rotated once for this step.
+// The optional block range also permits independent cache-construction tests.
+kernel void qwen_graph_qsa_index_prepare(device const float *index_projection [[buffer(0)]],
+    device const float *index_cache [[buffer(1)]], device const float *query_norm [[buffer(2)]],
+    device const float *key_norm [[buffer(3)]], device float *queries [[buffer(4)]],
+    device float *pooled_keys [[buffer(5)]], constant uint *p [[buffer(6)]],
+    device atomic_uint *failure [[buffer(30)]], uint task [[thread_position_in_grid]]) {
+    uint count = p[0], heads = p[1], dim = p[2], rotary_dim = p[3];
+    uint position = p[4], ratio = p[7], budget = p[8];
+    float eps = as_type<float>(p[5]), theta = as_type<float>(p[6]);
+    if (ratio == 0) { atomic_store_explicit(failure, 1u, memory_order_relaxed); return; }
+    if (task < heads) {
+        if (count <= budget) return;
+        uint base = task * dim;
+        float sum = 0.0f;
+        for (uint i = 0; i < dim; ++i) {
+            float x = index_projection[base + i];
+            sum += x * x;
+        }
+        float scale = 1.0f / sqrt(sum / float(dim) + eps);
+        for (uint i = 0; i < dim; ++i) {
+            float value = index_projection[base + i] * scale * query_norm[i];
+            if (i < rotary_dim) {
+                uint r = i < rotary_dim / 2 ? i : i - rotary_dim / 2;
+                uint partner = i < rotary_dim / 2 ? i + rotary_dim / 2 : i - rotary_dim / 2;
+                float phase = float(position) * pow(theta, -2.0f * float(r) / float(rotary_dim));
+                float cosine;
+                float sine = sincos(phase, cosine);
+                float other = index_projection[base + partner] * scale * query_norm[partner];
+                value = i < rotary_dim / 2 ? value * cosine - other * sine : other * sine + value * cosine;
+            }
+            queries[base + i] = value;
+        }
+    } else {
+        uint offset = task - heads;
+        if (offset >= p[10]) return;
+        uint block = p[9] + offset;
+        if (block >= count / ratio) {
+            atomic_store_explicit(failure, 1u, memory_order_relaxed);
+            return;
+        }
+        float sum = 0.0f;
+        for (uint i = 0; i < dim; ++i) {
+            float pooled = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, i);
+            sum += pooled * pooled;
+        }
+        float scale = 1.0f / sqrt(sum / float(dim) + eps);
+        for (uint i = 0; i < dim; ++i) {
+            float value = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, i) * scale * key_norm[i];
+            if (i < rotary_dim) {
+                uint r = i < rotary_dim / 2 ? i : i - rotary_dim / 2;
+                uint partner = i < rotary_dim / 2 ? i + rotary_dim / 2 : i - rotary_dim / 2;
+                float phase = float(block * ratio) * pow(theta, -2.0f * float(r) / float(rotary_dim));
+                float cosine;
+                float sine = sincos(phase, cosine);
+                float other = qwen_graph_qsa_pooled_component(index_cache, block, ratio, dim, partner) * scale * key_norm[partner];
+                value = i < rotary_dim / 2 ? value * cosine - other * sine : other * sine + value * cosine;
+            }
+            pooled_keys[block * dim + i] = value;
+        }
+    }
+}
+
+kernel void qwen_graph_qsa_index_cached_scores(device const float *queries [[buffer(0)]],
+    device const float *pooled_keys [[buffer(1)]], device float *block_scores [[buffer(2)]],
+    constant uint *p [[buffer(3)]], device atomic_uint *failure [[buffer(30)]],
+    uint block [[thread_position_in_grid]]) {
+    uint blocks = p[0], heads = p[1], dim = p[2];
+    if (block >= blocks) return;
+    float score = 0.0f;
+    for (uint head = 0; head < heads; ++head) {
+        float head_score = 0.0f;
+        for (uint i = 0; i < dim; ++i) head_score += queries[head * dim + i] * pooled_keys[block * dim + i];
+        score += max(head_score, 0.0f);
+    }
+    score /= sqrt(float(dim));
+    block_scores[block] = score;
+    if (isnan(score)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+}
+
+// The high word preserves descending float total_cmp; the low word gives the
+// earlier block the larger key when scores tie. Radix selection compares keys
+// exactly, independent of thread scheduling or reduction order.
+inline ulong qwen_graph_qsa_selection_key(float score, uint block) {
+    uint score_key = as_type<uint>(qwen_graph_total_key(score)) ^ 0x80000000u;
+    return (ulong(score_key) << 32) | ulong(UINT_MAX - block);
+}
+
+kernel void qwen_graph_qsa_index_threshold(device const float *block_scores [[buffer(0)]],
+    device uint *threshold_id [[buffer(1)]], device uint *threshold_score [[buffer(2)]],
+    constant uint *p [[buffer(3)]], device atomic_uint *failure [[buffer(30)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint blocks = p[0], keep_count = p[1];
+    threadgroup ulong prefix;
+    threadgroup ulong mask;
+    threadgroup uint rank;
+    threadgroup uint partial[8];
+    if (tid == 0) { prefix = 0; mask = 0; rank = keep_count; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (keep_count == 0 || keep_count > blocks) {
+        if (tid == 0) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    for (uint pass = 0; pass < 64; ++pass) {
+        ulong bit = ulong(1) << (63 - pass);
+        uint count = 0;
+        for (uint block = tid; block < blocks; block += 256) {
+            ulong key = qwen_graph_qsa_selection_key(block_scores[block], block);
+            count += (key & mask) == prefix && (key & bit) != 0;
+        }
+        uint total = simd_sum(count);
+        if (lane == 0) partial[sg] = total;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            uint ones = 0;
+            for (uint group = 0; group < 8; ++group) ones += partial[group];
+            if (ones >= rank) prefix |= bit;
+            else rank -= ones;
+            mask |= bit;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        threshold_score[0] = uint(prefix >> 32);
+        threshold_id[0] = UINT_MAX - uint(prefix);
+    }
+}
+
+kernel void qwen_graph_qsa_index_mask(device const float *block_scores [[buffer(0)]],
+    device const uint *threshold_id [[buffer(1)]], device const uint *threshold_score [[buffer(2)]],
+    device uint *visible_mask [[buffer(3)]], constant uint *p [[buffer(4)]],
+    device atomic_uint *failure [[buffer(30)]], uint token [[thread_position_in_grid]]) {
+    uint count = p[0], ratio = p[1], budget = p[2];
+    if (token >= count) return;
+    if (ratio == 0 || budget < ratio) {
+        atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    if (count <= budget || token >= (count / ratio) * ratio) {
+        visible_mask[token] = 1;
+        return;
+    }
+    uint block = token / ratio;
+    ulong threshold = (ulong(threshold_score[0]) << 32) | ulong(UINT_MAX - threshold_id[0]);
+    visible_mask[token] = qwen_graph_qsa_selection_key(block_scores[block], block) >= threshold ? 1u : 0u;
+}
+
 // Separate independent score dots, ordered softmax reductions and independent
 // value channels. Scratch remains [heads,capacity]; arithmetic within every dot
 // and visible-token reduction follows the scalar reference order.
@@ -348,6 +567,86 @@ kernel void qwen_graph_ple(device const float *key [[buffer(0)]],
 
 // Each channel owns its chronological history column, so convolution and
 // shifting have no cross-channel dependency or in-place copy race.
+// One 256-thread group owns a stream. Only reductions change order; all
+// activations/state remain F32 and normalization retains the original formula.
+kernel void qwen_graph_ple_parallel(device const float *key [[buffer(0)]],
+    device const float *value [[buffer(1)]], device const float *query [[buffer(2)]],
+    device const float *key_norm [[buffer(3)]], device const float *query_norm [[buffer(4)]],
+    device const float *conv_norm [[buffer(5)]], device const float *conv_weights [[buffer(6)]],
+    device float *history [[buffer(7)]], device float *output [[buffer(8)]],
+    device float *scratch [[buffer(9)]], constant uint *p [[buffer(10)]],
+    device atomic_uint *failure [[buffer(30)]], uint stream [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint streams = p[0], dim = p[1];
+    if (stream >= streams) return;
+    if (dim == 0 || p[2] < 2 || p[3] == 0) {
+        if (!tid) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    uint base = stream * dim;
+    float eps = as_type<float>(p[4]);
+    threadgroup float key_partial[8], query_partial[8], partial[8];
+    threadgroup float key_scale, query_scale, gate, conv_scale;
+    float ks = 0.0f, qs = 0.0f;
+    for (uint i = tid; i < dim; i += 256) {
+        float k = key[base + i], q = query[base + i];
+        ks += k * k;
+        qs += q * q;
+        if (!isfinite(k) || !isfinite(q) || !isfinite(value[i])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    }
+    ks = simd_sum(ks); qs = simd_sum(qs);
+    if (!lane) { key_partial[sg] = ks; query_partial[sg] = qs; }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        ks = simd_sum(lane < 8 ? key_partial[lane] : 0.0f);
+        qs = simd_sum(lane < 8 ? query_partial[lane] : 0.0f);
+        if (!lane) {
+            key_scale = 1.0f / sqrt(ks / float(dim) + eps);
+            query_scale = 1.0f / sqrt(qs / float(dim) + eps);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float dot = 0.0f;
+    for (uint i = tid; i < dim; i += 256) {
+        float k = key[base + i] * key_scale * key_norm[base + i];
+        float q = query[base + i] * query_scale * query_norm[base + i];
+        dot += k * q;
+    }
+    dot = simd_sum(dot);
+    if (!lane) partial[sg] = dot;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        dot = simd_sum(lane < 8 ? partial[lane] : 0.0f);
+        if (!lane) {
+            float score = dot / sqrt(float(dim));
+            float sign = score > 0.0f ? 1.0f : (score < 0.0f ? -1.0f : 0.0f);
+            gate = qwen_graph_sigmoid_value(sign * sqrt(max(abs(score), 1e-6f)));
+            if (!isfinite(dot) || !isfinite(gate)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float square_sum = 0.0f;
+    for (uint i = tid; i < dim; i += 256) {
+        float x = gate * value[i];
+        output[base + i] = x;
+        square_sum += x * x;
+    }
+    square_sum = simd_sum(square_sum);
+    if (!lane) partial[sg] = square_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        square_sum = simd_sum(lane < 8 ? partial[lane] : 0.0f);
+        if (!lane) conv_scale = 1.0f / sqrt(square_sum / float(dim) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    for (uint i = tid; i < dim; i += 256) {
+        float normalized = output[base + i] * conv_scale * conv_norm[base + i];
+        scratch[base + i] = normalized;
+        if (!isfinite(output[base + i]) || !isfinite(normalized)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    }
+}
+
 kernel void qwen_graph_ple_convolve(device const float *conv_weights [[buffer(0)]],
     device float *history [[buffer(1)]], device float *output [[buffer(2)]],
     device const float *scratch [[buffer(3)]], constant uint *p [[buffer(4)]],
@@ -411,4 +710,83 @@ kernel void qwen_graph_router(device const float *scores [[buffer(0)]],
     }
     if (!isfinite(sum) || sum <= 0.0f) { atomic_store_explicit(failure, 1u, memory_order_relaxed); return; }
     for (uint slot = 0; slot < k; ++slot) selected_probs[slot] /= sum;
+}
+
+// Parallel max selection retains float total_cmp's signed-zero ordering and
+// chooses the smallest expert id for equal keys. Only the short selected-score
+// softmax remains serial, preserving its original F32 accumulation order.
+kernel void qwen_graph_router_parallel(device const float *scores [[buffer(0)]],
+    device uint *selected_ids [[buffer(1)]], device float *selected_probs [[buffer(2)]],
+    constant uint *p [[buffer(3)]], device atomic_uint *failure [[buffer(30)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint experts = p[0], k = p[1];
+    if (k == 0 || k > experts) {
+        if (!tid) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    threadgroup int group_keys[8];
+    threadgroup uint group_ids[8];
+    threadgroup atomic_uint invalid;
+    if (!tid) atomic_store_explicit(&invalid, 0u, memory_order_relaxed);
+    for (uint slot = tid; slot < k; slot += 256) {
+        selected_ids[slot] = UINT_MAX;
+        selected_probs[slot] = -INFINITY;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    for (uint expert = tid; expert < experts; expert += 256) {
+        if (isnan(scores[expert])) atomic_store_explicit(&invalid, 1u, memory_order_relaxed);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (atomic_load_explicit(&invalid, memory_order_relaxed)) {
+        if (!tid) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        return;
+    }
+    for (uint slot = 0; slot < k; ++slot) {
+        int best_key = INT_MIN;
+        uint best_id = UINT_MAX;
+        for (uint expert = tid; expert < experts; expert += 256) {
+            bool selected = false;
+            for (uint previous = 0; previous < slot; ++previous) selected |= selected_ids[previous] == expert;
+            if (selected) continue;
+            int key = qwen_graph_total_key(scores[expert]);
+            if (key > best_key || (key == best_key && expert < best_id)) {
+                best_key = key;
+                best_id = expert;
+            }
+        }
+        int simd_key = simd_max(best_key);
+        uint simd_id = simd_min(best_key == simd_key ? best_id : UINT_MAX);
+        if (!lane) { group_keys[sg] = simd_key; group_ids[sg] = simd_id; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (!tid) {
+            best_key = group_keys[0];
+            best_id = group_ids[0];
+            for (uint group = 1; group < 8; ++group) {
+                int key = group_keys[group];
+                uint id = group_ids[group];
+                if (key > best_key || (key == best_key && id < best_id)) {
+                    best_key = key;
+                    best_id = id;
+                }
+            }
+            selected_ids[slot] = best_id;
+            selected_probs[slot] = scores[best_id];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    }
+    if (!tid) {
+        float maximum = selected_probs[0];
+        float sum = 0.0f;
+        for (uint slot = 0; slot < k; ++slot) {
+            float probability = exp(selected_probs[slot] - maximum);
+            selected_probs[slot] = probability;
+            sum += probability;
+        }
+        if (!isfinite(sum) || sum <= 0.0f) {
+            atomic_store_explicit(failure, 1u, memory_order_relaxed);
+            return;
+        }
+        for (uint slot = 0; slot < k; ++slot) selected_probs[slot] /= sum;
+    }
 }

@@ -18,6 +18,8 @@ struct AttentionCache {
     keys: DeviceVector,
     values: DeviceVector,
     index_keys: DeviceVector,
+    pooled_index_keys: DeviceVector,
+    index_queries: DeviceVector,
     query: DeviceVector,
     gates: DeviceVector,
     visible: DeviceVector,
@@ -71,6 +73,8 @@ impl AttentionControls {
             keys: DecodeGraph::zeros(size(key_width)?)?,
             values: DecodeGraph::zeros(size(key_width)?)?,
             index_keys: DecodeGraph::zeros(size(g.index_dim)?)?,
+            pooled_index_keys: DecodeGraph::zeros((capacity / g.ratio).max(1) * g.index_dim)?,
+            index_queries: DecodeGraph::zeros(g.index_heads * g.index_dim)?,
             query: DecodeGraph::zeros(g.heads * g.head_dim)?,
             gates: DecodeGraph::zeros(g.heads * g.head_dim)?,
             visible: DecodeGraph::zeros(capacity)?,
@@ -91,6 +95,13 @@ impl AttentionControls {
                 let used = position.checked_mul(width).ok_or(Error::Invalid("Qwen graph cache copy"))?;
                 graph.copy_into(&source.slice(0, used)?, &destination.slice(0, used)?)?;
             }
+            let pooled_used = (position / g.ratio) * g.index_dim;
+            if pooled_used != 0 {
+                graph.copy_into(
+                    &previous.pooled_index_keys.slice(0, pooled_used)?,
+                    &cache.pooled_index_keys.slice(0, pooled_used)?,
+                )?;
+            }
         }
         self.cache = Some(cache);
         Ok(())
@@ -110,13 +121,20 @@ impl AttentionControls {
         let project = |graph: &mut DecodeGraph, name: &str| {
             weights.encode_matvec(graph, &format!("{}.{name}.weight", attention.prefix), input)
         };
+        graph.begin_projection_level()?;
         let index = project(graph, "indexer.index_qk_proj")?;
         let query_and_gate = project(graph, "q_proj")?;
         let keys = project(graph, "k_proj")?;
         let values = project(graph, "v_proj")?;
+        graph.end_projection_level()?;
         let count = position + 1;
+        let scalar_prepare = std::env::var_os("STARK_QWEN38_SCALAR_QSA_PREPARE").is_some_and(|value| value == "1");
         graph.kernel(
-            "qwen_graph_qsa_prepare",
+            if scalar_prepare {
+                "qwen_graph_qsa_prepare"
+            } else {
+                "qwen_graph_qsa_prepare_parallel"
+            },
             &[
                 &index,
                 &query_and_gate,
@@ -142,58 +160,146 @@ impl AttentionControls {
                 g.eps.to_bits(),
                 g.rope_theta.to_bits(),
             ],
-            g.heads + g.kv_heads + 1,
-            1,
+            (g.heads + g.kv_heads + 1)
+                * if scalar_prepare {
+                    1
+                } else {
+                    256
+                },
+            if scalar_prepare {
+                1
+            } else {
+                256
+            },
         )?;
-        graph.kernel(
-            "qwen_graph_qsa_visible",
-            &[
-                &index,
-                &cache.index_keys,
-                &self.index_q_norm,
-                &self.index_k_norm,
-                &cache.visible,
-                &cache.block_scores,
-                &cache.top_ids,
-                &cache.top_scores,
-            ],
-            &[
-                count as u32,
-                g.index_heads as u32,
-                g.index_dim as u32,
-                g.rotary_dim as u32,
-                position as u32,
-                g.eps.to_bits(),
-                g.rope_theta.to_bits(),
-                g.ratio as u32,
-                g.budget as u32,
-            ],
-            1,
-            1,
-        )?;
+        let visibility_parameters = [
+            count as u32,
+            g.index_heads as u32,
+            g.index_dim as u32,
+            g.rotary_dim as u32,
+            position as u32,
+            g.eps.to_bits(),
+            g.rope_theta.to_bits(),
+            g.ratio as u32,
+            g.budget as u32,
+        ];
+        if std::env::var_os("STARK_QWEN38_SCALAR_QSA_SELECTION").is_some_and(|value| value == "1") {
+            graph.kernel(
+                "qwen_graph_qsa_visible",
+                &[
+                    &index,
+                    &cache.index_keys,
+                    &self.index_q_norm,
+                    &self.index_k_norm,
+                    &cache.visible,
+                    &cache.block_scores,
+                    &cache.top_ids,
+                    &cache.top_scores,
+                ],
+                &visibility_parameters,
+                1,
+                1,
+            )?;
+        } else {
+            let completed_block = count.is_multiple_of(g.ratio);
+            if count > g.budget || completed_block {
+                let mut preparation_parameters = visibility_parameters.to_vec();
+                preparation_parameters.extend([
+                    if completed_block {
+                        (count / g.ratio - 1) as u32
+                    } else {
+                        0
+                    },
+                    u32::from(completed_block),
+                ]);
+                graph.kernel(
+                    "qwen_graph_qsa_index_prepare",
+                    &[
+                        &index,
+                        &cache.index_keys,
+                        &self.index_q_norm,
+                        &self.index_k_norm,
+                        &cache.index_queries,
+                        &cache.pooled_index_keys,
+                    ],
+                    &preparation_parameters,
+                    g.index_heads + usize::from(completed_block),
+                    1,
+                )?;
+            }
+            if count > g.budget {
+                let blocks = count / g.ratio;
+                graph.kernel(
+                    "qwen_graph_qsa_index_cached_scores",
+                    &[&cache.index_queries, &cache.pooled_index_keys, &cache.block_scores],
+                    &[blocks as u32, g.index_heads as u32, g.index_dim as u32],
+                    blocks,
+                    64,
+                )?;
+                graph.kernel(
+                    "qwen_graph_qsa_index_threshold",
+                    &[&cache.block_scores, &cache.top_ids, &cache.top_scores],
+                    &[blocks as u32, (g.budget / g.ratio).min(blocks) as u32],
+                    256,
+                    256,
+                )?;
+            }
+            graph.kernel(
+                "qwen_graph_qsa_index_mask",
+                &[&cache.block_scores, &cache.top_ids, &cache.top_scores, &cache.visible],
+                &[count as u32, g.ratio as u32, g.budget as u32],
+                count,
+                256,
+            )?;
+        }
         let output = graph.scratch(g.heads * g.head_dim)?;
-        let parameters = [count as u32, g.heads as u32, g.head_dim as u32, g.kv_heads as u32, cache.capacity as u32];
-        graph.kernel(
-            "qwen_graph_qsa_scores",
-            &[&cache.query, &cache.keys, &cache.visible, &cache.scores],
-            &parameters,
-            g.heads * count,
-            64,
-        )?;
-        graph.kernel(
-            "qwen_graph_qsa_softmax",
-            &[&cache.scores, &cache.visible, &cache.probabilities],
-            &[count as u32, g.heads as u32, cache.capacity as u32],
-            g.heads,
-            1,
-        )?;
-        graph.kernel(
-            "qwen_graph_qsa_output",
-            &[&cache.probabilities, &cache.values, &cache.gates, &cache.visible, &output],
-            &parameters,
-            g.heads * g.head_dim,
-            256,
-        )?;
+        let splits = count.div_ceil(256);
+        let partial_len =
+            g.heads.checked_mul(splits).and_then(|n| n.checked_mul(g.head_dim + 2)).filter(|&n| n <= 8_000_000);
+        let scalar_attention = count < 256
+            || partial_len.is_none()
+            || std::env::var_os("STARK_QWEN38_SCALAR_ATTENTION").is_some_and(|value| value == "1");
+        if scalar_attention {
+            let parameters =
+                [count as u32, g.heads as u32, g.head_dim as u32, g.kv_heads as u32, cache.capacity as u32];
+            graph.kernel(
+                "qwen_graph_qsa_scores",
+                &[&cache.query, &cache.keys, &cache.visible, &cache.scores],
+                &parameters,
+                g.heads * count,
+                64,
+            )?;
+            graph.kernel(
+                "qwen_graph_qsa_softmax",
+                &[&cache.scores, &cache.visible, &cache.probabilities],
+                &[count as u32, g.heads as u32, cache.capacity as u32],
+                g.heads,
+                1,
+            )?;
+            graph.kernel(
+                "qwen_graph_qsa_output",
+                &[&cache.probabilities, &cache.values, &cache.gates, &cache.visible, &output],
+                &parameters,
+                g.heads * g.head_dim,
+                256,
+            )?;
+        } else {
+            let partials = graph.scratch(partial_len.ok_or(Error::Invalid("Qwen split attention workspace"))?)?;
+            graph.kernel(
+                "qwen_graph_qsa_split_attention",
+                &[&cache.query, &cache.keys, &cache.values, &cache.visible, &partials],
+                &[count as u32, g.heads as u32, g.head_dim as u32, g.kv_heads as u32, splits as u32],
+                g.heads * splits * 256,
+                256,
+            )?;
+            graph.kernel(
+                "qwen_graph_qsa_combine_attention",
+                &[&partials, &cache.gates, &output],
+                &[g.heads as u32, g.head_dim as u32, splits as u32],
+                g.heads * g.head_dim,
+                256,
+            )?;
+        }
         weights.encode_matvec(graph, &format!("{}.o_proj.weight", attention.prefix), &output)
     }
 }
@@ -232,11 +338,18 @@ impl PleControls {
         input: &DeviceVector,
         g: &Geometry,
     ) -> Result<DeviceVector> {
+        graph.begin_projection_level()?;
         let key = weights.encode_matvec(graph, &format!("{}.key_proj.weight", ple.prefix), embedding)?;
         let value = weights.encode_matvec(graph, &format!("{}.value_proj.weight", ple.prefix), embedding)?;
+        graph.end_projection_level()?;
         let output = graph.scratch(g.streams * g.dim)?;
+        let scalar = std::env::var_os("STARK_QWEN38_SCALAR_PLE").is_some_and(|value| value == "1");
         graph.kernel(
-            "qwen_graph_ple",
+            if scalar {
+                "qwen_graph_ple"
+            } else {
+                "qwen_graph_ple_parallel"
+            },
             &[
                 &key,
                 &value,
@@ -250,8 +363,16 @@ impl PleControls {
                 &self.scratch,
             ],
             &[g.streams as u32, g.dim as u32, g.ple_kernel as u32, g.ngram_size as u32, g.eps.to_bits()],
-            g.streams,
-            1,
+            if scalar {
+                g.streams
+            } else {
+                g.streams * 256
+            },
+            if scalar {
+                1
+            } else {
+                256
+            },
         )?;
         graph.kernel(
             "qwen_graph_ple_convolve",
@@ -324,7 +445,11 @@ impl State {
                     .transpose()
             })
             .collect::<Result<Vec<_>>>()?;
-        let mut graph = DecodeGraph::new()?;
+        let mut graph = if std::env::var_os("STARK_QWEN38_SINGLE_ENCODER").is_some_and(|value| value == "1") {
+            DecodeGraph::new_parallel()?
+        } else {
+            DecodeGraph::new()?
+        };
         let mut hidden = DecodeGraph::upload(&embedding.repeat(g.streams))?;
         for (index, layer) in model.layers.iter_mut().enumerate() {
             let controls = &mut self.layers[index];
@@ -333,9 +458,11 @@ impl State {
             {
                 let extra = ple_controls.encode(&mut graph, &model.weights, ple, embedding, &hidden, g)?;
                 hidden = graph.add(&hidden, &extra)?;
+                graph.diagnostic_checkpoint("qwen.phase.ple")?;
             }
             let (input, gates) =
                 mix(&mut graph, &model.weights, &layer.attn_hyper, &controls.attention_hyper.norm, &hidden, g)?;
+            graph.diagnostic_checkpoint("qwen.phase.attention_mix")?;
             let output = match &mut layer.mixer {
                 Mixer::Delta(mixer) => {
                     if mixer.metal.is_none() {
@@ -368,10 +495,16 @@ impl State {
                     .ok_or(Error::Invalid("Qwen graph QSA controls"))?
                     .encode(&mut graph, &model.weights, attention, &input, g, model.position)?,
             };
+            graph.diagnostic_checkpoint(match &layer.mixer {
+                Mixer::Delta(_) => "qwen.phase.gdn",
+                Mixer::Attention(_) => "qwen.phase.qsa",
+            })?;
             hidden = inject(&mut graph, &hidden, &output, &gates, g)?;
             let (input, gates) =
                 mix(&mut graph, &model.weights, &layer.mlp_hyper, &controls.mlp_hyper.norm, &hidden, g)?;
+            graph.diagnostic_checkpoint("qwen.phase.ffn_mix")?;
             let output = moe(&mut graph, &model.weights, &format!("{}.mlp", layer.prefix), &input, g)?;
+            graph.diagnostic_checkpoint("qwen.phase.moe")?;
             hidden = inject(&mut graph, &hidden, &output, &gates, g)?;
         }
         graph.check_finite(&hidden)?;
@@ -407,8 +540,8 @@ fn mix(
     input: &DeviceVector,
     g: &Geometry,
 ) -> Result<(DeviceVector, DeviceVector)> {
-    let normalized = graph.rms_norm(input, norm, g.dim, g.eps)?;
     let inject = hyper.combine.then(|| format!("{}.block_inject_weight.weight", hyper.prefix));
+    let normalized = graph.rms_norm(input, norm, g.dim, g.eps)?;
     graph.qwen_hyperconnection(
         weights,
         &format!("{}.input_mix_weight_down.weight", hyper.prefix),
@@ -444,19 +577,35 @@ fn moe(
     input: &DeviceVector,
     g: &Geometry,
 ) -> Result<DeviceVector> {
+    graph.begin_projection_level()?;
     let scores = weights.encode_matvec(graph, &format!("{prefix}.gate.weight"), input)?;
     let shared_gate = weights.encode_matvec(graph, &format!("{prefix}.shared_expert_gate.weight"), input)?;
     let shared_values = weights.encode_matvec(graph, &format!("{prefix}.shared_expert.gate_proj.weight"), input)?;
     let shared_up = weights.encode_matvec(graph, &format!("{prefix}.shared_expert.up_proj.weight"), input)?;
+    graph.end_projection_level()?;
     let indices = graph.scratch(g.active_experts)?;
     let probabilities = graph.scratch(g.active_experts)?;
+    let scalar_router = std::env::var_os("STARK_QWEN38_SCALAR_ROUTER").is_some_and(|value| value == "1");
     graph.kernel(
-        "qwen_graph_router",
+        if scalar_router {
+            "qwen_graph_router"
+        } else {
+            "qwen_graph_router_parallel"
+        },
         &[&scores, &indices, &probabilities],
         &[g.experts as u32, g.active_experts as u32],
-        1,
-        1,
+        if scalar_router {
+            1
+        } else {
+            256
+        },
+        if scalar_router {
+            1
+        } else {
+            256
+        },
     )?;
+    graph.begin_projection_level()?;
     let gate = weights.encode_indexed_matvec(
         graph,
         &format!("{prefix}.switch_mlp.gate_proj.weight"),
@@ -473,7 +622,10 @@ fn moe(
         input,
         false,
     )?;
+    graph.end_projection_level()?;
     let values = graph.swiglu(&gate, &up, None)?;
+    let shared_values = graph.swiglu(&shared_values, &shared_up, None)?;
+    graph.begin_projection_level()?;
     let down = weights.encode_indexed_matvec(
         graph,
         &format!("{prefix}.switch_mlp.down_proj.weight"),
@@ -482,9 +634,9 @@ fn moe(
         &values,
         true,
     )?;
-    let shared_values = graph.swiglu(&shared_values, &shared_up, None)?;
     let shared_down =
         weights.encode_matvec(graph, &format!("{prefix}.shared_expert.down_proj.weight"), &shared_values)?;
+    graph.end_projection_level()?;
     let activated_gate = graph.scratch(1)?;
     graph.kernel("qwen_graph_sigmoid", &[&shared_gate, &activated_gate], &[1], 1, 1)?;
     graph.weighted_sum_device(&down, &probabilities, &shared_down, &activated_gate)
@@ -507,3 +659,7 @@ pub(super) fn step(
 #[cfg(test)]
 #[path = "qwen_graph_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "qwen_attention_tests.rs"]
+mod attention_tests;

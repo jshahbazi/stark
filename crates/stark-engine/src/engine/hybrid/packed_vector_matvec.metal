@@ -83,3 +83,48 @@ kernel void hybrid_iq_matvec_vector8(
     const float total = simd_sum(sum);
     if (lane == 0) output[row] = total;
 }
+
+// Graph GEMV checks the unmodified reduction before any activation can hide
+// an overflow. Every input participates in each row; nonfinite operands must
+// propagate through safe F32 multiply/add and the SIMD sum.
+kernel void hybrid_graph_affine_matvec_vector8(
+    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
+    device const uchar *scales_base [[buffer(4)]], device const uchar *biases_base [[buffer(5)]],
+    constant uint4 &offsets [[buffer(6)]], device atomic_uint *failure [[buffer(30)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    const uint row = tile * 8 + simd_group;
+    if (row >= p.rows) return;
+    const uint item = hybrid_affine_scale_kind == 0 ? 4 : 2;
+    const uint packed_shift = hybrid_affine_bits == 4 ? 1 : 0;
+    const uint group_shift = hybrid_affine_group == 128 ? 7 : (hybrid_affine_group == 64 ? 6 : 5);
+    const ulong row_element = ulong(row) * p.columns;
+    const ulong code_offset = row_element >> packed_shift;
+    const ulong plane_offset = row_element >> group_shift;
+    const ulong input_offset = p.block ? ulong(row / p.block) * p.columns : 0;
+    device const uchar *codes = codes_base + offsets.x;
+    device const uchar *scales = scales_base + offsets.y;
+    device const uchar *biases = biases_base + offsets.z;
+    float sum = 0;
+    for (uint col = lane * 8; col < p.columns; col += 256) {
+        const ulong group = plane_offset + (col >> group_shift);
+        const float scale = hybrid_float(scales + group * item, hybrid_affine_scale_kind);
+        const float bias = hybrid_float(biases + group * item, hybrid_affine_scale_kind);
+        device const uchar *packed = codes + code_offset + (col >> packed_shift);
+        const uint low = hybrid_u32(packed);
+        const uint high = hybrid_affine_bits == 8 ? hybrid_u32(packed + 4) : 0;
+        #pragma clang loop unroll(full)
+        for (uint j = 0; j < 8; ++j) {
+            const uint word = hybrid_affine_bits == 4 || j < 4 ? low : high;
+            const uint shift = hybrid_affine_bits == 4 ? j * 4 : (j & 3) * 8;
+            const uint q = (word >> shift) & ((1u << hybrid_affine_bits) - 1);
+            const float w = scale * float(q) + bias;
+            sum += w * input[input_offset + col + j];
+        }
+    }
+    const float total = simd_sum(sum);
+    if (lane == 0) {
+        if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        output[row] = total;
+    }
+}

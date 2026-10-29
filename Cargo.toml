@@ -6,7 +6,7 @@ members = [
     "crates/stark-generate",
 ]
 resolver = "3"
-exclude = ["vendor/cxx"]
+exclude = ["vendor/cxx", "vendor/lily-core"]
 
 [workspace.package]
 edition = "2024"

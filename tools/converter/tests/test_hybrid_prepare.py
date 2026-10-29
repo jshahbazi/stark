@@ -162,6 +162,85 @@ def test_flint_preparation_preserves_packed_bytes_and_imports_local_folder(tmp_p
     assert not model_valid(output)
 
 
+def test_lily_q4_xl_recipe_is_pinned_and_quantization_label_is_distinct():
+    source = hybrid.SOURCES["qwen38-lily-q4-xl"]
+    assert source["weights_repo"] == "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl"
+    assert source["weights_revision"] == "0f94842e3682b49acace4daeb4cf2e65a6f94f83"
+    assert source["metadata_repo"] == source["weights_repo"]
+    assert source["metadata_revision"] == source["weights_revision"]
+    assert source["architecture"] == "qwen4_exp"
+    assert source["weight_bytes"] == 106_905_155_192
+    assert source["weight_shards"] == 55
+    assert source["quantization"] != hybrid.SOURCES["qwen38-mixed"]["quantization"]
+    assert source["required_files"] == ["LICENSE", "README.md"]
+
+
+def test_lily_q4_xl_preparation_preserves_config_metadata_and_import_identity(tmp_path, monkeypatch):
+    source = {**hybrid.SOURCES["qwen38-lily-q4-xl"], "weight_bytes": 55}
+    monkeypatch.setitem(hybrid.SOURCES, "qwen38-lily-q4-xl", source)
+    calls = []
+    lily_config = {
+        "format": "qwen4_exp-affine-v1",
+        "quantization": {
+            "default": {"bits": 4, "group_size": 64},
+            "q8_groups": ["attn", "shared", "head", "embed"],
+            "ngram_embedding": {"bits": 4, "group_size": 32},
+        },
+        "ple": {"layer_multipliers": [3, 5], "ngram_heads_vocab_sizes": [101], "ngram_heads_offsets": [0]},
+        "vision": None,
+        "mtp": None,
+    }
+
+    def download(repo, **options):
+        calls.append((repo, options))
+        root = Path(options["local_dir"])
+        if "model-*-of-*.safetensors" in options["allow_patterns"]:
+            for index in range(1, 56):
+                name = f"model-{index:05}-of-00055.safetensors"
+                (root / name).write_bytes(bytes([index % 256]))
+            (root / "model.safetensors.index.json").write_text("{}")
+            (root / "README.md").write_text("Lily checkpoint README\n")
+            (root / "LICENSE").write_text("upstream checkpoint license\n")
+            return
+        metadata(root, "qwen4_exp")
+        config = json.loads((root / "config.json").read_text())
+        config["text_config"]["model_type"] = "qwen4_exp_text"
+        config["lily"] = lily_config
+        (root / "config.json").write_text(json.dumps(config))
+
+    monkeypatch.setattr(hybrid, "snapshot_download", download)
+    output = tmp_path / "qwen38-lily-q4-xl"
+    receipt = hybrid.prepare("qwen38-lily-q4-xl", output, offline=True)
+
+    assert len(calls) == 2
+    assert all(repo == source["weights_repo"] for repo, _ in calls)
+    assert all(options["revision"] == source["weights_revision"] for _, options in calls)
+    assert all(options["local_files_only"] for _, options in calls)
+    assert calls[0][1]["allow_patterns"] == source["weights_patterns"]
+    assert receipt["weight_bytes"] == 55
+    assert receipt["native_loading"] == receipt["execution"] == "unverified"
+    assert (output / "LICENSE").read_text() == "upstream checkpoint license\n"
+    assert (output / "README.md").read_text() == "Lily checkpoint README\n"
+    assert (output / "model-00055-of-00055.safetensors").read_bytes() == bytes([55])
+
+    config = json.loads((output / "config.json").read_text())
+    assert config["lily"] == lily_config
+    assert config["text_config"]["eos_token_id"] == [1, 2]
+    assert config["token_codec_config"]["prompt_template"] == "{{ messages[0]['content'] }}"
+    assert config["stark_native_hybrid"]["source"] == source["weights_repo"]
+
+    from stark_convert.desktop import model_valid
+    from stark_convert.model_inventory import model_display
+
+    assert hybrid.prepared_identity(output)["quantization"] == source["quantization"]
+    assert model_valid(output)
+    display = model_display({"id": "lily", "name": "Lily Q4 XL", "path": str(output)})
+    assert display["quantization"] == source["quantization"]
+
+    (output / "README.md").unlink()
+    assert hybrid.prepared_identity(output) is None
+
+
 def test_interrupted_gguf_flatten_resumes_without_downloading_moved_shards(tmp_path, monkeypatch):
     source = {**hybrid.SOURCES["glm53-q2"], "weight_bytes": 4}
     monkeypatch.setitem(hybrid.SOURCES, "glm53-q2", source)

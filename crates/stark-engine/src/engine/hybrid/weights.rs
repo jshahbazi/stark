@@ -219,6 +219,10 @@ pub struct Weights {
     static_views: Mutex<StaticViewCache>,
     #[cfg(feature = "metal")]
     bank_views: Mutex<StaticViewCache>,
+    // Tensor geometry is immutable after open; avoid rescanning every bank
+    // for each routed projection. Memory-budget admission remains live below.
+    #[cfg(feature = "metal")]
+    indexed_bank_geometry_admitted: bool,
 }
 
 impl Weights {
@@ -245,6 +249,8 @@ impl Weights {
             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
             #[cfg(feature = "metal")]
             bank_views: Mutex::new(StaticViewCache::new(0)),
+            #[cfg(feature = "metal")]
+            indexed_bank_geometry_admitted: false,
         };
         let mut splits = BTreeMap::new();
         for path in &paths {
@@ -306,6 +312,11 @@ impl Weights {
     /// CPU-mapped. These are immutable buffer wrappers, not a page-lock promise.
     #[cfg(feature = "metal")]
     fn configure_bank_views(&mut self) -> Result<()> {
+        self.indexed_bank_geometry_admitted =
+            self.tensors.values().filter(|tensor| tensor.shape.len() == 3).all(|tensor| {
+                tensor.shape[0].checked_mul(tensor.shape[1]).is_some_and(|rows| rows <= MAX_VECTOR)
+                    && tensor.shape[2] <= MAX_VECTOR
+            });
         let mut spans = HashMap::new();
         for tensor in self.tensors.values().filter(|tensor| tensor.shape.len() == 3) {
             let mut banks = vec![tensor];
@@ -907,11 +918,7 @@ impl Weights {
     /// indexing. Partial admission must retain the bounded CPU selection path.
     #[cfg(feature = "metal")]
     pub(super) fn indexed_banks_admitted(&self) -> bool {
-        self.bank_views.lock().is_ok_and(|cache| cache.limit > 0)
-            && self.tensors.values().filter(|tensor| tensor.shape.len() == 3).all(|tensor| {
-                tensor.shape[0].checked_mul(tensor.shape[1]).is_some_and(|rows| rows <= MAX_VECTOR)
-                    && tensor.shape[2] <= MAX_VECTOR
-            })
+        self.bank_views.lock().is_ok_and(|cache| cache.limit > 0) && self.indexed_bank_geometry_admitted
     }
 
     #[cfg(feature = "metal")]
@@ -2187,6 +2194,7 @@ mod tests {
         let weights = Weights::open(&fixture.0).unwrap();
         let weak = Arc::downgrade(&weights.files[0]);
         let input = vec![1.0; 32];
+        assert!(weights.indexed_banks_admitted());
         assert_eq!(weights.expert_matvec("experts", 2, &input).unwrap(), vec![96.0; 2]);
         assert_eq!(
             weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
@@ -2207,6 +2215,7 @@ mod tests {
         // Exercise the same numerical path when complete-bank retention was
         // rejected by the memory-budget admission check.
         *weights.bank_views.lock().unwrap() = StaticViewCache::new(0);
+        assert!(!weights.indexed_banks_admitted());
         assert_eq!(
             weights.selected_matvec("experts", &[3, 1, 3], &input.repeat(3)).unwrap(),
             vec![128.0, 128.0, 64.0, 64.0, 128.0, 128.0]
