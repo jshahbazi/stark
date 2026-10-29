@@ -48,6 +48,12 @@ cargo +1.98.1 build --release --locked -p stark-generate
 cargo +1.98.1 build --release --locked -p stark-score --features optimized
 ```
 
+Use a distinct `CARGO_TARGET_DIR` for every experimental source checkout or
+copied workspace. Reusing one target across same-named path dependencies can
+retain an experimental core when the original files have older modification
+times. Seal the executable hash and verify that diagnostic selectors are absent
+before labeling a restored build as production evidence.
+
 ## Engine tests
 
 The engine unit suite under `crates/stark-engine/unit` is compiled into the library's test target. It needs a nightly toolchain because `src/lib.rs` enables `custom_test_frameworks` under `cfg(test)`, and the `cpu` feature for its reference kernels. CI runs on the hosted `macos-26` runner: it compiles the default CPU/Metal target and executes the CPU/grammar configuration. Hosted macOS 26 runners currently report `CannotCreateResidencySet` while creating Metal contexts. On a physical Apple silicon Mac with working Metal residency, run the full native Metal suite locally with the same pinned nightly:
