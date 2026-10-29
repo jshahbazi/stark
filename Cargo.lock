@@ -2049,8 +2049,10 @@ name = "stark-generate"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "stark-engine",
 ]
 

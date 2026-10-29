@@ -406,6 +406,142 @@ MOE_DOWN_COMBINE_VARIANT(moe_gather_gemv_q4_down_combine, 16, 4)
 // The one-simdgroup form, the reference of the bit-identity test.
 MOE_DOWN_COMBINE_VARIANT(moe_gather_gemv_q4_down_combine_sg1, 16, 1)
 
+// Stark: down/combine plus the subsequent HC stream write.
+template <uint LANES, uint SG>
+static inline void moe_down_combine_inject_body(device const uint*   codes,
+                                         device const bfloat* scales,
+                                         device const bfloat* biases,
+                                         device const bfloat* x,
+                                         device const uint*   indices,
+                                         device const float*  scores,
+                                         device const bfloat* shared_out,
+                                         device const float*  shared_gate,
+                                         device bfloat*       out,
+                                         device bfloat* hyper,
+                                         device const bfloat* inj,
+                                         uint G, float inv_g,
+                                         uint K, uint GS, uint H, uint S, uint has_shared,
+                                         uint group, uint sg, uint lane,
+                                         threadgroup float* xchg) {
+    constexpr uint ROWS = 32 / LANES;
+    const uint hlane = lane % LANES;
+    const uint rl = lane / LANES;
+    const uint row = group * ROWS + rl;
+    const uint words = K / 8;
+    const uint blocks = words / 4;
+    const uint bpg = GS / 32;
+    const uint groups = K / GS;
+    constexpr uint STRIDE = MOE_MAX_K / SG + 1;
+    float combined = 0.0f;
+    for (uint slot = sg; slot < S; slot += SG) {
+        const ulong grow = (ulong)indices[slot] * H + row;
+        device const uint4* wrow = (device const uint4*)(codes + grow * words);
+        device const bfloat4* xv = (device const bfloat4*)(x + (ulong)slot * K);
+        float sum = 0.0f;
+        for (uint i = hlane; i < blocks; i += LANES) {
+            const uint g = i / bpg;
+            const float scale = float(scales[grow * groups + g]);
+            const float bias = float(biases[grow * groups + g]);
+            const uint4 w4 = wrow[i];
+            float qx = 0.0f;
+            float xs = 0.0f;
+            for (uint j = 0; j < 4; ++j) {
+                const uint word = w4[j];
+                const float4 xlo = float4(xv[2 * (4 * i + j)]);
+                const float4 xhi = float4(xv[2 * (4 * i + j) + 1]);
+                const float4 qlo =
+                    float4(float((word >> 0) & 0xF), float((word >> 4) & 0xF),
+                           float((word >> 8) & 0xF), float((word >> 12) & 0xF));
+                const float4 qhi =
+                    float4(float((word >> 16) & 0xF), float((word >> 20) & 0xF),
+                           float((word >> 24) & 0xF), float((word >> 28) & 0xF));
+                qx += dot(qlo, xlo) + dot(qhi, xhi);
+                xs += dot(xlo, float4(1.0f)) + dot(xhi, float4(1.0f));
+            }
+            sum += scale * qx + bias * xs;
+        }
+        for (uint off = LANES / 2; off > 0; off >>= 1) {
+            sum += simd_shuffle_down(sum, off);
+        }
+        if (hlane == 0) {
+            if (SG == 1) {
+                combined += scores[slot] * float(bfloat(sum));
+            } else {
+                xchg[(sg * ROWS + rl) * STRIDE + slot / SG] = float(bfloat(sum));
+            }
+        }
+    }
+    if (SG == 1) {
+        if (hlane == 0) {
+            if (has_shared != 0) {
+                const float gate = 1.0f / (1.0f + exp(-shared_gate[0]));
+                combined += gate * float(shared_out[row]);
+            }
+            const bfloat branch = bfloat(combined);
+            out[row] = branch;
+            for (uint g = 0; g < G; ++g) {
+                const float logit = float(inj[g]) * inv_g;
+                const float weight = 2.0f / (1.0f + exp(-logit));
+                const ulong at = (ulong)g * H + row;
+                hyper[at] = bfloat(float(hyper[at]) + float(branch) * weight);
+            }
+        }
+        return;
+    }
+    // xchg[(sg * ROWS + rl) * STRIDE + j]: simdgroup sg's j-th slot sum for
+    // its rl-th row.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0 && hlane == 0) {
+        for (uint slot = 0; slot < S; ++slot) {
+            const uint s = slot % SG;
+            const uint j = slot / SG;
+            combined += scores[slot] * xchg[(s * ROWS + rl) * STRIDE + j];
+        }
+        if (has_shared != 0) {
+            const float gate = 1.0f / (1.0f + exp(-shared_gate[0]));
+            combined += gate * float(shared_out[row]);
+        }
+        const bfloat branch = bfloat(combined);
+            out[row] = branch;
+            for (uint g = 0; g < G; ++g) {
+                const float logit = float(inj[g]) * inv_g;
+                const float weight = 2.0f / (1.0f + exp(-logit));
+                const ulong at = (ulong)g * H + row;
+                hyper[at] = bfloat(float(hyper[at]) + float(branch) * weight);
+            }
+    }
+}
+
+// Original down/combine body copied above with only the BF16 output
+// epilogue extended. Keep the unfused entry point as the numerical control.
+kernel void moe_gather_gemv_q4_down_combine_inject(
+    device const uint* codes [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const bfloat* x [[buffer(3)]],
+    device const uint* indices [[buffer(4)]],
+    device const float* scores [[buffer(5)]],
+    device const bfloat* shared_out [[buffer(6)]],
+    device const float* shared_gate [[buffer(7)]],
+    device bfloat* out [[buffer(8)]],
+    device bfloat* hyper [[buffer(9)]],
+    device const bfloat* inj [[buffer(10)]],
+    constant uint& K [[buffer(11)]],
+    constant uint& GS [[buffer(12)]],
+    constant uint& H [[buffer(13)]],
+    constant uint& S [[buffer(14)]],
+    constant uint& has_shared [[buffer(15)]],
+    constant uint& G [[buffer(16)]],
+    constant float& inv_g [[buffer(17)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float xchg[4 * 2 * (MOE_MAX_K / 4 + 1)];
+    moe_down_combine_inject_body<16, 4>(
+        codes, scales, biases, x, indices, scores, shared_out, shared_gate,
+        out, hyper, inj, G, inv_g, K, GS, H, S, has_shared, group, sg, lane, xchg);
+}
+
 // Small-M GEMV reuses each selected expert across its routed rows.
 
 // Masked Q4 nibbles are rescaled before affine dequantization.

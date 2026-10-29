@@ -17,6 +17,15 @@ const MAX_K: usize = 16;
 /// above `MAX_K` only for the prediction log's wider selection.
 pub const ROUTER_MAX_K: usize = 32;
 
+/// Optional single-token HC write following the decode MoE projection.
+/// The projection's BF16 branch value is retained before the F32 write gate.
+#[derive(Clone, Copy)]
+pub(crate) struct HcInjection<'a> {
+    pub hyper: &'a Tensor,
+    pub logits: &'a Tensor,
+    pub groups: usize,
+}
+
 /// Softmax top-k routing from F32 logits; ties choose the lowest expert id.
 pub fn moe_router_topk(
     ctx: &MetalContext,
@@ -391,35 +400,9 @@ pub fn moe_gather_gemv_down_combine_named(
     shared: Option<(&Tensor, &Tensor)>,
     out: &Tensor,
 ) -> Result<()> {
+    check_down_combine(w, h, x, indices, scores, shared, out)?;
     let k_in = w.in_features();
-    ensure!(w.bits == 4, "fused down/combine requires Q4 weights");
-    ensure!(h.is_multiple_of(2), "fused down/combine requires even H");
-    ensure!(indices.dtype() == DType::U32, "indices must be U32");
     let slots = indices.numel();
-    ensure!(
-        w.out_features().is_multiple_of(h),
-        "stacked expert rows {} not divisible by H {h}",
-        w.out_features()
-    );
-    ensure!(scores.numel() == slots && scores.dtype() == DType::F32, "bad scores");
-    ensure!(x.numel() == slots * k_in, "x must be BF16 [{slots}, {k_in}]");
-    ensure!(x.dtype() == DType::BF16, "x must be BF16");
-    ensure!(out.numel() == h && out.dtype() == DType::BF16, "out must be BF16 [{h}]");
-    ensure!(
-        k_in.is_multiple_of(w.group_size) && w.group_size.is_multiple_of(32),
-        "in {k_in} / group size {} not block-packable",
-        w.group_size
-    );
-    if let Some((shared_out, gate)) = shared {
-        ensure!(
-            shared_out.numel() == h && shared_out.dtype() == DType::BF16,
-            "shared_out must be BF16 [{h}]"
-        );
-        ensure!(
-            gate.numel() == 1 && gate.dtype() == DType::F32,
-            "gate must be F32 [1]"
-        );
-    }
     let (shared_out, gate) = match shared {
         Some((shared_out, gate)) => (shared_out, gate),
         None => (x, scores),
@@ -446,6 +429,118 @@ pub fn moe_gather_gemv_down_combine_named(
             &u32_bytes(shared.is_some() as usize),
         ],
         down_combine_grid(name, h),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_down_combine(
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: Option<(&Tensor, &Tensor)>,
+    out: &Tensor,
+) -> Result<()> {
+    let k_in = w.in_features();
+    ensure!(w.bits == 4, "fused down/combine requires Q4 weights");
+    ensure!(h.is_multiple_of(2), "fused down/combine requires even H");
+    ensure!(indices.dtype() == DType::U32, "indices must be U32");
+    let slots = indices.numel();
+    ensure!(
+        w.out_features().is_multiple_of(h),
+        "stacked expert rows {} not divisible by H {h}",
+        w.out_features()
+    );
+    ensure!((1..=MAX_K).contains(&slots), "down/combine requires 1..={MAX_K} slots");
+    ensure!(scores.numel() == slots && scores.dtype() == DType::F32, "bad scores");
+    ensure!(x.numel() == slots * k_in, "x must be BF16 [{slots}, {k_in}]");
+    ensure!(x.dtype() == DType::BF16, "x must be BF16");
+    ensure!(out.numel() == h && out.dtype() == DType::BF16, "out must be BF16 [{h}]");
+    ensure!(
+        k_in.is_multiple_of(w.group_size) && w.group_size.is_multiple_of(32),
+        "in {k_in} / group size {} not block-packable",
+        w.group_size
+    );
+    if let Some((shared_out, gate)) = shared {
+        ensure!(
+            shared_out.numel() == h && shared_out.dtype() == DType::BF16,
+            "shared_out must be BF16 [{h}]"
+        );
+        ensure!(
+            gate.numel() == 1 && gate.dtype() == DType::F32,
+            "gate must be F32 [1]"
+        );
+    }
+    Ok(())
+}
+
+/// The original down/combine dot and BF16 branch store followed by the
+/// original HC injection expression in the row's owning thread. Each owner
+/// writes its column in every stream, so no cross-thread synchronization is
+/// required after the existing slot-ordered reduction. The caller orders both
+/// `out` and `injection.hyper` before subsequent readers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_gather_gemv_down_combine_inject(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: Option<(&Tensor, &Tensor)>,
+    out: &Tensor,
+    injection: HcInjection<'_>,
+) -> Result<()> {
+    check_down_combine(w, h, x, indices, scores, shared, out)?;
+    ensure!(injection.groups > 0, "HC injection needs at least one stream");
+    ensure!(
+        injection.hyper.dtype() == DType::BF16
+            && injection.hyper.numel() == h * injection.groups,
+        "HC hyper must be BF16 [groups, h]"
+    );
+    ensure!(
+        injection.logits.dtype() == DType::BF16
+            && injection.logits.numel() == injection.groups,
+        "HC injection logits must be BF16 [groups]"
+    );
+    let k_in = w.in_features();
+    let slots = indices.numel();
+    let (shared_out, gate) = match shared {
+        Some((shared_out, gate)) => (shared_out, gate),
+        None => (x, scores),
+    };
+    let pipeline = ctx.pipeline(
+        "moe_gather_gemv_q4_down_combine_inject",
+        SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            shared_out.binding(),
+            gate.binding(),
+            out.binding(),
+            injection.hyper.binding(),
+            injection.logits.binding(),
+        ],
+        &[
+            &u32_bytes(k_in),
+            &u32_bytes(w.group_size),
+            &u32_bytes(h),
+            &u32_bytes(slots),
+            &u32_bytes(shared.is_some() as usize),
+            &u32_bytes(injection.groups),
+            &(1.0 / injection.groups as f32).to_ne_bytes(),
+        ],
+        down_combine_grid("moe_gather_gemv_q4_down_combine_inject", h),
     )
 }
 
@@ -777,3 +872,7 @@ pub fn moe_row_gate_add(
         Grid::Threads { grid: (h, m, 1), threadgroup: (32, 1, 1) },
     )
 }
+
+#[cfg(test)]
+#[path = "moe_injection_tests.rs"]
+mod injection_tests;

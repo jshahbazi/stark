@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
+use rayon::prelude::*;
 use stark_engine::engine::hybrid::{Model, profile};
 
 use crate::{
@@ -17,6 +18,62 @@ pub(crate) struct HybridBackend {
     model: Model,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
+    probability_mapper: ProbabilityMapper,
+}
+
+const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
+
+/// Request serialization permits one worker-owned pool. Its threads borrow
+/// the current readout only during `install`, then park between maps. Small
+/// candidate sets never start the pool, and failed startup stays serial.
+#[derive(Default)]
+struct ProbabilityMapper {
+    pool: Option<rayon::ThreadPool>,
+    attempted: bool,
+}
+
+impl ProbabilityMapper {
+    fn map(
+        &mut self,
+        logits: &[f32],
+        indices: &[usize],
+        max: f32,
+        temperature: f32,
+    ) -> Vec<f64> {
+        if indices.len() < PARALLEL_PROBABILITY_MIN_CANDIDATES {
+            return probability_values(logits, indices, max, temperature, None);
+        }
+        if !self.attempted {
+            self.attempted = true;
+            let threads = std::thread::available_parallelism().map_or(1, |n| n.get().min(4));
+            if threads > 1 {
+                self.pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().ok();
+            }
+        }
+        probability_values(logits, indices, max, temperature, self.pool.as_ref())
+    }
+}
+
+fn probability_values(
+    logits: &[f32],
+    indices: &[usize],
+    max: f32,
+    temperature: f32,
+    pool: Option<&rayon::ThreadPool>,
+) -> Vec<f64> {
+    if let Some(pool) = pool {
+        let mut probabilities = Vec::new();
+        if probabilities.try_reserve_exact(indices.len()).is_ok() {
+            probabilities.resize(indices.len(), 0.0);
+            pool.install(|| {
+                probabilities.par_iter_mut().zip(indices.par_iter()).for_each(|(p, &i)| {
+                    *p = (((logits[i] - max) / temperature) as f64).exp();
+                });
+            });
+            return probabilities;
+        }
+    }
+    indices.iter().map(|&i| (((logits[i] - max) / temperature) as f64).exp()).collect()
 }
 
 #[derive(serde::Serialize)]
@@ -103,6 +160,7 @@ impl HybridBackend {
             model,
             cancellation,
             profile_output,
+            probability_mapper: ProbabilityMapper::default(),
         })
     }
 
@@ -143,6 +201,7 @@ impl HybridBackend {
             }
         }
         let model = &mut self.model;
+        let probability_mapper = &mut self.probability_mapper;
         let mut previous = None;
         let mut rng = options.seed;
         let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if gpu_greedy {
@@ -154,11 +213,11 @@ impl HybridBackend {
                 .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
             Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
         } else if sampled_decode {
-            let first = sample(&logits, &options.sampling, &mut rng)?;
+            let first = sample_with_mapper(&logits, &options.sampling, &mut rng, Some(&mut *probability_mapper))?;
             let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
             let tail = model
                 .sampled_decode(first, budget.saturating_sub(1), |readout| {
-                    sample(readout, &options.sampling, &mut rng)
+                    sample_with_mapper(readout, &options.sampling, &mut rng, Some(&mut *probability_mapper))
                         .map_err(|_| stark_engine::engine::hybrid::Error::Invalid("sampled token selection failed"))
                 })
                 .map_err(|_| "native_generation_failed")?
@@ -172,10 +231,11 @@ impl HybridBackend {
                         Err(_) => return Some(Err("native_generation_failed")),
                     }
                 }
-                let token = match sample(&logits, &options.sampling, &mut rng) {
-                    Ok(token) => token,
-                    Err(error) => return Some(Err(error)),
-                };
+                let token =
+                    match sample_with_mapper(&logits, &options.sampling, &mut rng, Some(&mut *probability_mapper)) {
+                        Ok(token) => token,
+                        Err(error) => return Some(Err(error)),
+                    };
                 previous = Some(token);
                 Some(Ok(u64::from(token)))
             }))
@@ -306,10 +366,20 @@ fn uniform(state: &mut u64) -> f64 {
     ((z ^ (z >> 31)) >> 11) as f64 * (1.0 / ((1u64 << 53) as f64))
 }
 
+#[cfg(test)]
 fn sample(
     logits: &[f32],
     sampling: &Sampling,
     rng: &mut u64,
+) -> Result<u32, &'static str> {
+    sample_with_mapper(logits, sampling, rng, None)
+}
+
+fn sample_with_mapper(
+    logits: &[f32],
+    sampling: &Sampling,
+    rng: &mut u64,
+    mapper: Option<&mut ProbabilityMapper>,
 ) -> Result<u32, &'static str> {
     let _total_scope = profile::Scope::new("sample.total");
     {
@@ -340,8 +410,10 @@ fn sample(
     let (probabilities, kept, cumulative) = {
         let _scope = profile::Scope::new("sample.probability_filter");
         let max = logits[indices[0]];
-        let probabilities: Vec<f64> =
-            indices.iter().map(|&i| (((logits[i] - max) / temperature) as f64).exp()).collect();
+        let probabilities = match mapper {
+            Some(mapper) => mapper.map(logits, &indices, max, *temperature),
+            None => probability_values(logits, &indices, max, *temperature, None),
+        };
         let total = probabilities.iter().sum::<f64>();
         let mut kept = 0;
         let mut cumulative = 0.0;
@@ -917,5 +989,100 @@ mod tests {
             }
         }
         assert!(sample(&[], &options, &mut 0).is_err());
+    }
+
+    #[test]
+    fn probability_pool_is_lazy_and_startup_failure_retains_serial_mapping() {
+        let mut mapper = ProbabilityMapper::default();
+        let logits = sampler_fixture(PARALLEL_PROBABILITY_MIN_CANDIDATES);
+        let indices = sampling_indices(&logits, None).unwrap();
+        let max = logits[indices[0]];
+        let small = mapper.map(&logits, &indices[..20], max, 0.7);
+        let expected = probability_values(&logits, &indices[..20], max, 0.7, None);
+        assert!(small.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(!mapper.attempted && mapper.pool.is_none(), "small sets started the probability pool");
+        let _ = mapper.map(&logits, &indices, max, 0.7);
+        assert!(mapper.attempted, "large set did not attempt pool startup");
+        if let Some(pool) = &mapper.pool {
+            assert!((2..=4).contains(&pool.current_num_threads()));
+        }
+        let mut failed_mapper = ProbabilityMapper {
+            pool: None,
+            attempted: true,
+        };
+        let fallback = failed_mapper.map(&logits, &indices, max, 0.7);
+        let expected = probability_values(&logits, &indices, max, 0.7, None);
+        assert!(
+            fallback.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "serial fallback changed probability bits"
+        );
+        assert!(failed_mapper.pool.is_none(), "failed pool startup was retried");
+    }
+
+    #[test]
+    fn parallel_probability_mapping_preserves_bits_for_finite_edges() {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let n = PARALLEL_PROBABILITY_MIN_CANDIDATES;
+        let edges = [
+            0.0,
+            -0.0,
+            f32::MAX,
+            f32::MIN,
+            f32::MIN_POSITIVE,
+            -f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            f32::from_bits(0x8000_0001),
+            1.0,
+            -1.0,
+        ];
+        for logits in [
+            sampler_fixture(n),
+            (0..n).map(|i| edges[i % edges.len()]).collect(),
+            vec![0.0; n],
+            (0..n).map(|i| f32::from_bits((i as u32).wrapping_mul(104729) & 0x807f_ffff)).collect(),
+        ] {
+            let indices = sampling_indices(&logits, None).unwrap();
+            let max = logits[indices[0]];
+            for temperature in [0.01, 0.7, 1.0, 32.0] {
+                let reference = probability_values(&logits, &indices, max, temperature, None);
+                let parallel = probability_values(&logits, &indices, max, temperature, Some(&pool));
+                assert!(reference.len() == parallel.len());
+                assert!(
+                    reference.iter().zip(&parallel).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "parallel probability bits changed"
+                );
+                assert!(
+                    reference.iter().sum::<f64>().to_bits() == parallel.iter().sum::<f64>().to_bits(),
+                    "serial probability sum changed"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_sampler_preserves_serial_filter_draw_and_rng() {
+        let logits = sampler_fixture(PARALLEL_PROBABILITY_MIN_CANDIDATES);
+        let mut mapper = ProbabilityMapper::default();
+        for top_k in [None, Some(20)] {
+            for temperature in [0.01, 0.7, 1.0, 32.0] {
+                for (top_p, min_p) in [(None, None), (Some(0.95), None), (Some(0.5), Some(0.000001))] {
+                    let sampling = Sampling::Stochastic {
+                        temperature,
+                        top_k,
+                        top_p,
+                        min_p,
+                    };
+                    for seed in [0, 42, u64::MAX] {
+                        let mut reference_rng = seed;
+                        let mut parallel_rng = seed;
+                        let reference = sample(&logits, &sampling, &mut reference_rng).unwrap();
+                        let parallel =
+                            sample_with_mapper(&logits, &sampling, &mut parallel_rng, Some(&mut mapper)).unwrap();
+                        assert!(reference == parallel, "parallel seeded draw changed");
+                        assert!(reference_rng == parallel_rng, "parallel RNG advancement changed");
+                    }
+                }
+            }
+        }
     }
 }
