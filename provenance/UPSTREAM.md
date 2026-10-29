@@ -68,6 +68,22 @@ exponential reduction and BF16 probabilities before the value product. The
 source softmax precision option specifies F32 accumulation; its exponential
 remains the explicit source `fast::exp` operation.
 
+The QKV host routing in `encodable_block/mixer/attention/qkv_norm.rs` also
+reuses this existing normalization adaptation for contiguous M=1 Q/K rows:
+OLMo's 4,096-element full-width vectors and Gemma's 256/512-element head rows,
+batched as eight query heads or one key head. The padded SIMD reduction,
+configured epsilon, precise reciprocal square root and BF16 normalization/gain
+materialization retain the same source expression. The F32-stored gain vector
+is shared across the head rows and cast to BF16 before multiplication; the
+stored Gemma gains have zero scale offset.
+
+The route is restricted to the explicit BF16 source reduction policy with
+`OnlyNormalization`, learned scales, no bias or mean subtraction, and zero
+scale offset. Gemma's per-head branch additionally bounds query/KV geometry to
+eight query heads and at most one KV head. Weightless V, multirow and other
+profiles retain their existing validation and kernels. This host selection
+uses the normalization source pin above and adds no upstream kernel source.
+
 Source BF16 vector attention uses a separate Safe, contraction-enabled kernel
 in `crates/stark-engine/src/backends/metal/kernel/attention/source_single_pass.metal`,
 selected by `single_pass.rs`. This follows the pinned `sdpa_vector.h` arithmetic

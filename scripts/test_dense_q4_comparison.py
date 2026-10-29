@@ -182,7 +182,9 @@ class DenseQ4ComparisonTests(unittest.TestCase):
             engines[1]["harness"].write_bytes(b"mutated")
             with self.assertRaises(ComparisonError) as caught:
                 validate_frozen_engine(engines[1])
-            self.assertEqual(caught.exception.code, "mlx_harness_changed_during_campaign")
+            self.assertEqual(
+                caught.exception.code, "mlx_harness_changed_during_campaign"
+            )
 
     def test_campaign_identity_is_bound_across_loads_and_engines(self):
         binding = campaign_binding()
@@ -230,7 +232,9 @@ class DenseQ4ComparisonTests(unittest.TestCase):
             run["output_sha256"] = "7" * 64
         with self.assertRaises(ComparisonError) as caught:
             bind_campaign_report(changed, NATIVE_ENGINE, binding)
-        self.assertEqual(caught.exception.code, "engine_profile_changed_during_campaign")
+        self.assertEqual(
+            caught.exception.code, "engine_profile_changed_during_campaign"
+        )
 
     def test_campaign_rejects_changed_mlx_harness_and_reference_profile(self):
         changed = mlx_report()
@@ -244,7 +248,9 @@ class DenseQ4ComparisonTests(unittest.TestCase):
         changed["floating_parameter_dtypes"] = ["mlx.core.float32"]
         with self.assertRaises(ComparisonError) as caught:
             bind_campaign_report(changed, MLX_ENGINE, binding)
-        self.assertEqual(caught.exception.code, "engine_profile_changed_during_campaign")
+        self.assertEqual(
+            caught.exception.code, "engine_profile_changed_during_campaign"
+        )
 
     def test_three_engine_orders_keep_position_counts_within_one(self):
         ids = ["baseline", "candidate", "mlx"]

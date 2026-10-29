@@ -1,8 +1,11 @@
 use stark_engine_macros::stark_test;
 
-use super::QKVNorm;
+use super::{Head, QKVNorm};
 use crate::{
-    backends::common::{Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context},
+    backends::common::{
+        Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context,
+        kernel::{Kernels, NormalizationKernel, QKVNormKernel},
+    },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
     tests::{
@@ -123,6 +126,138 @@ fn test_olmo_qk_norm_spans_projected_heads_and_preserves_value_and_padding() {
     for_each_backend!(|B| run_full_projection_norm_test::<B>());
 }
 
+fn make_wide_source_head<B: Backend>(
+    context: &B::Context,
+    scales: &[f32],
+    use_wide_source: bool,
+) -> Head<B> {
+    let mut config = NormalizationConfig {
+        epsilon: 1e-6,
+        scale_offset: None,
+        upcast_mode: UpcastMode::OnlyNormalization,
+        mlx_bf16_reduction: true,
+        subtract_mean: false,
+        has_scale: false,
+        has_biases: false,
+    };
+    let mut head = QKVNorm::<B>::build_head(context, DataType::BF16, config.clone(), None, scales.len() as u32, false)
+        .expect("failed to create source QKV head");
+    head.kernel = <B::Kernels as Kernels>::QKVNormKernel::new(
+        context,
+        DataType::BF16,
+        DataType::F32,
+        DataType::BF16,
+        DataType::F32,
+        true,
+        true,
+        true,
+    )
+    .expect("failed to create scaled source QKV kernel");
+    head.scales = Some(create_buffer_with_data::<B, f32>(context, scales));
+    config.has_scale = true;
+    head.config = config;
+    head.wide_source = use_wide_source.then(|| {
+        <B::Kernels as Kernels>::NormalizationKernel::new(
+            context,
+            DataType::BF16,
+            DataType::F32,
+            DataType::BF16,
+            DataType::F32,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            true,
+        )
+        .expect("failed to create wide source normalization kernel")
+    });
+    head
+}
+
+fn run_wide_source_qkv_matches_head_kernel<B: Backend>() {
+    const QUERY_HEADS: u32 = 32;
+    const KV_HEADS: u32 = 32;
+    const HEAD_DIM: u32 = 128;
+    const WIDTH: u32 = QUERY_HEADS * HEAD_DIM;
+    const GATE_WIDTH: u32 = WIDTH;
+    const ROW_STRIDE: u32 = 3 * WIDTH + GATE_WIDTH;
+    let context = create_context::<B>();
+    let make_scales = |offset: f32| {
+        (0..WIDTH as usize)
+            .map(|index| half::bf16::from_f32(offset + (index % 29) as f32 * 0.00390625).to_f32())
+            .collect::<Vec<_>>()
+    };
+    let query_scales = make_scales(0.75);
+    let key_scales = make_scales(0.875);
+    let make_norm = |use_wide_source| QKVNorm {
+        query: Some(make_wide_source_head::<B>(&context, &query_scales, use_wide_source)),
+        key: Some(make_wide_source_head::<B>(&context, &key_scales, use_wide_source)),
+        value: None,
+        num_q_heads: QUERY_HEADS,
+        num_kv_heads: KV_HEADS,
+        projection_row_stride: ROW_STRIDE,
+        head_dim: HEAD_DIM,
+        full_width: true,
+    };
+    let old_norm = make_norm(false);
+    let wide_norm = make_norm(true);
+    for batch_size in [1u32, 2] {
+        let input = (0..batch_size as usize * ROW_STRIDE as usize)
+            .map(|index| {
+                let channel = index % ROW_STRIDE as usize;
+                let value = ((index * 37 % 257) as f32 - 128.0) * 0.0078125;
+                if channel >= (3 * WIDTH) as usize {
+                    half::bf16::from_f32(0.25 + (channel % 31) as f32 * 0.015625)
+                } else {
+                    half::bf16::from_f32(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut old_output = create_buffer_with_data::<B, half::bf16>(&context, &input);
+        let mut wide_output = create_buffer_with_data::<B, half::bf16>(&context, &input);
+        let mut commands = context.create_command_buffer(None, None).expect("failed to create command buffer");
+        old_norm.encode(&mut old_output, batch_size, &mut commands).expect("failed to encode old source QKV norm");
+        wide_norm.encode(&mut wide_output, batch_size, &mut commands).expect("failed to encode wide source QKV norm");
+        commands.end_encoding().submit().wait_until_completed().expect("failed to execute source QKV comparison");
+        let old_values = buffer_to_vec::<B, half::bf16>(&old_output);
+        let wide_values = buffer_to_vec::<B, half::bf16>(&wide_output);
+        let old_bits = old_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        let wide_bits = wide_values.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        let row_stride = ROW_STRIDE as usize;
+        let qk_end = (2 * WIDTH) as usize;
+        for row in 0..batch_size as usize {
+            let start = row * row_stride;
+            assert_eq!(
+                &old_bits[start..start + qk_end],
+                &wide_bits[start..start + qk_end],
+                "source Q/K bits differ for batch={batch_size} on {}",
+                std::any::type_name::<B>(),
+            );
+            assert_eq!(
+                &input[start + 2 * WIDTH as usize..start + row_stride],
+                &old_values[start + 2 * WIDTH as usize..start + row_stride],
+                "V/gate/padding changed in old path",
+            );
+            assert_eq!(
+                &input[start + 2 * WIDTH as usize..start + row_stride],
+                &wide_values[start + 2 * WIDTH as usize..start + row_stride],
+                "V/gate/padding changed in wide path",
+            );
+        }
+    }
+}
+
+#[stark_test]
+fn wide_source_qkv_matches_head_kernel_and_preserves_other_channels() {
+    for_each_backend!(|B| run_wide_source_qkv_matches_head_kernel::<B>());
+}
+
 #[cfg(feature = "attention-kv-only")]
 fn run_projected_key_value_exact<B: Backend>() {
     use half::bf16;
@@ -197,4 +332,180 @@ fn packed_qkv_rejects_mlx_reduction_for_unqualified_dtype() {
         has_biases: false,
     };
     assert!(QKVNorm::<Cpu>::build_head(&context, DataType::F32, config, None, 128, false).is_err());
+}
+
+// Source small-head correctness controls, alongside the validated wide-row test.
+fn run_small_source_qkv_rows<B: Backend>() {
+    use half::bf16;
+    const Q: u32 = 8;
+    let context = create_context::<B>();
+    for dim in [256u32, 512] {
+        let query_scales = (0..dim).map(|i| 0.750244140625 + (i % 31) as f32 / 2048.0).collect::<Vec<_>>();
+        let key_scales = (0..dim).map(|i| 0.875244140625 - (i % 23) as f32 / 2048.0).collect::<Vec<_>>();
+        for batch in [1u32, 2] {
+            for layout in 0..4 {
+                for value_norm in [false, true] {
+                    let shared = layout == 3;
+                    let kv = if shared {
+                        0
+                    } else {
+                        1
+                    };
+                    let stride = if layout == 2 {
+                        2 * dim
+                    } else {
+                        (Q + 2 * kv + Q) * dim + 32
+                    };
+                    let make = |candidate: bool| QKVNorm {
+                        query: Some(make_wide_source_head::<B>(&context, &query_scales, candidate)),
+                        key: (kv != 0).then(|| make_wide_source_head::<B>(&context, &key_scales, candidate)),
+                        value: (kv != 0 && value_norm).then(|| {
+                            QKVNorm::<B>::build_head(
+                                &context,
+                                DataType::BF16,
+                                NormalizationConfig {
+                                    epsilon: 1e-6,
+                                    scale_offset: None,
+                                    upcast_mode: UpcastMode::OnlyNormalization,
+                                    mlx_bf16_reduction: true,
+                                    subtract_mean: false,
+                                    has_scale: false,
+                                    has_biases: false,
+                                },
+                                None,
+                                dim,
+                                false,
+                            )
+                            .unwrap()
+                        }),
+                        num_q_heads: Q,
+                        num_kv_heads: kv,
+                        projection_row_stride: stride,
+                        head_dim: dim,
+                        full_width: false,
+                    };
+                    let old = make(false);
+                    let candidate = make(true);
+                    let input = (0..(batch * stride + 32) as usize)
+                        .map(|i| bf16::from_f32(((i * 37 % 509) as f32 - 254.0) / 128.0))
+                        .collect::<Vec<_>>();
+                    let mut a = create_buffer_with_data::<B, bf16>(&context, &input);
+                    let mut b = create_buffer_with_data::<B, bf16>(&context, &input);
+                    let mut commands = context.create_command_buffer(None, None).unwrap();
+                    for (norm, buffer) in [(&old, &mut a), (&candidate, &mut b)] {
+                        match layout {
+                            1 => norm.encode_packed(buffer, batch, Q, stride, true, &mut commands).unwrap(),
+                            2 => norm.encode_key_value(buffer, batch, &mut commands).unwrap(),
+                            _ => norm.encode(buffer, batch, &mut commands).unwrap(),
+                        }
+                    }
+                    commands.end_encoding().submit().wait_until_completed().unwrap();
+                    let a = buffer_to_vec::<B, bf16>(&a);
+                    let b = buffer_to_vec::<B, bf16>(&b);
+                    assert_eq!(
+                        a.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        b.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                        "small source QKV old/new bits differ dim={dim} batch={batch} layout={layout} value={value_norm}"
+                    );
+                    for row in 0..batch as usize {
+                        let start = row * stride as usize;
+                        let live = if layout == 2 {
+                            2 * dim
+                        } else {
+                            (Q + 2 * kv) * dim
+                        } as usize;
+                        assert_eq!(
+                            &b[start + live..start + stride as usize],
+                            &input[start + live..start + stride as usize],
+                            "gate/padding changed"
+                        );
+                        if layout == 1 {
+                            assert_eq!(
+                                &b[start..start + (Q * dim) as usize],
+                                &input[start..start + (Q * dim) as usize],
+                                "skipped queries changed"
+                            );
+                        }
+                        if kv != 0 && !value_norm {
+                            let value_start = start
+                                + if layout == 2 {
+                                    dim
+                                } else {
+                                    (Q + 1) * dim
+                                } as usize;
+                            assert_eq!(
+                                &b[value_start..value_start + dim as usize],
+                                &input[value_start..value_start + dim as usize],
+                                "unnormalized values changed"
+                            );
+                        }
+                    }
+                    assert_eq!(
+                        &b[(batch * stride) as usize..],
+                        &input[(batch * stride) as usize..],
+                        "trailing sentinel changed"
+                    );
+                }
+            }
+        }
+        // Inject a regular source kernel into legacy heads: the host guard
+        // must preserve SourceFalse, FullLayer and nonzero-offset semantics.
+        for legacy in 0..3 {
+            let make = |candidate: bool| {
+                let mut query = make_wide_source_head::<B>(&context, &query_scales, candidate);
+                let mut key = make_wide_source_head::<B>(&context, &key_scales, candidate);
+                for head in [&mut query, &mut key] {
+                    head.config.mlx_bf16_reduction = false;
+                    head.config.upcast_mode = if legacy == 1 {
+                        UpcastMode::FullLayer
+                    } else {
+                        UpcastMode::OnlyNormalization
+                    };
+                    head.config.scale_offset = (legacy == 2).then_some(1.0);
+                    head.kernel = <B::Kernels as Kernels>::QKVNormKernel::new(
+                        &context,
+                        DataType::BF16,
+                        DataType::F32,
+                        DataType::BF16,
+                        DataType::F32,
+                        true,
+                        true,
+                        false,
+                    )
+                    .unwrap();
+                }
+                QKVNorm {
+                    query: Some(query),
+                    key: Some(key),
+                    value: None,
+                    num_q_heads: Q,
+                    num_kv_heads: 1,
+                    projection_row_stride: 10 * dim,
+                    head_dim: dim,
+                    full_width: false,
+                }
+            };
+            let old = make(false);
+            let candidate = make(true);
+            let input = (0..(10 * dim) as usize)
+                .map(|i| bf16::from_f32(((i * 13 % 251) as f32 - 125.0) / 64.0))
+                .collect::<Vec<_>>();
+            let mut a = create_buffer_with_data::<B, bf16>(&context, &input);
+            let mut b = create_buffer_with_data::<B, bf16>(&context, &input);
+            let mut commands = context.create_command_buffer(None, None).unwrap();
+            old.encode(&mut a, 1, &mut commands).unwrap();
+            candidate.encode(&mut b, 1, &mut commands).unwrap();
+            commands.end_encoding().submit().wait_until_completed().unwrap();
+            assert_eq!(
+                buffer_to_vec::<B, bf16>(&a).iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                buffer_to_vec::<B, bf16>(&b).iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                "legacy small-head exclusion differs dim={dim} case={legacy}"
+            );
+        }
+    }
+}
+
+#[stark_test]
+fn small_source_qkv_rows_match_packed_source_and_preserve_other_channels() {
+    for_each_backend!(|B| run_small_source_qkv_rows::<B>());
 }

@@ -4,7 +4,7 @@ use thiserror::Error;
 use crate::{
     backends::common::{
         Backend, BufferMut, CommandBuffer, CommandBufferEncoding,
-        kernel::{Kernels, QKVNormKernel, ReferenceRMSBF16Kernel},
+        kernel::{Kernels, NormalizationKernel, QKVNormKernel, ReferenceRMSBF16Kernel},
     },
     config::normalization::{NormalizationConfig, UpcastMode},
     data_type::DataType,
@@ -21,6 +21,7 @@ pub enum QKVNormError<B: Backend> {
 
 struct Head<B: Backend> {
     kernel: <B::Kernels as Kernels>::QKVNormKernel,
+    wide_source: Option<<B::Kernels as Kernels>::NormalizationKernel>,
     reference: Option<<B::Kernels as Kernels>::ReferenceRMSBF16Kernel>,
     scales: Option<B::GlobalBuffer>,
     config: NormalizationConfig,
@@ -153,8 +154,44 @@ impl<B: Backend> QKVNorm<B> {
             config.mlx_bf16_reduction,
         )
         .map_err(QKVNormError::BackendError)?;
+        // Contiguous source M1 decode rows reuse ordinary RMS for full-width
+        // 4096-element vectors or batched per-head 256/512-element vectors.
+        // Its padded SIMD reduction preserves the packed source arithmetic;
+        // multirow Q/K normalization retains the existing strided kernel.
+        let wide_source = (intermediate_data_type == DataType::BF16
+            && matches!(head_dim, 256 | 512 | 4096)
+            && !reference_profile
+            && config.mlx_bf16_reduction
+            && config.upcast_mode == UpcastMode::OnlyNormalization
+            && scales.is_some()
+            && !config.subtract_mean
+            && !config.has_biases
+            && config.scale_offset.is_none_or(|offset| offset == 0.0))
+        .then(|| {
+            <B::Kernels as Kernels>::NormalizationKernel::new(
+                context,
+                DataType::BF16,
+                DataType::F32,
+                DataType::BF16,
+                DataType::F32,
+                true,  // in_place
+                false, // subtract_mean
+                false, // full_layer
+                false, // copy_to_shortcut
+                false, // residual_add
+                false, // use_hadamard
+                false, // scale_residual_sum
+                false, // scale_output
+                false, // has_biases
+                true,  // has_scales
+                true,  // mlx_bf16_reduction
+            )
+        })
+        .transpose()
+        .map_err(QKVNormError::BackendError)?;
         Ok(Head {
             kernel,
+            wide_source,
             reference,
             scales,
             config,
@@ -261,6 +298,62 @@ impl<B: Backend> QKVNorm<B> {
                     command_buffer,
                 );
                 continue;
+            }
+            if !self.full_width
+                && batch_dim == 1
+                && self.num_q_heads == 8
+                && self.num_kv_heads <= 1
+                && matches!(width, 256 | 512)
+                && matches!(head_count, 1 | 8)
+                && head.config.mlx_bf16_reduction
+                && head.config.upcast_mode == UpcastMode::OnlyNormalization
+                && head.config.has_scale
+                && !head.config.has_biases
+                && !head.config.subtract_mean
+                && head.config.scale_offset.is_none_or(|offset| offset == 0.0)
+            {
+                if let Some(wide) = &head.wide_source {
+                    let element_bytes = DataType::BF16.size_in_bytes();
+                    let start = head_offset as usize * width as usize * element_bytes;
+                    let end = start + head_count as usize * width as usize * element_bytes;
+                    wide.encode(
+                        None::<&B::ScratchBuffer>,
+                        head.scales.as_ref(),
+                        None::<&B::GlobalBuffer>,
+                        buffer.reborrow().subrange_mut(start..end),
+                        None::<&mut B::ScratchBuffer>,
+                        None::<&B::GlobalBuffer>,
+                        head_count,
+                        width,
+                        head.config.epsilon,
+                        head.config.scale_offset.unwrap_or(0.0),
+                        1.0,
+                        command_buffer,
+                    );
+                    continue;
+                }
+            }
+            if self.full_width && batch_dim == 1 && width == 4096 && head_count == 1 {
+                if let Some(wide) = &head.wide_source {
+                    let element_bytes = DataType::BF16.size_in_bytes();
+                    let start = head_offset as usize * width as usize * element_bytes;
+                    let end = start + width as usize * element_bytes;
+                    wide.encode(
+                        None::<&B::ScratchBuffer>,
+                        head.scales.as_ref(),
+                        None::<&B::GlobalBuffer>,
+                        buffer.reborrow().subrange_mut(start..end),
+                        None::<&mut B::ScratchBuffer>,
+                        None::<&B::GlobalBuffer>,
+                        1,
+                        width,
+                        head.config.epsilon,
+                        head.config.scale_offset.unwrap_or(0.0),
+                        1.0,
+                        command_buffer,
+                    );
+                    continue;
+                }
             }
             head.kernel.encode(
                 None::<&B::ScratchBuffer>,

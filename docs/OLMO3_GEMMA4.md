@@ -59,6 +59,10 @@ Source cached attention also preserves physical sliding-window traversal across 
 
 The source RMS reduction is an explicit compatibility policy. The canonical native result can agree more closely with an F64 control at individual rounding boundaries. Default-false metadata keeps existing canonical and unrelated model paths on their earlier policy. Q8 and other structurally supported imports do not inherit this W4/group-64 numerical qualification. Exact checkpoints, devices, compiled binaries and validation workloads are recorded in the [Q4 precision investigation](archive/runs/2026-10-28-olmo3-gemma4-q4-precision.md).
 
+Contiguous single-token Q/K normalization reuses the existing source RMS kernel. OLMo treats each 4,096-element full-width Q or K vector as one row. Gemma's bounded per-head route batches eight query rows or one key row, each with 256 or 512 elements; shared-KV consumers supply query rows only. Each row uses the same F32 gain vector, configured epsilon, four-contiguous-value source reduction and precise reciprocal square root. Normalized values and gains materialize in BF16 before multiplication. Stored Gemma Q/K gains use scale offset zero.
+
+This routing requires BF16, the explicit source reduction setting, `OnlyNormalization`, learned scales, no bias or mean subtraction, and zero scale offset. Gemma additionally requires eight query heads and at most one KV head. Weightless value normalization, multi-token input, canonical BF16 profiles and other geometries retain their existing routing and validation. The host selects contiguous buffer subranges without changing the artifact format or precision policy.
+
 ## Gemma 4 E2B image artifact and execution
 
 The converter emits a `Gemma4VisionLanguageModelConfig` with artifact-contract schema 4 and the `gemma4-e2b-bf16-v1` family profile. Native admission validates five components before loading tensors: `config.json`, `model.safetensors`, `tokenizer.json`, `preprocessor_config.json`, and `chat_template.jinja`. Their hashes, source identity, schema, geometry, tokenizer IDs and processor recipe must match the contract.
