@@ -66,21 +66,16 @@ The [native image path](docs/MULTIMODAL_IMPLEMENTATION.md) accepts one PNG/JPEG 
 
 The tables below include named checkpoints and fine-tunes as well as their implementation families. Braces abbreviate size or version choices, such as `Qwen3-{0.6B,1.7B}`.
 
-#### Decision models
-
-| Model | Supported use | Images |
-| --- | --- | --- |
-| **JevK5** (`alibiserikbay/JevK5`, BF16 Qwen3.5-4B) | Candidate probability scoring and the app's Decision workflow. [Recorded scoring parity](docs/validation/SCORING_PARITY.md) covers 243 cases on its named build; [chat EOS checks](docs/TERMINATOR_METRICS_VALIDATION_2026_10_25.md) also cover native generation. | The recorded JevK5 artifact is text-only. |
-
-The [scoring worker](docs/SCORING.md) can also score compatible language models below. Decision use requires a direct-answer template, distinct single-token labels and checkpoint-specific checks. JevK5's recorded parity applies to its exact checkpoint and build; decision accuracy and calibration need their own evaluation.
-
-#### Text models
+#### Text
 
 | Family / adapter | Named models and checkpoint coverage |
 | --- | --- |
+| **Qwen3.8-Flash-Next** | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` |
+| **GLM-5.3-Flash** | `unsloth/GLM-5.3-Flash-GGUF` (`UD-Q2_K_XL`) |
+| **Recursive Flint** | `RecursiveSI/flint-int4` |
 | Qwen3 dense | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, **Polaris-4B-Preview** (`POLARIS-Project/Polaris-4B-Preview`) |
 | Qwen2 dense | **Qwen2.5-Coder** (`Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct`), **DeepSeek-R1-Distill-Qwen-1.5B** (`deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B`) |
-| Qwen3.5 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision models above) |
+| Qwen3.5 dense | `Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}`, **Qwen3.8-4B-Distill** (`empero-ai/Qwen3.8-4B-Distill`), **JevK5** (see Decision below) |
 | Llama dense | `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-{1B,3B}-Instruct`, `unsloth/Llama-3.2-1B-Instruct`, **SmolLM2** (`HuggingFaceTB/SmolLM2-1.7B-Instruct`), **Nanbeige4.1** (`Nanbeige/Nanbeige4.1-3B`), **Reka Flash 3.1** (`RekaAI/reka-flash-3.1`) |
 | Mistral dense | **Mistral 7B Instruct** (`mistralai/Mistral-7B-Instruct-{v0.2,v0.3}`), **Codestral** (`mistralai/Codestral-22B-v0.1`), **Devstral Small** (`mistralai/Devstral-Small-2505`) |
 | Gemma 2 | `google/gemma-2-2b-it` |
@@ -91,19 +86,11 @@ The [scoring worker](docs/SCORING.md) can also score compatible language models 
 | LFM2 | `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}` |
 | LLaMBA / Mamba2 | `cartesia-ai/Llamba-1B`, `cartesia-ai/Llamba-1B-4bit-mlx` |
 
-These converter paths accept supported floating Safetensors layouts and produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
+For models using the converter, supported floating Safetensors layouts produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
 
-#### Native original-format models
+Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Their current Stark paths accept text input.
 
-| Model | Prepared checkpoint choices |
-| --- | --- |
-| **GLM-5.3-Flash** | `unsloth/GLM-5.3-Flash-GGUF` (`UD-Q2_K_XL`) |
-| **Qwen3.8-Flash-Next** | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` |
-| **Recursive Flint** | `RecursiveSI/flint-int4` |
-
-These use separate Rust/Metal execution paths and require the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md). See [Flint setup and limits](docs/FLINT.md). Their current Stark paths accept text input.
-
-#### Image models
+#### Images
 
 | Family / model | Image support in Stark |
 | --- | --- |
@@ -113,9 +100,13 @@ These use separate Rust/Metal execution paths and require the [pinned preparatio
 
 Image input supports one PNG/JPEG through Playground, terminal chat and the Local API. Convert with `--artifact-mode vision-language`; the default text conversion omits vision tensors. Quantized vision weights and LoRA-only adapters are unsupported. A fine-tune's name or base family alone does not establish image support: it needs the complete supported vision tower, BF16 weights and reviewed tokenizer, template and processor metadata. See the [vision family contract](docs/VISION_FAMILY_CONTRACT.md).
 
-#### Classifier models
+#### Decision
 
-**ModernBERT** conversion covers `trymirai/chat-moderation-router` and `trymirai/health-related-router`; the [converter guide](tools/converter/README.md#catalog-coverage-and-qualification) records both repositories as inaccessible. These produce classifier artifacts; the app has no ModernBERT chat, Decision or image workflow.
+| Model | Supported use | Images |
+| --- | --- | --- |
+| **JevK5** (`alibiserikbay/JevK5`, BF16 Qwen3.5-4B) | Candidate probability scoring and the app's Decision workflow. [Recorded scoring parity](docs/validation/SCORING_PARITY.md) covers 243 cases on its named build; [chat EOS checks](docs/TERMINATOR_METRICS_VALIDATION_2026_10_25.md) also cover native generation. | The recorded JevK5 artifact is text-only. |
+
+The [scoring worker](docs/SCORING.md) can also score compatible language models listed under Text. Decision use requires a direct-answer template, distinct single-token labels and checkpoint-specific checks. JevK5's recorded parity applies to its exact checkpoint and build; decision accuracy and calibration need their own evaluation.
 
 Family support describes implemented code paths. Each checkpoint needs compatible metadata and tensors and a successful native load; quality, throughput and Decision calibration require separate validation. These are source-tree capabilities; installed releases may contain an earlier set of families.
 
