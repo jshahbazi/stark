@@ -8,8 +8,8 @@ Measured results, each bound to the source revision, build and host named inside
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
-**Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
-Qwen's mixed-precision Lily-format path measures 77.18 tok/s warm decode at 4K
+**Native GLM-5.3-Flash and Qwen3.8-Flash-Next integration (2026-10-28).**
+Qwen's initial mixed-precision Lily-format path measures 77.18 tok/s warm decode at 4K
 input and 256 outputs, with speculation disabled. The original Pipe checkpoint
 improves from 23.16 to 43.70 tok/s on its matched short F32 workload. See the
 [mixed-precision study](QWEN38_MIXED_PRECISION_2026_10_28.md) for distinct artifacts,
@@ -25,6 +25,15 @@ Both use temperature 1, top-p 0.95, seed 42 and the same Lily q4-xl checkpoint,
 without speculation. All output hashes match within each sampling mode. The
 [sampled BF16 study](QWEN38_SAMPLED_BF16_2026_10_28.md) retains both measurement
 windows, profiles GPU/CPU stages and records exact sampler validation.
+
+**Qwen3.8 HC and GDN kernels (2026-10-29).** Fixed-quantization paired component
+controls reduce HC time by 5.40%, GDN input projection/convolution by 5.62%, and
+the recurrent output wrapper by 1.15%. Retained routes match full-logit and
+seeded sampled references. MoE trials are rejected. The [kernel study](QWEN38_KERNELS_2026_10_29.md)
+records every sampled stage and separates component gains from unstable
+between-load throughput measurements. A private same-loaded-model control
+observes +1.93% pooled top-k 20 decode and effectively unchanged nucleus
+throughput; earlier source-bound records are retained.
 
 ## Engine comparison history
 
@@ -42,8 +51,9 @@ windows, profiles GPU/CPU stages and records exact sampler validation.
 
 | Study | Outcome |
 | --- | --- |
-| [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Current sampled path at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
-| [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Current Qwen: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |
+| [Qwen HC and GDN kernels](QWEN38_KERNELS_2026_10_29.md) | Current kernels; exact references and component gains; same-loaded-model top-k observation +1.93%, nucleus unchanged; between-load throughput remains unstable |
+| [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Sampler/scheduling baseline at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
+| [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Initial Lily integration: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |
 | [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current GLM result; earlier Qwen throughput superseded, source-bound validation retained |
 | [Native GLM and Qwen graph and kernels](GLM_QWEN_NATIVE_GRAPH_2026_10_28.md) | Earlier stage-chaining study; superseded throughput, source-bound validation retained |
 | [Native GLM and Qwen optimization](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md) | Initial no-copy and batching study; build identities and validation remain source-bound historical evidence |
