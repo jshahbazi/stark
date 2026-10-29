@@ -35,6 +35,15 @@ between-load throughput measurements. A private same-loaded-model control
 observes +1.93% pooled top-k 20 decode and effectively unchanged nucleus
 throughput; earlier source-bound records are retained.
 
+**Qwen3.8 sampled throughput during desktop activity (2026-10-29).** Real-readout
+paired controls reduce top-20 selector time by 73.5% and full-vocabulary ordering
+by 43.2%, preserving complete candidate orders and seeded outputs. The
+[stability study](QWEN38_STABILITY_2026_10_29.md) records same-loaded-model
+activity/QoS/feedback-queue controls and correlates throughput swings with
+concurrent GPU work. These controls do not establish consistent 77–80 tok/s
+during normal desktop multitasking. Earlier kernel and throughput records
+remain source-bound historical evidence.
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -51,6 +60,7 @@ throughput; earlier source-bound records are retained.
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen desktop throughput stability](QWEN38_STABILITY_2026_10_29.md) | Current sampler and host diagnostics; exact selector gains; normal-desktop 77–80 tok/s acceptance not established |
 | [Qwen HC and GDN kernels](QWEN38_KERNELS_2026_10_29.md) | Current kernels; exact references and component gains; same-loaded-model top-k observation +1.93%, nucleus unchanged; between-load throughput remains unstable |
 | [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Sampler/scheduling baseline at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
 | [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Initial Lily integration: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |

@@ -267,6 +267,8 @@ impl ScoringBackend for NativeBackend {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
             };
+            let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
+                .map_err(|_| "inference_activity_unavailable")?;
             let started = Instant::now();
             model.reset();
             let state_creation_seconds = started.elapsed().as_secs_f64();

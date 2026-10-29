@@ -3,6 +3,7 @@
 //! These models carry distinct recurrent state, sparse attention and residual
 //! streams. They deliberately do not enter the dense decoder's artifact path.
 
+pub mod activity;
 pub mod flint;
 pub mod glm;
 #[cfg(feature = "metal")]
