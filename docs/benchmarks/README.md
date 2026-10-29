@@ -67,6 +67,7 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen iQ-MLX 4.7 bpw investigation](QWEN38_IQ47_INVESTIGATION_2026_10_29.md) | Exact pack unmeasured: storage and loader support pending; publisher's M5 Ultra result uses MTP; fresh existing-checkpoint Stark control is 72.08 greedy / 64.92 sampled warm tok/s |
 | [Qwen AC power-mode control](QWEN38_POWER_MODES_2026_10_29.md) | Same inference build; 60 exact requests; selected High Power does not recover the target in this window; original settings restored |
 | [Qwen desktop throughput stability](QWEN38_STABILITY_2026_10_29.md) | Current sampler and host diagnostics; exact selector gains; normal-desktop 77–80 tok/s acceptance not established |
 | [Qwen HC and GDN kernels](QWEN38_KERNELS_2026_10_29.md) | Current kernels; exact references and component gains; same-loaded-model top-k observation +1.93%, nucleus unchanged; between-load throughput remains unstable |
