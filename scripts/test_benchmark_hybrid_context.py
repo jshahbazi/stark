@@ -4,6 +4,7 @@ import hashlib
 import json
 from argparse import Namespace
 
+import pytest
 from benchmark_hybrid_context import run
 
 
@@ -30,7 +31,10 @@ class FakeWorker:
         pass
 
 
-def test_run_uses_exact_cycled_prefix_and_emits_only_hashes_and_aggregates(tmp_path):
+@pytest.mark.parametrize("sampling_mode", ["greedy", "stochastic"])
+def test_run_uses_exact_cycled_prefix_and_emits_only_hashes_and_aggregates(
+    tmp_path, sampling_mode
+):
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text("{}")
@@ -48,6 +52,11 @@ def test_run_uses_exact_cycled_prefix_and_emits_only_hashes_and_aggregates(tmp_p
         input_tokens=5,
         tokens=4,
         replays=3,
+        sampling=sampling_mode,
+        temperature=1.0,
+        top_k=20,
+        top_p=0.95,
+        seed=42,
     )
     workers = []
 
@@ -74,4 +83,16 @@ def test_run_uses_exact_cycled_prefix_and_emits_only_hashes_and_aggregates(tmp_p
         and request["max_new_tokens"] == 4
         for request in workers[0].generation_requests
     )
+    expected_sampling = (
+        {"mode": "greedy"}
+        if sampling_mode == "greedy"
+        else {"mode": "stochastic", "temperature": 1.0, "top_k": 20, "top_p": 0.95}
+    )
+    assert all(
+        request["sampling"] == expected_sampling
+        for request in workers[0].generation_requests
+    )
+    if sampling_mode == "stochastic":
+        assert report["seed"] == 42
+        assert all(request["seed"] == 42 for request in workers[0].generation_requests)
     assert json.loads(output.read_text()) == report

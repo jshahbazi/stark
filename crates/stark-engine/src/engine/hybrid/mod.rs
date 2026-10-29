@@ -274,6 +274,45 @@ impl Model {
         false
     }
 
+    /// Opt-in aggregate GPU stage timestamps for the BF16 backend. Profiling
+    /// perturbs execution and is never enabled for production rate comparisons.
+    pub fn set_bf16_stage_profiling(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.set_stage_profiling(enabled),
+            _ => {
+                let _ = enabled;
+                Err(Error::Unsupported("BF16 stage profiling unavailable"))
+            },
+        }
+    }
+
+    /// The mixed-precision backend can overlap encoding around a host sampler.
+    pub fn supports_sampled_decode(&self) -> bool {
+        self.supports_greedy_readout()
+    }
+
+    /// Continue a validated full-logit readout using the caller's sampler.
+    /// The callback runs only for requested draws; cleanup never samples.
+    pub fn sampled_decode<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        sample: impl FnMut(&[f32]) -> Result<u32> + 'a,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.sampled_decode(first, remaining, sample)?)),
+            _ => {
+                let _ = (first, remaining, sample);
+                Err(Error::Unsupported("native sampled stream unavailable"))
+            },
+        }
+    }
+
     pub fn step_greedy(
         &mut self,
         token: u32,

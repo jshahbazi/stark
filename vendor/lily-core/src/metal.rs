@@ -60,6 +60,9 @@ use objc2_metal::{
 
 use crate::tensor::Tensor;
 
+#[path = "metal_stage_profile.rs"]
+pub mod stage_profile;
+
 pub type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
 
 /// A device buffer handle. Cloning shares the allocation; the allocation
@@ -390,6 +393,8 @@ pub struct MetalContext {
     build_nanos: AtomicU64,
     /// Per-kernel profile mode; see [`profile`].
     profile: bool,
+    /// Original Stark phase counters; disabled in normal execution.
+    stage_profile: bool,
     /// The buffers [`Self::new_buffer`] allocated while a
     /// [`BufferRecording`] is open.
     recorded: RefCell<Option<Vec<Weak<GpuBuffer>>>>,
@@ -436,6 +441,7 @@ impl MetalContext {
             built: AtomicU64::new(0),
             build_nanos: AtomicU64::new(0),
             profile,
+            stage_profile: false,
             recorded: RefCell::new(None),
         };
         // The production GEMM paths use native Metal tensor units.
@@ -455,6 +461,14 @@ impl MetalContext {
     /// Whether the per-kernel profile mode is on; see [`profile`].
     pub fn profiling(&self) -> bool {
         self.profile
+    }
+
+    /// Enable original Stark diagnostic stage timestamps for future passes.
+    /// Mutable access excludes any outstanding pass borrowing this context.
+    /// This changes neither math nor quantization; timestamps can still affect
+    /// scheduling, so profile runs do not establish production throughput.
+    pub fn set_stage_profiling(&mut self, enabled: bool) {
+        self.stage_profile = enabled;
     }
 
     /// Compiles MSL source through the framework's compiler (the same
@@ -633,6 +647,7 @@ impl MetalContext {
             label: Cell::new(profile::UNLABELED),
             names: RefCell::new(Vec::new()),
             segment_kernel: Cell::new(None),
+            stage_trace: RefCell::new(None),
             slot: RefCell::new(slot),
         })
     }
@@ -1865,6 +1880,7 @@ pub struct ComputePass<'a> {
     gated: Cell<bool>,
     /// Name for the per-kernel profile ([`Self::set_label`]).
     label: Cell<&'static str>,
+    stage_trace: RefCell<Option<stage_profile::Trace>>,
     /// Profile mode only: the kernel of each closed command buffer, in
     /// program order (one dispatch per command buffer).
     names: RefCell<Vec<&'static str>>,
@@ -2008,6 +2024,53 @@ impl<'a> ComputePass<'a> {
     /// what it executes.
     pub fn set_label(&self, label: &'static str) {
         self.label.set(label);
+    }
+
+    /// Insert a precise timestamp at a true decode dependency boundary. Fixed
+    /// phase categories contain no request data. No work is added by default.
+    pub fn profile_stage(&self, phase: stage_profile::Phase) -> Result<()> {
+        if !self.ctx.stage_profile {
+            return Ok(());
+        }
+        let mut trace = self.stage_trace.borrow_mut();
+        if trace.is_none() {
+            *trace = Some(stage_profile::Trace::new(self.ctx.device())?);
+        }
+        let trace = trace.as_mut().expect("stage trace initialized");
+        let index = trace.push(phase)?;
+        self.with_encoder(|encoder, _inner, _pool| {
+            // SAFETY: Trace reserves a fixed bounded heap entry per call. The
+            // heap remains owned by the pass through verified GPU completion.
+            unsafe {
+                encoder.writeTimestampWithGranularity_intoHeap_atIndex(
+                    objc2_metal::MTL4TimestampGranularity::Precise,
+                    &trace.heap,
+                    index,
+                );
+            }
+            Ok(())
+        })
+    }
+
+    /// End the last profiled phase before the decode pass signals completion.
+    pub fn finish_stage_profile(&self) -> Result<()> {
+        if !self.ctx.stage_profile {
+            return Ok(());
+        }
+        let mut trace = self.stage_trace.borrow_mut();
+        let trace = trace.as_mut().ok_or_else(|| anyhow!("stage trace missing"))?;
+        let index = trace.finish()?;
+        self.with_encoder(|encoder, _inner, _pool| {
+            // SAFETY: the reserved terminal entry is in this pass's own heap.
+            unsafe {
+                encoder.writeTimestampWithGranularity_intoHeap_atIndex(
+                    objc2_metal::MTL4TimestampGranularity::Precise,
+                    &trace.heap,
+                    index,
+                );
+            }
+            Ok(())
+        })
     }
 
     /// Encodes one kernel dispatch with a byte offset per buffer binding — used
@@ -2205,6 +2268,7 @@ impl<'a> ComputePass<'a> {
         let milestone = self.milestone.borrow_mut().take();
         let slot = self.slot.replace(Slot { inner: None, pool: self.ctx.pool.clone() });
         let names = std::mem::take(&mut *self.names.borrow_mut());
+        let stage_trace = self.stage_trace.borrow_mut().take();
         Ok(EncodedPass {
             ctx: self.ctx,
             program,
@@ -2214,6 +2278,7 @@ impl<'a> ComputePass<'a> {
             slot,
             label: self.label.get(),
             names,
+            stage_trace,
         })
     }
 
@@ -2282,13 +2347,23 @@ pub struct EncodedPass<'a> {
     label: &'static str,
     /// Profile mode only: one kernel name per `Item::Cmd`.
     names: Vec<&'static str>,
+    stage_trace: Option<stage_profile::Trace>,
 }
 
 impl<'a> EncodedPass<'a> {
     /// Submits without blocking.
     pub fn commit(self) -> Result<PendingPass<'a>> {
-        let EncodedPass { ctx, program, done, milestone, gated, slot, label, names } =
-            self;
+        let EncodedPass {
+            ctx,
+            program,
+            done,
+            milestone,
+            gated,
+            slot,
+            label,
+            names,
+            stage_trace,
+        } = self;
         let cmds = program.iter().filter(|item| matches!(item, Item::Cmd(_))).count();
         let profile = if ctx.profile {
             ensure!(
@@ -2316,6 +2391,8 @@ impl<'a> EncodedPass<'a> {
             feedback,
             feeder,
             slot: Some(slot),
+            stage_trace,
+            stage_command_buffers: cmds,
         })
     }
 }
@@ -2344,6 +2421,9 @@ pub struct PendingPass<'a> {
     /// A gated pass's feeder, until it submitted the last part.
     feeder: Option<FeederHandle>,
     slot: Option<Slot>,
+    // Remains alive through normal waits and fault-safe Drop draining.
+    stage_trace: Option<stage_profile::Trace>,
+    stage_command_buffers: usize,
 }
 
 impl Drop for PendingPass<'_> {
@@ -2506,9 +2586,15 @@ impl PendingPass<'_> {
         // Keep command memory until feedback and the subsequent fault check
         // have both succeeded. On error, Drop retains its fault-safe drain.
         self.feedback.accept_outputs(&self.ctx.fault)?;
+        let completed = CompletedPass { feedback: self.feedback.clone() };
+        if let Some(trace) = self.stage_trace.take() {
+            let profile =
+                trace.resolve(completed.timing()?, self.stage_command_buffers)?;
+            stage_profile::record(profile)?;
+        }
         self.program.clear();
         self.slot = None;
-        Ok(CompletedPass { feedback: self.feedback.clone() })
+        Ok(completed)
     }
 }
 

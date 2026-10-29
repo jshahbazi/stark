@@ -18,6 +18,14 @@ result remains in the [decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md).
 Earlier Qwen throughput and kernel measurements remain historical records for
 their named builds.
 
+**Qwen3.8 sampled generation at fixed quantization (2026-10-28).** Repeated
+4K-input/256-output runs measure top-k 20 sampling at 75.08 tok/s versus 50.62
+for the preserved worker, and nucleus-only sampling at 65.57 versus 49.73.
+Both use temperature 1, top-p 0.95, seed 42 and the same Lily q4-xl checkpoint,
+without speculation. All output hashes match within each sampling mode. The
+[sampled BF16 study](QWEN38_SAMPLED_BF16_2026_10_28.md) retains both measurement
+windows, profiles GPU/CPU stages and records exact sampler validation.
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -34,6 +42,7 @@ their named builds.
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Current sampled path at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
 | [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Current Qwen: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |
 | [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current GLM result; earlier Qwen throughput superseded, source-bound validation retained |
 | [Native GLM and Qwen graph and kernels](GLM_QWEN_NATIVE_GRAPH_2026_10_28.md) | Earlier stage-chaining study; superseded throughput, source-bound validation retained |
