@@ -595,6 +595,40 @@ pub fn hc_read_up_mix_q8(
     )
 }
 
+/// Single-row up+mix using a cached BF16 SiLU activation. The shader keeps
+/// the original single-row weight staging and dot/reduction operation order.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hc_read_up_mix_q8_cached(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    up: &QuantWeights,
+    act: &Tensor,
+    hyper: &Tensor,
+    w: &Tensor,
+    inv_rms: &Tensor,
+    mixed: &Tensor,
+    h: usize,
+    groups: usize,
+    w_bias: f32,
+) -> Result<()> {
+    let name: &'static str = match groups {
+        1 => "hc_read_up_mix_q8_cached_g1",
+        2 => "hc_read_up_mix_q8_cached_g2",
+        3 => "hc_read_up_mix_q8_cached_g3",
+        4 => "hc_read_up_mix_q8_cached_g4",
+        5 => "hc_read_up_mix_q8_cached_g5",
+        6 => "hc_read_up_mix_q8_cached_g6",
+        7 => "hc_read_up_mix_q8_cached_g7",
+        8 => "hc_read_up_mix_q8_cached_g8",
+        _ => anyhow::bail!("streams {groups} outside 1..={HC_MAX_G}"),
+    };
+    // Keep the original up kernel's binding layout, including its unused
+    // inv_g parameter, so only the activation loads change in its body.
+    dispatch_read_up_mix(
+        ctx, pass, name, up, act, hyper, w, inv_rms, mixed, h, groups, 1, true, w_bias,
+    )
+}
+
 /// [`hc_read_up_mix_q8`] over `rows <= HC_FUSED_MAX_ROWS` rows at once, on
 /// the precomputed activation: `act` is `[rows, lowrank]` (`silu(down /
 /// groups)` from [`hc_read_down_q8_rows`]), `hyper` `[rows, groups*h]`,
@@ -636,3 +670,7 @@ pub fn hc_read_up_mix_q8_rows(
         w_bias,
     )
 }
+
+#[cfg(test)]
+#[path = "hc_tests.rs"]
+mod tests;

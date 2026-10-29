@@ -119,6 +119,50 @@ static inline float gemv_q4_packed_sum(device const uint* codes,
 
 GEMV_Q4_PACKED_KERNEL(gemv_q4_bf16_2row, 2)
 
+// Modified by Stark: GDN input projection followed by its causal convolution.
+// The original two-row dot helper and BF16 projection boundary are retained.
+// Each row has exactly one writer, including the convolution window update.
+kernel void gemv_q4_bf16_2row_gdn_conv(
+                     device const uint* codes [[buffer(0)]],
+                     device const bfloat* scales [[buffer(1)]],
+                     device const bfloat* biases [[buffer(2)]],
+                     device const bfloat* x [[buffer(3)]],
+                     device bfloat* raw_out [[buffer(4)]],
+                     device bfloat* window [[buffer(5)]],
+                     device const bfloat* conv_w [[buffer(6)]],
+                     device bfloat* conv_out [[buffer(7)]],
+                     constant uint& K [[buffer(8)]],
+                     constant uint& GS [[buffer(9)]],
+                     constant uint& C [[buffer(10)]],
+                     constant uint& KD [[buffer(11)]],
+                     uint group [[threadgroup_position_in_grid]],
+                     uint lane [[thread_index_in_threadgroup]]) {
+    constexpr uint LANES = 16;
+    const uint sublane = lane % LANES;
+    const uint row = group * 2 + lane / LANES;
+    const float sum = gemv_q4_packed_sum<2>(
+        codes, scales, biases, x, row, sublane, K, GS);
+    if (sublane == 0) {
+        const bfloat projected = bfloat(sum);
+        raw_out[row] = projected;
+        if (row < C) {
+            // conv1d_step_bf16's expression, input rounding and tap order.
+            uint taps = KD - 1;
+            float acc = 0.0f;
+            for (uint t = 0; t < taps; ++t) {
+                acc += float(window[row * taps + t]) * float(conv_w[t * C + row]);
+            }
+            float xc = float(projected);
+            acc += xc * float(conv_w[taps * C + row]);
+            conv_out[row] = bfloat(acc / (1.0f + exp(-acc)));
+            for (uint t = 0; t + 1 < taps; ++t) {
+                window[row * taps + t] = window[row * taps + t + 1];
+            }
+            window[row * taps + taps - 1] = bfloat(xc);
+        }
+    }
+}
+
 
 // 8-bit variant: one code word holds 4 elements (low byte first).
 static inline float dot_word_q8(uint word, float s, float b,

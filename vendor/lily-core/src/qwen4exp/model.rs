@@ -35,7 +35,7 @@ use crate::kernels::gdn::{
 };
 use crate::kernels::hc::{
     HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16, hc_inject_bf16,
-    hc_mix_bf16, hc_read_down_q8, hc_read_down_q8_rows, hc_read_up_mix_q8,
+    hc_mix_bf16, hc_read_down_q8_rows, hc_read_up_mix_q8_cached,
     hc_read_up_mix_q8_rows, rmsnorm_grouped_bf16, silu_scaled_bf16,
 };
 use crate::kernels::norm::rmsnorm_bf16;
@@ -812,10 +812,8 @@ impl PleScratch {
 }
 
 /// Hyper-connection read intermediates for `rows` tokens. The fused decode
-/// read (`hc_read_decode`) only touches `down`, `inj`, `inv_rms` and
-/// `mixed`; the fused small-batch read (`hc_read_batched`, up to
-/// `HC_FUSED_MAX_ROWS` rows) also writes `act`; the unfused batched read of
-/// larger chunks writes every buffer.
+/// and small-batch reads touch `down`, `act`, `inj`, `inv_rms` and `mixed`;
+/// the unfused batched read of larger chunks writes every buffer.
 pub(super) struct HcScratch {
     /// `[rows, G*H]` normed streams.
     pub(super) hn: Tensor,
@@ -3381,11 +3379,12 @@ impl Qwen4ExpModel {
     }
 
     /// Single-row hyper-connection read: `s.hyper` → `s.hc.mixed` (+ `inj`).
-    /// Two fused dispatches (norm + down/inject GEMV; SiLU + up GEMV + mix)
-    /// standing in for the six-kernel batched read; the down half keeps the
-    /// normalized stream in f32 where the batched path rounds it to bf16, so
-    /// the two differ at bf16 rounding level. Leaves `mixed`/`inj` ordered
-    /// for the caller.
+    /// Two fused dispatches: one-row norm + down/inject projection + SiLU,
+    /// then the original up-projection dot/mix body with cached activations.
+    /// The activation is computed once and reused by every output column.
+    /// The down half keeps the normalized stream in f32 where the unfused
+    /// large-batch path rounds it to bf16. Leaves `mixed`/`inj` ordered for
+    /// the caller.
     fn hc_read_decode(
         &self,
         ctx: &MetalContext,
@@ -3411,27 +3410,29 @@ impl Qwen4ExpModel {
     ) -> Result<()> {
         let cfg = &self.config;
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
-        hc_read_down_q8(
+        let hyper_rows = hyper.view(0, &[1, g * h])?;
+        hc_read_down_q8_rows(
             ctx,
             pass,
-            hyper,
+            &hyper_rows,
             &hc.norm,
             &hc.down,
             hc.inject.as_ref(),
             &out.down,
             &out.inj,
             &out.inv_rms,
+            &out.act,
             h,
             g,
             cfg.rms_norm_eps,
             NORM_WEIGHT_BIAS,
         )?;
-        pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms])?;
-        hc_read_up_mix_q8(
+        pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
+        hc_read_up_mix_q8_cached(
             ctx,
             pass,
             &hc.up,
-            &out.down,
+            &out.act,
             hyper,
             &hc.norm,
             &out.inv_rms,
@@ -3523,15 +3524,36 @@ impl Qwen4ExpModel {
         gdn_state: &Tensor,
         conv_window: &Tensor,
     ) -> Result<()> {
+        let fused_conv = !crate::ablate::on(crate::ablate::Group::GdnProj)
+            && !crate::ablate::on(crate::ablate::Group::GdnStep)
+            && w.in_proj.bits == 4
+            && self.config.linear_conv_kernel_dim == 4
+            && w.in_proj.out_features().is_multiple_of(2);
         if !crate::ablate::on(crate::ablate::Group::GdnProj) {
-            quant::gemv_quant(ctx, pass, &w.in_proj, &s.hc.mixed, &s.gdn_in)?;
-            pass.level_barrier(&[&s.gdn_in])?;
+            if fused_conv {
+                quant::gemv_q4_gdn_conv_step(
+                    ctx,
+                    pass,
+                    &w.in_proj,
+                    &s.hc.mixed,
+                    &s.gdn_in,
+                    conv_window,
+                    &w.conv_w,
+                    &s.qkv_conv,
+                )?;
+                pass.level_barrier(&[&s.gdn_in, &s.qkv_conv, conv_window])?;
+            } else {
+                quant::gemv_quant(ctx, pass, &w.in_proj, &s.hc.mixed, &s.gdn_in)?;
+                pass.level_barrier(&[&s.gdn_in])?;
+            }
         }
         if crate::ablate::on(crate::ablate::Group::GdnStep) {
             return Ok(());
         }
-        conv1d_step(ctx, pass, conv_window, &s.qkv, &w.conv_w, &s.qkv_conv)?;
-        pass.level_barrier(&[&s.qkv_conv, conv_window])?;
+        if !fused_conv {
+            conv1d_step(ctx, pass, conv_window, &s.qkv, &w.conv_w, &s.qkv_conv)?;
+            pass.level_barrier(&[&s.qkv_conv, conv_window])?;
+        }
         gdn_step_gated_fused(
             ctx,
             pass,

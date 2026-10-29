@@ -784,3 +784,7 @@ pub fn gated_rmsnorm(
         Grid::Threadgroups { groups: (rows, 1, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+#[cfg(test)]
+#[path = "gdn_tests.rs"]
+mod tests;

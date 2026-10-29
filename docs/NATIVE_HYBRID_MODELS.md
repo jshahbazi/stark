@@ -138,6 +138,14 @@ Completion feedback errors fence the request before a successful result can be
 returned. Bounded top-k sampling selects and sorts only the required prefix;
 full-vocabulary sampling uses stable radix ordering. Both preserve the existing
 F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
+HC decode computes the scaled BF16 activation once in the down kernel and
+reuses it in an up/mix kernel retaining the original single-row dot order.
+For Q4 GDN input projections with four convolution taps and an even output
+width, projection and convolution share one dispatch, preserving the BF16
+projection boundary, tap order and window updates. Other layouts retain
+separate dispatches. The recurrent kernel keeps its BF16-rounded output local
+before the F32 norm reduction. The [kernel study](benchmarks/QWEN38_KERNELS_2026_10_29.md)
+records matching references, rejected trials and sampled benchmarks.
 Every request resets logical state. GPU execution failures require model reload.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and executes neither MTP nor vision. Source modifications and licenses are

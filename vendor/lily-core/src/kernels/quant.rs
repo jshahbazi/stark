@@ -175,6 +175,58 @@ pub fn gemv_quant(
     )
 }
 
+/// Q4 two-row GDN input projection with its four-tap causal convolution.
+/// The complete BF16 projection is preserved in `raw_out`; only its first
+/// `conv_out.numel()` rows additionally update the convolution window/output.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemv_q4_gdn_conv_step(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    raw_out: &Tensor,
+    window: &Tensor,
+    conv_w: &Tensor,
+    conv_out: &Tensor,
+) -> Result<()> {
+    let (n, k) = check_quant(w)?;
+    let c = conv_out.numel();
+    ensure!(
+        w.bits == 4 && n.is_multiple_of(2),
+        "fused GDN projection requires Q4 row pairs"
+    );
+    ensure!(c > 0 && c <= n, "invalid GDN convolution channel count");
+    ensure!(
+        x.numel() == k && raw_out.numel() == n,
+        "fused GDN projection size mismatch"
+    );
+    ensure!(
+        conv_w.shape() == [4, c] && window.numel() == 3 * c,
+        "fused GDN convolution requires four taps"
+    );
+    ensure!(
+        [x, raw_out, window, conv_w, conv_out].iter().all(|t| t.dtype() == DType::BF16),
+        "fused GDN projection/convolution expects BF16"
+    );
+    let pipeline =
+        ctx.pipeline("gemv_q4_bf16_2row_gdn_conv", SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            raw_out.binding(),
+            window.binding(),
+            conv_w.binding(),
+            conv_out.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(c), &u32_bytes(4)],
+        Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
 /// Writes `out[N, K] = dequant(W)` in bf16.
 fn dequant_to_bf16(
     ctx: &MetalContext,

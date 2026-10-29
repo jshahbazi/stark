@@ -591,3 +591,99 @@ HC_READ_UP_MIX_ROWS_KERNELS(5)
 HC_READ_UP_MIX_ROWS_KERNELS(6)
 HC_READ_UP_MIX_ROWS_KERNELS(7)
 HC_READ_UP_MIX_ROWS_KERNELS(8)
+
+
+// Modified by Stark: reuse the cached SiLU from the one-row down kernel.
+// The cached up body retains the pinned single-row weight staging, dot
+// expression, reduction and mix, replacing only its activation loads.
+template <uint GG>
+static inline void hc_read_up_mix_q8_cached_body(device const uint* u_codes,
+                                          device const bfloat* u_scales,
+                                          device const bfloat* u_biases,
+                                          device const bfloat* down,
+                                          device const bfloat* hyper,
+                                          device const bfloat* norm_w,
+                                          device const float* inv_rms,
+                                          device bfloat* mixed,
+                                          uint H, uint R, uint GS, float inv_g, float w_bias,
+                                          uint col, uint lane) {
+    const uint words = R / 4;
+    const uint blocks = words / 4;
+    const uint bpg = GS / 16;
+    const uint groups = R / GS;
+    device const bfloat4* dv = (device const bfloat4*)down;
+
+    float sum[GG];
+    for (uint g = 0; g < GG; ++g) {
+        sum[g] = 0.0f;
+    }
+    for (uint i = lane; i < blocks; i += 32) {
+        const uint q = i / bpg;
+        uint4 w4[GG];
+        for (uint g = 0; g < GG; ++g) {
+            const ulong row = (ulong)g * H + col;
+            w4[g] = ((device const uint4*)(u_codes + row * words))[i];
+        }
+        float4 act[4];
+        for (uint j = 0; j < 4; ++j) {
+            act[j] = float4(dv[4 * i + j]);
+        }
+        for (uint g = 0; g < GG; ++g) {
+            const ulong row = (ulong)g * H + col;
+            const float s = float(u_scales[row * groups + q]);
+            const float b = float(u_biases[row * groups + q]);
+            sum[g] += hc_dot_word_q8(w4[g].x, s, b, act[0])
+                + hc_dot_word_q8(w4[g].y, s, b, act[1])
+                + hc_dot_word_q8(w4[g].z, s, b, act[2])
+                + hc_dot_word_q8(w4[g].w, s, b, act[3]);
+        }
+    }
+    float acc = 0.0f;
+    for (uint g = 0; g < GG; ++g) {
+        const float logit = float(bfloat(simd_sum(sum[g])));
+        const float gate = 1.0f / (1.0f + exp(-logit));
+        const uint e = g * H + col;
+        const float hn = float(bfloat(float(hyper[e]) * inv_rms[g] * (w_bias + float(norm_w[e]))));
+        acc += gate * hn;
+    }
+    if (lane == 0) {
+        mixed[col] = bfloat(acc / float(GG));
+    }
+}
+
+#define HC_READ_UP_MIX_CACHED_KERNEL(GG)                                                    \
+    kernel void hc_read_up_mix_q8_cached_g##GG(                                             \
+                     device const uint*   u_codes  [[buffer(0)]],  /* [G*H, R/4] */  \
+                     device const bfloat* u_scales [[buffer(1)]],  /* [G*H, R/GS] */ \
+                     device const bfloat* u_biases [[buffer(2)]],                    \
+                     device const bfloat* down     [[buffer(3)]],  /* [R] */         \
+                     device const bfloat* hyper    [[buffer(4)]],  /* [G*H] */       \
+                     device const bfloat* norm_w   [[buffer(5)]],  /* [G*H] */       \
+                     device const float*  inv_rms  [[buffer(6)]],  /* [G] */         \
+                     device bfloat*       mixed    [[buffer(7)]],  /* [H] */         \
+                     constant uint&       H        [[buffer(8)]],                    \
+                     constant uint&       R        [[buffer(9)]],                    \
+                     constant uint&       GS       [[buffer(10)]],                   \
+                     constant float&      inv_g    [[buffer(11)]],                   \
+                     constant float&      w_bias   [[buffer(12)]],                   \
+                     uint tg     [[threadgroup_position_in_grid]],                   \
+                     uint tgsize [[threads_per_threadgroup]],                        \
+                     uint sg     [[simdgroup_index_in_threadgroup]],                 \
+                     uint lane   [[thread_index_in_simdgroup]]) {                    \
+        const uint col = tg * (tgsize / 32) + sg;                                    \
+        if (col >= H) {                                                              \
+            return;  /* whole simdgroup */                                           \
+        }                                                                            \
+        hc_read_up_mix_q8_cached_body<GG>(u_codes, u_scales, u_biases, down, hyper, norm_w, \
+                                   inv_rms, mixed, H, R, GS, inv_g, w_bias, col,     \
+                                   lane);                                            \
+    }
+
+HC_READ_UP_MIX_CACHED_KERNEL(1)
+HC_READ_UP_MIX_CACHED_KERNEL(2)
+HC_READ_UP_MIX_CACHED_KERNEL(3)
+HC_READ_UP_MIX_CACHED_KERNEL(4)
+HC_READ_UP_MIX_CACHED_KERNEL(5)
+HC_READ_UP_MIX_CACHED_KERNEL(6)
+HC_READ_UP_MIX_CACHED_KERNEL(7)
+HC_READ_UP_MIX_CACHED_KERNEL(8)

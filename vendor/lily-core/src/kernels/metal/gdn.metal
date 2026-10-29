@@ -115,6 +115,8 @@ static inline float gdn_step_body(device const bfloat* q,
     return o;
 }
 
+// Modified by Stark: keep each thread's BF16-rounded raw value local. No
+// other thread reads it before the following norm reduction.
 #define GDN_STEP_GATED_WRAPPER(NAME, STATE_T)                                 \
 kernel void NAME(device const bfloat* q       [[buffer(0)]],                  \
                  device const bfloat* k       [[buffer(1)]],                  \
@@ -140,15 +142,12 @@ kernel void NAME(device const bfloat* q       [[buffer(0)]],                  \
     threadgroup float part_q[DIM / 32];                                       \
     threadgroup float part_k[DIM / 32];                                       \
     threadgroup float gates[4];                                               \
-    threadgroup bfloat raw[DIM];                                              \
     threadgroup float norm_part[DIM / 32];                                    \
     threadgroup float inv_rms = 0.0f;                                         \
     const float o = gdn_step_body(q, k, v, a, b, a_log, dt_bias, state,      \
                                   scale, vpk, h, tid, sg, lane, q_norm,       \
                                   k_norm, part_q, part_k, gates);             \
-    raw[tid] = bfloat(o);                                                     \
-    threadgroup_barrier(mem_flags::mem_threadgroup);                          \
-    const float rv = float(raw[tid]);                                         \
+    const float rv = float(bfloat(o));                                        \
     const float ss = simd_sum(rv * rv);                                       \
     if (lane == 0) {                                                          \
         norm_part[sg] = ss;                                                   \
