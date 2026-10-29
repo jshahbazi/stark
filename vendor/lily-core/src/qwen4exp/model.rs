@@ -3267,6 +3267,7 @@ impl Qwen4ExpModel {
         let conv_slot = state.conv_slot;
         self.set_cache_position(Some(state.pos));
 
+        pass.profile_stage(crate::metal::stage_profile::Phase::Embedding)?;
         let ids = s.next_token.view(slot_in, &[1])?;
         quant::gather_rows_quant(ctx, pass, &self.weights.embed_tokens, &ids, &s.x)?;
         pass.level_barrier(&[&s.x])?;
@@ -3286,13 +3287,16 @@ impl Qwen4ExpModel {
                     s.sync.encode_wait(pass, value)?;
                 }
                 if !crate::ablate::on(crate::ablate::Group::Ple) {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Ple)?;
                     self.ple_decode(ctx, pass, ple_w, ple_s, pst, conv_slot, s)?;
                 }
             }
 
+            pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.attn_hc, s)?;
             match (&layer.mixer, lstate) {
                 (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
                     self.gdn_decode_branch(
                         ctx,
                         pass,
@@ -3306,6 +3310,7 @@ impl Qwen4ExpModel {
                     Mixer::Attn(w),
                     LayerState::Attn { k_cache, v_cache, idx_keys, blk_keys },
                 ) => {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Qsa)?;
                     self.attn_decode_branch(
                         ctx,
                         pass,
@@ -3323,11 +3328,14 @@ impl Qwen4ExpModel {
             }
             pass.level_barrier(&[&s.branch_out])?;
             if !crate::ablate::on(crate::ablate::Group::Inject) {
+                pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
                 hc_inject_bf16(ctx, pass, &s.hyper, &s.branch_out, &s.hc.inj, h, g)?;
                 pass.level_barrier(&[&s.hyper])?;
             }
 
+            pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.mlp_hc, s)?;
+            pass.profile_stage(crate::metal::stage_profile::Phase::Moe)?;
             decode_moe(
                 ctx,
                 pass,
@@ -3345,13 +3353,16 @@ impl Qwen4ExpModel {
             )?;
             pass.level_barrier(&[&s.branch_out])?;
             if !crate::ablate::on(crate::ablate::Group::Inject) {
+                pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
                 hc_inject_bf16(ctx, pass, &s.hyper, &s.branch_out, &s.hc.inj, h, g)?;
                 pass.level_barrier(&[&s.hyper])?;
             }
         }
 
+        pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
         self.hc_read_decode(ctx, pass, &self.weights.final_mixer, s)?;
         if !crate::ablate::on(crate::ablate::Group::Head) {
+            pass.profile_stage(crate::metal::stage_profile::Phase::Head)?;
             quant::gemv_quant(
                 ctx,
                 pass,
@@ -3361,9 +3372,11 @@ impl Qwen4ExpModel {
             )?;
             pass.level_barrier(&[&s.logits])?;
         }
+        pass.profile_stage(crate::metal::stage_profile::Phase::Draw)?;
         let out = s.next_token.view(slot_out, &[1])?;
         sample_f32(ctx, pass, &s.logits, &s.sampler, draw.params, draw.step, &out)?;
         pass.level_barrier(&[&s.next_token])?;
+        pass.finish_stage_profile()?;
         s.sync.signal_done(pass)
     }
 

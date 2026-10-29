@@ -129,11 +129,15 @@ Experts remain resident; the large n-gram embedding table is mapped read-only
 and paged. Batched prefill processes the current request, and greedy decoding
 reads back one GPU-selected token per step. Scoring and stochastic generation
 read the complete F32 logits and use Stark's existing scoring and sampling.
-Greedy requests overlap future CPU command encoding with the current GPU step.
-The future pass remains unsubmitted until its input token is validated; no draft
-model or speculative token is used. An early stop drains at most one submitted
-ordinary step before state reset, and completion feedback errors fence the
-request before a successful result can be returned.
+Greedy and sampled requests overlap future CPU command encoding with the current
+GPU step. Sampled requests retain full F32 readout and Stark's CPU sampler.
+The future pass remains unsubmitted until the actual selected input token is
+validated and staged. Early stops drain at most one submitted ordinary step
+before state reset; cleanup never invokes the sampler or consumes randomness.
+Completion feedback errors fence the request before a successful result can be
+returned. Bounded top-k sampling selects and sorts only the required prefix;
+full-vocabulary sampling uses stable radix ordering. Both preserve the existing
+F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
 Every request resets logical state. GPU execution failures require model reload.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and executes neither MTP nor vision. Source modifications and licenses are
@@ -246,6 +250,24 @@ These switches support numerical and kernel diagnostics; benchmark comparisons
 must record their values and use the production defaults unless the diagnostic
 variant itself is under study.
 
+For Lily-format BF16 stage diagnostics, set `STARK_QWEN38_PROFILE_OUTPUT` to a
+new JSONL file before launching the generator. The file is created exclusively
+with mode `0600`; existing files and symlinks are rejected. Records contain
+static CPU/GPU categories and aggregate counts, durations and byte totals.
+Precise GPU timestamp writes retain one command buffer per decode step and can
+affect scheduling. Measure production throughput in a separate run with this
+setting absent. For example, after building the worker:
+
+```sh
+mkdir -p runtime/qwen38-profile
+chmod 700 runtime/qwen38-profile
+STARK_QWEN38_PROFILE_OUTPUT="$PWD/runtime/qwen38-profile/stages.jsonl" uv run --project tools/converter --locked --python 3.13.13 python scripts/benchmark_hybrid_context.py --model models/qwen38-lily-q4-xl --worker target/release/stark-generate --corpus vendor/lily-core/src/qwen4exp/model.rs --input-tokens 4096 --tokens 64 --replays 3 --sampling stochastic --temperature 1 --top-k 20 --top-p 0.95 --seed 42 --output runtime/qwen38-profile/run.json
+```
+
+The context benchmark supports greedy and stochastic generation; `--top-k 0`
+omits top-k filtering. It emits counts, hashes and timing aggregates. The
+benchmark study records the separate pinned corpus used for its exact workload.
+
 The F32 graph's prefill processes tokens sequentially and projects vocabulary logits only for
 the final input token. Performance must be measured on the exact checkpoint and
 host. Published Sushi or MLX throughput does not qualify Stark's throughput.
@@ -253,6 +275,9 @@ The earlier [GPU stage and kernel benchmark](benchmarks/GLM_QWEN_NATIVE_GRAPH_20
 records the execution path before the deferred graph.
 The [Qwen mixed-precision benchmark](benchmarks/QWEN38_MIXED_PRECISION_2026_10_28.md)
 records the later F32 improvements, Lily-format qualification and 4K throughput.
+The [sampled-generation study](benchmarks/QWEN38_SAMPLED_BF16_2026_10_28.md)
+records the subsequent sampler, scheduling and BF16 profiling work at fixed
+quantization.
 The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
 and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
 record the remaining graph, kernel and prefill opportunities with source and

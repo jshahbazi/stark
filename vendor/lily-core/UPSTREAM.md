@@ -15,6 +15,8 @@ The fourteen upstream Metal shader files retain their pinned source bytes. Stark
 
 Host patches also sanitize framework errors and retain submitted command memory until GPU completion feedback arrives after a fault. Missing completion feedback keeps fault cleanup blocked; it cannot safely release live GPU memory. Unused capture, profiling and standalone vision helpers are removed from the extracted Rust modules.
 
+Stark adds an explicit, disabled-by-default Metal 4 stage profiler in `src/metal_stage_profile.rs`. Fixed phase markers use a bounded per-pass timestamp heap, retain the existing concurrent dispatch and dependency barriers, and require one command buffer per profiled decode. The heap remains owned through verified completion and fault draining. Resolution checks entry sizes, timestamp order, device-reported frequency and agreement with independent command feedback. Only aggregate phase durations leave the profiler; no model values or request payloads are captured. Precise timestamps can still change scheduling, so instrumented rates are diagnostic and separate from ordinary throughput runs. Upstream diagnostic environment controls remain disabled.
+
 Every successful pass wait also awaits all asynchronous completion feedback before accepting outputs, then checks the context's sticky fault. A signaled GPU fence alone is insufficient: framework error feedback can arrive afterward. Command resources remain held until these checks succeed, and failed checks retain the fault-safe cleanup drain.
 
 ## Validation status

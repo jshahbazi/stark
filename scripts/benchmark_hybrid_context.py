@@ -1,4 +1,4 @@
-"""Measure serialized greedy decoding from an exact, corpus-derived prefix.
+"""Measure serialized decoding from an exact, corpus-derived prefix.
 
 The report contains only hashes, token counts, finish reasons, and timings.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import time
 from pathlib import Path
@@ -39,6 +40,35 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("invalid_benchmark_limits")
     if args.input_tokens + args.tokens > 16384:
         raise ValueError("context_limit_exceeded")
+    if getattr(args, "sampling", "greedy") == "stochastic":
+        temperature = getattr(args, "temperature", 1.0)
+        top_k = getattr(args, "top_k", 20)
+        top_p = getattr(args, "top_p", 0.95)
+        seed = getattr(args, "seed", 42)
+        if (
+            not math.isfinite(temperature)
+            or temperature <= 0
+            or temperature > 100
+            or top_k < 0
+            or not math.isfinite(top_p)
+            or not 0 < top_p <= 1
+            or not 0 <= seed <= 2**64 - 1
+        ):
+            raise ValueError("invalid_sampling_parameters")
+
+
+def sampling_options(args: argparse.Namespace) -> dict:
+    if getattr(args, "sampling", "greedy") == "greedy":
+        return {"mode": "greedy"}
+    options = {
+        "mode": "stochastic",
+        "temperature": getattr(args, "temperature", 1.0),
+        "top_p": getattr(args, "top_p", 0.95),
+    }
+    top_k = getattr(args, "top_k", 20)
+    if top_k:
+        options["top_k"] = top_k
+    return options
 
 
 def run(args: argparse.Namespace, worker_factory=Worker) -> dict:
@@ -52,8 +82,9 @@ def run(args: argparse.Namespace, worker_factory=Worker) -> dict:
         raise ValueError("corpus_empty")
 
     report = {
-        "schema_version": 1,
-        "scope": "serialized_native_text_greedy_fixed_context",
+        "schema_version": 2,
+        "scope": "serialized_native_text_fixed_context",
+        "sampling": sampling_options(args),
         "worker_sha256": sha256_file(args.worker),
         "configuration_sha256": sha256_file(args.model / "config.json"),
         "source_receipt_sha256": sha256_file(args.model / "native-source.json"),
@@ -64,6 +95,8 @@ def run(args: argparse.Namespace, worker_factory=Worker) -> dict:
         "replay_count": args.replays,
         "replays": [],
     }
+    if report["sampling"]["mode"] == "stochastic":
+        report["seed"] = getattr(args, "seed", 42)
     worker = worker_factory(args.worker.resolve(), args.model.resolve(), 3600)
     try:
         ready = worker.read()
@@ -98,7 +131,8 @@ def run(args: argparse.Namespace, worker_factory=Worker) -> dict:
                     "input_token_ids": ids,
                     "context_tokens": args.input_tokens + args.tokens,
                     "max_new_tokens": args.tokens,
-                    "sampling": {"mode": "greedy"},
+                    "sampling": report["sampling"],
+                    **({"seed": report["seed"]} if "seed" in report else {}),
                     "request_id": replay + 1,
                 }
             )
@@ -200,6 +234,15 @@ def main(argv=None) -> int:
     parser.add_argument("--input-tokens", type=int, default=4096)
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--replays", type=int, choices=(3, 5), default=5)
+    parser.add_argument(
+        "--sampling", choices=("greedy", "stochastic"), default="greedy"
+    )
+    parser.add_argument("--temperature", type=float, default=1.0)
+    parser.add_argument(
+        "--top-k", type=int, default=20, help="Zero disables top-k filtering."
+    )
+    parser.add_argument("--top-p", type=float, default=0.95)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
     try:
         report = run(args)
