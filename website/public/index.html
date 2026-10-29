@@ -27,7 +27,7 @@
   <header class="site-header">
     <a class="wordmark" href="#" aria-label="Stark home">STARK<span>ENGINE / APPLE SILICON</span></a>
     <nav aria-label="Main navigation">
-      <a href="#start">Get started</a><a href="#benchmarks">Benchmarks</a><a href="#engine">For developers</a>
+      <a href="#start">Get started</a><a href="#models">Models</a><a href="#benchmarks">Benchmarks</a><a href="#engine">For developers</a>
       <a class="repo-link" href="https://github.com/jshahbazi/stark">GitHub <span aria-hidden="true">↗</span></a>
     </nav>
   </header>
@@ -83,8 +83,8 @@ open "$HOME/Applications/Stark.app"</code></pre>
         <p class="install-check">After the terminal install, <code>stark doctor</code> should report <code>Installation checks passed. No model was loaded.</code> Add the PATH line to <code>~/.zprofile</code> for future terminals.</p>
       </div>
       <ol class="start-steps">
-        <li><span>01</span><div><h3>Choose a model.</h3><p>Check the converter guide for available families and verified checkpoints, including selected Qwen3, Qwen3.5, Llama, Gemma, SmolLM3 and LFM2 models. Runtime verification applies to exact checkpoints and formats.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md#catalog-coverage-and-qualification">Model compatibility <span aria-hidden="true">↗</span></a></div></li>
-        <li><span>02</span><div><h3>Install your model.</h3><p>Click the cat in your menu bar, choose <strong>Install Model</strong> and select a compatible local folder or Hugging Face repository. For terminal use, run <code>stark convert</code>; the Convert tab below shows an example.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md">Converter guide <span aria-hidden="true">↗</span></a></div></li>
+        <li><span>01</span><div><h3>Choose a model.</h3><p>Browse text, image and Decision models, including JevK5, Qwen, Llama and named fine-tunes. Compatibility and validation depend on the exact checkpoint and format.</p><a href="#models">Explore supported models <span aria-hidden="true">↓</span></a></div></li>
+        <li><span>02</span><div><h3>Install your model.</h3><p>Click the cat in your menu bar, choose <strong>Manage Models</strong> and use <strong>Model Catalog</strong> or <strong>Add from Source</strong>. For terminal use, run <code>stark convert</code>; the Convert tab below shows an example.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md">Converter guide <span aria-hidden="true">↗</span></a></div></li>
         <li><span>03</span><div><h3>Start chatting.</h3><p>Select your model and choose <strong>Run</strong> in the app. In Terminal, use <code>stark chat --model-path /path/to/converted-model</code>. Use <code>/reset</code> for a new conversation and <code>/exit</code> to quit.</p><a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#interactive-cli-chat">Terminal chat guide <span aria-hidden="true">↗</span></a></div></li>
       </ol>
       <section class="api-connect" id="connect" aria-labelledby="connect-title">
@@ -97,16 +97,64 @@ open "$HOME/Applications/Stark.app"</code></pre>
           <li><span aria-hidden="true">03</span><div><p>Look for <strong>OpenAI-compatible</strong> or <strong>Custom OpenAI</strong> in your client's provider settings, then paste the connection details.</p></div></li>
         </ol>
         <p>Keep Stark open while you use it. The API listens only on this Mac and issues a new in-memory key each launch. After reopening Stark, update the key and check the URL; it prefers port 8000 and uses another port if occupied.</p>
-        <p class="api-compatibility">Text chat and streaming only. Direct browser or webview requests and remote connections are unsupported, along with tool calls, embeddings, images, structured output and the Responses API.</p>
+        <p class="api-compatibility">Chat and streaming, with one PNG/JPEG for an enabled <a href="#image-models">Qwen3.5 vision model</a>. Direct browser or webview requests and remote connections are unsupported, along with tool calls, embeddings, structured output and the Responses API.</p>
         <p>Requests default to 512 output tokens, or the worker's lower limit, and temperature 0 for greedy sampling. Adjust supported generation settings in your client. Other options may be rejected; check the API limits if a request fails.</p>
         <p><a href="https://github.com/jshahbazi/stark/blob/78d40c122832b1ce03ef86a7440d0585f0a50195/docs/LOCAL_API.md">Client results and API limits <span aria-hidden="true">↗</span></a></p>
       </section>
     </section>
 
+    <section class="models-section section-pad" id="models" aria-labelledby="models-title">
+      <div class="wrap">
+        <div class="models-heading"><div><p class="eyebrow">02 / MODEL DIRECTORY</p><h2 id="models-title">Find your model.<br>Choose your task.</h2></div><p>Chat, work with an image, or score a decision. Explore the models Stark implements, including the fine-tunes you know by name.</p></div>
+        <nav class="model-jumps" aria-label="Model categories"><a href="#decision-models">Decision</a><a href="#text-models">Text</a><a href="#image-models">Images</a><a href="#native-models">Native formats</a><a href="#classifier-models">Classifiers</a></nav>
+        <div class="model-feature-grid">
+          <article class="decision-card" id="decision-models" aria-labelledby="decision-title">
+            <p class="eyebrow">DECISION MODELS</p><div class="model-title-line"><h3 id="decision-title">JevK5</h3><span class="model-badge">BF16 · 4B</span></div>
+            <p class="model-lead">Put a probability behind each choice.</p><p>Use JevK5 for candidate probability scoring and Stark's Decision workflow. Enter context, a question and answer choices in Playground.</p>
+            <p class="model-source">alibiserikbay/JevK5</p>
+            <div class="model-evidence"><strong>243 recorded scoring cases</strong><span>Exact parity on the recorded checkpoint and build. Accuracy and calibration require separate evaluation.</span></div>
+            <p class="model-card-note">Qwen3.5-4B architecture · recorded artifact is text-only. Other compatible language models can score decisions with a direct-answer template, distinct single-token labels and checkpoint checks.</p>
+            <a href="https://github.com/jshahbazi/stark/blob/main/docs/validation/SCORING_PARITY.md">Scoring evidence <span aria-hidden="true">↗</span></a>
+          </article>
+          <article class="image-card" id="image-models" aria-labelledby="images-title">
+            <p class="eyebrow">IMAGE MODELS</p><div class="model-title-line"><h3 id="images-title">Qwen3.5</h3><span class="model-badge">DENSE BF16</span></div>
+            <p class="model-lead">Bring an image into the conversation.</p><p>One PNG or JPEG in Playground, terminal chat or the Local API. Compatible complete models and merged fine-tunes need a full vision artifact and passing local image checks.</p>
+            <ul class="model-sizes" aria-label="Qwen3.5 sizes covered by configuration fixtures"><li>0.8B</li><li>2B</li><li>4B</li><li>9B</li><li>27B</li></ul>
+            <p class="model-card-note">Sizes above are covered by configuration fixtures. The 0.8B artifact has recorded reference parity and image execution evidence; other sizes need their own runtime checks.</p>
+            <p class="model-card-note">Other families, the recorded JevK5 artifact, MoE and quantized vision weights have no image support. Convert with <code>--artifact-mode vision-language</code>; default conversion is text-only.</p>
+            <a href="https://github.com/jshahbazi/stark/blob/main/docs/VISION_FAMILY_CONTRACT.md">Image compatibility <span aria-hidden="true">↗</span></a>
+          </article>
+        </div>
+        <div class="text-models" id="text-models">
+          <div class="model-category-heading"><div><p class="eyebrow">TEXT MODELS</p><h3>Familiar names. Local execution.</h3></div><p>Open a family for checkpoint names and sizes.</p></div>
+          <div class="model-family-grid" id="model-family-list">
+            <details class="model-family"><summary><span><strong>Qwen3 dense</strong><span>Polaris-4B-Preview</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}</code>, <code>Qwen/Qwen3-4B-Instruct-2507</code>, <code>Qwen/Qwen3-4B-Thinking-2507</code>, <strong>Polaris-4B-Preview</strong> (<code>POLARIS-Project/Polaris-4B-Preview</code>)</div></details>
+            <details class="model-family"><summary><span><strong>Qwen2 dense</strong><span>Qwen2.5-Coder, DeepSeek-R1-Distill-Qwen-1.5B</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><strong>Qwen2.5-Coder</strong> (<code>Qwen/Qwen2.5-Coder-{0.5B,1.5B,3B,7B,14B,32B}-Instruct</code>), <strong>DeepSeek-R1-Distill-Qwen-1.5B</strong> (<code>deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B</code>)</div></details>
+            <details class="model-family"><summary><span><strong>Qwen3.5 dense</strong><span>Qwen3.8-4B-Distill, JevK5</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>Qwen/Qwen3.5-{0.8B,2B,4B,9B,27B}</code>, <strong>Qwen3.8-4B-Distill</strong> (<code>empero-ai/Qwen3.8-4B-Distill</code>), <strong>JevK5</strong> (<a href="#decision-models">Decision model</a>)</div></details>
+            <details class="model-family"><summary><span><strong>Llama dense</strong><span>SmolLM2, Nanbeige4.1, Reka Flash 3.1</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>meta-llama/Llama-3.1-8B-Instruct</code>, <code>meta-llama/Llama-3.2-{1B,3B}-Instruct</code>, <code>unsloth/Llama-3.2-1B-Instruct</code>, <strong>SmolLM2</strong> (<code>HuggingFaceTB/SmolLM2-1.7B-Instruct</code>), <strong>Nanbeige4.1</strong> (<code>Nanbeige/Nanbeige4.1-3B</code>), <strong>Reka Flash 3.1</strong> (<code>RekaAI/reka-flash-3.1</code>)</div></details>
+            <details class="model-family"><summary><span><strong>Mistral dense</strong><span>Mistral 7B Instruct, Codestral, Devstral Small</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><strong>Mistral 7B Instruct</strong> (<code>mistralai/Mistral-7B-Instruct-{v0.2,v0.3}</code>), <strong>Codestral</strong> (<code>mistralai/Codestral-22B-v0.1</code>), <strong>Devstral Small</strong> (<code>mistralai/Devstral-Small-2505</code>)</div></details>
+            <details class="model-family"><summary><span><strong>Gemma 2</strong><span>Gemma 2 2B Instruct</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>google/gemma-2-2b-it</code></div></details>
+            <details class="model-family"><summary><span><strong>Gemma 3 text</strong><span>FunctionGemma, rnj-1</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>google/gemma-3-1b-it</code>, <strong>FunctionGemma</strong> (<code>google/functiongemma-270m-it</code>), <strong>rnj-1</strong> (<code>EssentialAI/rnj-1-instruct</code>)</div></details>
+            <details class="model-family"><summary><span><strong>Phi-3 layout</strong><span>Phi-4-mini-instruct</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><strong>Phi-4-mini-instruct</strong> (<code>microsoft/Phi-4-mini-instruct</code>); supported tied-embedding layout with LongRoPE</div></details>
+            <details class="model-family"><summary><span><strong>Granite dense</strong><span>Granite 3.1 &amp; 3.3 · 2B / 8B</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>ibm-granite/granite-{3.1,3.3}-{2b,8b}-instruct</code></div></details>
+            <details class="model-family"><summary><span><strong>SmolLM3</strong><span>SmolLM3 3B</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>HuggingFaceTB/SmolLM3-3B</code></div></details>
+            <details class="model-family"><summary><span><strong>LFM2</strong><span>350M / 700M / 1.2B / 2.6B</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>LiquidAI/LFM2-{350M,700M,1.2B,2.6B}</code></div></details>
+            <details class="model-family"><summary><span><strong>LLaMBA / Mamba2</strong><span>Llamba 1B · floating &amp; MLX 4-bit</span></span><span class="family-toggle" aria-hidden="true">+</span></summary><div class="family-checkpoints"><code>cartesia-ai/Llamba-1B</code>, <code>cartesia-ai/Llamba-1B-4bit-mlx</code></div></details>
+          </div>
+          <p class="model-format-note">Supported floating Safetensors layouts convert to native BF16. Existing MLX affine 4/8-bit exports are supported for Qwen3, Qwen3.5, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, within each adapter's layout and group-size limits. Braces in checkpoint names indicate size or version choices. Compatible complete checkpoints and merged fine-tunes can also use generic conversion.</p>
+        </div>
+        <div class="model-secondary-grid">
+          <article id="native-models"><p class="eyebrow">NATIVE ORIGINAL FORMATS</p><h3>GLM, Qwen Next &amp; Flint</h3><p>Separate Rust/Metal paths read these prepared quantized checkpoints directly. Text input only.</p><ul class="native-model-list"><li><strong>GLM-5.3-Flash</strong><span>unsloth/GLM-5.3-Flash-GGUF · UD-Q2_K_XL</span></li><li><strong>Qwen3.8-Flash-Next</strong><span>pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit</span><span>fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl</span></li><li><strong>Recursive Flint</strong><span>RecursiveSI/flint-int4</span></li></ul><a href="https://github.com/jshahbazi/stark/blob/main/docs/NATIVE_HYBRID_MODELS.md">Pinned preparation guide <span aria-hidden="true">↗</span></a></article>
+          <article id="classifier-models"><p class="eyebrow">CLASSIFIER CONVERSION</p><h3>ModernBERT</h3><p>Conversion for classifier artifacts. The app has no ModernBERT chat, Decision or image workflow.</p><ul class="native-model-list"><li><strong>Chat moderation router</strong><span>trymirai/chat-moderation-router</span></li><li><strong>Health-related router</strong><span>trymirai/health-related-router</span></li></ul><p class="model-card-note">Both source repositories are recorded as inaccessible in the converter guide.</p><a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md#catalog-coverage-and-qualification">Converter coverage <span aria-hidden="true">↗</span></a></article>
+        </div>
+        <p class="model-qualification">Family support describes implemented paths. Each checkpoint needs compatible metadata, tensors and a successful native load. Quality, throughput and Decision calibration need separate validation. This directory describes the source tree; installed releases may include fewer families.</p>
+      </div>
+    </section>
+
     <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
       <div id="bench-engines" aria-hidden="true"></div>
       <div class="wrap">
-        <div class="benchmark-heading"><div><p class="eyebrow">02 / BENCHMARKS</p><h2 id="benchmark-title">Measured on<br>Apple silicon.</h2></div><p><strong>Stark led all six Qwen3.5-2B workloads in this run.</strong> Across five engines on an M5 Max, Stark recorded 12.2% higher aggregate throughput than MLX-LM.</p></div>
+        <div class="benchmark-heading"><div><p class="eyebrow">03 / BENCHMARKS</p><h2 id="benchmark-title">Measured on<br>Apple silicon.</h2></div><p><strong>Stark led all six Qwen3.5-2B workloads in this run.</strong> Across five engines on an M5 Max, Stark recorded 12.2% higher aggregate throughput than MLX-LM.</p></div>
         <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>QWEN3.5-2B / 4-BIT</span><span>ONE REQUEST AT A TIME</span></div>
         <div class="chart-toolbar benchmark-controls">
           <label class="workload-control" for="benchmark-workload">Workload<select id="benchmark-workload"><option value="0">Overall · six workloads</option><option value="1">Fibonacci module</option><option value="2">GPU explanation</option><option value="3">Copy editing</option><option value="4">Medium context</option><option value="5">Long context</option><option value="6">Long output</option></select></label>
@@ -122,7 +170,7 @@ open "$HOME/Applications/Stark.app"</code></pre>
     </section>
 
     <section class="engine-section wrap section-pad" id="engine" aria-labelledby="engine-title">
-      <div class="section-heading"><p class="eyebrow">03 / FOR DEVELOPERS</p><h2 id="engine-title">Integrate Stark.</h2><p>Use the menu bar app's local <a href="#connect">OpenAI-style text-chat API</a>, or start generation and scoring workers from your application. Workers exchange JSON-lines requests and replies over private stdin/stdout pipes.</p></div>
+      <div class="section-heading"><p class="eyebrow">04 / FOR DEVELOPERS</p><h2 id="engine-title">Integrate Stark.</h2><p>Use the menu bar app's local <a href="#connect">OpenAI-style text-chat API</a>, or start generation and scoring workers from your application. Workers exchange JSON-lines requests and replies over private stdin/stdout pipes.</p></div>
       <p class="engine-provenance">Derived from Uzu, Stark adds direct scoring APIs, Rust/Metal optimizations and a streaming model converter. Direct worker integrations control their own chat templates, tools and interface; no Stark SDK packages are published. <a href="https://github.com/jshahbazi/stark/blob/main/README.md">Read the project overview</a>.</p>
       <div class="engine-grid">
         <div class="capabilities">

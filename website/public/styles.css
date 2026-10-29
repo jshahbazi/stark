@@ -176,6 +176,69 @@ code {
   padding-left:14px
 }
 
+.models-section {border-top:1px solid var(--line);background:#eaece2}
+.models-heading {display:grid;grid-template-columns:1.4fr 1fr;align-items:end;gap:64px}
+.models-heading h2 {margin-top:18px}
+.models-heading>p {max-width:390px;color:var(--muted);font-size:18px}
+.model-jumps {display:flex;flex-wrap:wrap;gap:8px;margin:36px 0 28px}
+.model-jumps a {border:1px solid #b9bdb1;border-radius:2px;padding:8px 16px;text-decoration:none;font-size:13px}
+.model-jumps a:hover {background:var(--ink);color:var(--paper)}
+.model-feature-grid {display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.model-feature-grid article {padding:36px;min-width:0}
+.decision-card {background:var(--night);color:var(--paper)}
+.decision-card>.eyebrow {color:var(--gold)}
+.image-card {background:#f7f6ef;border:1px solid #cbd0bf}
+.model-title-line {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;margin:22px 0 20px}
+.model-title-line h3 {font-size:46px}
+.model-badge {font:10px/1.5 var(--mono);letter-spacing:.06em;border:1px solid currentColor;padding:5px 8px}
+.model-feature-grid .model-lead {font-size:21px;line-height:1.3;margin-bottom:14px}
+.model-feature-grid p:not(.eyebrow) {margin-bottom:18px}
+.model-feature-grid article>a,.model-secondary-grid article>a {display:inline-block;font-size:13px;margin-top:8px}
+.model-source {font:12px/1.7 var(--mono);color:var(--gold);overflow-wrap:anywhere}
+.model-evidence {border-block:1px solid #494e43;padding:19px 0;margin:24px 0}
+.model-evidence strong {display:block;font-size:18px;color:var(--gold);margin-bottom:7px}
+.model-evidence span,.model-card-note {font-size:13px;line-height:1.65}
+.decision-card .model-card-note,.model-evidence span {color:#c3c8bb}
+.model-sizes {display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:24px 0;padding:0}
+.model-sizes li {font:13px/1.5 var(--mono);padding:8px 12px;background:#e5e8da}
+.model-category-heading {display:flex;justify-content:space-between;align-items:end;gap:24px;margin:52px 0 24px}
+.model-category-heading h3 {margin-top:12px;font-size:30px}
+.model-category-heading>p {color:var(--muted);font-size:13px}
+.model-family-grid {display:grid;grid-template-columns:1fr 1fr;gap:0 28px;align-items:start}
+.model-family {border-top:1px solid #bdc4b2;min-width:0}
+.model-family summary {list-style:none;cursor:pointer;display:flex;justify-content:space-between;gap:16px;padding:22px 0}
+.model-family summary::-webkit-details-marker {display:none}
+.model-family summary strong {display:block;font-size:19px;font-weight:550;line-height:1.3}
+.model-family summary span span {display:block;font-size:12px;color:var(--muted);margin-top:6px}
+.family-toggle {font-size:23px;line-height:1.2;color:var(--muted)}
+.model-family[open] .family-toggle {transform:rotate(45deg)}
+.family-checkpoints {font-size:14px;line-height:1.9;padding:0 20px 24px 0;overflow-wrap:anywhere}
+.model-format-note,.model-qualification {font-size:13px;color:var(--muted);line-height:1.8;margin-top:24px}
+.model-secondary-grid {display:grid;grid-template-columns:1.2fr 1fr;gap:48px;border-top:1px solid #bdc4b2;margin-top:40px;padding-top:36px}
+.model-secondary-grid article {min-width:0}
+.model-secondary-grid h3 {margin:14px 0 18px;font-size:28px}
+.model-secondary-grid article>p:not(.eyebrow) {font-size:14px;max-width:460px}
+.native-model-list {padding:0;margin:24px 0;list-style:none}
+.native-model-list li {margin-bottom:18px}
+.native-model-list strong {display:block;font-size:15px;font-weight:550;margin-bottom:4px}
+.native-model-list span {display:block;font:11px/1.8 var(--mono);color:var(--muted);overflow-wrap:anywhere}
+.model-qualification {border-top:1px solid #bdc4b2;padding-top:22px;margin-top:36px}
+@media(max-width:800px) {
+  .models-heading {grid-template-columns:1fr;gap:24px}
+  .models-heading>p {max-width:560px}
+  .model-feature-grid article {padding:26px}
+  .model-title-line h3 {font-size:38px}
+  .model-category-heading {display:block}
+  .model-category-heading>p {margin-top:15px}
+  .site-header nav {flex-wrap:wrap;justify-content:flex-end}
+}
+@media(max-width:560px) {
+  .model-feature-grid,.model-family-grid,.model-secondary-grid {grid-template-columns:1fr}
+  .model-secondary-grid {gap:32px}
+  .model-title-line h3 {font-size:40px}
+  .model-jumps a {padding:7px 12px}
+}
+
 .hero {
   display:grid;
   grid-template-columns:1.2fr .9fr;
