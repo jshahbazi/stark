@@ -258,6 +258,8 @@ impl GenerationBackend for HybridBackend {
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
+            .map_err(|_| "inference_activity_unavailable")?;
         if self.profile_output.is_some() {
             profile::reset();
         }
@@ -382,6 +384,11 @@ fn sampling_indices(
     if k == logits.len() {
         return Ok(radix_sampling_indices(logits));
     }
+    if k <= 64
+        && let Some(indices) = bounded_sampling_indices(logits, k)
+    {
+        return Ok(indices);
+    }
     let _scope = profile::Scope::new("sample.select.partial");
     let compare = |&a: &usize, &b: &usize| logits[b].total_cmp(&logits[a]).then_with(|| a.cmp(&b));
     let mut indices: Vec<usize> = (0..logits.len()).collect();
@@ -389,6 +396,36 @@ fn sampling_indices(
     indices.truncate(k);
     indices.sort_unstable_by(compare);
     Ok(indices)
+}
+
+/// Keep the small candidate prefix in order while scanning contiguous logits.
+/// New IDs are always greater than existing IDs, so equal keys cannot displace
+/// the last candidate. A bounded replacement budget retains linear selection
+/// for adversarial input orders that repeatedly replace the complete prefix.
+fn bounded_sampling_indices(
+    logits: &[f32],
+    k: usize,
+) -> Option<Vec<usize>> {
+    let _scope = profile::Scope::new("sample.select.bounded");
+    let mut indices: Vec<usize> = (0..k).collect();
+    indices.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]).then_with(|| a.cmp(&b)));
+    let mut worst_key = descending_sample_key(logits[indices[k - 1]]);
+    let mut replacements = 0;
+    for index in k..logits.len() {
+        let key = descending_sample_key(logits[index]);
+        if key >= worst_key {
+            continue;
+        }
+        replacements += 1;
+        if replacements > 1_024 {
+            return None;
+        }
+        let position = indices.partition_point(|&candidate| descending_sample_key(logits[candidate]) <= key);
+        indices.copy_within(position..k - 1, position + 1);
+        indices[position] = index;
+        worst_key = descending_sample_key(logits[indices[k - 1]]);
+    }
+    Some(indices)
 }
 
 /// An ascending integer key for descending F32 `total_cmp` order. Negative
@@ -401,36 +438,48 @@ fn descending_sample_key(value: f32) -> u32 {
     !(bits ^ mask)
 }
 
-/// Four stable byte passes preserve ascending input IDs for equal logit keys.
-/// Only indices move; logits, F64 probability arithmetic and RNG stay intact.
+/// Three stable 11-bit passes preserve ascending input IDs for equal logit
+/// keys. Packing keys with IDs avoids random logit gathers on later passes.
+/// Logits, F64 probability arithmetic and RNG stay intact.
 fn radix_sampling_indices(logits: &[f32]) -> Vec<usize> {
     let _scope = profile::Scope::new("sample.select.radix");
-    let mut histograms = [[0_usize; 256]; 4];
-    for &logit in logits {
-        let key = descending_sample_key(logit);
-        for (pass, histogram) in histograms.iter_mut().enumerate() {
-            histogram[((key >> (pass * 8)) & 0xff) as usize] += 1;
-        }
+    // Model token IDs are u32. Keep the selector's prior usize contract for
+    // callers with a larger slice, even though such IDs cannot be sampled.
+    if logits.len() > u32::MAX as usize {
+        let mut indices: Vec<usize> = (0..logits.len()).collect();
+        indices.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]).then_with(|| a.cmp(&b)));
+        return indices;
     }
-    let mut indices: Vec<usize> = (0..logits.len()).collect();
+    let mut histograms = [[0_usize; 2_048]; 3];
+    let mut entries: Vec<u64> = logits
+        .iter()
+        .enumerate()
+        .map(|(index, &logit)| {
+            let key = descending_sample_key(logit);
+            for (pass, histogram) in histograms.iter_mut().enumerate() {
+                histogram[((key >> (pass * 11)) & 0x7ff) as usize] += 1;
+            }
+            (u64::from(key) << 32) | index as u64
+        })
+        .collect();
     let mut scratch = vec![0; logits.len()];
     for (pass, histogram) in histograms.iter().enumerate() {
-        let mut offsets = [0_usize; 256];
+        let mut offsets = [0_usize; 2_048];
         let mut end = 0;
         for (offset, &count) in offsets.iter_mut().zip(histogram) {
             *offset = end;
             end += count;
         }
         debug_assert_eq!(end, logits.len());
-        for &index in &indices {
-            let digit = ((descending_sample_key(logits[index]) >> (pass * 8)) & 0xff) as usize;
+        for &entry in &entries {
+            let digit = ((entry >> (32 + pass * 11)) & 0x7ff) as usize;
             let destination = &mut offsets[digit];
-            scratch[*destination] = index;
+            scratch[*destination] = entry;
             *destination += 1;
         }
-        std::mem::swap(&mut indices, &mut scratch);
+        std::mem::swap(&mut entries, &mut scratch);
     }
-    indices
+    entries.into_iter().map(|entry| entry as u32 as usize).collect()
 }
 
 #[cfg(test)]
@@ -762,6 +811,37 @@ mod tests {
         let sorted = math::topk(&logits, logits.len()).unwrap();
         for k in [1, 20, 64, 1_024] {
             assert!(sampling_indices(&logits, Some(k as u32)).unwrap().as_slice() == &sorted[..k]);
+        }
+    }
+
+    #[test]
+    fn bounded_selection_preserves_adversarial_orders_and_fallback_boundary() {
+        for k in 1..=64 {
+            for replacements in [1_023, 1_024, 1_025, 1_026] {
+                let count = k + replacements;
+                let ascending: Vec<f32> = (0..count).map(|index| index as f32).collect();
+                assert!(
+                    bounded_sampling_indices(&ascending, k).is_some() == (replacements <= 1_024),
+                    "bounded replacement budget changed"
+                );
+                let descending: Vec<f32> = ascending.iter().rev().copied().collect();
+                let signed_zero: Vec<f32> = (0..count)
+                    .map(|index| {
+                        if index.is_multiple_of(2) {
+                            -0.0
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                for logits in [&ascending, &descending, &signed_zero] {
+                    let expected = math::topk(logits, k).unwrap();
+                    assert!(
+                        sampling_indices(logits, Some(k as u32)).unwrap() == expected,
+                        "bounded or fallback candidate order changed"
+                    );
+                }
+            }
         }
     }
 

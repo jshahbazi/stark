@@ -135,8 +135,10 @@ The future pass remains unsubmitted until the actual selected input token is
 validated and staged. Early stops drain at most one submitted ordinary step
 before state reset; cleanup never invokes the sampler or consumes randomness.
 Completion feedback errors fence the request before a successful result can be
-returned. Bounded top-k sampling selects and sorts only the required prefix;
-full-vocabulary sampling uses stable radix ordering. Both preserve the existing
+returned. Top-k up to 64 uses a sorted prefix while scanning contiguous logits,
+falling back to partition selection after 1,024 replacements. Larger bounded
+top-k uses partition selection. Full-vocabulary sampling uses three stable
+11-bit radix passes over packed F32 keys and IDs. These preserve the existing
 F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
 HC decode computes the scaled BF16 activation once in the down kernel and
 reuses it in an up/mix kernel retaining the original single-row dot order.
@@ -147,6 +149,10 @@ separate dispatches. The recurrent kernel keeps its BF16-rounded output local
 before the F32 norm reduction. The [kernel study](benchmarks/QWEN38_KERNELS_2026_10_29.md)
 records matching references, rejected trials and sampled benchmarks.
 Every request resets logical state. GPU execution failures require model reload.
+Hybrid generation and scoring hold a macOS user-initiated, latency-critical
+process activity through request execution and GPU cleanup, then release it
+between requests. This expresses the request's activity lifetime; it does not
+reserve GPU resources or establish a fixed clock or throughput.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and executes neither MTP nor vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
@@ -275,6 +281,13 @@ STARK_QWEN38_PROFILE_OUTPUT="$PWD/runtime/qwen38-profile/stages.jsonl" uv run --
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
 benchmark study records the separate pinned corpus used for its exact workload.
+Pass `--host-metrics` to attach optional CPU, GPU-client, VM and thermal
+aggregates for each replay. Only monitoring intervals completely inside a
+request contribute; coverage, boundary exclusions, source availability and
+counter discontinuities are reported. Process names and IDs remain in memory;
+reports contain fixed buckets. GPU-client counter units are unverified and
+their raw deltas do not measure GPU clocks or prove exclusive access. This
+monitor adds host work, so record its use in comparisons.
 
 The F32 graph's prefill processes tokens sequentially and projects vocabulary logits only for
 the final input token. Performance must be measured on the exact checkpoint and
@@ -286,6 +299,8 @@ records the later F32 improvements, Lily-format qualification and 4K throughput.
 The [sampled-generation study](benchmarks/QWEN38_SAMPLED_BF16_2026_10_28.md)
 records the subsequent sampler, scheduling and BF16 profiling work at fixed
 quantization.
+The [desktop stability study](benchmarks/QWEN38_STABILITY_2026_10_29.md) records
+later exact selector improvements, scheduling controls and concurrent GPU work.
 The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
 and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
 record the remaining graph, kernel and prefill opportunities with source and
