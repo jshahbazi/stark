@@ -301,6 +301,9 @@ records the subsequent sampler, scheduling and BF16 profiling work at fixed
 quantization.
 The [desktop stability study](benchmarks/QWEN38_STABILITY_2026_10_29.md) records
 later exact selector improvements, scheduling controls and concurrent GPU work.
+The [AC power-mode control](benchmarks/QWEN38_POWER_MODES_2026_10_29.md) records
+the subsequent temporary High Power test and restoration. Stark does not change
+the host's power preferences.
 The [Qwen research review](archive/runs/2026-10-28-qwen38-performance-literature-review.md)
 and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-review.md)
 record the remaining graph, kernel and prefill opportunities with source and

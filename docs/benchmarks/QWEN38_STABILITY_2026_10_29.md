@@ -244,8 +244,10 @@ to investigate separately: competing work and sustained frequency changes.
 The long-run analysis SHA-256 is
 `61c4a49bedb255b13f995a691185388a8b26e3d077adba684fd8d54a95ec95de`.
 
-macOS AC and battery Energy Mode both read Automatic after this run. High Power
-mode has not been tested; no result for that mode is claimed.
+macOS AC and battery Energy Mode both read Automatic after this run. At this
+stage High Power had not been tested; this run claims no result for that mode.
+The subsequent [power-mode control](QWEN38_POWER_MODES_2026_10_29.md) records a
+separate Automatic/High-selected/Automatic experiment on the retained worker.
 
 ## Validation and remaining work
 

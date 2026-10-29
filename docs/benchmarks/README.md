@@ -44,6 +44,13 @@ concurrent GPU work. These controls do not establish consistent 77–80 tok/s
 during normal desktop multitasking. Earlier kernel and throughput records
 remain source-bound historical evidence.
 
+**Qwen3.8 AC power-mode control (2026-10-29).** The same worker measures 72.88,
+66.79 and 65.41 pooled top-k 20 tok/s across sequential Automatic, High Power
+selected, and restored Automatic phases. Desktop GPU load and clocks vary
+materially, so the [power-mode study](QWEN38_POWER_MODES_2026_10_29.md) does not
+isolate a causal mode effect. All 60 outputs match their references, the
+77–80 tok/s target remains unmet, and the original preferences are restored.
+
 ## Engine comparison history
 
 | Study | Date | Status |
@@ -60,6 +67,7 @@ remain source-bound historical evidence.
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen AC power-mode control](QWEN38_POWER_MODES_2026_10_29.md) | Same inference build; 60 exact requests; selected High Power does not recover the target in this window; original settings restored |
 | [Qwen desktop throughput stability](QWEN38_STABILITY_2026_10_29.md) | Current sampler and host diagnostics; exact selector gains; normal-desktop 77–80 tok/s acceptance not established |
 | [Qwen HC and GDN kernels](QWEN38_KERNELS_2026_10_29.md) | Current kernels; exact references and component gains; same-loaded-model top-k observation +1.93%, nucleus unchanged; between-load throughput remains unstable |
 | [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Sampler/scheduling baseline at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
