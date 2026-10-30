@@ -1642,6 +1642,39 @@ code {
   .engine-table small { max-width:145px; font-size:9px }
 }
 
+/* Separate Qwen3.8 decode-phase study */
+.qwen38-section { padding-bottom:85px; scroll-margin-top:30px }
+.qwen38-study { border-top:1px solid #4b5546; padding-top:44px }
+.qwen38-study>.eyebrow { color:var(--gold); margin-bottom:18px }
+.qwen38-study h2 { font-size:clamp(25px,4vw,38px); line-height:1.2; overflow-wrap:anywhere }
+.qwen38-intro { max-width:740px; color:#bec7b5; font-size:16px; line-height:1.7; margin-top:18px }
+.qwen38-intro strong { color:var(--gold); font-weight:500 }
+.qwen38-study .benchmark-specs { margin-top:25px }
+.qwen38-table { min-width:330px }
+.qwen38-table th:first-child { width:42% }
+.qwen38-table th:nth-child(2) { width:29% }
+.qwen38-table th:last-child { width:29% }
+.qwen38-table td:last-child { padding-right:0; text-align:right; white-space:nowrap }
+.qwen38-table small { line-height:1.6 }
+.qwen38-table .bar { height:6px }
+.qwen38-conditions { max-width:960px; font-size:12px }
+.qwen38-conditions strong { color:#d9dfd0; font-weight:500 }
+.qwen38-precision { max-width:960px; border-left:2px solid var(--gold); padding-left:18px; margin-top:22px; color:#bec7b5; font-size:12px; line-height:1.8 }
+.qwen38-precision strong { color:var(--gold); font-weight:500 }
+.qwen38-method { border-top:0; padding-top:0; margin-top:26px }
+@media (max-width:600px) {
+  .qwen38-section { padding-bottom:55px }
+  .qwen38-study { padding-top:32px }
+  .qwen38-intro { font-size:14px }
+  .qwen38-table th,.qwen38-table td { padding-right:12px }
+  .qwen38-table thead th { font-size:9px; line-height:1.6 }
+  .qwen38-table thead span { font-size:8px }
+  .qwen38-table tbody th { font-size:12px }
+  .qwen38-table small { font-size:8px }
+  .qwen38-table td { font-size:12px }
+  .qwen38-conditions,.qwen38-precision { font-size:11px }
+}
+
 .not-found {
   padding-block:70px 130px;
   min-height:58vh
