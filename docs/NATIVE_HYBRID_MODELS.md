@@ -176,6 +176,9 @@ Native-source selection requires both `model_type=qwen4_exp` and
 `lily.format=qwen4_exp-affine-v1`. The typed `Qwen38LanguageModelConfig` route
 uses the same specialized runtime through its Uzu storage adapter. Other Qwen
 exports retain the F32 graph below.
+Converted group-major affine parameters are restored once at load time with
+an integer NEON transpose on AArch64 and byte-copy fallbacks. The operation
+preserves every BF16 encoding and does not change decode arithmetic.
 This backend uses BF16 activations, F32 reductions, logits and GDN recurrent
 state, and explicitly selected Q8 attention K/V caches. The q4-xl weights use
 Q4 GDN projections and Q8 attention, shared-expert, readout and embedding groups.
@@ -191,9 +194,14 @@ before state reset; cleanup never invokes the sampler or consumes randomness.
 Completion feedback errors fence the request before a successful result can be
 returned. Top-k up to 64 uses a sorted prefix while scanning contiguous logits,
 falling back to partition selection after 1,024 replacements. Larger bounded
-top-k uses partition selection. Full-vocabulary sampling uses three stable
+top-k uses partition selection. Eligible nucleus sampling first proves an exact
+Top64 stopping prefix using an outward-rounded bound on the reference total.
+Larger or uncertain nuclei use the complete ordering and reuse the same rounded
+probabilities. Full-vocabulary ordering uses three stable
 11-bit radix passes over packed F32 keys and IDs. These preserve the existing
 F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
+The proof, eligibility and fallback rules are in
+[native hybrid sampling](NUMERICAL_SAMPLING.md).
 For at least 65,536 candidates, a lazily created worker-owned pool computes
 independent F64 exponentials on at most four available CPUs. Probability sums,
 filtering and draws retain their serial order. Small lists and failed pool

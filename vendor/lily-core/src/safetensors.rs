@@ -186,25 +186,194 @@ impl Checkpoint {
             let mut physical = vec![0u8; (meta.end - meta.start) as usize];
             file.read_exact(&mut physical)
                 .with_context(|| format!("reading {name}"))?;
-            for group in 0..groups {
-                let padding =
-                    &physical[2 * (group * stride + rows)..2 * ((group + 1) * stride)];
-                ensure!(
-                    padding.iter().all(|&byte| byte == 0),
-                    "nonzero Uzu affine padding"
-                );
-                for row in 0..rows {
-                    let from = 2 * (group * stride + row);
-                    let to = 2 * (row * groups + group);
-                    buf[to..to + 2].copy_from_slice(&physical[from..from + 2]);
-                }
-            }
+            restore_group_output(&physical, buf, rows, groups, stride)?;
         } else {
             file.read_exact(buf).with_context(|| format!("reading {name}"))?;
         }
         Ok(())
     }
 }
+
+/// Restore canonical group-major affine parameters without interpreting their
+/// BF16 bits. NEON transposes 8x8 word tiles; byte tails/fallback retain all bits.
+fn restore_group_output(
+    physical: &[u8],
+    output: &mut [u8],
+    rows: usize,
+    groups: usize,
+    stride: usize,
+) -> Result<()> {
+    for group in 0..groups {
+        let padding =
+            &physical[2 * (group * stride + rows)..2 * ((group + 1) * stride)];
+        if padding.iter().any(|&byte| byte != 0) {
+            // Preserve original failure-side writes: only complete earlier
+            // groups were copied before this invalid padding was inspected.
+            for previous in 0..group {
+                for row in 0..rows {
+                    let from = 2 * (previous * stride + row);
+                    let to = 2 * (row * groups + previous);
+                    output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                }
+            }
+            anyhow::bail!("nonzero Uzu affine padding");
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if physical.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0
+        && output.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0
+        && std::arch::is_aarch64_feature_detected!("neon")
+    {
+        let row_blocks = rows / 8 * 8;
+        let group_blocks = groups / 8 * 8;
+        for start in (0..rows).step_by(64) {
+            let end = rows.min(start + 64);
+            let vector_end = end.min(row_blocks);
+            for group in (0..group_blocks).step_by(8) {
+                for row in (start..vector_end).step_by(8) {
+                    // Both strided 8x8 spans are checked before any vector
+                    // access; each load/store is exactly eight u16 values.
+                    ensure!(
+                        transpose_u16_tile_bounds(
+                            physical.len(),
+                            output.len(),
+                            row,
+                            group,
+                            groups,
+                            stride
+                        ),
+                        "invalid NEON transpose tile bounds"
+                    );
+                    let source = 2 * (group * stride + row);
+                    let destination = 2 * (row * groups + group);
+                    // SAFETY: alignment/CPU feature checked above; the helper
+                    // bounds include the final row/group and all eight lanes.
+                    unsafe {
+                        transpose_u16_8x8_neon(
+                            physical.as_ptr().add(source).cast(),
+                            output.as_mut_ptr().add(destination).cast(),
+                            stride,
+                            groups,
+                        );
+                    }
+                }
+                for g in group..group + 8 {
+                    for row in vector_end.max(start)..end {
+                        let from = 2 * (g * stride + row);
+                        let to = 2 * (row * groups + g);
+                        output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                    }
+                }
+            }
+            for group in group_blocks..groups {
+                for row in start..end {
+                    let from = 2 * (group * stride + row);
+                    let to = 2 * (row * groups + group);
+                    output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                }
+            }
+        }
+        return Ok(());
+    }
+    restore_group_output_blocked(physical, output, rows, groups, stride);
+    Ok(())
+}
+
+fn restore_group_output_blocked(
+    physical: &[u8],
+    output: &mut [u8],
+    rows: usize,
+    groups: usize,
+    stride: usize,
+) {
+    for start in (0..rows).step_by(64) {
+        let end = rows.min(start + 64);
+        for group in 0..groups {
+            for row in start..end {
+                let from = 2 * (group * stride + row);
+                let to = 2 * (row * groups + group);
+                output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn transpose_u16_tile_bounds(
+    source_bytes: usize,
+    dest_bytes: usize,
+    row: usize,
+    group: usize,
+    groups: usize,
+    stride: usize,
+) -> bool {
+    let Some(last_row) = row.checked_add(7) else { return false };
+    let Some(last_group) = group.checked_add(7) else { return false };
+    if last_row >= stride || last_group >= groups {
+        return false;
+    }
+    let end = |major: usize, pitch: usize, minor: usize| {
+        major
+            .checked_mul(pitch)
+            .and_then(|n| n.checked_add(minor))
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_mul(2))
+    };
+    end(last_group, stride, last_row).is_some_and(|end| end <= source_bytes)
+        && end(last_row, groups, last_group).is_some_and(|end| end <= dest_bytes)
+}
+
+/// Transpose eight contiguous source rows with independent source/dest
+/// strides. Caller must validate both 8x8 spans and u16 pointer alignment.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn transpose_u16_8x8_neon(
+    source: *const u16,
+    dest: *mut u16,
+    source_stride: usize,
+    dest_stride: usize,
+) {
+    use std::arch::aarch64::*;
+    // SAFETY: caller proved each of the eight loads/stores is in bounds and
+    // both bases have u16 alignment. NEON permits unaligned 16-byte vectors.
+    unsafe {
+        let a0 = vld1q_u16(source);
+        let a1 = vld1q_u16(source.add(source_stride));
+        let a2 = vld1q_u16(source.add(2 * source_stride));
+        let a3 = vld1q_u16(source.add(3 * source_stride));
+        let a4 = vld1q_u16(source.add(4 * source_stride));
+        let a5 = vld1q_u16(source.add(5 * source_stride));
+        let a6 = vld1q_u16(source.add(6 * source_stride));
+        let a7 = vld1q_u16(source.add(7 * source_stride));
+        let t0 = vreinterpretq_u32_u16(vtrn1q_u16(a0, a1));
+        let t1 = vreinterpretq_u32_u16(vtrn2q_u16(a0, a1));
+        let t2 = vreinterpretq_u32_u16(vtrn1q_u16(a2, a3));
+        let t3 = vreinterpretq_u32_u16(vtrn2q_u16(a2, a3));
+        let t4 = vreinterpretq_u32_u16(vtrn1q_u16(a4, a5));
+        let t5 = vreinterpretq_u32_u16(vtrn2q_u16(a4, a5));
+        let t6 = vreinterpretq_u32_u16(vtrn1q_u16(a6, a7));
+        let t7 = vreinterpretq_u32_u16(vtrn2q_u16(a6, a7));
+        let b0 = vreinterpretq_u64_u32(vtrn1q_u32(t0, t2));
+        let b1 = vreinterpretq_u64_u32(vtrn1q_u32(t1, t3));
+        let b2 = vreinterpretq_u64_u32(vtrn2q_u32(t0, t2));
+        let b3 = vreinterpretq_u64_u32(vtrn2q_u32(t1, t3));
+        let b4 = vreinterpretq_u64_u32(vtrn1q_u32(t4, t6));
+        let b5 = vreinterpretq_u64_u32(vtrn1q_u32(t5, t7));
+        let b6 = vreinterpretq_u64_u32(vtrn2q_u32(t4, t6));
+        let b7 = vreinterpretq_u64_u32(vtrn2q_u32(t5, t7));
+        vst1q_u16(dest, vreinterpretq_u16_u64(vtrn1q_u64(b0, b4)));
+        vst1q_u16(dest.add(dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b1, b5)));
+        vst1q_u16(dest.add(2 * dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b2, b6)));
+        vst1q_u16(dest.add(3 * dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b3, b7)));
+        vst1q_u16(dest.add(4 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b0, b4)));
+        vst1q_u16(dest.add(5 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b1, b5)));
+        vst1q_u16(dest.add(6 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b2, b6)));
+        vst1q_u16(dest.add(7 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b3, b7)));
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests;
 
 /// Asks the kernel not to keep this file's pages in the unified buffer cache
 /// (`F_NOCACHE`). Best effort; reads still work if it fails.
