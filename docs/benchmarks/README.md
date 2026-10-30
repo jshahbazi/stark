@@ -1,15 +1,23 @@
 # Benchmarks
 
-Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Raw protocols, result JSON and patches for the engine comparisons live under [archive/experiments](../archive/experiments/).
+Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
 ## Current result
 
-**Qwen3.8 fast path versus MLX-Serve (2026-10-30).** The completed quiet-desktop
-4K/256 sampled comparison measures 74.13 tok/s pooled decode for Stark and
-58.53 for MLX-Serve 26.10.3, with ten measured requests per engine. Comparable
-mixed-precision packs have different GDN and embedding widths. The
-[full report](QWEN38_STARK_MLX_SERVE_2026_10_30.md) preserves block drift,
-69.08–79.52 tok/s Stark variation, controls and checkpoint identities.
+**Qwen3.8, identical checkpoint, maximum sampled throughput (2026-10-30).**
+Stark peaks at **58.13 tok/s** versus **60.95** for stock MLX-Serve 26.10.3,
+with the same verified files, quantization and no speculation. Ten measured
+4K/256 requests per engine ran after the user confirmed other apps were closed. Nine aligned next-token
+choices matched; longer greedy continuations and scores diverged, so numerical
+and quality equivalence remain unestablished. The
+[same-checkpoint report](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md)
+records timing conventions, controls, limits and machine-readable aggregates.
+
+**Earlier Qwen3.8 comparison, different quantization profiles (2026-10-30).**
+The Lily-format Stark checkpoint peaked at 79.52 tok/s against 61.00 for the
+official MLX pack. Its [source-bound report](QWEN38_STARK_MLX_SERVE_2026_10_30.md)
+retains pooled rates and block drift. That result does not isolate engine
+efficiency; the new same-checkpoint result above does not reproduce that lead.
 
 **Generation throughput, Qwen3.5-2B 4-bit, Apple M5 Max, one request at a time (2026-10-22).** Stark `97f15f38` measured 245.5 tokens/s aggregate against 218.8 for MLX-LM, 174.7 for vLLM Metal, 147.9 for llama.cpp and 125.6 for TensorFold, and led all six workloads. Four independent loads per configuration, three repeats per workload, 432 requests. Rates include input processing, generation, transport and cleanup; loading and warmup are excluded. [Full report](QWEN35_ENGINE_COMPARISON_2026_10_22.md), [machine-readable results](../../website/public/benchmark-results.json).
 
@@ -62,7 +70,8 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Date | Status |
 | --- | --- | --- |
-| [Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Current: sampled 4K/256, comparable-budget checkpoint profiles; Stark 26.65% faster pooled decode |
+| [Qwen3.8 same-checkpoint maximum throughput](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 58.13 vs 60.95 tok/s; numerical equivalence unestablished |
+| [Earlier Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical different-pack comparison: maximum 79.52 vs 61.00 tok/s; does not isolate engine efficiency |
 | [Qwen3.5 engine comparison](QWEN35_ENGINE_COMPARISON_2026_10_22.md) | 2026-10-22 | Current: five engines, six workloads, 12.2% over MLX-LM |
 | [TensorFold stock Qwen3.5 comparison](TENSORFOLD_STOCK_QWEN35_COMPARISON.md) | 2026-10-16 | Superseded by the 2026-10-22 comparison, which includes TensorFold |
 | [TensorFold JevK5 scoring comparison](TENSORFOLD_JEVK5_COMPARISON.md) | 2026-10-16 | Scoring-path comparison; not repeated since |

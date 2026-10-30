@@ -1,0 +1,212 @@
+{
+  "schema": "stark-qwen38-same-checkpoint-benchmark-v1",
+  "date": "2026-10-30",
+  "status": "completed_performance_measurement_numerical_equivalence_unestablished",
+  "primary_statistic": "maximum_decode_tokens_per_second",
+  "maximum_scope": "Fastest complete request useful post-first-token decode rate among equal post-warmup measured request counts per engine.",
+  "hardware": {
+    "soc": "Apple M5 Max",
+    "gpu_cores": 40,
+    "unified_memory_gib": 128,
+    "macos": "26.7.1",
+    "macos_build": "25G241",
+    "power": "AC",
+    "energy_mode": "Automatic",
+    "other_apps_closed": "User confirmed immediately before correctness checks and comparison"
+  },
+  "checkpoint": {
+    "repository": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+    "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+    "same_weight_files_and_stored_quantization": true,
+    "conversion_or_requantization_performed": false,
+    "files_verified": 113,
+    "total_bytes": 107326639344,
+    "lfs_payload_hashes_verified": 103
+  },
+  "stark_source_commit": "434beaf6aa679ba3af55fcaa9aac625d494d222b",
+  "stark_worker_sha256": "0f95ff0d43cebedcc8f622b16d7b3e15eafb80b08abb4f03f8e8202241169fe0",
+  "mlx_version": "26.10.3",
+  "mlx_binary_sha256": "908e87168f7fbced9a0a40fdd0469e18b510594ca8f76b72c32c69392be918c8",
+  "workload": {
+    "input_tokens": 4096,
+    "output_tokens": 256,
+    "input_token_sha256": "fd1222c74a823b3a6cf5ed3ffd3dd22cb627afde17c21cef8b2150ac9e14b322",
+    "context_tokens": 4352,
+    "sampling": {
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": 42,
+      "repeat_penalty": 1.0,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0,
+      "speculation": false,
+      "kv_quant_bits": 8
+    },
+    "block_order": [
+      "stark",
+      "mlx-serve",
+      "mlx-serve",
+      "stark"
+    ],
+    "calls_per_block": 6,
+    "excluded_warmups_per_block": 1,
+    "measured_requests_per_engine": 10,
+    "prefix_reuse": false
+  },
+  "timer_accounting": {
+    "emitted_tokens_per_request": 256,
+    "useful_post_first_token_outputs": 255,
+    "native_timed_decode_forwards": 255,
+    "mlx_timed_decode_forwards": 256,
+    "mlx_unused_final_forward_included": true,
+    "estimated_time_subtraction_performed": false,
+    "boundary_note": "Native times first sample through last sample. MLX includes an extra final forward producing an unused next token; its terminal null cleanup tick is excluded. Executor overhead remains measured."
+  },
+  "summary": {
+    "stark": {
+      "measured_runs": 10,
+      "maximum_decode_tokens_per_second": 58.13249751148798,
+      "pooled_decode_tokens_per_second": 55.62521204677127,
+      "maximum_endpoint_output_tokens_per_decode_second": 58.36046808996441,
+      "pooled_endpoint_output_tokens_per_decode_second": 55.843350133229194,
+      "median_decode_tokens_per_second": 55.325136391530435,
+      "minimum_decode_tokens_per_second": 53.996389229689626,
+      "pooled_prefill_tokens_per_second": 1854.172354706846,
+      "median_wall_seconds": 6.88686168694403,
+      "all_calls_repeat_exact": true,
+      "repeat_scope": "token IDs",
+      "output_sha256": "c254db928d6e7b6bb60a5baddd090beca1e5cfd4fe5715fbe52b92d76e1d22f0"
+    },
+    "mlx-serve": {
+      "measured_runs": 10,
+      "maximum_decode_tokens_per_second": 60.94845179929442,
+      "pooled_decode_tokens_per_second": 58.29907669793841,
+      "maximum_endpoint_output_tokens_per_decode_second": 61.18746533576224,
+      "pooled_endpoint_output_tokens_per_decode_second": 58.5277005281264,
+      "median_decode_tokens_per_second": 57.91319518165883,
+      "minimum_decode_tokens_per_second": 56.151722083429505,
+      "pooled_prefill_tokens_per_second": 1825.7648515935432,
+      "median_wall_seconds": 6.684363083448261,
+      "all_calls_repeat_exact": true,
+      "repeat_scope": "decoded text",
+      "output_sha256": "191fb666878353944131ab98f2cb5b188c5c18fd3218fc4877d6a62acc68fb40"
+    }
+  },
+  "block_summary": [
+    {
+      "block": 0,
+      "engine": "stark",
+      "measured_runs": 5,
+      "maximum_decode_tokens_per_second": 58.13249751148798,
+      "pooled_decode_tokens_per_second": 57.244503179126546,
+      "maximum_endpoint_output_tokens_per_decode_second": 58.36046808996441,
+      "pooled_endpoint_output_tokens_per_decode_second": 57.468991426887825,
+      "median_decode_tokens_per_second": 57.28059746263468,
+      "minimum_decode_tokens_per_second": 56.445431419793486,
+      "pooled_prefill_tokens_per_second": 2147.9352844596915,
+      "median_wall_seconds": 6.5547587079927325
+    },
+    {
+      "block": 1,
+      "engine": "mlx-serve",
+      "measured_runs": 5,
+      "maximum_decode_tokens_per_second": 60.74777661440227,
+      "pooled_decode_tokens_per_second": 57.94338034458685,
+      "maximum_endpoint_output_tokens_per_decode_second": 60.98600318936071,
+      "pooled_endpoint_output_tokens_per_decode_second": 58.170609287114644,
+      "median_decode_tokens_per_second": 58.00284310375151,
+      "minimum_decode_tokens_per_second": 56.151722083429505,
+      "pooled_prefill_tokens_per_second": 1794.4415115129348,
+      "median_wall_seconds": 6.746972249820828
+    },
+    {
+      "block": 2,
+      "engine": "mlx-serve",
+      "measured_runs": 5,
+      "maximum_decode_tokens_per_second": 60.94845179929442,
+      "pooled_decode_tokens_per_second": 58.65916704274852,
+      "maximum_endpoint_output_tokens_per_decode_second": 61.18746533576224,
+      "pooled_endpoint_output_tokens_per_decode_second": 58.88920299193577,
+      "median_decode_tokens_per_second": 57.82354725956615,
+      "minimum_decode_tokens_per_second": 57.56764833616795,
+      "pooled_prefill_tokens_per_second": 1858.2011648709608,
+      "median_wall_seconds": 6.678239916916937
+    },
+    {
+      "block": 3,
+      "engine": "stark",
+      "measured_runs": 5,
+      "maximum_decode_tokens_per_second": 54.20484136326738,
+      "pooled_decode_tokens_per_second": 54.09501145986907,
+      "maximum_endpoint_output_tokens_per_decode_second": 54.41740936861352,
+      "pooled_endpoint_output_tokens_per_decode_second": 54.307148759711694,
+      "median_decode_tokens_per_second": 54.0980692982478,
+      "minimum_decode_tokens_per_second": 53.996389229689626,
+      "pooled_prefill_tokens_per_second": 1631.0951947142953,
+      "median_wall_seconds": 7.235713625093922
+    }
+  ],
+  "comparison": {
+    "stark_maximum_decode_faster_percent": -4.620222835322352,
+    "stark_to_mlx_maximum_decode_ratio": 0.9537977716467765,
+    "scope": "Equal opportunity maximum request decode rates; same files/quantization, distinct executors and timers."
+  },
+  "correctness": {
+    "model_admission_and_sampled_smoke_completed": true,
+    "within_engine_all_12_calls_repeat": true,
+    "cross_engine_greedy_exact_fixtures": 1,
+    "cross_engine_greedy_fixtures": 3,
+    "cross_engine_greedy_validation_passed": false,
+    "aligned_numerical_control_completed": true,
+    "aligned_summary": {
+      "fixtures": 9,
+      "scored_fixtures": 9,
+      "unsupported_fixtures": 0,
+      "native_gpu_cpu_argmax_matches": 9,
+      "mlx_selected_highest_raw_mapped_alternative_fixtures": 9,
+      "mlx_selected_highest_raw_reported_alternative_fixtures": 9,
+      "native_gpu_mlx_selected_matches": 9,
+      "native_cpu_mlx_selected_matches": 9,
+      "common_candidate_set_rank1_matches": 9,
+      "native_cpu_argmax_reference_coverage": 9,
+      "rank_pairs_compared": 1068,
+      "rank_pairs_agree": 979,
+      "rank_pairs_rounded_ties_excluded": 12,
+      "raw_logit_gap_error_rmse": 0.622801055988207,
+      "maximum_absolute_logit_gap_error": 2.283834457397461,
+      "tv_supported_fixtures": 9,
+      "tv_declined_fixtures": 0,
+      "mean_coarsened_reported_score_tv": 0.034855605567885715,
+      "maximum_coarsened_reported_score_tv": 0.11471122432629191,
+      "compared_candidate_scores": 144,
+      "logprob_error_rmse": 0.47714755062908515,
+      "maximum_absolute_logprob_error": 1.491017754122856
+    },
+    "numerical_equivalence_established": false,
+    "quality_equivalence_established": false,
+    "note": "Nine aligned next-token choices agree; two of three 16-token greedy continuations diverge. BF16 rounding boundaries differ. Reported-score coarsening is an approximate bounded diagnostic, not a formal full-vocabulary bound or quality acceptance test."
+  },
+  "mlx_ngram_warm": {
+    "completed_before_each_measured_load": true,
+    "fresh_loads": 2,
+    "bytes_per_load": 32000153976
+  },
+  "evidence_sha256": {
+    "matched-official-sampled-abba-4k-v3.json": "fa5ea052ac478aac36fd3373638e74d2fbe7ec360e2ad9ec09f0a66a3f529bfe",
+    "matched-aligned-numerical-control-v1.json": "21eb546f62c9f6648a81e0b8076d90dda1ccdf5e774761fd77ea47af7e92e7f2",
+    "matched-official-greedy-v1.json": "69ac6aa13916b796bad6450e325ed597f9ecb98e40e34f1de601918a1c543179",
+    "matched-checkpoint-benchmark-v3.py": "920f29cf7c399518c810e75220b9b3ae4f8cefb17d4bca67a3aa47cdeb2a877b",
+    "matched-checkpoint-payload-hashes-v1.json": "e112599b932abf197011afe5eb91bc1f8a2bb55716eda470b6ee4ef0fcb275e8",
+    "matched-native-source-receipt-v2.json": "d7abf3e1d65e699db4f11808490fe461540802cf5b6dce9ee9124f4f0ffa2735",
+    "matched-score-source-receipt-v1.json": "3ede37d15b7200f377141dc720be748d557b5e101cfd226f475fbd36d6386903",
+    "matched-official-benchmark-preflight-v1.json": "46d712ed3e059e5f6f96b3837a44589eb3bfbe9e5247d34354de8cf41d4f212c",
+    "matched-official-sampled-abba-4k-v3-audit-v1.json": "244ee326aba99f386476a0741627aa72b0d4158918503faf957d84b95efdca45"
+  },
+  "independent_aggregate_audit": {
+    "passed": true,
+    "checks": 185,
+    "external_gpu_inactivity_independently_observed": false
+  }
+}

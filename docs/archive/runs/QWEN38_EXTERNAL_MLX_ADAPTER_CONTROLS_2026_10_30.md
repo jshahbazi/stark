@@ -4,6 +4,11 @@ This record qualifies loader fixtures, GPU components and the retained Lily
 route. **Full official-checkpoint admission and a matched throughput comparison
 remain pending the checkpoint transfer.** It supplies no new throughput claim.
 
+Follow-up: the [same-checkpoint benchmark](../../benchmarks/QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md)
+records the subsequently completed transfer, real model checks, numerical
+differences and throughput. The component evidence below remains bound to
+its original validation stage.
+
 ## Implementation and scope
 
 The native mixed-precision route now recognizes the external-table affine
