@@ -84,6 +84,8 @@ enum Request {
         #[serde(default)]
         sampling: Sampling,
         #[serde(default)]
+        mtp_drafts: u32,
+        #[serde(default)]
         stop_token_ids: Vec<u32>,
         #[serde(default)]
         stream: bool,
@@ -187,6 +189,7 @@ pub(crate) struct GenerationOptions {
     pub max_new_tokens: u32,
     pub seed: u64,
     pub sampling: Sampling,
+    pub mtp_drafts: u32,
     pub eos_token_ids: Vec<u32>,
     pub extra_stop_token_ids: Vec<u32>,
     pub stop: Vec<String>,
@@ -389,6 +392,12 @@ pub(crate) trait GenerationBackend {
     fn supports_images(&self) -> bool {
         false
     }
+    fn supports_mtp(&self) -> bool {
+        false
+    }
+    fn mtp_metadata(&self) -> Option<Value> {
+        None
+    }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
     }
@@ -481,6 +490,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || options.context_tokens > MAX_CONTEXT_TOKENS
             || options.max_new_tokens == 0
             || options.max_new_tokens > MAX_NEW_TOKENS
+            || options.mtp_drafts > 3
             || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
             || options.stop.len() > 4
             || options.stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
@@ -488,6 +498,9 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || options.extra_stop_token_ids.iter().collect::<HashSet<_>>().len() != options.extra_stop_token_ids.len()
         {
             return Err("invalid_generation_request");
+        }
+        if options.mtp_drafts > 0 && !self.backend.supports_mtp() {
+            return Err("mtp_not_supported");
         }
         if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
             return Err("context_overflow");
@@ -542,14 +555,18 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 write_reply(output, &json!({"event":"delta","text":suffix}))?;
             }
         }
-        Ok(json!({"generated_token_ids":generated.generated_token_ids,"text":text,
+        let mut reply = json!({"generated_token_ids":generated.generated_token_ids,"text":text,
             "input_tokens":input_tokens,"output_tokens":generated.generated_token_ids.len(),
             "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
             "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64(),
             "prefill_seconds":generated.prefill_seconds,"decode_seconds":generated.decode_seconds,
             "input_tokens_per_second":tokens_per_second(input_tokens, generated.prefill_seconds),
             "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
-            "timing_method":"first-token-wall-clock-v1"}))
+            "timing_method":"first-token-wall-clock-v1"});
+        if let Some(metadata) = self.backend.mtp_metadata() {
+            reply["mtp"] = metadata;
+        }
+        Ok(reply)
     }
 
     fn tokenize(
@@ -594,6 +611,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 max_new_tokens,
                 seed,
                 sampling,
+                mtp_drafts,
                 stop_token_ids,
                 stream,
                 stop,
@@ -604,6 +622,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed,
                     sampling,
+                    mtp_drafts,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -638,6 +657,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed: 0,
                     sampling: Sampling::default(),
+                    mtp_drafts: 0,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
@@ -713,6 +733,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed,
                     sampling,
+                    mtp_drafts: 0,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -802,6 +823,10 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
+    if worker.backend.supports_mtp() {
+        readiness["mtp"] = json!({"supported":true,"max_drafts":3,
+            "default_drafts":0,"sampling":"exact-rejection-v1"});
+    }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
             .backend
@@ -910,6 +935,8 @@ mod tests {
         drained: Arc<AtomicBool>,
         invalid_tokenization: bool,
         images: bool,
+        mtp: bool,
+        mtp_requests: Vec<u32>,
         image_schema: u32,
         family_version: u32,
         family_profile: &'static str,
@@ -942,6 +969,15 @@ mod tests {
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
+        }
+        fn supports_mtp(&self) -> bool {
+            self.mtp
+        }
+        fn mtp_metadata(&self) -> Option<Value> {
+            self.mtp.then(|| {
+                let drafts = self.mtp_requests.last().copied().unwrap_or(0);
+                json!({"enabled":drafts > 0,"drafts":drafts,"sampling":"exact-rejection-v1"})
+            })
         }
         fn tokenize(
             &mut self,
@@ -983,6 +1019,7 @@ mod tests {
             self.inputs.push(input.to_vec());
             self.seeds.push(options.seed);
             self.sampling.push(options.sampling.clone());
+            self.mtp_requests.push(options.mtp_drafts);
             self.drained.store(false, Ordering::SeqCst);
             let mut on_token = |token| {
                 if let Some(callback) = on_text.as_deref_mut() {
@@ -1100,6 +1137,8 @@ mod tests {
             drained: Arc::new(AtomicBool::new(true)),
             invalid_tokenization: false,
             images: false,
+            mtp: false,
+            mtp_requests: Vec::new(),
             image_schema: 2,
             family_version: 1,
             family_profile: "qwen35-dense-bf16-merged-v1",
@@ -1114,6 +1153,38 @@ mod tests {
     }
     fn standard() -> Value {
         json!({"operation":"generate","input_token_ids":[2],"context_tokens":16,"max_new_tokens":8})
+    }
+
+    #[test]
+    fn mtp_requests_are_opt_in_bounded_and_require_model_support() {
+        let mut worker = worker();
+        let mut request = standard();
+        request["mtp_drafts"] = json!(1);
+        assert_eq!(post(&mut worker, request.clone())["error"], "mtp_not_supported");
+        assert_eq!(worker.backend.generation_calls, 0);
+        worker.backend.mtp = true;
+        request["mtp_drafts"] = json!(4);
+        assert_eq!(post(&mut worker, request.clone())["error"], "invalid_generation_request");
+        assert_eq!(worker.backend.generation_calls, 0);
+        for drafts in 0..=3 {
+            request["mtp_drafts"] = json!(drafts);
+            let reply = post(&mut worker, request.clone());
+            assert!(reply.get("error").is_none());
+            assert_eq!(reply["mtp"]["drafts"], drafts);
+            assert_eq!(reply["mtp"]["enabled"], drafts > 0);
+        }
+        assert!(post(&mut worker, standard()).get("error").is_none());
+        assert!(worker.backend.mtp_requests == [0, 1, 2, 3, 0]);
+        for invalid in [json!(-1), json!(1.5), json!(true), json!(null)] {
+            request["mtp_drafts"] = invalid;
+            assert_eq!(post(&mut worker, request.clone())["error"], "invalid_request");
+        }
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut std::io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let readiness: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(readiness["mtp"]["supported"], true);
+        assert_eq!(readiness["mtp"]["default_drafts"], 0);
+        assert_eq!(readiness["mtp"]["max_drafts"], 3);
     }
     fn post(
         worker: &mut GenerationWorker<FakeBackend>,
@@ -1389,6 +1460,7 @@ mod tests {
             max_new_tokens: 8,
             seed: 0,
             sampling: Sampling::Greedy {},
+            mtp_drafts: 0,
             eos_token_ids: vec![1],
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
@@ -1443,6 +1515,7 @@ mod tests {
                     max_new_tokens: 1,
                     seed: 0,
                     sampling: Sampling::default(),
+                    mtp_drafts: 0,
                     eos_token_ids: vec![1],
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),

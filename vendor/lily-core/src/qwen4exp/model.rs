@@ -328,6 +328,7 @@ pub struct Qwen4ExpModel {
     /// the GPU runs chunk k (paged table only; on by default, off for the
     /// bit-identity test of the staging pipeline).
     ngram_ahead: bool,
+    mtp_enabled: bool,
     /// The attention K/V caches' element format (`--kv-cache`); states and
     /// scratch made after [`Self::set_kv_format`] follow it.
     kv_format: KvFormat,
@@ -1297,6 +1298,14 @@ pub(super) struct Capture {
     pub(super) ple_conv_in: Option<Tensor>,
 }
 
+/// Ordinary decode values copied into request-local speculative captures.
+struct DecodeCapture<'a> {
+    row: usize,
+    rows: usize,
+    spec: &'a SpecScratch,
+    hyper: &'a Tensor,
+}
+
 impl Qwen4ExpModel {
     pub fn load(ctx: &MetalContext, dir: impl AsRef<Path>) -> Result<Self> {
         Self::load_with(
@@ -1383,6 +1392,7 @@ impl Qwen4ExpModel {
             hasher,
             prefill_chunk,
             ngram_ahead: true,
+            mtp_enabled: with_mtp,
             kv_format: kv_format_from_env()?.unwrap_or_default(),
         })
     }
@@ -1758,7 +1768,48 @@ impl Qwen4ExpModel {
         ensure!(state.spec.is_none(), "decode step during a pending speculative step");
         let pass = ctx.begin_concurrent()?;
         pass.set_label("decode");
-        self.encode_decode_graph(ctx, &pass, state, s, slot_in, slot_out, draw, park)?;
+        self.encode_decode_graph(
+            ctx, &pass, state, s, slot_in, slot_out, draw, park, None,
+        )?;
+        pass.end()
+    }
+
+    /// The ordinary decode graph with copies for speculative rollback.
+    pub(super) fn encode_host_verify_step<'a>(
+        &self,
+        ctx: &'a MetalContext,
+        state: &DecodeState,
+        s: &Scratch,
+        row: usize,
+        rows: usize,
+    ) -> Result<EncodedPass<'a>> {
+        ensure!(
+            row < rows && rows <= MAX_DRAFTS + 1,
+            "invalid host verify capture row"
+        );
+        let spec = s
+            .spec
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing host verify captures"))?;
+        let hyper = &s
+            .prefill
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing host hidden captures"))?
+            .hyper;
+        let pass = ctx.begin_concurrent()?;
+        pass.set_label("exact host MTP verify");
+        let greedy = SamplingParams::greedy();
+        self.encode_decode_graph(
+            ctx,
+            &pass,
+            state,
+            s,
+            0,
+            1,
+            Draw { params: &greedy, step: state.pos },
+            None,
+            Some(DecodeCapture { row, rows, spec, hyper }),
+        )?;
         pass.end()
     }
 
@@ -2025,6 +2076,13 @@ impl Qwen4ExpModel {
         self.ngram_ahead = on;
     }
 
+    /// Select head work only while the request is reset.
+    pub fn set_mtp_enabled(&mut self, enabled: bool) -> Result<()> {
+        ensure!(!enabled || self.weights.mtp.is_some(), "no MTP head loaded");
+        self.mtp_enabled = enabled;
+        Ok(())
+    }
+
     // --- prefill ------------------------------------------------------------
 
     /// Encodes the batched graph for the chunk `ps` at `state.pos` without
@@ -2197,7 +2255,9 @@ impl Qwen4ExpModel {
                     )?;
                     pass.level_barrier(&[&s.next_token])?;
                 }
-                if let (Some(mtp), Some(mst)) = (&self.weights.mtp, &state.mtp) {
+                if self.mtp_enabled
+                    && let (Some(mtp), Some(mst)) = (&self.weights.mtp, &state.mtp)
+                {
                     let images = vision.map_or(&[][..], |v| v.images);
                     self.mtp_catch_up(ctx, &pass, mtp, mst, pos, s, ps, rope, images)?;
                 }
@@ -3258,6 +3318,7 @@ impl Qwen4ExpModel {
         slot_out: usize,
         draw: Draw<'_>,
         park: Option<u64>,
+        capture: Option<DecodeCapture<'_>>,
     ) -> Result<()> {
         ensure!(state.pos < state.capacity, "sequence full ({})", state.capacity);
         let cfg = &self.config;
@@ -3272,6 +3333,7 @@ impl Qwen4ExpModel {
         hc_broadcast_bf16(ctx, pass, &s.x, &s.hyper, h, g)?;
         pass.level_barrier(&[&s.hyper])?;
 
+        let mut gdn_index = 0;
         for (_layer_index, (layer, lstate)) in
             self.weights.layers.iter().zip(state.layers.iter()).enumerate()
         {
@@ -3287,6 +3349,18 @@ impl Qwen4ExpModel {
                 if !crate::ablate::on(crate::ablate::Group::Ple) {
                     pass.profile_stage(crate::metal::stage_profile::Phase::Ple)?;
                     self.ple_decode(ctx, pass, ple_w, ple_s, pst, conv_slot, s)?;
+                    if let Some(capture) = &capture
+                        && let Some(out) = &capture.spec.ple_conv_in
+                    {
+                        let width = ple_s.gated_n.numel();
+                        copy_words(
+                            ctx,
+                            pass,
+                            &ple_s.gated_n,
+                            &out.view(capture.row * width, &[width])?,
+                        )?;
+                        pass.level_barrier(&[out])?;
+                    }
                 }
             }
 
@@ -3303,6 +3377,28 @@ impl Qwen4ExpModel {
                         state,
                         &conv_windows[conv_slot],
                     )?;
+                    if let Some(capture) = &capture {
+                        let raw = &capture.spec.conv_in[gdn_index];
+                        let width = s.qkv.numel();
+                        copy_words(
+                            ctx,
+                            pass,
+                            &s.qkv,
+                            &raw.view(capture.row * width, &[width])?,
+                        )?;
+                        if capture.row + 1 < capture.rows {
+                            let mid = &capture.spec.mid[gdn_index];
+                            copy_words(
+                                ctx,
+                                pass,
+                                state,
+                                &mid.view(capture.row * state.numel(), state.shape())?,
+                            )?;
+                            pass.level_barrier(&[mid])?;
+                        }
+                        pass.level_barrier(&[raw])?;
+                    }
+                    gdn_index += 1;
                 }
                 (
                     Mixer::Attn(w),
@@ -3389,6 +3485,25 @@ impl Qwen4ExpModel {
                 &s.logits,
             )?;
             pass.level_barrier(&[&s.logits])?;
+        }
+        if let Some(capture) = &capture {
+            let wide = cfg.hc_width();
+            copy_words(
+                ctx,
+                pass,
+                &s.hyper,
+                &capture.hyper.view(capture.row * wide, &[wide])?,
+            )?;
+            copy_words(
+                ctx,
+                pass,
+                &s.logits,
+                &capture
+                    .spec
+                    .logits
+                    .view(capture.row * cfg.vocab_size, &[cfg.vocab_size])?,
+            )?;
+            pass.level_barrier(&[capture.hyper, &capture.spec.logits])?;
         }
         pass.profile_stage(crate::metal::stage_profile::Phase::Draw)?;
         let out = s.next_token.view(slot_out, &[1])?;

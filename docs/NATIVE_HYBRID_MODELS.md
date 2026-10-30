@@ -162,8 +162,18 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
+The generation worker can also load the checkpoint's existing MTP head and
+enable one to three draft tokens per request through `mtp_drafts`. It is off
+by default. Draft and target distributions use Stark's complete-logit CPU
+sampler with exact probability-ratio rejection and residual correction;
+quantization is unchanged. Verification reuses ordinary decode arithmetic,
+captures GDN and convolution state, and rejection restores the committed
+prefix and n-gram history. The
+head and its speculative state add memory. See the
+[generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
+aggregate counters and sampling semantics. Scoring keeps MTP disabled.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
-and executes neither MTP nor vision. Source modifications and licenses are
+and does not execute vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
 
 The existing native graph uses F32 forward arithmetic. Deferred Metal commands keep
@@ -318,8 +328,9 @@ and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-r
 record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
-These paths are text-only. The native loader does not execute vision, video,
-audio, MTP or DFlash. The workers retain their 16,384-token context and
+These paths are text-only. They do not execute vision, video, audio or DFlash.
+MTP is available only through the Lily-format generation path described above.
+The workers retain their 16,384-token context and
 4,096-output-token caps; the upstream advertised maximum context is not a Stark
 memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.

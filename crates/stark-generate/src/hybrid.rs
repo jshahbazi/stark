@@ -14,11 +14,14 @@ use crate::{
     text_stop::StopFilter,
 };
 
+mod mtp;
+
 pub(crate) struct HybridBackend {
     model: Model,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     probability_mapper: ProbabilityMapper,
+    last_mtp: Option<serde_json::Value>,
 }
 
 const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
@@ -151,7 +154,7 @@ impl HybridBackend {
         let profile_output = std::env::var_os("STARK_QWEN38_PROFILE_OUTPUT")
             .map(|path| ProfileOutput::open(Path::new(&path)))
             .transpose()?;
-        let mut model = Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
+        let mut model = Model::load_with_mtp(path, true).map_err(|_| "hybrid_model_load_failed")?;
         if profile_output.is_some() {
             model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
             profile::enable(true);
@@ -161,6 +164,7 @@ impl HybridBackend {
             cancellation,
             profile_output,
             probability_mapper: ProbabilityMapper::default(),
+            last_mtp: None,
         })
     }
 
@@ -173,7 +177,9 @@ impl HybridBackend {
         let started = Instant::now();
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
-        let gpu_greedy = matches!(options.sampling, Sampling::Greedy {}) && self.model.supports_greedy_readout();
+        let gpu_greedy = options.mtp_drafts == 0
+            && matches!(options.sampling, Sampling::Greedy {})
+            && self.model.supports_greedy_readout();
         let sampled_decode =
             matches!(options.sampling, Sampling::Stochastic { .. }) && self.model.supports_sampled_decode();
         let cancellation = &mut self.cancellation;
@@ -204,7 +210,23 @@ impl HybridBackend {
         let probability_mapper = &mut self.probability_mapper;
         let mut previous = None;
         let mut rng = options.seed;
-        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if gpu_greedy {
+        let mut mtp_sampler;
+        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if options.mtp_drafts > 0 {
+            // The first target draw comes from prefill. The MTP sampler owns
+            // separate draft randomness and exact target rejection sampling.
+            mtp_sampler = mtp::ExactMtpSampler::new(&options.sampling, &mut rng, probability_mapper);
+            let first = if gpu_greedy {
+                greedy_token.take().ok_or("native_generation_failed")?
+            } else {
+                mtp_sampler.sample_initial(&logits)?
+            };
+            let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
+            let tail = model
+                .mtp_decode(first, budget.saturating_sub(1), options.mtp_drafts as usize, &mut mtp_sampler)
+                .map_err(|_| "native_generation_failed")?
+                .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
+            Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
+        } else if gpu_greedy {
             let first = greedy_token.take().ok_or("native_generation_failed")?;
             let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
             let tail = model
@@ -324,10 +346,20 @@ impl GenerationBackend for HybridBackend {
             profile::reset();
         }
         self.model.reset();
+        self.last_mtp = None;
+        self.model.set_mtp_enabled(options.mtp_drafts > 0).map_err(|_| "mtp_not_supported")?;
         if self.profile_output.as_ref().is_some_and(|output| output.failed) {
             return Err("native_profile_output_failed");
         }
         let result = self.generate_inner(input, options, on_text);
+        if self.model.supports_mtp() {
+            self.last_mtp = Some(serde_json::json!({
+                "enabled":options.mtp_drafts > 0,
+                "drafts":options.mtp_drafts,
+                "sampling":"exact-rejection-v1",
+                "stats":self.model.mtp_stats(),
+            }));
+        }
         self.model.reset();
         if let Some(output) = self.profile_output.as_mut() {
             output.write(&AggregateProfile {
@@ -353,6 +385,12 @@ impl GenerationBackend for HybridBackend {
     }
     fn runtime_identity(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({"backend":"stark_native_hybrid_metal","execution":"autoregressive"}))
+    }
+    fn supports_mtp(&self) -> bool {
+        self.model.supports_mtp()
+    }
+    fn mtp_metadata(&self) -> Option<serde_json::Value> {
+        self.last_mtp.clone()
     }
 }
 
@@ -382,6 +420,35 @@ fn sample_with_mapper(
     mapper: Option<&mut ProbabilityMapper>,
 ) -> Result<u32, &'static str> {
     let _total_scope = profile::Scope::new("sample.total");
+    let distribution = sampling_distribution(logits, sampling, mapper)?;
+    if matches!(sampling, Sampling::Greedy {}) {
+        return Ok(distribution.indices[0] as u32);
+    }
+    let _draw_scope = profile::Scope::new("sample.draw");
+    let target = uniform(rng) * distribution.total;
+    let mut mass = 0.0;
+    for (&index, &p) in distribution.indices.iter().zip(&distribution.weights) {
+        mass += p;
+        if target < mass {
+            return Ok(index as u32);
+        }
+    }
+    Ok(*distribution.indices.last().ok_or("native_generation_failed")? as u32)
+}
+
+struct Distribution {
+    indices: Vec<usize>,
+    weights: Vec<f64>,
+    total: f64,
+}
+
+/// Shared by ordinary and speculative sampling: filtering and accumulation
+/// retain the qualified F32 temperature and ordered F64 probability policy.
+fn sampling_distribution(
+    logits: &[f32],
+    sampling: &Sampling,
+    mapper: Option<&mut ProbabilityMapper>,
+) -> Result<Distribution, &'static str> {
     {
         let _scope = profile::Scope::new("sample.finite");
         if logits.is_empty() || logits.iter().any(|value| !value.is_finite()) {
@@ -401,7 +468,11 @@ fn sample_with_mapper(
                 best = index;
             }
         }
-        return Ok(best as u32);
+        return Ok(Distribution {
+            indices: vec![best],
+            weights: vec![1.0],
+            total: 1.0,
+        });
     };
     let indices = {
         let _scope = profile::Scope::new("sample.select");
@@ -429,16 +500,11 @@ fn sample_with_mapper(
         }
         (probabilities, kept, cumulative)
     };
-    let _draw_scope = profile::Scope::new("sample.draw");
-    let target = uniform(rng) * cumulative;
-    let mut mass = 0.0;
-    for (&index, &p) in indices[..kept].iter().zip(&probabilities) {
-        mass += p;
-        if target < mass {
-            return Ok(index as u32);
-        }
-    }
-    Ok(indices[kept - 1] as u32)
+    Ok(Distribution {
+        indices: indices.into_iter().take(kept).collect(),
+        weights: probabilities.into_iter().take(kept).collect(),
+        total: cumulative,
+    })
 }
 
 /// Only the requested candidate prefix needs sorting. The comparison is the
