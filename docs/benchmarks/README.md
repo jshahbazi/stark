@@ -67,6 +67,7 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen Metal hotpaths and finite readout checks](QWEN38_METAL_HOTPATHS_2026_10_29.md) | Quiet baseline 73.62 top-k / 69.85 nucleus tok/s; MoE, HC and GDN trials rejected or inconclusive; retained exact SIMD finite checks reduce guard elapsed time, with no reliable end-to-end gain or desktop target acceptance |
 | [Qwen residual fusion and exact CPU sampling](QWEN38_FUSION_2026_10_29.md) | MoE down/injection component 5.55% faster; exact probability mapping 58.7% faster; nucleus same-loaded observation +1.3%, with broad overlap and an unmet 77–80 tok/s target |
 | [Qwen iQ-MLX 4.7 bpw investigation](QWEN38_IQ47_INVESTIGATION_2026_10_29.md) | Exact pack unmeasured: storage and loader support pending; publisher's M5 Ultra result uses MTP; fresh existing-checkpoint Stark control is 72.08 greedy / 64.92 sampled warm tok/s |
 | [Qwen AC power-mode control](QWEN38_POWER_MODES_2026_10_29.md) | Same inference build; 60 exact requests; selected High Power does not recover the target in this window; original settings restored |
