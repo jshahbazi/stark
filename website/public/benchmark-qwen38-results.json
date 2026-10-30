@@ -1,0 +1,413 @@
+{
+  "schema_version": 1,
+  "benchmark_id": "qwen38-stark-mlx-serve-2026-10-30",
+  "model": "Qwen3.8-Flash-Next",
+  "measured_date": "2026-10-30",
+  "status": "completed",
+  "metric": "decode_phase_tokens_per_second",
+  "metric_label": "Decode-phase throughput",
+  "unit": "tokens/s",
+  "method": "Total measured output tokens divided by total measured decode-phase seconds; one excluded warmup per fresh load.",
+  "metric_scope": {
+    "workload_count": 1,
+    "end_to_end_request_throughput": false,
+    "part_of_six_workload_overall_result": false,
+    "decode_numerator_tokens_per_request": 256,
+    "timing_boundaries": "Each engine's internal phase timers; GPU hardware timing is not inferred.",
+    "wall_time_note": "Median whole-call time is supplemental; Stark uses a worker pipe and MLX uses HTTP.",
+    "standalone_control_convention_note": "Separate native retention/post-cleanup controls use the worker's 255/decode-seconds convention for 256 outputs. Their values are not substituted into this ABBA dataset."
+  },
+  "hardware": {
+    "computer": "MacBook Pro",
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "unified_memory_gib": 128,
+    "os": {
+      "product": "macOS",
+      "version": "26.7.1",
+      "build": "25G241",
+      "architecture": "arm64"
+    }
+  },
+  "conditions": {
+    "scope": "quiet desktop; other applications closed as confirmed by the user",
+    "other_applications_closed_user_confirmed": true,
+    "ac_connected": true,
+    "ac_energy_mode": "Automatic",
+    "pmset_powermode": 0,
+    "downloads_and_builds_finished_before_timing": true,
+    "concurrency": 1,
+    "requests_and_model_loads_serialized": true,
+    "normal_desktop_multitasking_qualified": false
+  },
+  "workload": {
+    "input_tokens": 4096,
+    "output_tokens": 256,
+    "context_capacity_tokens": 4352,
+    "input_kind": "same corpus-derived token IDs supplied directly to both engines",
+    "input_token_sha256": "fd1222c74a823b3a6cf5ed3ffd3dd22cb627afde17c21cef8b2150ac9e14b322",
+    "prefix_tokenization_exact_between_checkpoints": true,
+    "sampling": {
+      "mode": "stochastic",
+      "temperature": 1.0,
+      "top_k": 20,
+      "top_p": 0.95,
+      "min_p": 0.0,
+      "seed": 42,
+      "repeat_penalty": 1.0,
+      "frequency_penalty": 0.0,
+      "presence_penalty": 0.0
+    },
+    "speculation": false,
+    "kv_cache_bits": 8,
+    "prefix_reuse": false
+  },
+  "design": {
+    "block_order": [
+      "stark",
+      "mlx-serve",
+      "mlx-serve",
+      "stark"
+    ],
+    "fresh_load_blocks": 4,
+    "calls_per_block": 6,
+    "warmup_calls_excluded_per_block": 1,
+    "measured_requests_per_block": 5,
+    "measured_requests_per_engine": 10,
+    "total_calls_including_warmup": 24,
+    "total_measured_requests": 20,
+    "mlx_speculation_disabled_by": [
+      "--no-mtp",
+      "--no-drafter",
+      "--no-pld",
+      "matching false per-request flags"
+    ],
+    "mlx_caching": "prefix entries=0, disk prefix cache off, tokenize cache entries=0",
+    "mlx_timing": "Per-call /metrics.json histogram sum differences; each phase count and successful-request count must increase by exactly one.",
+    "mlx_cached_tokens_per_call": 0
+  },
+  "engines": [
+    {
+      "id": "stark_optimized",
+      "name": "Stark",
+      "version": "source-bound optimized build",
+      "executable_sha256": "3fca1cb56dc0ab2d8ab9b870a2c5e0ae9a92289900e88cf70768f237f3445544",
+      "checkpoint": {
+        "repository": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+        "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "url": "https://huggingface.co/fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl/tree/0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+        "profile": "Lily mixed affine Q4/Q8; GDN Q4 and token embedding Q8"
+      },
+      "fresh_loads": 2,
+      "calls_including_warmup": 12,
+      "warmup_calls_excluded": 2,
+      "measured_requests": 10,
+      "pooled_decode_tokens_per_second": 74.13470375580526,
+      "median_decode_tokens_per_second": 75.41740737383051,
+      "minimum_decode_tokens_per_second": 69.08083496602019,
+      "maximum_decode_tokens_per_second": 79.52443043653909,
+      "pooled_prefill_tokens_per_second": 1912.9474520999775,
+      "median_wall_seconds": 5.410380312358029,
+      "repeat": {
+        "all_12_calls_equal_including_warmups": true,
+        "scope": "generated token IDs",
+        "sha256": "621ca90417af420aaf9defdc957f7cc1f57f318c08d908be764834abb382b0d0"
+      },
+      "source_manifest_sha256": "8fffa7222e115d450919de48d3791b6ddc14c37d584ead12a03aca396ac7a64e",
+      "source_receipt_sha256": "31522b6b6409015f13dc590f16846042c21c37f4778513e0df00d28bc81e6e61",
+      "cargo_lock_sha256": "9ee091260fa8c09b1919885bdbf42538bdd5b4f832258ad84b4321375b19e6e5",
+      "version_note": "No release version is inferred; executable and source manifest hashes identify the measured build."
+    },
+    {
+      "id": "mlx_serve",
+      "name": "MLX-Serve",
+      "version": "26.10.3",
+      "executable_sha256": "908e87168f7fbced9a0a40fdd0469e18b510594ca8f76b72c32c69392be918c8",
+      "checkpoint": {
+        "repository": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "url": "https://huggingface.co/ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit/tree/788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "profile": "Official mixed affine Q4/Q8; GDN Q8 and token embedding Q4",
+        "published_snapshot_bytes": 107326639344
+      },
+      "fresh_loads": 2,
+      "calls_including_warmup": 12,
+      "warmup_calls_excluded": 2,
+      "measured_requests": 10,
+      "pooled_decode_tokens_per_second": 58.533419724597046,
+      "median_decode_tokens_per_second": 58.007426196227584,
+      "minimum_decode_tokens_per_second": 56.40595358626635,
+      "maximum_decode_tokens_per_second": 60.99803443746206,
+      "pooled_prefill_tokens_per_second": 1948.2349240420965,
+      "median_wall_seconds": 6.5336115210084245,
+      "repeat": {
+        "all_12_calls_equal_including_warmups": true,
+        "scope": "decoded response text",
+        "sha256": "191fb666878353944131ab98f2cb5b188c5c18fd3218fc4877d6a62acc68fb40"
+      },
+      "release_url": "https://github.com/ddalcu/mlx-serve/releases/tag/v26.10.3",
+      "release_archive_sha256": "d1781c89c206f0d077d6d1abbcab43aa9ec65280202c83eac908f957956b652b"
+    }
+  ],
+  "blocks": [
+    {
+      "block": 0,
+      "engine": "stark",
+      "runs": 5,
+      "pooled_decode_tokens_per_second": 78.04309678513886,
+      "median_decode_tokens_per_second": 77.8728701139208,
+      "minimum_decode_tokens_per_second": 77.30708810599174,
+      "maximum_decode_tokens_per_second": 79.52443043653909,
+      "pooled_prefill_tokens_per_second": 2086.6961187202255,
+      "first_measured_decode_tokens_per_second": 79.52443043653909,
+      "last_measured_decode_tokens_per_second": 77.30708810599174
+    },
+    {
+      "block": 1,
+      "engine": "mlx-serve",
+      "runs": 5,
+      "pooled_decode_tokens_per_second": 58.641084587585404,
+      "median_decode_tokens_per_second": 58.30605606350949,
+      "minimum_decode_tokens_per_second": 56.40595358626635,
+      "maximum_decode_tokens_per_second": 60.99803443746206,
+      "pooled_prefill_tokens_per_second": 2025.1234293101888,
+      "first_measured_decode_tokens_per_second": 60.99803443746206,
+      "last_measured_decode_tokens_per_second": 56.40595358626635
+    },
+    {
+      "block": 2,
+      "engine": "mlx-serve",
+      "runs": 5,
+      "pooled_decode_tokens_per_second": 58.4261494818459,
+      "median_decode_tokens_per_second": 57.88374428826898,
+      "minimum_decode_tokens_per_second": 57.656137873028804,
+      "maximum_decode_tokens_per_second": 60.716026975907845,
+      "pooled_prefill_tokens_per_second": 1876.971355669091,
+      "first_measured_decode_tokens_per_second": 60.716026975907845,
+      "last_measured_decode_tokens_per_second": 57.656137873028804
+    },
+    {
+      "block": 3,
+      "engine": "stark",
+      "runs": 5,
+      "pooled_decode_tokens_per_second": 70.59910531767008,
+      "median_decode_tokens_per_second": 70.16905740548403,
+      "minimum_decode_tokens_per_second": 69.08083496602019,
+      "maximum_decode_tokens_per_second": 73.52772664166929,
+      "pooled_prefill_tokens_per_second": 1765.9091031553428,
+      "first_measured_decode_tokens_per_second": 73.52772664166929,
+      "last_measured_decode_tokens_per_second": 69.08083496602019
+    }
+  ],
+  "comparison": {
+    "stark_pooled_decode_faster_percent": 26.653634974025287,
+    "mlx_pooled_decode_lower_percent": 21.04450849712409,
+    "scope": "Observed engine-plus-checkpoint result using comparable weight budgets and different quantization profiles and values.",
+    "isolates_engine_efficiency": false,
+    "identical_quantization": false,
+    "equivalent_model_quality_established": false
+  },
+  "temporal_variation": {
+    "stark_last_vs_first_block_decode_percent": -9.53830867060913,
+    "mlx_second_vs_first_block_decode_percent": -0.36652648437714985,
+    "cause": "unestablished",
+    "consistent_77_to_80_tokens_per_second_established": false
+  },
+  "precision_comparison": {
+    "profiles_are_identical": false,
+    "representative_weights": [
+      {
+        "category": "routed_experts",
+        "lily": {
+          "bits": 4,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 4,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "gdn_projections",
+        "lily": {
+          "bits": 4,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "hc_down_up_projections",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "hc_block_inject_projections",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 16,
+          "group_size": null,
+          "encoding": "BF16"
+        }
+      },
+      {
+        "category": "qsa_and_indexer_projections",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "shared_expert_projections",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "shared_expert_gate",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 16,
+          "group_size": null,
+          "encoding": "BF16"
+        }
+      },
+      {
+        "category": "moe_router",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "token_embedding",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 4,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "vocabulary_head",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "ple_key_value_projections",
+        "lily": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 8,
+          "group_size": 64,
+          "encoding": "affine"
+        }
+      },
+      {
+        "category": "ple_ngram_table",
+        "lily": {
+          "bits": 4,
+          "group_size": 32,
+          "encoding": "affine"
+        },
+        "official_mlx": {
+          "bits": 4,
+          "group_size": 32,
+          "encoding": "affine"
+        }
+      }
+    ],
+    "header_audit_scope": {
+      "representative_matrices": 28,
+      "official_safetensors_headers": 8,
+      "exhaustive_tensor_precision_audit": false,
+      "note": "The sampled MoE router is Q8 in both packs; the official model card's BF16-router description is stale. PLE ngram width is separately recorded in the pack manifest."
+    },
+    "executor_precision_note": "Activations, reductions, recurrent arithmetic, RNGs and numerical paths differ; no cross-engine output, probability or precision parity is claimed."
+  },
+  "limitations": [
+    "One 4K-input/256-output sampled workload, not the site's six-workload end-to-end benchmark.",
+    "Different weight values and quantization profiles prevent an engine-only or strict same-quantization conclusion.",
+    "Quiet-desktop measurements do not qualify normal desktop multitasking performance.",
+    "Observed Stark measured rates span 69.08-79.52 tokens/s and do not establish a sustained 77-80 tokens/s guarantee.",
+    "Repeatability is established within each engine only: native token-ID hashes versus MLX decoded-text hashes.",
+    "This throughput study does not establish model quality or numerical equivalence.",
+    "Checkpoint file identities and selected metadata hashes were checked; full weight payloads were not all freshly rehashed."
+  ],
+  "provenance": {
+    "aggregate_report_sha256": "0c280cca7a0366a63e66de8f2bc28bda9b984d40f5a01258561d0be5f17553df",
+    "independent_aggregate_audit_sha256": "152ae23206d5e710101f704990e68cc7ac706e72e0269698ecd55a4cffdc5f3e",
+    "independent_audit_checks_passed": 31,
+    "controller_sha256": "b119a9413f47a7422fa55dc34f88b43afaab584a656b4650bc0736cd6a72b15e",
+    "precision_header_audit_sha256": "db5ef1cdfc0c737e1bc11ca6f5a3a89275e078004c4192cbe0ed9a18cc4be75d",
+    "official_pack_manifest_sha256": "11246ebbea8a24a988517ebeb59623b857df89120e5ae3becd48807194542ef6",
+    "hardware_assets_receipt_sha256": "61519c1b1ddde772f3eb49d11b9a4acfdbdffb85b260c1c77380a49f8e7d9a7c",
+    "native_checkpoint_metadata_identity_sha256": "903c3b4d77e327e52a0b87034227d765337ef412892637aa2a1ba6fd20a1933e",
+    "mlx_checkpoint_metadata_identity_sha256": "e4b4fe795e5abde55d20b297520800b1ec834607305e5d46d545f7def0806d9f",
+    "corpus_sha256": "daecdf178c6429a721f9e1b5ae379c664adb8f8af55b381535355636ec469955",
+    "executable_library_settings_and_checkpoint_identities_guarded": true,
+    "all_113_official_file_sizes_match_manifest": true,
+    "model_payload_rehashed": false
+  },
+  "privacy": {
+    "public_data": "aggregate measurements, fixed configuration and hashes only",
+    "raw_prompts_responses_token_vectors_or_probabilities_included": false
+  },
+  "full_report_path": "docs/benchmarks/QWEN38_STARK_MLX_SERVE_2026_10_30.md"
+}

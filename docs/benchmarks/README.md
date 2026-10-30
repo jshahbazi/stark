@@ -4,6 +4,13 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**Qwen3.8 fast path versus MLX-Serve (2026-10-30).** The completed quiet-desktop
+4K/256 sampled comparison measures 74.13 tok/s pooled decode for Stark and
+58.53 for MLX-Serve 26.10.3, with ten measured requests per engine. Comparable
+mixed-precision packs have different GDN and embedding widths. The
+[full report](QWEN38_STARK_MLX_SERVE_2026_10_30.md) preserves block drift,
+69.08–79.52 tok/s Stark variation, controls and checkpoint identities.
+
 **Generation throughput, Qwen3.5-2B 4-bit, Apple M5 Max, one request at a time (2026-10-22).** Stark `97f15f38` measured 245.5 tokens/s aggregate against 218.8 for MLX-LM, 174.7 for vLLM Metal, 147.9 for llama.cpp and 125.6 for TensorFold, and led all six workloads. Four independent loads per configuration, three repeats per workload, 432 requests. Rates include input processing, generation, transport and cleanup; loading and warmup are excluded. [Full report](QWEN35_ENGINE_COMPARISON_2026_10_22.md), [machine-readable results](../../website/public/benchmark-results.json).
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
@@ -55,6 +62,7 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Current: sampled 4K/256, comparable-budget checkpoint profiles; Stark 26.65% faster pooled decode |
 | [Qwen3.5 engine comparison](QWEN35_ENGINE_COMPARISON_2026_10_22.md) | 2026-10-22 | Current: five engines, six workloads, 12.2% over MLX-LM |
 | [TensorFold stock Qwen3.5 comparison](TENSORFOLD_STOCK_QWEN35_COMPARISON.md) | 2026-10-16 | Superseded by the 2026-10-22 comparison, which includes TensorFold |
 | [TensorFold JevK5 scoring comparison](TENSORFOLD_JEVK5_COMPARISON.md) | 2026-10-16 | Scoring-path comparison; not repeated since |
