@@ -588,7 +588,26 @@ impl MtpDecode<'_> {
         let verified = self
             .model
             .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
-            .map_err(|_| Error::Invalid("MTP verify failed"))?;
+            .map_err(|error| {
+                if profile::enabled() {
+                    // Classify only fixed diagnostic guards. Never emit the
+                    // framework error, request data, or an exception dump.
+                    let category = match error.to_string().as_str() {
+                        "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
+                        "stage profile changed command buffer count" => {
+                            "qwen.mtp.verify.profile_failure.command_buffers"
+                        },
+                        "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
+                        "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
+                        "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
+                        "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
+                        "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
+                        _ => "qwen.mtp.verify.profile_failure.other",
+                    };
+                    profile::record(category, 0.0, 0);
+                }
+                Error::Invalid("MTP verify failed")
+            })?;
         let elapsed = started.elapsed().as_secs_f64();
         self.stats.verify_seconds += elapsed;
         profile::record("qwen.mtp.verify", elapsed, 0);

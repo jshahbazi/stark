@@ -2383,8 +2383,8 @@ impl Qwen4ExpModel {
                     m,
                 )?;
                 let BatchMode::Verify { params, step0 } = mode else {
-                    s.sync.signal_done(&pass)?;
                     pass.finish_stage_profile()?;
+                    s.sync.signal_done(&pass)?;
                     return pass.end();
                 };
                 // One draw per row; the rows share the sampler scratch (and
