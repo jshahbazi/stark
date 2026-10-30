@@ -626,6 +626,7 @@ pub(crate) fn prefill_moe(
 /// Row-batched MoE with the exact ordinary-decode arithmetic at every
 /// projection, router, SwiGLU and combine boundary. Only addressing and grid
 /// rows change; the original decode kernel bodies provide the calculations.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prefill_moe_decode_exact(
     ctx: &MetalContext,
@@ -634,8 +635,35 @@ pub(crate) fn prefill_moe_decode_exact(
     w: &MoeWeights,
     io: &PrefillMoeIo<'_>,
     ms: &PrefillMoeScratch,
-    _decode_scratch: &MoeScratch,
+    decode_scratch: &MoeScratch,
 ) -> Result<()> {
+    let injected = prefill_moe_decode_exact_with_injection(
+        ctx,
+        pass,
+        dims,
+        w,
+        io,
+        ms,
+        decode_scratch,
+        None,
+    )?;
+    ensure!(!injected, "absent HC injection changed passthrough semantics");
+    Ok(())
+}
+
+/// The exact verifier may fuse its subsequent HC write into the final
+/// projection. `None` preserves the branch-only path and returns false.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prefill_moe_decode_exact_with_injection(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    dims: &MoeDims,
+    w: &MoeWeights,
+    io: &PrefillMoeIo<'_>,
+    ms: &PrefillMoeScratch,
+    _decode_scratch: &MoeScratch,
+    injection: Option<moe::HcInjection<'_>>,
+) -> Result<bool> {
     let m = io.x.shape()[0];
     ensure!((1..=4).contains(&m), "decode-exact MoE supports 1..4 rows");
     let h = dims.hidden;
@@ -689,6 +717,23 @@ pub(crate) fn prefill_moe_decode_exact(
         &ms.shared_out,
     )?;
     pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+    if let Some(injection) = injection {
+        moe::moe_down_combine_inject_decode_rows(
+            ctx,
+            pass,
+            &w.expert_down,
+            h,
+            &ms.ea,
+            slots,
+            &ms.scores,
+            &ms.shared_out,
+            &ms.decode_shared_gate,
+            io.out,
+            top_k,
+            injection,
+        )?;
+        return Ok(true);
+    }
     moe::moe_down_combine_decode_rows(
         ctx,
         pass,
@@ -701,7 +746,8 @@ pub(crate) fn prefill_moe_decode_exact(
         &ms.decode_shared_gate,
         io.out,
         top_k,
-    )
+    )?;
+    Ok(false)
 }
 
 /// With a served expert cache: has the routed ids in `indices` (`count`

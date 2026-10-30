@@ -55,7 +55,7 @@ use crate::metal::{
 };
 use crate::moe_ffn::{
     DecodeMoeIo, MoeDims, MoeScratch, PrefillMoeIo, PrefillMoeScratch, decode_moe,
-    prefill_moe, prefill_moe_decode_exact, prefix_rows, project_mat,
+    prefill_moe, prefill_moe_decode_exact_with_injection, prefix_rows, project_mat,
     project_mat_decode_exact, project_stack_or_slices,
 };
 use crate::tensor::{DType, Tensor};
@@ -2510,8 +2510,8 @@ impl Qwen4ExpModel {
             mlp_act: &ps.mlp_act,
             dequant: &s.dequant,
         };
-        if capture.is_some_and(|c| c.exact) {
-            prefill_moe_decode_exact(
+        let injected = if capture.is_some_and(|c| c.exact) {
+            prefill_moe_decode_exact_with_injection(
                 ctx,
                 pass,
                 &moe_dims(cfg),
@@ -2519,14 +2519,26 @@ impl Qwen4ExpModel {
                 &io,
                 &ps.moe,
                 &s.moe,
-            )?;
+                Some(crate::kernels::moe::HcInjection {
+                    hyper,
+                    logits: &ps.hc.inj,
+                    groups: g,
+                }),
+            )?
         } else {
             prefill_moe(ctx, pass, &moe_dims(cfg), &layer.ffn, &io, &ps.moe)?;
+            false
+        };
+        if injected {
+            pass.level_barrier(&[&ps.branch_out, hyper])?;
+        } else {
+            pass.level_barrier(&[&ps.branch_out])?;
         }
-        pass.level_barrier(&[&ps.branch_out])?;
         self.trace_stage(ctx, pass, layer_index, "moe_output", &ps.branch_out, ps.m)?;
-        hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
-        pass.level_barrier(&[hyper])?;
+        if !injected {
+            hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+            pass.level_barrier(&[hyper])?;
+        }
         self.trace_stage(ctx, pass, layer_index, "output", hyper, ps.m)
     }
 

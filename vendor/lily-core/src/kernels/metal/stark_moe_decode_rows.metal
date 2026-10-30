@@ -122,3 +122,37 @@ kernel void stark_moe_gate_up_decode_rows(
             bfloat((gate_sum / (1.0f + exp(-gate_sum))) * up_sum);
     }
 }
+
+// Row-axis wrapper around the existing ordinary fused body. The BF16 branch
+// boundary, F32 weighted combine and subsequent HC expression are unchanged.
+kernel void stark_moe_down_combine_inject_decode_rows(
+    device const uint* codes [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const bfloat* x [[buffer(3)]],
+    device const uint* indices [[buffer(4)]],
+    device const float* scores [[buffer(5)]],
+    device const bfloat* shared [[buffer(6)]],
+    device const float* gate [[buffer(7)]],
+    device bfloat* out [[buffer(8)]],
+    device bfloat* hyper [[buffer(9)]],
+    device const bfloat* inj [[buffer(10)]],
+    constant uint& K [[buffer(11)]],
+    constant uint& GS [[buffer(12)]],
+    constant uint& H [[buffer(13)]],
+    constant uint& S [[buffer(14)]],
+    constant uint& has_shared [[buffer(15)]],
+    constant uint& G [[buffer(16)]],
+    constant float& inv_g [[buffer(17)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float xchg[4 * 2 * (MOE_MAX_K / 4 + 1)];
+    const uint row = tg.x;
+    moe_down_combine_inject_body<16, 4>(codes, scales, biases,
+        x + (ulong)row * S * K, indices + (ulong)row * S,
+        scores + (ulong)row * S, shared + (ulong)row * H, gate + row,
+        out + (ulong)row * H, hyper + (ulong)row * G * H,
+        inj + (ulong)row * G, G, inv_g, K, GS, H, S, has_shared,
+        tg.y, sg, lane, xchg);
+}

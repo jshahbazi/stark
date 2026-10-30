@@ -143,6 +143,50 @@ pub(crate) fn moe_down_combine_decode_rows(
     out: &Tensor,
     top_k: usize,
 ) -> Result<()> {
+    let (m, k) = check_decode_rows_down_combine(
+        w, h, x, indices, scores, shared, gate, out, top_k,
+    )?;
+    let pipeline = ctx.pipeline(
+        "stark_moe_down_combine_decode_rows",
+        DECODE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            shared.binding(),
+            gate.binding(),
+            out.binding(),
+        ],
+        &[
+            &u32_bytes(k),
+            &u32_bytes(w.group_size),
+            &u32_bytes(h),
+            &u32_bytes(top_k),
+            &u32_bytes(1),
+        ],
+        Grid::Threadgroups { groups: (m, h / 2, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_decode_rows_down_combine(
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+    top_k: usize,
+) -> Result<(usize, usize)> {
     ensure!(
         out.shape().len() == 2 && out.dtype() == DType::BF16,
         "decode combine requires BF16 [m,H]"
@@ -181,8 +225,41 @@ pub(crate) fn moe_down_combine_decode_rows(
             && gate.numel() == m,
         "decode shared precision or geometry"
     );
+    Ok((m, k))
+}
+
+/// Ordinary fused down/combine/HC body, addressed independently per row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_down_combine_inject_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+    top_k: usize,
+    injection: HcInjection<'_>,
+) -> Result<()> {
+    let (m, k) = check_decode_rows_down_combine(
+        w, h, x, indices, scores, shared, gate, out, top_k,
+    )?;
+    ensure!(injection.groups > 0, "HC injection needs at least one stream");
+    ensure!(
+        injection.hyper.dtype() == DType::BF16
+            && injection.hyper.numel() == m * h * injection.groups,
+        "HC hyper must be BF16 [rows,groups,h]"
+    );
+    ensure!(
+        injection.logits.dtype() == DType::BF16
+            && injection.logits.numel() == m * injection.groups,
+        "HC logits must be BF16 [rows,groups]"
+    );
     let pipeline = ctx.pipeline(
-        "stark_moe_down_combine_decode_rows",
+        "stark_moe_down_combine_inject_decode_rows",
         DECODE_ROWS_SOURCE,
         MslVersion::V3_1,
     )?;
@@ -198,6 +275,8 @@ pub(crate) fn moe_down_combine_decode_rows(
             shared.binding(),
             gate.binding(),
             out.binding(),
+            injection.hyper.binding(),
+            injection.logits.binding(),
         ],
         &[
             &u32_bytes(k),
@@ -205,6 +284,8 @@ pub(crate) fn moe_down_combine_decode_rows(
             &u32_bytes(h),
             &u32_bytes(top_k),
             &u32_bytes(1),
+            &u32_bytes(injection.groups),
+            &(1.0 / injection.groups as f32).to_ne_bytes(),
         ],
         Grid::Threadgroups { groups: (m, h / 2, 1), threadgroup: (128, 1, 1) },
     )
