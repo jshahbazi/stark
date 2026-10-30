@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
 
+pub mod uzu;
+
 /// The index file name a checkpoint directory is expected to contain.
 const INDEX_NAME: &str = "model.safetensors.index.json";
 /// The single-file checkpoint name used when no index is present.
@@ -39,6 +41,7 @@ impl SafetensorsDType {
         match self {
             Self::BF16 => Some(2),
             Self::F32 | Self::U32 => Some(4),
+            Self::Other(name) if name == "I64" || name == "U64" => Some(8),
             Self::Other(_) => None,
         }
     }
@@ -52,11 +55,17 @@ pub struct TensorMeta {
     shard: PathBuf,
     start: u64,
     end: u64,
+    // Converted group-major affine parameters are restored bit-for-bit at
+    // load. Native checkpoint tensors and paged embeddings remain direct.
+    group_output: Option<(usize, usize, usize)>,
 }
 
 impl TensorMeta {
     pub fn byte_len(&self) -> usize {
-        (self.end - self.start) as usize
+        self.group_output
+            .map_or((self.end - self.start) as usize, |(rows, groups, _)| {
+                rows * groups * 2
+            })
     }
 
     /// The shard file holding this tensor.
@@ -173,7 +182,26 @@ impl Checkpoint {
         set_nocache(&file);
         file.seek(SeekFrom::Start(meta.start))
             .with_context(|| format!("seeking to {name}"))?;
-        file.read_exact(buf).with_context(|| format!("reading {name}"))?;
+        if let Some((rows, groups, stride)) = meta.group_output {
+            let mut physical = vec![0u8; (meta.end - meta.start) as usize];
+            file.read_exact(&mut physical)
+                .with_context(|| format!("reading {name}"))?;
+            for group in 0..groups {
+                let padding =
+                    &physical[2 * (group * stride + rows)..2 * ((group + 1) * stride)];
+                ensure!(
+                    padding.iter().all(|&byte| byte == 0),
+                    "nonzero Uzu affine padding"
+                );
+                for row in 0..rows {
+                    let from = 2 * (group * stride + row);
+                    let to = 2 * (row * groups + group);
+                    buf[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                }
+            }
+        } else {
+            file.read_exact(buf).with_context(|| format!("reading {name}"))?;
+        }
         Ok(())
     }
 }
@@ -230,6 +258,7 @@ fn parse_shard_header(path: &Path) -> Result<HashMap<String, TensorMeta>> {
                 shard: path.to_path_buf(),
                 start: data_section + start,
                 end: data_section + end,
+                group_output: None,
             },
         );
     }

@@ -104,7 +104,7 @@ stark-convert [SOURCE] [options]
 | `--revision REV` | branch, tag or 40-hex commit | Hugging Face revision, resolved to a commit. For a local directory it must be a 40-hex commit |
 | `--repo ID` | catalog identity | Treat a local directory as this catalog model; omit with `--metadata-profile hf-generic` |
 | `--metadata-profile hf-generic` | | Use the checkpoint's own metadata for a model that is not in the catalog. Cannot be combined with a catalog `--repo` or with `--require-native-support` |
-| `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
+| `--architecture NAME` | `qwen2`, `qwen3`, `qwen3_5`, `qwen4_exp`, `llama`, `llamba`, `mistral`, `modernbert`, `gemma2`, `gemma3_text`, `phi3`, `granite`, `smollm3`, `lfm2` | Assert the checkpoint architecture; conversion fails if the checkpoint disagrees. Required with `--capabilities` for a generic probe |
 | `--model-kind KIND` | `language` (default), `classifier` | `classifier` is required for ModernBERT. `tts` is accepted by the parser but no adapter implements it |
 | `--dtype DTYPE` | `bfloat16` (default), `float16`, `float32` | Output dtype. Only BF16 output can be loaded by the engine |
 | `--artifact-mode MODE` | `text` (default), `vision-language` | Full-vision artifacts for the pinned Qwen3.5-0.8B BF16 checkpoint or the supported merged-BF16 [family profile](../../docs/VISION_FAMILY_CONTRACT.md) |
@@ -148,6 +148,17 @@ The declarative [catalog](stark_convert/catalog.json) records 110 reference mode
 | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` |
 | SmolLM3 MLX | `mlx-community/SmolLM3-3B-{4bit,8bit}` |
 | ModernBERT classifier | `trymirai/chat-moderation-router`, `trymirai/health-related-router` (both repositories currently inaccessible) |
+
+The additional `qwen4_exp` adapter converts the implemented Lily-format
+Qwen3.8-Flash-Next text layout through `hf-generic`, including
+`fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`. It is outside the registered
+catalog identity counts above. Its typed `Qwen38LanguageModelConfig` uses
+canonical MLX storage and the existing specialized Qwen runtime. Conversion
+preserves mixed Q4/Q8 weights and omits vision and MTP. The
+[Uzu-format study](../../docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records
+full storage-preservation, independent load, exact readout and sampled-generation
+checks for the pinned artifact and worker. Automatic qualification remains bound
+to the registry's exact checkpoint/build tuples.
 
 Implementation is tracked per architecture and weight format; qualification is tracked per exact checkpoint, dtype, config, output hash and engine build. In text mode, twenty-seven BF16 catalog artifacts have a stored load-only qualification: when a conversion's source manifest, weights, config and tokenizer hashes match such a record, the receipt reports `native_loading: "qualified_tuple"` together with the named build's worker, source, lockfile and toolchain hashes. That record proves the engine built at that commit loaded the artifact and reached readiness; it does not measure inference quality. Other implemented text identities, size variants, and generic conversions start as `unverified`, or `runtime_blocked` when their dtype or dimensions exceed what the engine loads. `--require-native-support` requires an exact match in the applicable catalog. Remaining unsupported rows fail with an unsupported category.
 
@@ -241,7 +252,7 @@ Generic conversions record `catalogued=false` and the chosen architecture and pr
 
 ## MLX checkpoints
 
-MLX conversion repacks an existing affine 4-bit or 8-bit checkpoint without requantizing. Packed 32-bit words become U8 tensors with identical payload bytes; scales and biases are cast, fused, transposed and padded to Stark's group and output layout; embedding planes keep their layout. Every compressed matrix needs a complete plane triplet, fused groups must share representation and dtype, and the catalog binds each identity to its declared bit width. Supported MLX families are Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma 3 text and LFM2 with groups 16, 32, 64 and 128; quantized Qwen2, Mistral, Granite and Gemma 2 are unsupported.
+MLX conversion repacks an existing affine 4-bit or 8-bit checkpoint without requantizing. Packed 32-bit words become U8 tensors with identical payload bytes; scales and biases are cast, fused, transposed and padded to Stark's group and output layout; embedding planes keep their layout. Every compressed matrix needs a complete plane triplet, fused groups must share representation and dtype, and the catalog binds each identity to its declared bit width. Supported MLX families are Qwen3, Qwen3.5 text, Llama, LLaMBA, SmolLM3, Gemma 3 text and LFM2 with groups 16, 32, 64 and 128. Lily-format Qwen3.8 text has the separate mixed-Q4/Q8 contract below. Quantized Qwen2, Mistral, Granite and Gemma 2 are unsupported.
 
 ```sh
 uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.8B-MLX-4bit \
@@ -249,6 +260,35 @@ uv run --project tools/converter --locked stark-convert mlx-community/Qwen3.5-0.
 ```
 
 MLX metadata follows each profile's registered source: Qwen3 and Llama use their original repository's tokenizer and generation files, Qwen3.5 uses the official tokenizer and the Qwen3.5-27B generation file, LFM2 uses its own files, SmolLM3 and Gemma use the MLX tokenizer with official generation files, and LLaMBA uses the Llama-3.2-1B files with its registered EOS. External sources are pinned independently; a missing or gated dependency fails rather than substituting metadata. A self-contained future MLX checkpoint can use `hf-generic` with explicit stop metadata and an explicit `quantization` field.
+
+### Lily Qwen3.8 text
+
+The `qwen4_exp` adapter requires the implemented
+`lily.format=qwen4_exp-affine-v1` configuration and complete source planes.
+It accepts `--dtype bfloat16`, retains BF16 affine parameters, evaluates Lily's
+per-matrix Q4/Q8 policy and writes standard `MLXSpec` storage. Linear and
+flattened expert parameters use group-major `output_input`; token and n-gram
+embeddings keep row-group `input_output`. Typed bindings retain the logical
+expert dimensions and exact floating/integer controls. Code/control hashes,
+inverse parameter bit comparisons and zero-padding checks run before atomic
+publication. Vision and MTP tensors are explicitly omitted.
+
+```sh
+uv run --project tools/converter --locked stark-convert /path/to/qwen38-lily-q4-xl \
+  --metadata-profile hf-generic --architecture qwen4_exp --dtype bfloat16 \
+  --offline --chunk-mib 64 --output models/qwen38-lily-q4-xl-uzu
+```
+
+Use a 64 MiB workspace for this large expert checkpoint. Smaller workspaces can
+force the parameter transpose to read individual rows and greatly extend
+conversion time. The workspace size does not change the output representation.
+
+The artifact is self-contained. Its typed architecture loads through the
+specialized Qwen kernels shared with the native-source route. This does not add
+Qwen3.8's graph to the generic dense decoder. The output receipt retains
+`native_loading: "unverified"` and `execution: "unverified"` until matching
+qualification is recorded. See [native Qwen setup and limits](../../docs/NATIVE_HYBRID_MODELS.md#qwen38-uzu-text-artifacts)
+and the [Uzu-format study](../../docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md).
 
 ## Experimental Qwen3 GGUF import
 

@@ -108,7 +108,7 @@ impl LilyModel {
     pub fn load(path: &Path) -> Result<Self> {
         let context =
             MetalContext::new().map_err(|_| Error::Unsupported("mixed precision Metal context unavailable"))?;
-        let mut model = Qwen4ExpModel::load_with(
+        let model = Qwen4ExpModel::load_with(
             &context,
             path,
             NgramStorage::Paged,
@@ -122,6 +122,25 @@ impl LilyModel {
             None,
         )
         .map_err(|_| Error::Unsupported("mixed precision checkpoint admission failed"))?;
+        Self::from_model(context, model)
+    }
+
+    pub fn load_uzu(
+        path: &Path,
+        config: &crate::config::model::qwen38_language_model::Qwen38DecoderConfig,
+    ) -> Result<Self> {
+        let architecture = super::uzu::core_config(&config.architecture)?;
+        let checkpoint = super::uzu::checkpoint(path, config)?;
+        let context = MetalContext::new().map_err(|_| Error::Unsupported("Uzu Qwen Metal context unavailable"))?;
+        let model = Qwen4ExpModel::load_uzu(&context, architecture, checkpoint)
+            .map_err(|_| Error::Invalid("Uzu Qwen converted model admission failed"))?;
+        Self::from_model(context, model)
+    }
+
+    fn from_model(
+        context: MetalContext,
+        mut model: Qwen4ExpModel,
+    ) -> Result<Self> {
         let vocab_size = model.config.vocab_size;
         let max_context = model.config.max_position_embeddings.min(MAX_CONTEXT);
         if vocab_size == 0 || vocab_size > 1_000_000 || max_context == 0 {

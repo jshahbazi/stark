@@ -579,10 +579,29 @@ pub fn load(
             && session_context.is_none(),
         "vendored Lily core requires resident experts and has no session persistence"
     );
+    let ckpt = Checkpoint::open(&dir)?;
+    load_checkpoint(ctx, ckpt, config, storage, with_mtp, with_vision, machine_memory)
+}
+
+/// Shared architecture loader for native and converted Uzu storage. A Uzu
+/// caller supplies a checkpoint already admitted against canonical MLXSpec
+/// planes; this function never discovers or opens a source checkpoint.
+pub fn load_checkpoint(
+    ctx: &MetalContext,
+    ckpt: Checkpoint,
+    config: &Qwen4ExpConfig,
+    storage: NgramStorage,
+    with_mtp: bool,
+    with_vision: bool,
+    machine_memory: Option<u64>,
+) -> Result<ModelWeights> {
+    ensure!(
+        !with_mtp && !with_vision,
+        "vendored Lily core supports text-only non-speculative loading"
+    );
     // Every buffer allocated from here on that is still alive at the end is
     // a weight, or the expert cache's (filtered out below).
     let recording = ctx.record_buffers()?;
-    let ckpt = Checkpoint::open(&dir)?;
     ensure!(
         ckpt.meta(&format!("{PREFIX}embed_tokens.weight")).is_some(),
         "unsupported checkpoint layout; expected lily's qwen4_exp-affine-v1"
@@ -609,6 +628,34 @@ pub fn load(
         skip,
         Box::new(move |bases| expected_bits(policy, bases)),
     );
+    // Older exports can store copies of the PLE hashing controls. They must
+    // agree exactly with the typed architecture; kernels use the validated
+    // integer configuration and never cast these controls through floats.
+    if let Some(ple) = &config.ple {
+        let prefix = format!("{PREFIX}layers.{}.ple.ple_embedding.", ple.layer);
+        for (suffix, expected) in [
+            ("layer_multipliers", ple.layer_multipliers.as_slice()),
+            ("ngram_heads_vocab_sizes", ple.head_vocab_sizes.as_slice()),
+            ("ngram_heads_offsets", ple.head_offsets.as_slice()),
+        ] {
+            let name = format!("{prefix}{suffix}");
+            if let Some(meta) = loader.checkpoint().meta(&name) {
+                ensure!(
+                    meta.shape == [expected.len()]
+                        && matches!(&meta.dtype, crate::safetensors::SafetensorsDType::Other(dtype) if dtype == "I64" || dtype == "U64"),
+                    "invalid PLE integer control"
+                );
+                let bytes = loader.checkpoint().read(&name)?;
+                ensure!(
+                    bytes.chunks_exact(8).zip(expected).all(|(raw, value)| {
+                        u64::from_le_bytes(raw.try_into().unwrap()) == *value
+                    }),
+                    "PLE integer control mismatch"
+                );
+                loader.mark_consumed(&name);
+            }
+        }
+    }
     let h = config.hidden_size;
 
     let embed_tokens = loader.linear(&[&format!("{PREFIX}embed_tokens")], h)?;

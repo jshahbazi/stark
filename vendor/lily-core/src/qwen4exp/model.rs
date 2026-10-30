@@ -1357,6 +1357,42 @@ impl Qwen4ExpModel {
             expert_usage_out,
             session_context,
         )?;
+        Self::from_weights(config, weights)
+    }
+
+    /// Executes a self-contained Uzu converted text artifact through the same
+    /// validated BF16 architecture kernels. No native folder is consulted.
+    pub fn load_uzu(
+        ctx: &MetalContext,
+        config: Qwen4ExpConfig,
+        checkpoint: crate::safetensors::Checkpoint,
+    ) -> Result<Self> {
+        ensure!(
+            config.linear_key_head_dim == GDN_HEAD_DIM
+                && config.linear_value_head_dim == GDN_HEAD_DIM,
+            "unsupported Uzu GDN head dimension"
+        );
+        ensure!(
+            config.indexer.head_dim == INDEXER_D,
+            "unsupported Uzu indexer head dimension"
+        );
+        ensure!(
+            config.mtp.is_none() && config.vision.is_none(),
+            "Uzu Qwen execution is text-only and non-speculative"
+        );
+        let weights = weights::load_checkpoint(
+            ctx,
+            checkpoint,
+            &config,
+            NgramStorage::Paged,
+            false,
+            false,
+            None,
+        )?;
+        Self::from_weights(config, weights)
+    }
+
+    fn from_weights(config: Qwen4ExpConfig, weights: ModelWeights) -> Result<Self> {
         let hasher = match &config.ple {
             Some(p) => Some(NgramHasher::new(
                 &p.layer_multipliers,

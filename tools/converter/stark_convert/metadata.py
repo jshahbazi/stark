@@ -394,6 +394,10 @@ def write_metadata(
         from .adapters.qwen35 import normalize_qwen35_config
 
         hf_config = normalize_qwen35_config(hf_config)
+    elif expected_type == "qwen4_exp":
+        from .adapters.qwen38 import normalize_qwen38_config
+
+        hf_config = normalize_qwen38_config(hf_config)
     if hf_config.get("model_type") != expected_type:
         raise ConversionError("Model architecture does not match metadata profile.")
     if expected_type == "llamba" and model_entry["metadata_profile"] != GENERIC_PROFILE:

@@ -94,6 +94,7 @@ pub fn resolve_model_type(model_path: &Path) -> Result<ModelType, ResolveModelTy
     let config: AnyModelConfig = serde_json::from_reader(BufReader::new(file))?;
     Ok(match config {
         AnyModelConfig::LanguageModelConfig(_) => ModelType::LanguageModel,
+        AnyModelConfig::Qwen38LanguageModelConfig(_) => ModelType::LanguageModel,
         AnyModelConfig::ClassifierModelConfig(_) => ModelType::Classifier,
     })
 }

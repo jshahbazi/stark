@@ -20,7 +20,7 @@ SCHEMA_VERSION = 1
 MODES = ("text", "decision", "vision-language")
 _QUALIFICATION = {"status": "not_assessed", "scope": "checkpoint_and_build", "calibration": "not_assessed"}
 _REVISION = re.compile(r"[0-9a-f]{40}\Z")
-_MLX = {"qwen3", "llama", "gemma3_text", "smollm3", "qwen3_5", "lfm2", "llamba"}
+_MLX = {"qwen3", "llama", "gemma3_text", "smollm3", "qwen3_5", "qwen4_exp", "lfm2", "llamba"}
 _FAMILY_DEFINITIONS = (
     ("qwen3", "Qwen3 dense", "HFQwen3Config", ()),
     ("qwen2", "Qwen2 dense", "HFQwen2Config", ()),
@@ -32,6 +32,7 @@ _FAMILY_DEFINITIONS = (
     ("granite", "Granite dense", "HFGraniteConfig", ()),
     ("smollm3", "SmolLM3 dense", "HFSmolLM3Config", ()),
     ("qwen3_5", "Qwen3.5 dense", "HFQwen35Config", ("qwen3_5_text",)),
+    ("qwen4_exp", "Qwen3.8 Flash Next", "HFQwen38Config", ()),
     ("lfm2", "LFM2", "HFLFM2Config", ()),
     ("llamba", "LLaMBA", "HFLlambaConfig", ()),
     ("modernbert", "ModernBERT classifier", "ModernBERTConfig", ()),
@@ -65,7 +66,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
         if supported and architecture in {"phi3", "gemma2", "gemma3_text"}:
             caveats.append("tied_embeddings_required")
         modes[mode] = {"status": "conditional" if supported else "unsupported", "message": message, "caveats": caveats}
-    formats = ["safetensors-float"]
+    formats = [] if architecture == "qwen4_exp" else ["safetensors-float"]
     if architecture in _MLX:
         formats.extend(["mlx-affine-4bit", "mlx-affine-8bit"])
     return {
@@ -78,7 +79,7 @@ def _family(architecture: str, name: str, config_class: str, aliases: tuple[str,
             "status": "implemented",
             "containers": [".safetensors"],
             "source_formats": formats,
-            "output_dtypes": ["bfloat16", "float16", "float32"],
+            "output_dtypes": ["bfloat16"] if architecture == "qwen4_exp" else ["bfloat16", "float16", "float32"],
         },
         "modes": modes,
     }
@@ -179,7 +180,12 @@ def preflight_model(
             "metadata_unavailable",
             "Model metadata is unavailable; support has not been established.",
         )
-    if config.get("type") in ("LanguageModelConfig", "Qwen35VisionLanguageModelConfig", "ClassifierModelConfig"):
+    if config.get("type") in (
+        "LanguageModelConfig",
+        "Qwen35VisionLanguageModelConfig",
+        "Qwen38LanguageModelConfig",
+        "ClassifierModelConfig",
+    ):
         return _report(
             None,
             mode,
@@ -249,6 +255,32 @@ def preflight_model(
             "unsupported",
             "unsupported_embedding_layout",
             "This family currently implements tied embeddings only.",
+        )
+    if architecture == "qwen4_exp":
+        if mode == "vision-language":
+            return _report(family, mode, "unsupported", "unsupported_mode", "Qwen3.8 conversion implements text only.")
+        # A bare family probe describes implemented coverage. Real nested
+        # checkpoints receive the typed metadata validation before weight I/O.
+        if "text_config" in config or "lily" in config:
+            try:
+                from .adapters.qwen38 import architecture_config
+
+                architecture_config(config)
+            except (ConversionError, UnsupportedConversion):
+                return _report(
+                    family,
+                    mode,
+                    "unsupported",
+                    "unsupported_qwen38_metadata",
+                    "Qwen3.8 metadata is outside the implemented Lily text contract.",
+                )
+        return _report(
+            family,
+            mode,
+            "conditional",
+            "checkpoint_validation_required",
+            "Qwen3.8 text conversion preserves MLX quantization; exact artifact runtime checks remain unverified.",
+            ("Text conversion omits vision and MTP tensors; speculation is disabled.",),
         )
     if architecture != "qwen3_5" and "text_config" in config:
         return _report(

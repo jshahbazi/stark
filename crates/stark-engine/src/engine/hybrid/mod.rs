@@ -1,7 +1,7 @@
-//! Native, source-format execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
+//! Architecture-specific execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
 //!
 //! These models carry distinct recurrent state, sparse attention and residual
-//! streams. They deliberately do not enter the dense decoder's artifact path.
+//! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
 
 pub mod activity;
 pub mod finite_guard;
@@ -16,6 +16,7 @@ pub mod profile;
 pub mod qwen;
 #[cfg(feature = "metal")]
 mod qwen_metal;
+mod uzu;
 #[cfg(feature = "metal")]
 mod weight_metal;
 pub mod weights;
@@ -57,7 +58,7 @@ fn json_file(
 }
 
 fn config(path: &Path) -> Result<Value> {
-    json_file(&path.join("config.json"), 1024 * 1024)
+    json_file(&path.join("config.json"), 8 * 1024 * 1024)
 }
 
 fn extend_eos(
@@ -82,7 +83,8 @@ fn extend_eos(
 /// from a repository name or load repository-provided Python code.
 pub fn recognizes(path: &Path) -> Result<bool> {
     let value = config(path)?;
-    Ok(matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
+    Ok(value.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE)
+        || matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
 }
 
 enum Forward {
@@ -109,6 +111,9 @@ pub struct Model {
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
         let outer = config(path)?;
+        if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
+            return Self::load_uzu(path);
+        }
         let text = outer.get("text_config").unwrap_or(&outer);
         let vocab_size = text
             .get("vocab_size")
@@ -189,6 +194,56 @@ impl Model {
             max_context,
             eos,
         })
+    }
+
+    fn load_uzu(path: &Path) -> Result<Self> {
+        let config = uzu::read_config(path)?;
+        let architecture = &config.decoder_config.architecture;
+        let vocab_size = architecture.vocab_size as usize;
+        let tokenizer = Arc::new(
+            Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| Error::Invalid("Uzu Qwen tokenizer"))?,
+        );
+        let vocab = tokenizer.get_vocab(true);
+        if vocab.is_empty() || vocab.values().any(|&id| id as usize >= vocab_size) {
+            return Err(Error::Invalid("Uzu Qwen tokenizer vocabulary"));
+        }
+        let mut eos = architecture.eos_token_id.to_vec();
+        for &stop in &config.generation_config.stop_token_ids {
+            let id = u32::try_from(stop).map_err(|_| Error::Invalid("Uzu Qwen stop identifiers"))?;
+            if !eos.contains(&id) {
+                eos.push(id);
+            }
+        }
+        if let crate::config::token_codec::AnyTokenCodecConfig::ChatCodecConfig(codec) = &config.token_codec_config
+            && let Some(token) = &codec.eos_token
+        {
+            let id = tokenizer.token_to_id(token).ok_or(Error::Invalid("Uzu Qwen EOS token"))?;
+            if !eos.contains(&id) {
+                eos.push(id);
+            }
+        }
+        if eos.iter().any(|id| *id as usize >= vocab_size || !vocab.values().any(|value| value == id)) {
+            return Err(Error::Invalid("Uzu Qwen EOS identifiers"));
+        }
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        {
+            let model = lily::LilyModel::load_uzu(path, &config.decoder_config)?;
+            if model.vocab_size() != vocab_size || model.position() != 0 {
+                return Err(Error::Invalid("Uzu Qwen architecture metadata mismatch"));
+            }
+            let max_context = architecture.max_position_embeddings.min(model.max_context() as u32);
+            Ok(Self {
+                forward: Forward::Lily(Box::new(model)),
+                tokenizer,
+                vocab_size,
+                max_context,
+                eos,
+            })
+        }
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        {
+            Err(Error::Unsupported("Uzu Qwen converted execution requires macOS Metal"))
+        }
     }
 
     pub fn tokenizer(&self) -> &Arc<Tokenizer> {

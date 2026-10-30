@@ -5,7 +5,7 @@ import json
 from argparse import Namespace
 
 import pytest
-from benchmark_hybrid_context import run
+from benchmark_hybrid_context import model_provenance, run
 
 
 class FakeWorker:
@@ -163,3 +163,42 @@ def test_host_metrics_are_opt_in_and_use_fixed_aggregate_fields(tmp_path):
     assert "WindowServer" not in serialized
     assert "Claude Helper" not in serialized
     assert '"pid"' not in serialized
+
+
+def test_native_source_provenance_keeps_legacy_hash_and_labels_receipt(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    receipt = model / "native-source.json"
+    receipt.write_text("{}")
+
+    result = model_provenance(model)
+
+    assert result["model_artifact_kind"] == "native_source"
+    assert result["model_artifact_receipt_file"] == "native-source.json"
+    assert result["model_artifact_receipt_sha256"] == hashlib.sha256(b"{}").hexdigest()
+    assert result["source_receipt_sha256"] == result["model_artifact_receipt_sha256"]
+
+
+def test_conversion_provenance_labels_conversion_and_source_manifest_hash(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    manifest_hash = "a" * 64
+    receipt_path = model / "conversion.json"
+    receipt_path.write_text(json.dumps({"status": "ok", "source_manifest_sha256": manifest_hash}))
+
+    result = model_provenance(model)
+
+    assert result["model_artifact_kind"] == "stark_conversion"
+    assert result["model_artifact_receipt_file"] == "conversion.json"
+    assert result["model_artifact_receipt_sha256"] == hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    assert result["source_manifest_sha256"] == manifest_hash
+    assert "source_receipt_sha256" not in result
+
+
+def test_conversion_provenance_rejects_missing_source_manifest_hash(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "conversion.json").write_text(json.dumps({"status": "ok"}))
+
+    with pytest.raises(ValueError, match="conversion_source_manifest_hash_invalid"):
+        model_provenance(model)

@@ -24,6 +24,24 @@ Stark adds `src/kernels/metal/stark_finite_readout.metal`, an original integer-b
 
 Host patches also sanitize framework errors and retain submitted command memory until GPU completion feedback arrives after a fault. Missing completion feedback keeps fault cleanup blocked; it cannot safely release live GPU memory. Unused capture, profiling and standalone vision helpers are removed from the extracted Rust modules.
 
+Stark adds a canonical Uzu storage admission path in `src/safetensors/uzu.rs`
+and refactors Qwen weight/model loading so native-source and typed Uzu inputs
+share the existing specialized kernels. The host's
+`Qwen38LanguageModelConfig` contains explicit text architecture fields and
+logical tensor bindings. Admission requires one regular local
+`model.safetensors`, canonical MLXSpec matrices, bounded headers, checked byte
+spans, a bijective tensor inventory and valid layout/dtype/shape combinations.
+U32 packed codes are exposed from identical U8 storage bytes; BF16 group-major
+linear/expert parameter planes are inverse-transposed into owned logical
+buffers, with zero padding checked. Embedding row-group planes retain their
+paged access layout. Direct BF16/F32 and I64/U64 controls preserve their bits;
+optional PLE hash buffers must match the typed configuration as exact raw
+64-bit words. The converted folder supplies the configuration, tokenizer and
+weights, with no fallback to an original checkpoint folder. The typed text
+artifact omits vision and MTP. These are host loading and storage changes;
+their numerical and performance validation is recorded separately in the
+[Uzu-format study](../../docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md).
+
 Stark adds an explicit, disabled-by-default Metal 4 stage profiler in `src/metal_stage_profile.rs`. Fixed phase markers use a bounded per-pass timestamp heap, retain the existing concurrent dispatch and dependency barriers, and require one command buffer per profiled decode. The heap remains owned through verified completion and fault draining. Resolution checks entry sizes, timestamp order, device-reported frequency and agreement with independent command feedback. Only aggregate phase durations leave the profiler; no model values or request payloads are captured. Precise timestamps can still change scheduling, so instrumented rates are diagnostic and separate from ordinary throughput runs. Upstream diagnostic environment controls remain disabled.
 
 Every successful pass wait also awaits all asynchronous completion feedback before accepting outputs, then checks the context's sticky fault. A signaled GPU fence alone is insufficient: framework error feedback can arrive afterward. Command resources remain held until these checks succeed, and failed checks retain the fault-safe cleanup drain.
