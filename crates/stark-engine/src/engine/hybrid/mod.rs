@@ -4,6 +4,7 @@
 //! streams. They deliberately do not enter the dense decoder's artifact path.
 
 pub mod activity;
+pub mod finite_guard;
 pub mod flint;
 pub mod glm;
 #[cfg(feature = "metal")]

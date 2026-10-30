@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, profile};
+use stark_engine::engine::hybrid::{Model, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
@@ -384,7 +384,7 @@ fn sample_with_mapper(
     let _total_scope = profile::Scope::new("sample.total");
     {
         let _scope = profile::Scope::new("sample.finite");
-        if logits.is_empty() || logits.iter().any(|value| !value.is_finite()) {
+        if logits.is_empty() || !finite_guard::all_finite(logits) {
             return Err("native_generation_failed");
         }
     }

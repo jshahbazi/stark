@@ -225,7 +225,7 @@ impl LilyModel {
                 self.scratch.logits().to_f32().map_err(|_| Error::Invalid("mixed precision readout failed"))?
             };
             let _scope = profile::Scope::new("qwen.mixed.logit_validation");
-            if logits.len() != self.vocab_size || logits.iter().any(|value| !value.is_finite()) {
+            if logits.len() != self.vocab_size || !super::finite_guard::all_finite(&logits) {
                 return Err(Error::Invalid("mixed precision readout values"));
             }
             self.last_full_readout = Some(self.state.pos);
@@ -761,7 +761,7 @@ where
             self.scratch.logits().to_f32().map_err(|_| Error::Invalid("mixed precision sampled readout failed"))?
         };
         let _scope = profile::Scope::new("qwen.mixed.logit_validation");
-        if logits.len() != self.vocab_size || logits.iter().any(|value| !value.is_finite()) {
+        if logits.len() != self.vocab_size || !super::finite_guard::all_finite(&logits) {
             return Err(Error::Invalid("mixed precision sampled readout values"));
         }
         Ok(logits)
