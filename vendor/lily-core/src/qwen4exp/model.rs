@@ -2815,42 +2815,86 @@ impl Qwen4ExpModel {
         layer_index: usize,
     ) -> Result<()> {
         let cfg = &self.config;
-        if capture.is_some_and(|c| c.exact) {
-            let width = w.in_proj.out_features();
-            let projected = ps.stack.view(0, &[ps.m, width])?;
-            project_mat_decode_exact(ctx, pass, &ps.hc.mixed, &w.in_proj, &projected)?;
-            pass.level_barrier(&[&projected])?;
-            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
-        } else {
-            project_stack_or_slices(
+        let fused_capture = capture.filter(|c| {
+            c.exact
+                && w.in_proj.bits == 4
+                && cfg.linear_conv_kernel_dim == 4
+                && w.in_proj.out_features().is_multiple_of(2)
+        });
+        if let Some(c) = fused_capture {
+            quant::gemv_q4_gdn_conv_rows_exact(
                 ctx,
                 pass,
-                &ps.hc.mixed,
                 &w.in_proj,
-                &ps.stack,
-                [
-                    (&w.in_proj_qkv, &ps.qkv),
-                    (&w.in_proj_z, &ps.z),
-                    (&w.in_proj_a, &ps.a),
-                    (&w.in_proj_b, &ps.b),
-                ],
-                &s.dequant,
+                &ps.hc.mixed,
+                &ps.qkv,
+                &ps.z,
+                &ps.a,
+                &ps.b,
+                &conv_windows[conv_slot],
+                &conv_windows[1 - conv_slot],
+                &w.conv_w,
+                &ps.qkv_conv,
+                Some(&c.conv_in),
             )?;
+            pass.level_barrier(&[
+                &ps.qkv,
+                &ps.z,
+                &ps.a,
+                &ps.b,
+                &ps.qkv_conv,
+                &conv_windows[1 - conv_slot],
+                &c.conv_in,
+            ])?;
+        } else {
+            if capture.is_some_and(|c| c.exact) {
+                let width = w.in_proj.out_features();
+                let projected = ps.stack.view(0, &[ps.m, width])?;
+                project_mat_decode_exact(
+                    ctx,
+                    pass,
+                    &ps.hc.mixed,
+                    &w.in_proj,
+                    &projected,
+                )?;
+                pass.level_barrier(&[&projected])?;
+                split_cols_bf16(
+                    ctx,
+                    pass,
+                    &projected,
+                    &[&ps.qkv, &ps.z, &ps.a, &ps.b],
+                )?;
+            } else {
+                project_stack_or_slices(
+                    ctx,
+                    pass,
+                    &ps.hc.mixed,
+                    &w.in_proj,
+                    &ps.stack,
+                    [
+                        (&w.in_proj_qkv, &ps.qkv),
+                        (&w.in_proj_z, &ps.z),
+                        (&w.in_proj_a, &ps.a),
+                        (&w.in_proj_b, &ps.b),
+                    ],
+                    &s.dequant,
+                )?;
+            }
+            pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
+            if let Some(c) = capture {
+                copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
+            }
+            conv1d_prefill(
+                ctx,
+                pass,
+                &conv_windows[conv_slot],
+                &conv_windows[1 - conv_slot],
+                &ps.qkv,
+                &w.conv_w,
+                &ps.qkv_conv,
+            )?;
+            pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
         }
-        pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
-        if let Some(c) = capture {
-            copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
-        }
-        conv1d_prefill(
-            ctx,
-            pass,
-            &conv_windows[conv_slot],
-            &conv_windows[1 - conv_slot],
-            &ps.qkv,
-            &w.conv_w,
-            &ps.qkv_conv,
-        )?;
-        pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
         self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
         self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
         self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
