@@ -136,7 +136,7 @@ The terminal reply:
 | `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, `verification: "batched-decode-exact-v1"`, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -163,7 +163,7 @@ another engine token for token.
 
 An admitted Lily-format Qwen3.8 checkpoint containing its trained MTP head adds
 `mtp: {"supported": true, "max_drafts": 3, "default_drafts": 0,
-"sampling": "exact-rejection-v1"}` to readiness. The generation worker loads
+"sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness. The generation worker loads
 the head with the checkpoint's existing quantization. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized and start with fresh state.
@@ -172,8 +172,8 @@ Both target and draft use complete F32 readouts and the existing temperature,
 top-k, top-p and min-p filtering policy. The host accepts a proposed token with
 probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
 The bonus token uses the target distribution. This is exact rejection sampling;
-there is no candidate cap or approximate acceptance threshold. Verification
-reuses the ordinary decode graph and its precision boundaries. Exact sampling preserves the target
+there is no candidate cap or approximate acceptance threshold. Batched
+verification retains ordinary decode arithmetic and its precision boundaries. Exact sampling preserves the target
 distribution, rather than requiring identical token sequences at the same seed
 with MTP on and off. Each route is reproducible on matching builds and hardware.
 
@@ -182,9 +182,9 @@ in request memory only. Rejected suffixes rewind GDN recurrent state,
 convolution windows, n-gram history and the draft head's committed history.
 Early termination drains work and rewinds a partly delivered group without
 calling the sampler during cleanup. MTP adds memory and verification work, so
-its benefit depends on acceptance and the workload. The current verifier
-executes the ordinary target graph for each proposed position; it does not
-amortize trunk computation through a different batched arithmetic path.
+its benefit depends on acceptance and the workload. The verifier evaluates
+up to four positions in one graph, reusing weights while retaining each
+position's decode arithmetic and recurrent-state update order.
 It is disabled by default.
 
 ### Streaming

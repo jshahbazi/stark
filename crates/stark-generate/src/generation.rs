@@ -825,7 +825,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "stop_sequences":true,"cancellation":"pipe-v1"});
     if worker.backend.supports_mtp() {
         readiness["mtp"] = json!({"supported":true,"max_drafts":3,
-            "default_drafts":0,"sampling":"exact-rejection-v1"});
+            "default_drafts":0,"sampling":"exact-rejection-v1",
+            "verification":"batched-decode-exact-v1"});
     }
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker

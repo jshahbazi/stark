@@ -25,6 +25,7 @@ class FakeWorker:
                 "supported": True,
                 "max_drafts": 3,
                 "sampling": "exact-rejection-v1",
+                "verification": "batched-decode-exact-v1",
             },
         }
 
@@ -49,6 +50,7 @@ class FakeWorker:
                 "enabled": enabled,
                 "drafts": request["mtp_drafts"],
                 "sampling": "exact-rejection-v1",
+                "verification": "batched-decode-exact-v1",
                 "stats": {
                     "rounds": 2 if enabled else 0,
                     "proposed": 3 if enabled else 0,
@@ -186,7 +188,7 @@ def test_rejects_output_limits_outside_benchmark_range(tmp_path, tokens):
         run(args, worker_factory=FakeWorker)
 
 
-@pytest.mark.parametrize("bad_reply", ["missing_decode", "out_of_vocab", "off_activity"])
+@pytest.mark.parametrize("bad_reply", ["missing_decode", "out_of_vocab", "off_activity", "wrong_verifier"])
 def test_rejects_invalid_timing_ids_or_disabled_route_stats(tmp_path, bad_reply):
     args = make_args(tmp_path)
 
@@ -202,6 +204,8 @@ def test_rejects_invalid_timing_ids_or_disabled_route_stats(tmp_path, bad_reply)
                 result["sampled_tokens"] = 4
             elif bad_reply == "off_activity" and request["mtp_drafts"] == 0:
                 result["mtp"]["stats"]["rounds"] = 1
+            elif bad_reply == "wrong_verifier":
+                result["mtp"]["verification"] = "serial-control"
             return result
 
     worker = InvalidWorker(args.worker, args.model, 0, env={})
@@ -209,3 +213,14 @@ def test_rejects_invalid_timing_ids_or_disabled_route_stats(tmp_path, bad_reply)
         run(args, worker_factory=lambda *a, **kw: worker)
     assert worker.closed
     assert not args.output.exists()
+
+
+def test_refuses_worker_without_batched_verifier_identity(tmp_path):
+    args = make_args(tmp_path)
+    worker = FakeWorker(args.worker, args.model, 0, env={})
+    ready = worker.read()
+    ready["mtp"].pop("verification")
+    worker.read = lambda: ready
+    with pytest.raises(ValueError, match="mtp_verifier_unavailable"):
+        run(args, worker_factory=lambda *a, **kw: worker)
+    assert worker.closed and not worker.requests

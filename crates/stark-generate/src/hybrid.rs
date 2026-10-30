@@ -357,6 +357,7 @@ impl GenerationBackend for HybridBackend {
                 "enabled":options.mtp_drafts > 0,
                 "drafts":options.mtp_drafts,
                 "sampling":"exact-rejection-v1",
+                "verification":"batched-decode-exact-v1",
                 "stats":self.model.mtp_stats(),
             }));
         }

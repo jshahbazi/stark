@@ -559,7 +559,7 @@ impl MtpDecode<'_> {
         let started = Instant::now();
         let verified = self
             .model
-            .verify_host(self.context, self.state, self.scratch, self.pending, &proposals)
+            .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
             .map_err(|_| Error::Invalid("MTP verify failed"))?;
         self.stats.verify_seconds += started.elapsed().as_secs_f64();
         let mut accepted = 0;
@@ -1032,6 +1032,62 @@ mod tests {
 
     use super::*;
 
+    #[stark_test]
+    #[ignore]
+    #[cfg(debug_assertions)]
+    fn private_checkpoint_mtp_batched_stage_differential() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json")).unwrap();
+        let seed = tokenizer.encode("Hello.", false).unwrap().get_ids().to_vec();
+        let prefix: Vec<u32> = seed.iter().copied().cycle().take(64).collect();
+        let mut model = LilyModel::load_with_mtp(path, true).unwrap();
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            model.set_mtp_enabled(false).unwrap();
+            for &token in &prefix[..prefix.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            model.step(*prefix.last().unwrap()).unwrap()
+        };
+        let logits = prefill(&mut model);
+        let pending = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+        model.model.begin_numerical_trace(model.model.config.num_hidden_layers + 1).unwrap();
+        let _ = model.step(pending).unwrap();
+        let reference = model.model.finish_numerical_trace().unwrap();
+        let mut records = Vec::new();
+        for rows in [1usize, 4] {
+            let _ = prefill(&mut model);
+            model.model.begin_numerical_trace(model.model.config.num_hidden_layers + 1).unwrap();
+            let _ = model
+                .model
+                .verify_host_batched(
+                    &model.context,
+                    &mut model.state,
+                    &mut model.scratch,
+                    pending,
+                    &vec![pending; rows - 1],
+                )
+                .unwrap();
+            let candidate = model.model.finish_numerical_trace().unwrap();
+            let differences = reference.compare(&candidate, 0).unwrap();
+            let first = differences.iter().find(|x| x.unequal_values > 0);
+            eprintln!(
+                "{}",
+                serde_json::json!({"scope":"mtp_batched_stage_differential","rows":rows,"compared_stages":differences.len(),"first_divergence":first})
+            );
+            for difference in differences.iter().filter(|x| x.layer < 2) {
+                eprintln!("{}", serde_json::json!({"rows":rows,"difference":difference}));
+            }
+            records.push(serde_json::json!({"rows":rows,"differences":differences}));
+        }
+        if let Some(path) = std::env::var_os("STARK_MTP_BATCH_DIAGNOSTICS") {
+            use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).unwrap();
+            file.write_all(&serde_json::to_vec(&records).unwrap()).unwrap();
+        }
+    }
+
     #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
     struct NumericalControl {
         readouts: usize,
@@ -1126,8 +1182,10 @@ mod tests {
         let _ = prefill(&mut model);
         let mut host_serial = Vec::new();
         for &token in &tokens[..4] {
-            let verified =
-                model.model.verify_host(&model.context, &mut model.state, &mut model.scratch, token, &[]).unwrap();
+            let verified = model
+                .model
+                .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, token, &[])
+                .unwrap();
             host_serial.push(verified.logits[0].clone());
             model.model.finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, 0).unwrap();
         }
@@ -1154,6 +1212,7 @@ mod tests {
             top1_mismatches += usize::from(argmax(left) != argmax(right));
             let mut squared_error = 0.0;
             let mut squared_reference = 0.0;
+            let previous_unequal = phase.unequal_values;
             for (&a, &b) in left.iter().zip(right) {
                 comparisons += 1;
                 phase.values += 1;
@@ -1165,6 +1224,9 @@ mod tests {
                 max_error = max_error.max((a - b).abs());
             }
             phase.max_relative_rms = phase.max_relative_rms.max((squared_error / squared_reference).sqrt());
+            if phase.unequal_values == previous_unequal {
+                return;
+            }
             for (top_k, top_p, category) in [(None, 1.0, 0), (None, 0.95, 1), (Some(20), 0.95, 2)] {
                 let candidate = control_distribution(left, top_k, top_p);
                 let reference = control_distribution(right, top_k, top_p);
@@ -1185,30 +1247,38 @@ mod tests {
                 }
             }
         };
-        for accepted in 0..=3 {
-            let _ = prefill(&mut model);
-            let verified = model
-                .model
-                .verify_host(&model.context, &mut model.state, &mut model.scratch, tokens[0], &tokens[1..4])
-                .unwrap();
-            for (actual, expected) in verified.logits.iter().zip(&serial) {
-                compare(actual, expected, 0);
+        for width in 1..=4 {
+            for accepted in 0..width {
+                let _ = prefill(&mut model);
+                let verified = model
+                    .model
+                    .verify_host_batched(
+                        &model.context,
+                        &mut model.state,
+                        &mut model.scratch,
+                        tokens[0],
+                        &tokens[1..width],
+                    )
+                    .unwrap();
+                for (actual, expected) in verified.logits.iter().zip(&serial) {
+                    compare(actual, expected, 0);
+                }
+                for (actual, expected) in verified.logits.iter().zip(&host_serial) {
+                    compare(actual, expected, 3);
+                }
+                model
+                    .model
+                    .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, accepted)
+                    .unwrap();
+                assert!(model.state.pos == input.len() + accepted + 1);
+                let next = model.step(tokens[accepted + 1]).unwrap();
+                let _ = prefill(&mut model);
+                for &token in &tokens[..=accepted] {
+                    let _ = model.step(token).unwrap();
+                }
+                let expected = model.step(tokens[accepted + 1]).unwrap();
+                compare(&next, &expected, 1);
             }
-            for (actual, expected) in verified.logits.iter().zip(&host_serial) {
-                compare(actual, expected, 3);
-            }
-            model
-                .model
-                .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, accepted)
-                .unwrap();
-            assert!(model.state.pos == input.len() + accepted + 1);
-            let next = model.step(tokens[accepted + 1]).unwrap();
-            let _ = prefill(&mut model);
-            for &token in &tokens[..=accepted] {
-                let _ = model.step(token).unwrap();
-            }
-            let expected = model.step(tokens[accepted + 1]).unwrap();
-            compare(&next, &expected, 1);
         }
         struct AcceptSampler {
             calls: std::rc::Rc<std::cell::Cell<usize>>,
@@ -1270,7 +1340,7 @@ mod tests {
                         .unwrap();
                     let verified = model
                         .model
-                        .verify_host(&model.context, &mut model.state, &mut model.scratch, pending, &[])
+                        .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, pending, &[])
                         .unwrap();
                     model
                         .model
@@ -1312,7 +1382,7 @@ mod tests {
                 let _ = long_prefill(&mut model);
                 let verified = model
                     .model
-                    .verify_host(&model.context, &mut model.state, &mut model.scratch, fixed, &[fixed; 3])
+                    .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, fixed, &[fixed; 3])
                     .unwrap();
                 for (actual, reference) in verified.logits.iter().zip(&expected) {
                     compare(actual, reference, 0);

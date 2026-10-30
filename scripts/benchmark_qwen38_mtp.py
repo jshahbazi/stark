@@ -93,6 +93,8 @@ def _validate_result(
     ack = result.get("mtp")
     if not isinstance(ack, dict) or ack.get("sampling") != "exact-rejection-v1":
         raise ValueError("mtp_acknowledgement_unavailable")
+    if ack.get("verification") != "batched-decode-exact-v1":
+        raise ValueError("mtp_verifier_acknowledgement_mismatch")
     expected = 0 if route == "off" else drafts
     if ack.get("drafts") != expected or ack.get("enabled") is not (expected > 0):
         raise ValueError("mtp_route_acknowledgement_mismatch")
@@ -137,6 +139,7 @@ def _validate_result(
             "enabled": ack["enabled"],
             "drafts": ack["drafts"],
             "sampling": ack["sampling"],
+            "verification": ack["verification"],
             "timings_seconds": timings,
         },
     }
@@ -188,7 +191,8 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         raise ValueError("corpus_empty")
 
     report = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "verification": "batched-decode-exact-v1",
         "scope": "qwen38_same_worker_paired_mtp_sampling",
         "sampling": sampling_options(args),
         "seed": args.seed,
@@ -243,6 +247,8 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
             raise ValueError("mtp_not_supported")
         if mtp.get("sampling") != "exact-rejection-v1":
             raise ValueError("mtp_sampling_unavailable")
+        if mtp.get("verification") != report["verification"]:
+            raise ValueError("mtp_verifier_unavailable")
         max_drafts = mtp.get("max_drafts")
         if type(max_drafts) is not int or max_drafts < args.drafts:
             raise ValueError("mtp_drafts_unavailable")

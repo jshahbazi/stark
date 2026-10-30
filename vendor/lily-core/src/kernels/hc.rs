@@ -272,6 +272,7 @@ fn dispatch_read_down(
     groups: usize,
     eps: f32,
     w_bias: f32,
+    row_axis_rows: usize,
 ) -> Result<()> {
     // Without an inject weight its bindings are never read; bind the down
     // weight (and output) so every slot names a resident buffer.
@@ -314,7 +315,11 @@ fn dispatch_read_down(
         &buffers,
         &params,
         Grid::Threadgroups {
-            groups: (r + n_inj, 1, 1),
+            groups: if row_axis_rows > 0 {
+                (row_axis_rows, r + n_inj, 1)
+            } else {
+                (r + n_inj, 1, 1)
+            },
             threadgroup: (32 * groups, 1, 1),
         },
     )
@@ -364,6 +369,7 @@ pub fn hc_read_down_q8(
         groups,
         eps,
         w_bias,
+        0,
     )
 }
 
@@ -428,6 +434,56 @@ pub fn hc_read_down_q8_rows(
         groups,
         eps,
         w_bias,
+        0,
+    )
+}
+
+/// Row-axis execution of the ordinary MB=1 down/injection/activation body.
+#[allow(clippy::too_many_arguments)]
+pub fn hc_read_down_q8_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    hyper: &Tensor,
+    w: &Tensor,
+    down: &QuantWeights,
+    inject: Option<&QuantWeights>,
+    down_out: &Tensor,
+    inj_out: &Tensor,
+    inv_rms: &Tensor,
+    act_out: &Tensor,
+    h: usize,
+    groups: usize,
+    eps: f32,
+    w_bias: f32,
+) -> Result<()> {
+    ensure!(hyper.shape().len() == 2, "HC decode rows require [M, G*H]");
+    let rows = hyper.shape()[0];
+    ensure!((1..=HC_FUSED_MAX_ROWS).contains(&rows), "invalid HC decode row count");
+    let dims = check_read_down(
+        hyper, w, down, inject, down_out, inj_out, inv_rms, h, groups, rows,
+    )?;
+    ensure!(
+        act_out.numel() == down_out.numel() && act_out.dtype() == DType::BF16,
+        "HC activation shape"
+    );
+    dispatch_read_down(
+        ctx,
+        pass,
+        "stark_hc_down_decode_rows",
+        hyper,
+        w,
+        down,
+        inject,
+        down_out,
+        inj_out,
+        inv_rms,
+        Some(act_out),
+        dims,
+        h,
+        groups,
+        eps,
+        w_bias,
+        rows,
     )
 }
 
@@ -502,6 +558,7 @@ fn dispatch_read_up_mix(
     groups: usize,
     rows: usize,
     with_inv_g: bool,
+    row_axis: bool,
     w_bias: f32,
 ) -> Result<()> {
     let k = groups * h;
@@ -552,7 +609,11 @@ fn dispatch_read_up_mix(
         ],
         &params,
         Grid::Threadgroups {
-            groups: (h.div_ceil(HC_UP_COLS), 1, 1),
+            groups: if row_axis {
+                (rows, h.div_ceil(HC_UP_COLS), 1)
+            } else {
+                (h.div_ceil(HC_UP_COLS), 1, 1)
+            },
             threadgroup: (HC_UP_COLS * 32, 1, 1),
         },
     )
@@ -591,7 +652,8 @@ pub fn hc_read_up_mix_q8(
         _ => anyhow::bail!("streams {groups} outside 1..={HC_MAX_G}"),
     };
     dispatch_read_up_mix(
-        ctx, pass, name, up, down, hyper, w, inv_rms, mixed, h, groups, 1, true, w_bias,
+        ctx, pass, name, up, down, hyper, w, inv_rms, mixed, h, groups, 1, true, false,
+        w_bias,
     )
 }
 
@@ -625,7 +687,8 @@ pub(crate) fn hc_read_up_mix_q8_cached(
     // Keep the original up kernel's binding layout, including its unused
     // inv_g parameter, so only the activation loads change in its body.
     dispatch_read_up_mix(
-        ctx, pass, name, up, act, hyper, w, inv_rms, mixed, h, groups, 1, true, w_bias,
+        ctx, pass, name, up, act, hyper, w, inv_rms, mixed, h, groups, 1, true, false,
+        w_bias,
     )
 }
 
@@ -667,7 +730,42 @@ pub fn hc_read_up_mix_q8_rows(
     let name = HC_UP_MIX_ROWS_FNS[groups - 1][rows - 1];
     dispatch_read_up_mix(
         ctx, pass, name, up, act, hyper, w, inv_rms, mixed, h, groups, rows, false,
-        w_bias,
+        false, w_bias,
+    )
+}
+
+/// Row-axis execution of the original cached single-row up/mix body.
+#[allow(clippy::too_many_arguments)]
+pub fn hc_read_up_mix_q8_cached_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    up: &QuantWeights,
+    act: &Tensor,
+    hyper: &Tensor,
+    w: &Tensor,
+    inv_rms: &Tensor,
+    mixed: &Tensor,
+    h: usize,
+    groups: usize,
+    w_bias: f32,
+) -> Result<()> {
+    ensure!(hyper.shape().len() == 2, "cached HC rows require [M, G*H]");
+    let rows = hyper.shape()[0];
+    ensure!((1..=HC_FUSED_MAX_ROWS).contains(&rows), "invalid cached HC row count");
+    let name = match groups {
+        1 => "stark_hc_up_cached_rows_g1",
+        2 => "stark_hc_up_cached_rows_g2",
+        3 => "stark_hc_up_cached_rows_g3",
+        4 => "stark_hc_up_cached_rows_g4",
+        5 => "stark_hc_up_cached_rows_g5",
+        6 => "stark_hc_up_cached_rows_g6",
+        7 => "stark_hc_up_cached_rows_g7",
+        8 => "stark_hc_up_cached_rows_g8",
+        _ => anyhow::bail!("invalid cached HC stream count"),
+    };
+    dispatch_read_up_mix(
+        ctx, pass, name, up, act, hyper, w, inv_rms, mixed, h, groups, rows, true,
+        true, w_bias,
     )
 }
 

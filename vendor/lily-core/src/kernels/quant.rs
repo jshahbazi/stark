@@ -11,6 +11,11 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/quant.metal");
+const DECODE_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    "\n",
+    include_str!("metal/stark_decode_rows.metal"),
+);
 
 /// Rows each thread of the Q4 gather GEMV accumulates.
 const Q4_GEMV_ROWS: usize = 2;
@@ -174,6 +179,58 @@ pub fn gemv_quant(
         Grid::Threadgroups { groups: (n / packed_rows, 1, 1), threadgroup: (32, 1, 1) },
     )
 }
+
+/// One dispatch for several decode projections. Each row uses the ordinary
+/// GEMV body, including its raw-code affine arithmetic and lane reduction.
+/// The row axis changes addressing only; it never materializes BF16 weights.
+pub fn gemv_quant_rows_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+) -> Result<()> {
+    let (n, k) = check_quant(w)?;
+    ensure!(
+        x.dtype() == DType::BF16 && x.shape().len() == 2,
+        "decode rows require BF16 [m,K]"
+    );
+    let m = x.shape()[0];
+    ensure!(
+        (1..=4).contains(&m) && x.shape()[1] == k,
+        "decode row projection geometry"
+    );
+    ensure!(y.numel() == m * n, "decode row output geometry");
+    let requested_rows =
+        if w.bits == 4 && y.dtype() == DType::BF16 { Q4_GEMV_ROWS } else { 1 };
+    let packed_rows = if n.is_multiple_of(requested_rows) { requested_rows } else { 1 };
+    let name = match (w.bits, y.dtype(), packed_rows) {
+        (4, DType::BF16, 1) => "stark_decode_rows_q4_bf16",
+        (4, DType::BF16, 2) => "stark_decode_rows_q4_bf16_2row",
+        (4, DType::F32, 1) => "stark_decode_rows_q4_f32",
+        (8, DType::BF16, 1) => "stark_decode_rows_q8_bf16",
+        (8, DType::F32, 1) => "stark_decode_rows_q8_f32",
+        _ => anyhow::bail!("decode row output must be BF16 or F32"),
+    };
+    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            y.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+        // Adjacent groups read the same weight row for distinct inputs.
+        Grid::Threadgroups { groups: (m, n / packed_rows, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "quant_decode_rows_tests.rs"]
+mod decode_rows_tests;
 
 /// Q4 two-row GDN input projection with its four-tap causal convolution.
 /// The complete BF16 projection is preserved in `raw_out`; only its first

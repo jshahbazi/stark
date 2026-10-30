@@ -500,6 +500,142 @@ pub fn k_norm_rope_scatter_decode<'c>(
     }
 }
 
+/// Decode arithmetic over one to four query rows in one dispatch. Each
+/// threadgroup retains the single-row norm reduction and BF16 boundaries.
+#[allow(clippy::too_many_arguments)]
+pub fn q_norm_rope_split_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qg: &Tensor,
+    w: &Tensor,
+    q: &Tensor,
+    gate: &Tensor,
+    rot: usize,
+    base_pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+) -> Result<()> {
+    ensure!(q.shape().len() == 3, "query rows require [M, heads, D]");
+    let (m, heads, d) = (q.shape()[0], q.shape()[1], q.shape()[2]);
+    ensure!(
+        (1..=4).contains(&m) && heads > 0 && d == 256,
+        "unsupported query row geometry"
+    );
+    ensure!(rot <= d && rot.is_multiple_of(2), "invalid rotary dimension");
+    ensure!(
+        base_pos.checked_add(m).is_some_and(|end| end <= MAX_SEQ),
+        "query position boundary"
+    );
+    ensure!(
+        qg.numel() == 2 * q.numel() && gate.numel() == q.numel() && w.numel() == d,
+        "query row size mismatch"
+    );
+    for t in [qg, w, q, gate] {
+        ensure!(t.dtype() == DType::BF16, "query rows require BF16");
+    }
+    let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
+    let pipeline =
+        ctx.pipeline("q_norm_rope_split_decode_bf16_rows", SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[qg.binding(), w.binding(), q.binding(), gate.binding()],
+        &[
+            &u32_bytes(d),
+            &u32_bytes(rot),
+            &u32_bytes(base_pos),
+            &theta.to_ne_bytes(),
+            &eps.to_ne_bytes(),
+            &delta,
+            &u32_bytes(heads),
+        ],
+        Grid::Threadgroups { groups: (heads, m, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+/// Decode K normalization, rotary rounding and cache quantization over up
+/// to four independent positions. The original cache format is retained.
+#[allow(clippy::too_many_arguments)]
+pub fn k_norm_rope_scatter_decode_rows<'c>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    k: &Tensor,
+    w: &Tensor,
+    cache: impl Into<Kv<'c>>,
+    rot: usize,
+    base_pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+) -> Result<()> {
+    let cache = cache.into();
+    let format = cache.format()?;
+    let (heads, max_seq, d) = cache.shape();
+    ensure!(
+        heads > 0 && d == 256 && k.numel().is_multiple_of(heads * d),
+        "unsupported key row geometry"
+    );
+    let m = k.numel() / (heads * d);
+    ensure!((1..=4).contains(&m), "unsupported key row count");
+    ensure!(
+        base_pos.checked_add(m).is_some_and(|end| end <= max_seq),
+        "key position boundary"
+    );
+    ensure!(
+        rot <= d && rot.is_multiple_of(2) && w.numel() == d,
+        "invalid key normalization geometry"
+    );
+    ensure!(
+        k.dtype() == DType::BF16 && w.dtype() == DType::BF16,
+        "key rows require BF16"
+    );
+    let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
+    let params: [&[u8]; 8] = [
+        &u32_bytes(d),
+        &u32_bytes(rot),
+        &u32_bytes(base_pos),
+        &theta.to_ne_bytes(),
+        &eps.to_ne_bytes(),
+        &u32_bytes(max_seq),
+        &delta,
+        &u32_bytes(heads),
+    ];
+    let grid = Grid::Threadgroups { groups: (heads, m, 1), threadgroup: (256, 1, 1) };
+    match format {
+        KvFormat::Bf16 => {
+            let pipeline = ctx.pipeline(
+                "k_norm_rope_scatter_decode_bf16_rows",
+                SOURCE,
+                MslVersion::V3_1,
+            )?;
+            pass.dispatch_at(
+                &pipeline,
+                &[k.binding(), w.binding(), cache.values.binding()],
+                &params,
+                grid,
+            )
+        }
+        KvFormat::Q8 => {
+            let pipeline = ctx.pipeline(
+                "k_norm_rope_scatter_decode_q8_rows",
+                SOURCE,
+                MslVersion::V3_1,
+            )?;
+            pass.dispatch_at(
+                &pipeline,
+                &[
+                    k.binding(),
+                    w.binding(),
+                    cache.values.binding(),
+                    cache.scales()?.binding(),
+                ],
+                &params,
+                grid,
+            )
+        }
+    }
+}
+
 /// Dequantizes rows `0..len` of a q8 cache into the bf16 `out`
 /// (`[KVH, out_cap, D]`, `out_cap >= len`): the staging the dense tensor-op
 /// prefill reads in q8 mode (its window never passes the indexer's dense
@@ -876,3 +1012,7 @@ fn sdpa_decode_q8(
         Grid::Threadgroups { groups: (nq, 1, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+#[cfg(test)]
+#[path = "attention_verify_tests.rs"]
+mod attention_verify_tests;

@@ -166,7 +166,7 @@ The generation worker can also load the checkpoint's existing MTP head and
 enable one to three draft tokens per request through `mtp_drafts`. It is off
 by default. Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
-quantization is unchanged. Verification reuses ordinary decode arithmetic,
+quantization is unchanged. Batched verification retains ordinary decode arithmetic,
 captures GDN and convolution state, and rejection restores the committed
 prefix and n-gram history. The
 head and its speculative state add memory. See the

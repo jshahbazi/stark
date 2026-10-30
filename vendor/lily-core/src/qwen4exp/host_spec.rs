@@ -5,7 +5,7 @@
 use anyhow::{Result, ensure};
 
 use super::model::{
-    AttnPos, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
+    AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
 };
 use super::ngram::NgramHasher;
 use crate::engine::DecodeStateApi;
@@ -23,6 +23,60 @@ pub struct HostVerification {
 }
 
 impl Qwen4ExpModel {
+    /// Verifies the pending token and up to three proposals in one batched
+    /// graph with the ordinary decode arithmetic at every active boundary.
+    /// The strict single-token implementation remains a reference control.
+    pub fn verify_host_batched(
+        &self,
+        ctx: &MetalContext,
+        state: &mut DecodeState,
+        s: &mut Scratch,
+        pending: u32,
+        drafts: &[u32],
+    ) -> Result<HostVerification> {
+        ensure!(
+            state.spec.is_none() && drafts.len() <= MAX_DRAFTS
+                && self.weights.mtp.is_some() && s.spec.is_some(),
+            "invalid candidate verification state"
+        );
+        let mut tokens = vec![pending];
+        tokens.extend_from_slice(drafts);
+        ensure!(
+            tokens.iter().all(|&t| (t as usize) < self.config.vocab_size),
+            "candidate input ID"
+        );
+        let m = tokens.len();
+        state.ensure_capacity(ctx, state.pos + m)?;
+        self.ensure_prefill_scratch(ctx, s, m)?;
+        let capacity =
+            s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("candidate scratch"))?;
+        let ps = capacity.chunk(&tokens)?;
+        if let (Some(w), Some(p), Some(pst)) = (
+            self.weights.layers.iter().find_map(|l| l.ple.as_deref()),
+            &ps.ple,
+            &state.ple,
+        ) {
+            self.stage_ngram(w, p, &tokens, pst.hist)?;
+        }
+        let pos_before = state.pos;
+        let hist_before = state.ple.as_ref().map(|p| p.hist);
+        self.encode_batch(ctx, state, s, &ps, BatchMode::VerifyHost)?
+            .commit()?
+            .wait()?;
+        state.pos += m;
+        state.conv_slot = 1 - state.conv_slot;
+        if let Some(pst) = &mut state.ple {
+            pst.hist = NgramHasher::advance(pst.hist, &tokens);
+        }
+        let sp =
+            s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
+        let values = prefix_rows(&sp.logits, m)?.to_f32()?;
+        ensure!(values.iter().all(|x| x.is_finite()), "candidate readout values");
+        let logits =
+            values.chunks_exact(self.config.vocab_size).map(<[f32]>::to_vec).collect();
+        Ok(HostVerification { logits, pos_before, hist_before, tokens })
+    }
+
     /// Builds a short draft chain using the same complete-logit sampler as
     /// the caller. Head caches may contain speculative suffixes afterwards;
     /// later valid rows overwrite them before reading them.

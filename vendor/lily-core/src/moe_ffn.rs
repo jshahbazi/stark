@@ -14,6 +14,10 @@ use crate::metal::{ComputePass, MetalContext};
 use crate::tensor::{DType, Tensor};
 use crate::weights::{LinearWeights, MoeWeights};
 
+#[cfg(test)]
+#[path = "moe_decode_exact_tests.rs"]
+mod decode_exact_tests;
+
 /// The FFN shape a model hands the shared graph.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MoeDims {
@@ -130,6 +134,17 @@ pub(crate) fn project_mat(
     quant::gemm_quant_bf16_nt(ctx, pass, a, w, c, scratch)
 }
 
+/// Verify projection with precisely the ordinary decode GEMV arithmetic.
+pub(crate) fn project_mat_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    a: &Tensor,
+    w: &LinearWeights,
+    c: &Tensor,
+) -> Result<()> {
+    quant::gemv_quant_rows_decode_exact(ctx, pass, w, a, c)
+}
+
 /// Decode-side MoE intermediates: the router distribution and the top-k
 /// expert projections, all device-resident (no readback per step).
 pub(crate) struct MoeScratch {
@@ -167,6 +182,9 @@ pub(crate) struct PrefillMoeScratch {
     pub router_logits: Tensor,
     pub shared_out: Tensor,
     pub shared_gate: Tensor,
+    /// Verify-only F32 values; ordinary prefill keeps its original buffers.
+    decode_router_logits: Tensor,
+    decode_shared_gate: Tensor,
     pub indices: Tensor,
     /// The routed ids as expert-cache slots for the small-m kernels
     /// (`MoeWeights::slot_of`; the grouped route remaps in its block map).
@@ -232,6 +250,8 @@ impl PrefillMoeScratch {
             router_logits: Tensor::zeros(ctx, &[m, e], bf)?,
             shared_out: Tensor::zeros(ctx, &[m, h], bf)?,
             shared_gate: Tensor::zeros(ctx, &[m], bf)?,
+            decode_router_logits: Tensor::zeros(ctx, &[m.min(4), e], DType::F32)?,
+            decode_shared_gate: Tensor::zeros(ctx, &[m.min(4)], DType::F32)?,
             indices: Tensor::zeros(ctx, &[m, k], u32t)?,
             slots: Tensor::zeros(ctx, &[m, k], u32t)?,
             scores: Tensor::zeros(ctx, &[m, k], DType::F32)?,
@@ -281,6 +301,8 @@ impl PrefillMoeScratch {
             router_logits: prefix_rows(&self.router_logits, m)?,
             shared_out: prefix_rows(&self.shared_out, m)?,
             shared_gate: prefix_rows(&self.shared_gate, m)?,
+            decode_router_logits: prefix_rows(&self.decode_router_logits, m.min(4))?,
+            decode_shared_gate: prefix_rows(&self.decode_shared_gate, m.min(4))?,
             indices: prefix_rows(&self.indices, m)?,
             slots: prefix_rows(&self.slots, m)?,
             scores: prefix_rows(&self.scores, m)?,
@@ -596,6 +618,87 @@ pub(crate) fn prefill_moe(
         &ms.scores,
         &ms.shared_out,
         &ms.shared_gate,
+        io.out,
+        top_k,
+    )
+}
+
+/// Row-batched MoE with the exact ordinary-decode arithmetic at every
+/// projection, router, SwiGLU and combine boundary. Only addressing and grid
+/// rows change; the original decode kernel bodies provide the calculations.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prefill_moe_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    dims: &MoeDims,
+    w: &MoeWeights,
+    io: &PrefillMoeIo<'_>,
+    ms: &PrefillMoeScratch,
+    _decode_scratch: &MoeScratch,
+) -> Result<()> {
+    let m = io.x.shape()[0];
+    ensure!((1..=4).contains(&m), "decode-exact MoE supports 1..4 rows");
+    let h = dims.hidden;
+    let top_k = dims.top_k;
+    let inter = dims.moe_intermediate;
+    let shared_inter = w.shared.gate_proj.out_features();
+    let shared_gu = io.stack.view(0, &[m, 2 * shared_inter])?;
+    project_mat_decode_exact(ctx, pass, io.x, &w.gate, &ms.decode_router_logits)?;
+    project_mat_decode_exact(ctx, pass, io.x, &w.shared_gate, &ms.decode_shared_gate)?;
+    project_mat_decode_exact(ctx, pass, io.x, &w.shared.gate_up_proj, &shared_gu)?;
+    pass.level_barrier(&[
+        &ms.decode_router_logits,
+        &ms.decode_shared_gate,
+        &shared_gu,
+    ])?;
+    moe::moe_router_topk_decode_rows(
+        ctx,
+        pass,
+        &ms.decode_router_logits,
+        &ms.indices,
+        &ms.scores,
+        dims.norm_topk_prob,
+    )?;
+    silu_mul_rows_bf16(ctx, pass, &shared_gu, io.mlp_act)?;
+    pass.level_barrier(&[&ms.indices, &ms.scores, io.mlp_act])?;
+    let slots = match &w.slot_of {
+        Some(table) => {
+            resolve_experts(pass, w, &ms.indices, m * top_k)?;
+            moe::moe_remap_slots(ctx, pass, &ms.indices, table, &ms.slots, m * top_k)?;
+            pass.level_barrier(&[&ms.slots])?;
+            &ms.slots
+        }
+        None => &ms.indices,
+    };
+    moe::moe_gate_up_decode_rows(
+        ctx,
+        pass,
+        &w.expert_gate,
+        &w.expert_up,
+        inter,
+        io.x,
+        slots,
+        &ms.ea,
+        top_k,
+    )?;
+    project_mat_decode_exact(
+        ctx,
+        pass,
+        io.mlp_act,
+        &w.shared.down_proj,
+        &ms.shared_out,
+    )?;
+    pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+    moe::moe_down_combine_decode_rows(
+        ctx,
+        pass,
+        &w.expert_down,
+        h,
+        &ms.ea,
+        slots,
+        &ms.scores,
+        &ms.shared_out,
+        &ms.decode_shared_gate,
         io.out,
         top_k,
     )

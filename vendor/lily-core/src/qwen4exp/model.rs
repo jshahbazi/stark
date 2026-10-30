@@ -14,6 +14,8 @@ use std::path::Path;
 use anyhow::{Result, ensure};
 
 use std::cell::Cell;
+#[cfg(debug_assertions)]
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::engine::{
@@ -21,21 +23,22 @@ use crate::engine::{
     RowsInFlight, RowsStepTiming, ScratchApi, SnapshotApi, VisionMode, VisionTower,
 };
 use crate::kernels::attention::{
-    KvCache, KvFormat, MAX_SEQ, k_norm_rope_scatter_decode, kv_dequant_q8,
-    q_norm_rope_split_decode, rope_neox, scatter_kv, sdpa_decode, sdpa_prefill,
+    KvCache, KvFormat, MAX_SEQ, k_norm_rope_scatter_decode,
+    k_norm_rope_scatter_decode_rows, kv_dequant_q8, q_norm_rope_split_decode,
+    q_norm_rope_split_decode_rows, rope_neox, scatter_kv, sdpa_decode, sdpa_prefill,
     sdpa_split_scratch_splits, split_q_gate,
 };
 use crate::kernels::elementwise::{
-    add_bf16, copy_words, gather_row_bf16, sigmoid_mul_bf16,
+    add_bf16, copy_words, gather_row_bf16, sigmoid_mul_bf16, split_cols_bf16,
 };
 use crate::kernels::gdn::{
     GDN_HEAD_DIM, GDN_STATE_DTYPE, GdnChunkStaging, GdnGate, GdnRegscanStaging,
     conv1d_prefill, conv1d_step, gated_rmsnorm, gdn_chunk_staging_shapes,
-    gdn_prefill_mid, gdn_step_gated_fused,
+    gdn_prefill_mid, gdn_step_gated_fused, gdn_verify_gated_exact,
 };
 use crate::kernels::hc::{
     HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16, hc_inject_bf16,
-    hc_mix_bf16, hc_read_down_q8_rows, hc_read_up_mix_q8_cached,
+    hc_mix_bf16, hc_read_down_q8_rows, hc_read_down_q8_decode_rows, hc_read_up_mix_q8_cached, hc_read_up_mix_q8_cached_rows,
     hc_read_up_mix_q8_rows, rmsnorm_grouped_bf16, silu_scaled_bf16,
 };
 use crate::kernels::norm::rmsnorm_bf16;
@@ -52,7 +55,8 @@ use crate::metal::{
 };
 use crate::moe_ffn::{
     DecodeMoeIo, MoeDims, MoeScratch, PrefillMoeIo, PrefillMoeScratch, decode_moe,
-    prefill_moe, prefix_rows, project_mat, project_stack_or_slices,
+    prefill_moe, prefill_moe_decode_exact, prefix_rows, project_mat,
+    project_mat_decode_exact, project_stack_or_slices,
 };
 use crate::tensor::{DType, Tensor};
 
@@ -130,6 +134,8 @@ pub(super) enum BatchMode<'p> {
     /// rollback, no draft-head work (that follows once acceptance is known).
     /// Never parked: committed whole once its inputs are staged (`spec.rs`).
     Verify { params: &'p SamplingParams, step0: usize },
+    /// Candidate verifier: complete readouts and recurrent captures only.
+    VerifyHost,
 }
 
 /// One image of a prompt: its placeholder span and the tower's merged rows.
@@ -329,6 +335,8 @@ pub struct Qwen4ExpModel {
     /// bit-identity test of the staging pipeline).
     ngram_ahead: bool,
     mtp_enabled: bool,
+    #[cfg(debug_assertions)]
+    numerical_trace: RefCell<Option<super::NumericalTrace>>,
     /// The attention K/V caches' element format (`--kv-cache`); states and
     /// scratch made after [`Self::set_kv_format`] follow it.
     kv_format: KvFormat,
@@ -858,6 +866,7 @@ impl HcScratch {
             inv_rms: prefix_rows(&self.inv_rms, m)?,
         })
     }
+
 }
 
 /// Per-step intermediates, allocated once. Projection outputs that share one
@@ -1293,6 +1302,7 @@ impl PrefillScratch {
 /// each row but the last, and the rows' conv inputs (GDN and PLE) so the conv
 /// windows can be rewound.
 pub(super) struct Capture {
+    exact: bool,
     pub(super) mid: Option<Tensor>,
     pub(super) conv_in: Tensor,
     pub(super) ple_conv_in: Option<Tensor>,
@@ -1393,6 +1403,8 @@ impl Qwen4ExpModel {
             prefill_chunk,
             ngram_ahead: true,
             mtp_enabled: with_mtp,
+            #[cfg(debug_assertions)]
+            numerical_trace: RefCell::new(None),
             kv_format: kv_format_from_env()?.unwrap_or_default(),
         })
     }
@@ -1436,6 +1448,48 @@ impl Qwen4ExpModel {
     /// Whether the draft head is loaded.
     pub fn has_mtp(&self) -> bool {
         self.weights.mtp.is_some()
+    }
+
+    /// Explicit diagnostic scope. GPU tensor copies stay in memory until
+    /// the returned trace is compared and dropped; no production flag uses it.
+    #[cfg(debug_assertions)]
+    pub fn begin_numerical_trace(&self, layers: usize) -> Result<()> {
+        let mut trace = self.numerical_trace.borrow_mut();
+        ensure!(
+            trace.is_none()
+                && layers > 0
+                && layers <= self.config.num_hidden_layers + 1,
+            "invalid numerical trace scope"
+        );
+        *trace = Some(super::NumericalTrace::new(layers));
+        Ok(())
+    }
+
+    #[cfg(debug_assertions)]
+    pub fn finish_numerical_trace(&self) -> Result<super::NumericalTrace> {
+        self.numerical_trace
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("no numerical trace scope"))
+    }
+
+    #[inline(always)]
+    fn trace_stage(
+        &self,
+        ctx: &MetalContext,
+        pass: &ComputePass<'_>,
+        layer: usize,
+        stage: &'static str,
+        tensor: &Tensor,
+        rows: usize,
+    ) -> Result<()> {
+        #[cfg(debug_assertions)]
+        if let Some(trace) = self.numerical_trace.borrow().as_ref() {
+            trace.capture(ctx, pass, layer, stage, tensor, rows)?;
+        }
+        #[cfg(not(debug_assertions))]
+        let _ = (ctx, pass, layer, stage, tensor, rows);
+        Ok(())
     }
 
     /// Whether the vision tower is loaded.
@@ -2104,7 +2158,7 @@ impl Qwen4ExpModel {
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
         let pos = state.pos;
         let conv_slot = state.conv_slot;
-        let verify = matches!(mode, BatchMode::Verify { .. });
+        let verify = matches!(mode, BatchMode::Verify { .. } | BatchMode::VerifyHost);
         pass.set_label(if verify { "verify" } else { "prefill" });
         self.set_cache_position(verify.then_some(pos));
         if !verify && m > GATED_PREFILL_ROWS {
@@ -2127,7 +2181,7 @@ impl Qwen4ExpModel {
         let spec = if verify { s.spec.as_ref() } else { None };
         let vision = match mode {
             BatchMode::Prefill { vision, .. } => vision,
-            BatchMode::Verify { .. } => None,
+            BatchMode::Verify { .. } | BatchMode::VerifyHost => None,
         };
         // Rotary positions: each row's own 3-axis position for a chunk of a
         // prompt with an image, otherwise the sequence index plus the
@@ -2182,6 +2236,7 @@ impl Qwen4ExpModel {
                         })
                         .transpose()?;
                     Some(Capture {
+                        exact: matches!(mode, BatchMode::VerifyHost),
                         mid,
                         conv_in: prefix_rows(&sp.conv_in[gdn_index], m)?,
                         ple_conv_in: sp
@@ -2192,6 +2247,7 @@ impl Qwen4ExpModel {
                     })
                 }
                 (Some(sp), LayerState::Attn { .. }) => Some(Capture {
+                    exact: matches!(mode, BatchMode::VerifyHost),
                     mid: None,
                     conv_in: prefix_rows(&sp.conv_in[0], 0)?,
                     ple_conv_in: sp
@@ -2262,28 +2318,55 @@ impl Qwen4ExpModel {
                     self.mtp_catch_up(ctx, &pass, mtp, mst, pos, s, ps, rope, images)?;
                 }
             }
-            BatchMode::Verify { params, step0 } => {
+            BatchMode::Verify { .. } | BatchMode::VerifyHost => {
                 let sp = s.spec.as_ref().ok_or_else(|| {
                     anyhow::anyhow!("verify pass without spec scratch")
                 })?;
-                self.hc_read_batched(
+                if matches!(mode, BatchMode::VerifyHost) {
+                    self.hc_read_verify_exact(ctx, &pass, &self.weights.final_mixer, &ps.hyper, ps)?;
+                } else {
+                    self.hc_read_batched(ctx, &pass, &self.weights.final_mixer, &ps.hyper, s, ps)?;
+                }
+                self.trace_stage(
                     ctx,
                     &pass,
-                    &self.weights.final_mixer,
-                    &ps.hyper,
-                    s,
-                    ps,
+                    cfg.num_hidden_layers,
+                    "head_input",
+                    &ps.hc.mixed,
+                    m,
                 )?;
                 let logits = prefix_rows(&sp.logits, m)?;
-                project_mat(
+                if matches!(mode, BatchMode::VerifyHost) {
+                    project_mat_decode_exact(
+                        ctx,
+                        &pass,
+                        &ps.hc.mixed,
+                        &self.weights.lm_head,
+                        &logits,
+                    )?;
+                } else {
+                    project_mat(
+                        ctx,
+                        &pass,
+                        &ps.hc.mixed,
+                        &self.weights.lm_head,
+                        &logits,
+                        &s.dequant,
+                    )?;
+                }
+                pass.level_barrier(&[&logits])?;
+                self.trace_stage(
                     ctx,
                     &pass,
-                    &ps.hc.mixed,
-                    &self.weights.lm_head,
+                    cfg.num_hidden_layers,
+                    "logits",
                     &logits,
-                    &s.dequant,
+                    m,
                 )?;
-                pass.level_barrier(&[&logits])?;
+                let BatchMode::Verify { params, step0 } = mode else {
+                    s.sync.signal_done(&pass)?;
+                    return pass.end();
+                };
                 // One draw per row; the rows share the sampler scratch (and
                 // the penalty counts, which must see earlier rows' draws).
                 // Row j's draw checks proposal j (the row after it in the
@@ -2332,7 +2415,7 @@ impl Qwen4ExpModel {
         &self,
         ctx: &MetalContext,
         pass: &ComputePass<'_>,
-        _layer_index: usize,
+        layer_index: usize,
         layer: &LayerWeights,
         lstate: &LayerState,
         hyper: &Tensor,
@@ -2346,6 +2429,7 @@ impl Qwen4ExpModel {
     ) -> Result<()> {
         let cfg = &self.config;
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
+        self.trace_stage(ctx, pass, layer_index, "input", hyper, ps.m)?;
         if let Some((w, p, pst)) = ple {
             self.ple_batched(
                 ctx,
@@ -2358,10 +2442,18 @@ impl Qwen4ExpModel {
                 s,
                 ps,
                 capture.and_then(|c| c.ple_conv_in.as_ref()),
+                capture.is_some_and(|c| c.exact),
             )?;
         }
 
-        self.hc_read_batched(ctx, pass, &layer.attn_hc, hyper, s, ps)?;
+        self.trace_stage(ctx, pass, layer_index, "post_ple", hyper, ps.m)?;
+
+        if capture.is_some_and(|c| c.exact) {
+            self.hc_read_verify_exact(ctx, pass, &layer.attn_hc, hyper, ps)?;
+        } else {
+            self.hc_read_batched(ctx, pass, &layer.attn_hc, hyper, s, ps)?;
+        }
+        self.trace_stage(ctx, pass, layer_index, "mixer_input", &ps.hc.mixed, ps.m)?;
         match (&layer.mixer, lstate) {
             (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
                 self.gdn_batched(
@@ -2374,43 +2466,68 @@ impl Qwen4ExpModel {
                     conv_windows,
                     conv_slot,
                     capture,
+                    layer_index,
                 )?;
             }
             (
                 Mixer::Attn(w),
                 LayerState::Attn { k_cache, v_cache, idx_keys, blk_keys },
             ) => {
-                self.attn_batched(
-                    ctx, pass, w, s, ps, k_cache, v_cache, idx_keys, blk_keys, pos,
-                    rope,
-                )?;
+                if capture.is_some_and(|c| c.exact) {
+                    let Rope::Delta(delta) = rope else {
+                        anyhow::bail!("exact verify requires text rotary positions");
+                    };
+                    self.attn_verify_exact(
+                        ctx, pass, w, s, ps, k_cache, v_cache, idx_keys, blk_keys, pos,
+                        delta,
+                    )?;
+                } else {
+                    self.attn_batched(
+                        ctx, pass, w, s, ps, k_cache, v_cache, idx_keys, blk_keys, pos,
+                        rope,
+                    )?;
+                }
             }
             _ => anyhow::bail!("layer/state kind mismatch"),
         }
         pass.level_barrier(&[&ps.branch_out])?;
+        self.trace_stage(ctx, pass, layer_index, "mixer_output", &ps.branch_out, ps.m)?;
         hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
         pass.level_barrier(&[hyper])?;
 
-        self.hc_read_batched(ctx, pass, &layer.mlp_hc, hyper, s, ps)?;
-        prefill_moe(
-            ctx,
-            pass,
-            &moe_dims(cfg),
-            &layer.ffn,
-            &PrefillMoeIo {
-                x: &ps.hc.mixed,
-                out: &ps.branch_out,
-                stack: &ps.stack,
-                mlp_gate: &ps.mlp_gate,
-                mlp_up: &ps.mlp_up,
-                mlp_act: &ps.mlp_act,
-                dequant: &s.dequant,
-            },
-            &ps.moe,
-        )?;
+        if capture.is_some_and(|c| c.exact) {
+            self.hc_read_verify_exact(ctx, pass, &layer.mlp_hc, hyper, ps)?;
+        } else {
+            self.hc_read_batched(ctx, pass, &layer.mlp_hc, hyper, s, ps)?;
+        }
+        self.trace_stage(ctx, pass, layer_index, "moe_input", &ps.hc.mixed, ps.m)?;
+        let io = PrefillMoeIo {
+            x: &ps.hc.mixed,
+            out: &ps.branch_out,
+            stack: &ps.stack,
+            mlp_gate: &ps.mlp_gate,
+            mlp_up: &ps.mlp_up,
+            mlp_act: &ps.mlp_act,
+            dequant: &s.dequant,
+        };
+        if capture.is_some_and(|c| c.exact) {
+            prefill_moe_decode_exact(
+                ctx,
+                pass,
+                &moe_dims(cfg),
+                &layer.ffn,
+                &io,
+                &ps.moe,
+                &s.moe,
+            )?;
+        } else {
+            prefill_moe(ctx, pass, &moe_dims(cfg), &layer.ffn, &io, &ps.moe)?;
+        }
         pass.level_barrier(&[&ps.branch_out])?;
+        self.trace_stage(ctx, pass, layer_index, "moe_output", &ps.branch_out, ps.m)?;
         hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
-        pass.level_barrier(&[hyper])
+        pass.level_barrier(&[hyper])?;
+        self.trace_stage(ctx, pass, layer_index, "output", hyper, ps.m)
     }
 
     /// `hyper` `[m, G*H]` → `ps.hc.mixed` `[m, H]` (and the write-gate logits
@@ -2429,6 +2546,19 @@ impl Qwen4ExpModel {
         ps: &PrefillScratch,
     ) -> Result<()> {
         self.hc_read_rows(ctx, pass, hc, hyper, &ps.hc, ps.m, &s.dequant)
+    }
+
+    fn hc_read_verify_exact(&self, ctx: &MetalContext, pass: &ComputePass<'_>,
+        hc: &HcWeights, hyper: &Tensor, ps: &PrefillScratch) -> Result<()> {
+        let (h, g) = (self.config.hidden_size, self.config.hc_count);
+        let out = &ps.hc;
+        hc_read_down_q8_decode_rows(ctx, pass, hyper, &hc.norm, &hc.down,
+            hc.inject.as_ref(), &out.down, &out.inj, &out.inv_rms, &out.act,
+            h, g, self.config.rms_norm_eps, NORM_WEIGHT_BIAS)?;
+        pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
+        hc_read_up_mix_q8_cached_rows(ctx, pass, &hc.up, &out.act, hyper, &hc.norm,
+            &out.inv_rms, &out.mixed, h, g, NORM_WEIGHT_BIAS)?;
+        pass.level_barrier(&[&out.mixed])
     }
 
     /// [`Self::hc_read_batched`] into any `m`-row hyper-connection scratch
@@ -2520,6 +2650,7 @@ impl Qwen4ExpModel {
         s: &Scratch,
         ps: &PrefillScratch,
         conv_capture: Option<&Tensor>,
+        exact: bool,
     ) -> Result<()> {
         let cfg = &self.config;
         let ple = cfg.ple.as_ref().expect("PLE weights without PLE config");
@@ -2537,8 +2668,13 @@ impl Qwen4ExpModel {
             NORM_WEIGHT_BIAS,
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
-        project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
-        project_mat(ctx, pass, &p.emb, &w.value_proj, &p.value, &s.dequant)?;
+        if exact {
+            project_mat_decode_exact(ctx, pass, &p.emb, &w.key_proj, &p.key)?;
+            project_mat_decode_exact(ctx, pass, &p.emb, &w.value_proj, &p.value)?;
+        } else {
+            project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
+            project_mat(ctx, pass, &p.emb, &w.value_proj, &p.value, &s.dequant)?;
+        }
         pass.level_barrier(&[&p.key, &p.value])?;
         rmsnorm_grouped_bf16(
             ctx,
@@ -2597,22 +2733,31 @@ impl Qwen4ExpModel {
         conv_windows: &[Tensor; 2],
         conv_slot: usize,
         capture: Option<&Capture>,
+        layer_index: usize,
     ) -> Result<()> {
         let cfg = &self.config;
-        project_stack_or_slices(
-            ctx,
-            pass,
-            &ps.hc.mixed,
-            &w.in_proj,
-            &ps.stack,
-            [
-                (&w.in_proj_qkv, &ps.qkv),
-                (&w.in_proj_z, &ps.z),
-                (&w.in_proj_a, &ps.a),
-                (&w.in_proj_b, &ps.b),
-            ],
-            &s.dequant,
-        )?;
+        if capture.is_some_and(|c| c.exact) {
+            let width = w.in_proj.out_features();
+            let projected = ps.stack.view(0, &[ps.m, width])?;
+            project_mat_decode_exact(ctx, pass, &ps.hc.mixed, &w.in_proj, &projected)?;
+            pass.level_barrier(&[&projected])?;
+            split_cols_bf16(ctx, pass, &projected, &[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
+        } else {
+            project_stack_or_slices(
+                ctx,
+                pass,
+                &ps.hc.mixed,
+                &w.in_proj,
+                &ps.stack,
+                [
+                    (&w.in_proj_qkv, &ps.qkv),
+                    (&w.in_proj_z, &ps.z),
+                    (&w.in_proj_a, &ps.a),
+                    (&w.in_proj_b, &ps.b),
+                ],
+                &s.dequant,
+            )?;
+        }
         pass.level_barrier(&[&ps.qkv, &ps.z, &ps.a, &ps.b])?;
         if let Some(c) = capture {
             copy_words(ctx, pass, &ps.qkv, &c.conv_in)?;
@@ -2627,6 +2772,40 @@ impl Qwen4ExpModel {
             &ps.qkv_conv,
         )?;
         pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &ps.qkv, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_z", &ps.z, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_a", &ps.a, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_b", &ps.b, ps.m)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_conv", &ps.qkv_conv, ps.m)?;
+        if let Some(capture) = capture.filter(|c| c.exact) {
+            gdn_verify_gated_exact(
+                ctx,
+                pass,
+                &ps.qkv_conv,
+                &ps.a,
+                &ps.b,
+                &w.a_log,
+                &w.dt_bias,
+                gdn_state,
+                &ps.z,
+                &w.norm_w,
+                &ps.gdn_gated,
+                self.gdn_scale,
+                cfg.linear_num_key_heads,
+                cfg.rms_norm_eps,
+                self.gdn_gate,
+                capture.mid.as_ref(),
+            )?;
+            pass.level_barrier(&[&ps.gdn_gated, gdn_state])?;
+            self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
+            return project_mat_decode_exact(
+                ctx,
+                pass,
+                &ps.gdn_gated,
+                &w.out_proj,
+                &ps.branch_out,
+            );
+        }
         let staging = ps.gdn_stage.staging();
         gdn_prefill_mid(
             ctx,
@@ -2655,7 +2834,162 @@ impl Qwen4ExpModel {
             self.gdn_gate,
         )?;
         pass.level_barrier(&[&ps.gdn_gated])?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_gated", &ps.gdn_gated, ps.m)?;
         project_mat(ctx, pass, &ps.gdn_gated, &w.out_proj, &ps.branch_out, &s.dequant)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn attn_verify_exact(
+        &self,
+        ctx: &MetalContext,
+        pass: &ComputePass<'_>,
+        w: &AttnWeights,
+        s: &Scratch,
+        ps: &PrefillScratch,
+        k_cache: &KvCache,
+        v_cache: &KvCache,
+        idx_keys: &Tensor,
+        blk_keys: &Tensor,
+        pos: usize,
+        delta: i64,
+    ) -> Result<()> {
+        let cfg = &self.config;
+        let (m, nq, hd) = (ps.m, cfg.num_attention_heads, cfg.head_dim);
+        let idx = &cfg.indexer;
+        let (rot, theta, eps) =
+            (cfg.rotary_dim(), cfg.rope_parameters.rope_theta, cfg.rms_norm_eps);
+        let width = w.qkv_proj.out_features();
+        let projected = ps.stack.view(0, &[m, width])?;
+        project_mat_decode_exact(ctx, pass, &ps.hc.mixed, &w.qkv_proj, &projected)?;
+        project_mat_decode_exact(
+            ctx,
+            pass,
+            &ps.hc.mixed,
+            &w.indexer.qk_proj,
+            &ps.idx_qk,
+        )?;
+        pass.level_barrier(&[&projected, &ps.idx_qk])?;
+        split_cols_bf16(ctx, pass, &projected, &[&ps.qg, &ps.k_new, &ps.v_new])?;
+        pass.level_barrier(&[&ps.qg, &ps.k_new, &ps.v_new])?;
+        q_norm_rope_split_decode_rows(
+            ctx, pass, &ps.qg, &w.q_norm, &ps.q, &ps.gate, rot, pos, theta, eps, delta,
+        )?;
+        k_norm_rope_scatter_decode_rows(
+            ctx, pass, &ps.k_new, &w.k_norm, k_cache, rot, pos, theta, eps, delta,
+        )?;
+        scatter_kv(ctx, pass, v_cache, &ps.v_new, pos)?;
+        qsa::qsa_prep_q(
+            ctx,
+            pass,
+            &ps.idx_qk,
+            &w.indexer.q_norm,
+            &ps.idx_q,
+            idx.n_heads,
+            rot,
+            pos,
+            theta,
+            eps,
+            Rope::Delta(delta),
+        )?;
+        qsa::qsa_scatter_keys(ctx, pass, &ps.idx_qk, idx_keys, idx.n_heads, pos)?;
+        pass.level_barrier(&[
+            &ps.q,
+            &ps.gate,
+            &k_cache.values,
+            &v_cache.values,
+            &ps.idx_q,
+            idx_keys,
+        ])?;
+        let first_block = pos / idx.compress_ratio;
+        let complete = (pos + m) / idx.compress_ratio;
+        if complete > first_block {
+            qsa::qsa_block_keys(
+                ctx,
+                pass,
+                idx_keys,
+                &w.indexer.k_norm,
+                blk_keys,
+                idx.compress_ratio,
+                first_block,
+                complete - first_block,
+                rot,
+                theta,
+                eps,
+                Rope::Delta(delta),
+            )?;
+            pass.level_barrier(&[blk_keys])?;
+        }
+        // The ordinary dense kernel reads Q8 cache values directly in F32;
+        // staging them as BF16 for tensor SDPA would change the target.
+        for row in 0..m {
+            let at = pos + row;
+            let query = ps.q.view(row * nq * hd, &[nq, hd])?;
+            let output = ps.attn_o.view(row * nq * hd, &[nq, hd])?;
+            if at + 1 <= idx.dense_limit() {
+                sdpa_decode(
+                    ctx,
+                    pass,
+                    &query,
+                    k_cache,
+                    v_cache,
+                    &output,
+                    at + 1,
+                    self.attn_scale,
+                    Some((&s.sdpa_partials, &s.sdpa_stats)),
+                )?;
+            } else {
+                let nb = qsa::visible_blocks(at, idx.compress_ratio);
+                let index_query = ps
+                    .idx_q
+                    .view(row * idx.n_heads * INDEXER_D, &[idx.n_heads, INDEXER_D])?;
+                qsa::qsa_scores(
+                    ctx,
+                    pass,
+                    &index_query,
+                    blk_keys,
+                    &s.qsa.scores,
+                    idx.n_heads,
+                    nb,
+                    at,
+                    idx.compress_ratio,
+                )?;
+                pass.level_barrier(&[&s.qsa.scores])?;
+                qsa::qsa_select_blocks(
+                    ctx,
+                    pass,
+                    &s.qsa.scores,
+                    &s.qsa.sel,
+                    &s.qsa.n_sel,
+                    1,
+                    nb,
+                    at,
+                    idx.compress_ratio,
+                    idx.block_topk(),
+                )?;
+                pass.level_barrier(&[&s.qsa.sel, &s.qsa.n_sel])?;
+                qsa::qsa_attention(
+                    ctx,
+                    pass,
+                    &query,
+                    k_cache,
+                    v_cache,
+                    &s.qsa.sel,
+                    &s.qsa.n_sel,
+                    &output,
+                    &s.qsa.split_scratch(),
+                    1,
+                    idx.block_topk(),
+                    idx.compress_ratio,
+                    at,
+                    self.attn_scale,
+                )?;
+            }
+            // The next query reuses the ordinary attention partials/indexer.
+            pass.level_barrier(&[])?;
+        }
+        sigmoid_mul_bf16(ctx, pass, &ps.gate, &ps.attn_o, &ps.attn_gated)?;
+        pass.level_barrier(&[&ps.attn_gated])?;
+        project_mat_decode_exact(ctx, pass, &ps.attn_gated, &w.o_proj, &ps.branch_out)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3334,9 +3668,10 @@ impl Qwen4ExpModel {
         pass.level_barrier(&[&s.hyper])?;
 
         let mut gdn_index = 0;
-        for (_layer_index, (layer, lstate)) in
+        for (layer_index, (layer, lstate)) in
             self.weights.layers.iter().zip(state.layers.iter()).enumerate()
         {
+            self.trace_stage(ctx, pass, layer_index, "input", &s.hyper, 1)?;
             if let (Some(ple_w), Some(ple_s), Some(pst)) =
                 (&layer.ple, &s.ple, &state.ple)
             {
@@ -3364,8 +3699,11 @@ impl Qwen4ExpModel {
                 }
             }
 
+            self.trace_stage(ctx, pass, layer_index, "post_ple", &s.hyper, 1)?;
+
             pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.attn_hc, s)?;
+            self.trace_stage(ctx, pass, layer_index, "mixer_input", &s.hc.mixed, 1)?;
             match (&layer.mixer, lstate) {
                 (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
                     pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
@@ -3376,6 +3714,7 @@ impl Qwen4ExpModel {
                         s,
                         state,
                         &conv_windows[conv_slot],
+                        layer_index,
                     )?;
                     if let Some(capture) = &capture {
                         let raw = &capture.spec.conv_in[gdn_index];
@@ -3421,6 +3760,7 @@ impl Qwen4ExpModel {
                 _ => anyhow::bail!("layer/state kind mismatch"),
             }
             pass.level_barrier(&[&s.branch_out])?;
+            self.trace_stage(ctx, pass, layer_index, "mixer_output", &s.branch_out, 1)?;
             if !crate::ablate::on(crate::ablate::Group::Inject) {
                 pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
                 hc_inject_bf16(ctx, pass, &s.hyper, &s.branch_out, &s.hc.inj, h, g)?;
@@ -3429,6 +3769,7 @@ impl Qwen4ExpModel {
 
             pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.mlp_hc, s)?;
+            self.trace_stage(ctx, pass, layer_index, "moe_input", &s.hc.mixed, 1)?;
             pass.profile_stage(crate::metal::stage_profile::Phase::Moe)?;
             let fuse_injection = !crate::ablate::on(crate::ablate::Group::Inject);
             let injected = decode_moe(
@@ -3471,10 +3812,20 @@ impl Qwen4ExpModel {
                     pass.level_barrier(&[&s.hyper])?;
                 }
             }
+            self.trace_stage(ctx, pass, layer_index, "moe_output", &s.branch_out, 1)?;
+            self.trace_stage(ctx, pass, layer_index, "output", &s.hyper, 1)?;
         }
 
         pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
         self.hc_read_decode(ctx, pass, &self.weights.final_mixer, s)?;
+        self.trace_stage(
+            ctx,
+            pass,
+            cfg.num_hidden_layers,
+            "head_input",
+            &s.hc.mixed,
+            1,
+        )?;
         if !crate::ablate::on(crate::ablate::Group::Head) {
             pass.profile_stage(crate::metal::stage_profile::Phase::Head)?;
             quant::gemv_quant(
@@ -3486,6 +3837,7 @@ impl Qwen4ExpModel {
             )?;
             pass.level_barrier(&[&s.logits])?;
         }
+        self.trace_stage(ctx, pass, cfg.num_hidden_layers, "logits", &s.logits, 1)?;
         if let Some(capture) = &capture {
             let wide = cfg.hc_width();
             copy_words(
@@ -3658,6 +4010,7 @@ impl Qwen4ExpModel {
         s: &Scratch,
         gdn_state: &Tensor,
         conv_window: &Tensor,
+        layer_index: usize,
     ) -> Result<()> {
         let fused_conv = !crate::ablate::on(crate::ablate::Group::GdnProj)
             && !crate::ablate::on(crate::ablate::Group::GdnStep)
@@ -3689,6 +4042,11 @@ impl Qwen4ExpModel {
             conv1d_step(ctx, pass, conv_window, &s.qkv, &w.conv_w, &s.qkv_conv)?;
             pass.level_barrier(&[&s.qkv_conv, conv_window])?;
         }
+        self.trace_stage(ctx, pass, layer_index, "gdn_qkv", &s.qkv, 1)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_z", &s.z, 1)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_a", &s.a, 1)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_b", &s.b, 1)?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_conv", &s.qkv_conv, 1)?;
         gdn_step_gated_fused(
             ctx,
             pass,
@@ -3707,6 +4065,7 @@ impl Qwen4ExpModel {
             self.gdn_gate,
         )?;
         pass.level_barrier(&[&s.gdn_gated, gdn_state])?;
+        self.trace_stage(ctx, pass, layer_index, "gdn_gated", &s.gdn_gated, 1)?;
         if crate::ablate::on(crate::ablate::Group::GdnProj) {
             return Ok(());
         }
