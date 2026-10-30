@@ -205,7 +205,8 @@
     "scope": "Observed engine-plus-checkpoint result using comparable weight budgets and different quantization profiles and values.",
     "isolates_engine_efficiency": false,
     "identical_quantization": false,
-    "equivalent_model_quality_established": false
+    "equivalent_model_quality_established": false,
+    "stark_maximum_decode_faster_percent": 30.372119642758545
   },
   "temporal_variation": {
     "stark_last_vs_first_block_decode_percent": -9.53830867060913,
@@ -409,5 +410,10 @@
     "public_data": "aggregate measurements, fixed configuration and hashes only",
     "raw_prompts_responses_token_vectors_or_probabilities_included": false
   },
-  "full_report_path": "docs/benchmarks/QWEN38_STARK_MLX_SERVE_2026_10_30.md"
+  "full_report_path": "docs/benchmarks/QWEN38_STARK_MLX_SERVE_2026_10_30.md",
+  "presentation": {
+    "primary_statistic": "maximum_decode_tokens_per_second",
+    "maximum_scope": "Fastest of ten measured post-warmup requests per engine, each decoding 256 output tokens.",
+    "default_benchmark_model": "Qwen3.8-Flash-Next"
+  }
 }

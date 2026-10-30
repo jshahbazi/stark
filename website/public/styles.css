@@ -1642,14 +1642,20 @@ code {
   .engine-table small { max-width:145px; font-size:9px }
 }
 
-/* Separate Qwen3.8 decode-phase study */
-.qwen38-section { padding-bottom:85px; scroll-margin-top:30px }
-.qwen38-study { border-top:1px solid #4b5546; padding-top:44px }
-.qwen38-study>.eyebrow { color:var(--gold); margin-bottom:18px }
-.qwen38-study h2 { font-size:clamp(25px,4vw,38px); line-height:1.2; overflow-wrap:anywhere }
+/* Model-specific studies share one benchmark section. */
+.benchmark-overview>.eyebrow { color:var(--gold); margin-bottom:24px }
+.benchmark-tabs { display:flex; gap:12px; border-bottom:1px solid #4b5546; margin-top:36px }
+.benchmark-tabs button { padding:15px 20px; border:0; border-bottom:3px solid transparent; background:transparent; color:#bec7b5; text-align:left; font-size:15px }
+.benchmark-tabs button small { display:block; margin-top:5px; font:9px/1.5 var(--mono); color:#a9b59f }
+.benchmark-tabs button[aria-selected=true] { border-bottom-color:var(--gold); color:var(--gold); background:#242b22 }
+.benchmark-tabs button:hover { background:#30382b }
+.benchmark-panel { padding-top:32px; scroll-margin-top:30px }
+.benchmark-panel[hidden] { display:none }
+.benchmark-panel>.eyebrow { color:var(--gold); margin-bottom:18px }
+.benchmark-panel h3 { font-size:clamp(25px,4vw,38px); line-height:1.2; overflow-wrap:anywhere }
 .qwen38-intro { max-width:740px; color:#bec7b5; font-size:16px; line-height:1.7; margin-top:18px }
 .qwen38-intro strong { color:var(--gold); font-weight:500 }
-.qwen38-study .benchmark-specs { margin-top:25px }
+.benchmark-panel .benchmark-specs { margin-top:25px }
 .qwen38-table { min-width:330px }
 .qwen38-table th:first-child { width:42% }
 .qwen38-table th:nth-child(2) { width:29% }
@@ -1663,8 +1669,10 @@ code {
 .qwen38-precision strong { color:var(--gold); font-weight:500 }
 .qwen38-method { border-top:0; padding-top:0; margin-top:26px }
 @media (max-width:600px) {
-  .qwen38-section { padding-bottom:55px }
-  .qwen38-study { padding-top:32px }
+  .benchmark-tabs { gap:4px; margin-top:28px }
+  .benchmark-tabs button { padding:12px 10px; font-size:12px }
+  .benchmark-tabs button small { font-size:8px }
+  .benchmark-panel { padding-top:26px }
   .qwen38-intro { font-size:14px }
   .qwen38-table th,.qwen38-table td { padding-right:12px }
   .qwen38-table thead th { font-size:9px; line-height:1.6 }

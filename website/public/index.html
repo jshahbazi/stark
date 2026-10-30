@@ -7,7 +7,7 @@
   <meta name="theme-color" content="#171b19">
   <meta name="description" content="Run local language models on Apple silicon with Stark's menu bar app and terminal chat. Connect compatible local clients through its text-chat API. Open-source Rust and Metal, with model conversion and scoring.">
   <meta property="og:title" content="Stark — run local AI on your Mac">
-  <meta property="og:description" content="Chat in Stark or connect a compatible local client through its OpenAI-style text-chat API. Includes terminal tools, model conversion and measured Qwen3.5-2B performance.">
+  <meta property="og:description" content="Chat in Stark or connect a compatible local client through its OpenAI-style text-chat API. Includes terminal tools, model conversion and measured Qwen3.8 and Qwen3.5 performance.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://starkengine.app/">
   <meta property="og:image" content="https://starkengine.app/assets/stark-social-card.jpg">
@@ -49,10 +49,10 @@
       </figure>
     </section>
 
-    <section class="proof-band" aria-label="Measured Qwen3.5-2B result">
+    <section class="proof-band" aria-label="Maximum observed Qwen3.8 decode result">
       <div class="wrap proof-grid">
-        <div class="proof-main"><span class="metric">12.2<span>%</span></span><p>higher observed throughput<br>than MLX-LM on Qwen3.5-2B</p></div>
-        <div class="proof-detail"><strong>Qwen3.5-2B · 4-bit</strong><span>M5 Max · 128 GiB · one request at a time</span></div>
+        <div class="proof-main"><span class="metric">30.4<span>%</span></span><p>higher maximum observed decode<br>than MLX-Serve on Qwen3.8</p></div>
+        <div class="proof-detail"><strong>79.5 vs 61.0 tok/s · no speculation</strong><span>Different mixed quantization profiles · other apps closed</span><a href="#benchmarks">See the benchmark details <span aria-hidden="true">↓</span></a></div>
         <div class="proof-detail"><strong>Signed Mac installer</strong><span>Menu bar app and terminal chat included</span><a href="#start">See the install steps <span aria-hidden="true">↓</span></a></div>
       </div>
     </section>
@@ -160,7 +160,42 @@ open "$HOME/Applications/Stark.app"</code></pre>
     <section class="benchmark-section section-pad" id="benchmarks" aria-labelledby="benchmark-title">
       <div id="bench-engines" aria-hidden="true"></div>
       <div class="wrap">
-        <div class="benchmark-heading"><div><p class="eyebrow">03 / BENCHMARKS</p><h2 id="benchmark-title">Measured on<br>Apple silicon.</h2></div><p><strong>Stark led all six Qwen3.5-2B workloads in this run.</strong> Across five engines on an M5 Max, Stark recorded 12.2% higher aggregate throughput than MLX-LM.</p></div>
+        <div class="benchmark-overview"><p class="eyebrow">03 / BENCHMARKS</p><h2 id="benchmark-title">Measured on<br>Apple silicon.</h2></div>
+        <div class="benchmark-tabs" role="tablist" aria-label="Benchmark model">
+          <button type="button" role="tab" id="benchmark-tab-qwen38" aria-selected="true" aria-controls="qwen38-benchmark" tabindex="0" data-benchmark-panel="qwen38-benchmark">Qwen3.8-Flash-Next<small>Maximum observed decode</small></button>
+          <button type="button" role="tab" id="benchmark-tab-qwen35" aria-selected="false" aria-controls="qwen35-benchmark" tabindex="-1" data-benchmark-panel="qwen35-benchmark">Qwen3.5-2B<small>Six end-to-end workloads</small></button>
+        </div>
+        <div class="benchmark-panel qwen38-study" id="qwen38-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38" tabindex="0">
+        <p class="eyebrow">30 OCTOBER 2026 / SAMPLED GENERATION</p>
+        <h3 id="qwen38-title">Qwen3.8-Flash-Next.</h3>
+        <p class="qwen38-intro">Stark recorded <strong>30.4% higher maximum observed decode throughput</strong> than MLX-Serve with the tested checkpoints in this run.</p>
+        <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>4,096 INPUT / 256 OUTPUT TOKENS</span><span>NO SPECULATION</span></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen3.8 decode benchmark results">
+          <table class="benchmark-table qwen38-table">
+            <caption class="sr-only">Qwen3.8-Flash-Next maximum observed decode throughput and measured request ranges, with different quantization profiles.</caption>
+            <thead><tr><th scope="col">Engine / checkpoint</th><th scope="col">Maximum decode<span>tokens / second</span></th><th scope="col">Observed range<span>tokens / second</span></th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Stark<small>Lily q4-xl</small></th><td><strong>79.5</strong><span class="bar stark-bar" style="--bar:100%" aria-hidden="true"></span></td><td class="qwen38-range">69.1–79.5</td></tr>
+              <tr><th scope="row">MLX-Serve<small>26.10.3 / official mixed 4/8-bit</small></th><td>61.0<span class="bar mlx-bar" style="--bar:76.7035%" aria-hidden="true"></span></td><td class="qwen38-range">56.4–61.0</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="table-note qwen38-conditions"><strong>All other apps were closed before timing, as confirmed by the user.</strong> The Mac was on AC power in Automatic energy mode. These decode-phase rates exclude input processing and request transport. Maximum is the fastest of ten measured requests per engine, each decoding 256 output tokens, across two fresh loads after warmup.</p>
+        <p class="qwen38-precision"><strong>Quantization profiles differ.</strong> Stark used Lily q4-xl: GDN projections Q4, token embedding Q8. MLX-Serve used its official mixed 4/8-bit pack: GDN projections Q8, token embedding Q4. Routed experts use affine Q4 with group size 64 in both. These results compare the tested engine/checkpoint combinations; model quality equivalence has not been established.</p>
+        <div class="measurement-notes qwen38-method">
+          <details><summary>Qwen3.8 measurement details <span aria-hidden="true">+</span></summary><div>
+            <p>The same 4,096 input token IDs were supplied directly to each engine for 256 sampled outputs: temperature 1, top-k 20, top-p 0.95 and seed 42. Both used Q8 KV cache, with speculation and prefix reuse disabled. Requests and model loads ran one at a time; downloads and builds had finished.</p>
+            <p>Four fresh-load blocks ran in Stark / MLX / MLX / Stark order, with six requests per block and the first excluded as warmup. Pooled decode rates were 74.13 tok/s for Stark and 58.53 for MLX-Serve. Pooled throughput divides total measured output tokens by total decode time, using each engine's internal phase timers. This single-workload study is separate from the six-workload Qwen3.5 end-to-end comparison above.</p>
+            <p>Stark's first and last blocks measured 78.04 and 70.60 tok/s; the cause of the slowdown is unestablished. The observed range does not establish sustained 77–80 tok/s or performance during desktop multitasking.</p>
+            <p>HC block-inject projections and the shared-expert gate also differ: Q8 in Lily, BF16 in the official MLX pack. A bounded header audit checked 28 representative matrices across eight official Safetensors headers. The full report records checkpoint revisions, additional precision details, executable hashes and timing controls.</p>
+          </div></details>
+          <div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/19b31439824a023e9b2bfbeaad40071a50cad5d7/docs/benchmarks/QWEN38_STARK_MLX_SERVE_2026_10_30.md">Full Qwen3.8 report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-qwen38-results.json" download>Download Qwen3.8 results <span aria-hidden="true">↓</span></a></div>
+        </div>
+        </div>
+        <div class="benchmark-panel qwen35-study" id="qwen35-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen35" tabindex="0">
+          <p class="eyebrow">22 OCTOBER 2026 / SIX WORKLOADS</p>
+          <h3>Qwen3.5-2B.</h3>
+          <p class="qwen38-intro">Stark led all six Qwen3.5-2B workloads in this run. Across five engines on an M5 Max, Stark recorded <strong>12.2% higher aggregate throughput</strong> than MLX-LM.</p>
         <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>QWEN3.5-2B / 4-BIT</span><span>ONE REQUEST AT A TIME</span></div>
         <div class="chart-toolbar benchmark-controls">
           <label class="workload-control" for="benchmark-workload">Workload<select id="benchmark-workload"><option value="0">Overall · six workloads</option><option value="1">Fibonacci module</option><option value="2">GPU explanation</option><option value="3">Copy editing</option><option value="4">Medium context</option><option value="5">Long context</option><option value="6">Long output</option></select></label>
@@ -172,35 +207,6 @@ open "$HOME/Applications/Stark.app"</code></pre>
         <p class="chart-selection" id="chart-selection" aria-live="polite">Overall · geometric mean of six workloads</p>
         <p class="table-note">Higher is better. Input processing and generation are included; model loading and warmup are excluded. Measured 22 October 2026 with background desktop activity. Performance varies with system load, model and hardware.<br><span>* llama.cpp uses Q4_K_M; the other configurations use affine W4/G64. Quantizers differ.</span></p>
         <div class="measurement-notes" id="measurement-notes"><details><summary>How we benchmarked <span aria-hidden="true">+</span></summary><div><p>Five engines, six configurations and six workloads on one M5 Max. Each configuration was loaded four times, with three measured requests per workload after warmup. All 432 performance requests completed their fixed output lengths.</p><p>Rates include input processing, generation, transport and request cleanup. Stark and MLX-LM used private worker pipes; TensorFold, llama.cpp and vLLM Metal used local HTTP endpoints. Model loading and warmup are excluded. Each workload combines four per-load median rates using a geometric mean; the overall view gives all six workloads equal weight.</p><p>Requests ran one at a time with context 8192 and greedy sampling. Five workloads generated 128 tokens; long output generated 512. The common checkpoint is Qwen3.5-2B in MLX affine W4/G64, repacked unchanged for Stark. llama.cpp uses a separate Unsloth Q4_K_M GGUF; source-weight equivalence is unverified.</p><p>This run measures complete local requests with each stack's transport, dependencies and cache controls. It supplies no confidence interval or general answer-quality result. Other models, Macs and concurrent serving need separate measurements. The full report records exact versions, build revisions and the separate answer-format checks.</p></div></details><div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/b64daf27015d346761e369885ea320b55222b846/docs/QWEN35_ENGINE_COMPARISON_2026_10_22.md">Full benchmark report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-results.json" download>Download results <span aria-hidden="true">↓</span></a></div></div>
-      </div>
-    </section>
-
-    <section class="qwen38-section benchmark-section" id="qwen38-benchmark" aria-labelledby="qwen38-title">
-      <div class="wrap qwen38-study">
-        <p class="eyebrow">30 OCTOBER 2026 / SAMPLED GENERATION</p>
-        <h2 id="qwen38-title">Qwen3.8-Flash-Next.</h2>
-        <p class="qwen38-intro">Stark recorded <strong>26.7% higher pooled decode throughput</strong> than MLX-Serve with the tested checkpoints in this run.</p>
-        <div class="benchmark-specs"><span>APPLE M5 MAX / 40 GPU CORES</span><span>128 GiB MEMORY</span><span>4,096 INPUT / 256 OUTPUT TOKENS</span><span>NO SPECULATION</span></div>
-        <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen3.8 decode benchmark results">
-          <table class="benchmark-table qwen38-table">
-            <caption class="sr-only">Qwen3.8-Flash-Next pooled decode throughput and measured request ranges, with different quantization profiles.</caption>
-            <thead><tr><th scope="col">Engine / checkpoint</th><th scope="col">Pooled decode<span>tokens / second</span></th><th scope="col">Observed range<span>tokens / second</span></th></tr></thead>
-            <tbody>
-              <tr><th scope="row">Stark<small>Lily q4-xl</small></th><td><strong>74.1</strong><span class="bar stark-bar" style="--bar:100%" aria-hidden="true"></span></td><td class="qwen38-range">69.1–79.5</td></tr>
-              <tr><th scope="row">MLX-Serve<small>26.10.3 / official mixed 4/8-bit</small></th><td>58.5<span class="bar mlx-bar" style="--bar:78.9555%" aria-hidden="true"></span></td><td class="qwen38-range">56.4–61.0</td></tr>
-            </tbody>
-          </table>
-        </div>
-        <p class="table-note qwen38-conditions"><strong>All other apps were closed before timing, as confirmed by the user.</strong> The Mac was on AC power in Automatic energy mode. These decode-phase rates exclude input processing and request transport. Each engine had ten measured requests across two fresh loads, after warmup.</p>
-        <p class="qwen38-precision"><strong>Quantization profiles differ.</strong> Stark used Lily q4-xl: GDN projections Q4, token embedding Q8. MLX-Serve used its official mixed 4/8-bit pack: GDN projections Q8, token embedding Q4. Routed experts use affine Q4 with group size 64 in both. These results compare the tested engine/checkpoint combinations; model quality equivalence has not been established.</p>
-        <div class="measurement-notes qwen38-method">
-          <details><summary>Qwen3.8 measurement details <span aria-hidden="true">+</span></summary><div>
-            <p>The same 4,096 input token IDs were supplied directly to each engine for 256 sampled outputs: temperature 1, top-k 20, top-p 0.95 and seed 42. Both used Q8 KV cache, with speculation and prefix reuse disabled. Requests and model loads ran one at a time; downloads and builds had finished.</p>
-            <p>Four fresh-load blocks ran in Stark / MLX / MLX / Stark order, with six requests per block and the first excluded as warmup. Pooled throughput divides total measured output tokens by total decode time, using each engine's internal phase timers. This single-workload study is separate from the six-workload Qwen3.5 end-to-end comparison above.</p>
-            <p>Stark's first and last blocks measured 78.04 and 70.60 tok/s; the cause of the slowdown is unestablished. The observed range does not establish sustained 77–80 tok/s or performance during desktop multitasking.</p>
-            <p>HC block-inject projections and the shared-expert gate also differ: Q8 in Lily, BF16 in the official MLX pack. A bounded header audit checked 28 representative matrices across eight official Safetensors headers. The full report records checkpoint revisions, additional precision details, executable hashes and timing controls.</p>
-          </div></details>
-          <div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/19b31439824a023e9b2bfbeaad40071a50cad5d7/docs/benchmarks/QWEN38_STARK_MLX_SERVE_2026_10_30.md">Full Qwen3.8 report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-qwen38-results.json" download>Download Qwen3.8 results <span aria-hidden="true">↓</span></a></div>
         </div>
       </div>
     </section>
