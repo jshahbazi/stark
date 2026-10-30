@@ -1,6 +1,6 @@
 # Stark menu bar app
 
-A native macOS menu bar application for installing, running and chatting with converted models. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
+A native macOS menu bar application for installing, running and chatting with converted models. Stark starts in the menu bar without opening a window. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
 The playground shows **GPU memory** beside the status in both modes. It refreshes about once a second, including during model loading and requests, and reports the model worker's current Metal resource allocation. Apple silicon uses shared memory; the value excludes CPU-only allocations and other applications. A dash means no measurement is available. Stop clears the readout.
 

@@ -2695,14 +2695,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             .clipShape(RoundedRectangle(cornerRadius: 13)))
         engine.start()
         updater.startAutomaticChecks()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            guard let self = self else { return }
-            if self.engine.models.isEmpty { self.showInstall() } else { self.toggle() }
-        }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { if engine.models.isEmpty { showInstall() } else { showPrompt() } }
+        if !flag { if engine.models.isEmpty { toggle() } else { showPrompt() } }
         return true
     }
 
