@@ -297,6 +297,18 @@ chmod 700 runtime/qwen38-profile
 STARK_QWEN38_PROFILE_OUTPUT="$PWD/runtime/qwen38-profile/stages.jsonl" uv run --project tools/converter --locked --python 3.13.13 python scripts/benchmark_hybrid_context.py --model models/qwen38-lily-q4-xl --worker target/release/stark-generate --corpus vendor/lily-core/src/qwen4exp/model.rs --input-tokens 4096 --tokens 64 --replays 3 --sampling stochastic --temperature 1 --top-k 20 --top-p 0.95 --seed 42 --output runtime/qwen38-profile/run.json
 ```
 
+For a worker request with `mtp_drafts: 1` through `3`, the same opt-in output
+also records `qwen.mtp.draft`, `qwen.mtp.verify`,
+`qwen.mtp.target_sampling` and `qwen.mtp.finish` elapsed scopes. Verification
+GPU categories use `qwen.mtp.verify.gpu.*`; MoE setup,
+`moe_gate_up_shared_down` and `moe_down` are separate categories. Host scopes
+include synchronous GPU waits and are not CPU-active measurements. The
+paired MTP throughput harness deliberately removes this environment variable;
+use a separate diagnostic worker session to collect MTP profiles. A build
+with profiling disabled remains valid uninstrumented throughput evidence for
+its named executable. The [MTP optimization study](benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md)
+records the profile and longer on/off measurements at fixed quantization.
+
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
 benchmark study records the separate pinned corpus used for its exact workload.

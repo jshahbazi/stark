@@ -67,8 +67,9 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Outcome |
 | --- | --- |
-| [Qwen batched exact MTP](QWEN38_BATCHED_MTP_2026_10_30.md) | Current verifier: 90 complete target readouts match ordinary decode byte for byte; unchanged quantization; two-draft sampled top-k gains 12.44% across eight pairs, nucleus gains 2.09% across four pairs with one slower pair; MTP stays optional and default-off; 77–80 tok/s remains unqualified |
-| [Qwen serial exact MTP generation](QWEN38_EXACT_MTP_2026_10_30.md) | Historical serial verifier: 56 complete target readouts match; sampled MTP is 22.6–40.1% slower; throughput superseded by the batched study, source-bound numerical evidence retained |
+| [Qwen exact MTP sampled generation optimization](QWEN38_MTP_OPTIMIZATION_2026_10_30.md) | Current long-run sampled results: top-k 20 averages 78.33 tok/s on versus 67.46 off across 16 pairs (+16.11%); nucleus averages 71.01 versus 70.60 across eight pairs; 140 target readouts match byte for byte, local checks pass; the per-request 77 tok/s floor remains unmet |
+| [Qwen batched exact MTP verifier](QWEN38_BATCHED_MTP_2026_10_30.md) | Historical initial batched build: 90 complete target readouts match ordinary decode byte for byte; the initial two-draft throughput windows are superseded by the longer study, source-bound numerical evidence retained |
+| [Qwen serial exact MTP generation](QWEN38_EXACT_MTP_2026_10_30.md) | Historical serial verifier: 56 complete target readouts match; sampled MTP is 22.6–40.1% slower; throughput superseded by the long-run study, source-bound numerical evidence retained |
 | [Qwen residual fusion and exact CPU sampling](QWEN38_FUSION_2026_10_29.md) | MoE down/injection component 5.55% faster; exact probability mapping 58.7% faster; nucleus same-loaded observation +1.3%, with broad overlap and an unmet 77–80 tok/s target |
 | [Qwen iQ-MLX 4.7 bpw investigation](QWEN38_IQ47_INVESTIGATION_2026_10_29.md) | Exact pack unmeasured: storage and loader support pending; publisher's M5 Ultra result uses MTP; fresh existing-checkpoint Stark control is 72.08 greedy / 64.92 sampled warm tok/s |
 | [Qwen AC power-mode control](QWEN38_POWER_MODES_2026_10_29.md) | Same inference build; 60 exact requests; selected High Power does not recover the target in this window; original settings restored |
