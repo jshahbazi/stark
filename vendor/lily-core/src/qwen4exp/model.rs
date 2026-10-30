@@ -2998,73 +2998,84 @@ impl Qwen4ExpModel {
             )?;
             pass.level_barrier(&[blk_keys])?;
         }
-        // The ordinary dense kernel reads Q8 cache values directly in F32;
-        // staging them as BF16 for tensor SDPA would change the target.
-        for row in 0..m {
+        // Preserve ordinary dense decode arithmetic and its shared partials.
+        // Sparse rows use independent prefill scratch, so all short queries
+        // can share the same dependency levels without changing split plans.
+        let dense_rows = idx.dense_limit().saturating_sub(pos).min(m);
+        for row in 0..dense_rows {
             let at = pos + row;
             let query = ps.q.view(row * nq * hd, &[nq, hd])?;
             let output = ps.attn_o.view(row * nq * hd, &[nq, hd])?;
-            if at + 1 <= idx.dense_limit() {
-                sdpa_decode(
-                    ctx,
-                    pass,
-                    &query,
-                    k_cache,
-                    v_cache,
-                    &output,
-                    at + 1,
-                    self.attn_scale,
-                    Some((&s.sdpa_partials, &s.sdpa_stats)),
-                )?;
-            } else {
-                let nb = qsa::visible_blocks(at, idx.compress_ratio);
-                let index_query = ps
-                    .idx_q
-                    .view(row * idx.n_heads * INDEXER_D, &[idx.n_heads, INDEXER_D])?;
-                qsa::qsa_scores(
-                    ctx,
-                    pass,
-                    &index_query,
-                    blk_keys,
-                    &s.qsa.scores,
-                    idx.n_heads,
-                    nb,
-                    at,
-                    idx.compress_ratio,
-                )?;
-                pass.level_barrier(&[&s.qsa.scores])?;
-                qsa::qsa_select_blocks(
-                    ctx,
-                    pass,
-                    &s.qsa.scores,
-                    &s.qsa.sel,
-                    &s.qsa.n_sel,
-                    1,
-                    nb,
-                    at,
-                    idx.compress_ratio,
-                    idx.block_topk(),
-                )?;
-                pass.level_barrier(&[&s.qsa.sel, &s.qsa.n_sel])?;
-                qsa::qsa_attention(
-                    ctx,
-                    pass,
-                    &query,
-                    k_cache,
-                    v_cache,
-                    &s.qsa.sel,
-                    &s.qsa.n_sel,
-                    &output,
-                    &s.qsa.split_scratch(),
-                    1,
-                    idx.block_topk(),
-                    idx.compress_ratio,
-                    at,
-                    self.attn_scale,
-                )?;
-            }
-            // The next query reuses the ordinary attention partials/indexer.
+            sdpa_decode(
+                ctx,
+                pass,
+                &query,
+                k_cache,
+                v_cache,
+                &output,
+                at + 1,
+                self.attn_scale,
+                Some((&s.sdpa_partials, &s.sdpa_stats)),
+            )?;
+            // The following dense row reuses the ordinary partials.
             pass.level_barrier(&[])?;
+        }
+        let sparse_rows = m - dense_rows;
+        if sparse_rows > 0 {
+            let base = pos + dense_rows;
+            let nb = qsa::visible_blocks(pos + m - 1, idx.compress_ratio);
+            let index_queries = ps.idx_q.view(
+                dense_rows * idx.n_heads * INDEXER_D,
+                &[sparse_rows, idx.n_heads, INDEXER_D],
+            )?;
+            let queries = ps.q.view(dense_rows * nq * hd, &[sparse_rows, nq, hd])?;
+            let outputs =
+                ps.attn_o.view(dense_rows * nq * hd, &[sparse_rows, nq, hd])?;
+            qsa::qsa_scores(
+                ctx,
+                pass,
+                &index_queries,
+                blk_keys,
+                &ps.qsa.scores,
+                idx.n_heads,
+                nb,
+                base,
+                idx.compress_ratio,
+            )?;
+            pass.level_barrier(&[&ps.qsa.scores])?;
+            qsa::qsa_select_blocks(
+                ctx,
+                pass,
+                &ps.qsa.scores,
+                &ps.qsa.sel,
+                &ps.qsa.n_sel,
+                sparse_rows,
+                nb,
+                base,
+                idx.compress_ratio,
+                idx.block_topk(),
+            )?;
+            pass.level_barrier(&[&ps.qsa.sel, &ps.qsa.n_sel])?;
+            // VerifyHost has at most four rows: this is the ordinary split
+            // kernel and split/head-group plan for each query, never tensor
+            // SDPA or the large-query route.
+            qsa::qsa_attention(
+                ctx,
+                pass,
+                &queries,
+                k_cache,
+                v_cache,
+                &ps.qsa.sel,
+                &ps.qsa.n_sel,
+                &outputs,
+                &ps.qsa.split_scratch(),
+                sparse_rows,
+                idx.block_topk(),
+                idx.compress_ratio,
+                base,
+                self.attn_scale,
+            )?;
+            pass.level_barrier(&[&outputs])?;
         }
         sigmoid_mul_bf16(ctx, pass, &ps.gate, &ps.attn_o, &ps.attn_gated)?;
         pass.level_barrier(&[&ps.attn_gated])?;

@@ -1414,10 +1414,10 @@ mod tests {
                 compare(&next_head, &expected_head, 2);
             }
         }
-        // The sparse-attention selector completes four-token index blocks.
-        // Exercise both sides of a 4K boundary with rejected and accepted
-        // suffixes, against ordinary decode on the identical fixed inputs.
-        for length in [4095usize, 4096] {
+        // Exercise the configured dense-to-sparse transition and four-token
+        // index blocks against ordinary decode on identical fixed inputs.
+        let dense_limit = model.model.config.indexer.dense_limit();
+        for length in [2047usize, 2048, dense_limit - 2, dense_limit - 1, dense_limit, 4095, 4096] {
             let prefix: Vec<u32> = input.iter().copied().cycle().take(length).collect();
             let long_prefill = |model: &mut LilyModel| {
                 model.reset();
