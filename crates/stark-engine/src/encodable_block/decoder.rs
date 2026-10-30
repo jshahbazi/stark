@@ -31,6 +31,8 @@ pub enum DecoderError<B: Backend> {
     PerLayerEmbedding(#[from] PerLayerEmbeddingError<B>),
     #[error("Transformer error: {0}")]
     Transformer(#[from] TransformerNewError<B>),
+    #[error("Qwen3.8 decoder error: {0}")]
+    Qwen38(#[from] super::qwen38::Qwen38Error<B>),
 }
 
 pub struct Decoder<B: Backend> {

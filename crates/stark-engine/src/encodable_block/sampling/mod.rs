@@ -9,6 +9,7 @@ use parking_lot::Mutex;
 use crate::{
     backends::common::{
         Backend, Buffer, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, Context, InvalidInput, Kernels,
+        StageProfileCategory,
         kernel::{RepetitionPenaltyKernel, UnifiedSamplingKernel},
     },
     data_type::DataType,
@@ -26,6 +27,7 @@ pub use prng::PRng;
 pub struct Sampling<B: Backend> {
     vocab_size: u32,
     data_type: DataType,
+    validate_logits: bool,
     unified_kernels: Mutex<HashMap<UnifiedSamplingKey, <B::Kernels as Kernels>::UnifiedSamplingKernel>>,
 }
 
@@ -41,7 +43,21 @@ impl<B: Backend> Sampling<B> {
         Self {
             vocab_size,
             data_type,
+            validate_logits: false,
             unified_kernels: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reject any nonfinite readout value with an out-of-vocabulary sentinel.
+    /// The consumer must resolve and validate each sample on the host before
+    /// using it as another model input; unchecked GPU token chaining is unsafe.
+    pub fn new_checked(
+        data_type: DataType,
+        vocab_size: u32,
+    ) -> Self {
+        Self {
+            validate_logits: true,
+            ..Self::new(data_type, vocab_size)
         }
     }
 }
@@ -122,6 +138,9 @@ struct UnifiedSamplingKey {
 // TODO: repetition penalties shouldn't be stochastic only
 
 impl<B: Backend> Sampling<B> {
+    /// Encode sampling for each requested row. In checked mode a nonfinite
+    /// model readout produces `u32::MAX`; callers must reject this sentinel
+    /// before publishing or using the sample as a subsequent model input.
     pub fn encode(
         &self,
         logits: impl BufferRef<Backend = B, Buffer: Sized>,
@@ -218,6 +237,7 @@ impl<B: Backend> Sampling<B> {
                     key.has_top_k,
                     key.has_top_p,
                     key.has_min_p,
+                    self.validate_logits,
                 )?;
 
                 vacant.insert(kernel)
@@ -239,6 +259,7 @@ impl<B: Backend> Sampling<B> {
             sampling_length,
             command_buffer,
         );
+        command_buffer.stage_profile_checkpoint(StageProfileCategory::Sampling);
 
         command_buffer.pop_debug_group();
 

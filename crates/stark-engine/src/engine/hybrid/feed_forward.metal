@@ -47,31 +47,3 @@ kernel void hybrid_ffn_reduce(device const float *experts [[buffer(0)]],
     if (!isfinite(shared[channel])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
     output[channel] = value + shared_gate * shared[channel];
 }
-
-kernel void hybrid_qwen_hc_activate(device float *reduced [[buffer(0)]],
-    constant uint2 &sizes [[buffer(1)]], device atomic_uint *failure [[buffer(6)]],
-    uint index [[thread_position_in_grid]]) {
-    if (index >= sizes.x) return;
-    float value = reduced[index] / float(sizes.y);
-    if (!isfinite(reduced[index])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
-    reduced[index] = value * hybrid_ffn_sigmoid(value);
-}
-
-kernel void hybrid_qwen_hc_mix(device const float *gates [[buffer(0)]],
-    device const float *normalized [[buffer(1)]], device const float *inject [[buffer(2)]],
-    device float *output [[buffer(3)]], constant uint4 &sizes [[buffer(4)]],
-    device atomic_uint *failure [[buffer(6)]], uint channel [[thread_position_in_grid]]) {
-    if (channel < sizes.x) {
-        float value = 0.0f;
-        for (uint stream = 0; stream < sizes.y; ++stream) {
-            uint index = stream * sizes.x + channel;
-            if (!isfinite(gates[index])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
-            value += (hybrid_ffn_sigmoid(gates[index]) * normalized[index]) / float(sizes.y);
-        }
-        output[channel] = value;
-    }
-    if (sizes.z && channel < sizes.y) {
-        if (!isfinite(inject[channel])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
-        output[sizes.x + channel] = 2.0f * hybrid_ffn_sigmoid(inject[channel] / float(sizes.y));
-    }
-}

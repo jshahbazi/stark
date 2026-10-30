@@ -1,14 +1,16 @@
 # Supplemental license references
 
-The vendored Lily core's Apache-2.0 `LICENSE`, `NOTICE`, and `UPSTREAM.md`
-are copied directly from `vendor/lily-core/` into the same relative path under
-the distribution's `share/stark/licenses/` directory. Its `NOTICE` includes
-the Perplexity AI and Fabio Greter attribution, Stark's modifications notice,
-and the complete Apple MLX/MLX-LM MIT notice. Its `UPSTREAM.md` records the
-pinned source revision and extraction scope. These local dependency notices
-are collected explicitly because the Cargo registry inventory excludes path
-dependencies. The distribution source manifest hashes the vendored core and
-these notices alongside the other owned source files.
+Qwen3.8 equations/shader adaptations in the standard Uzu backend retain the
+root `LICENSE.qwen38-reference` and `NOTICE.qwen38-reference`. The
+`qwen38-uzu-architecture` manifest entry pins those repository-level notice
+hashes and identifies the upstream revision plus the modified historical Stark
+reference files. The distribution builder verifies the notices independently
+of Cargo metadata, packages both files and the current provenance page, and
+retains their complete Apple MIT terms.
+
+The archived extraction's Apache-2.0 `LICENSE`, `NOTICE`, and `UPSTREAM.md`
+remain under `vendor/lily-core/` and ship under that archival path. This folder
+contains no executable crate. Its retained `NOTICE` preserves MLX/MLX-LM rights.
 
 `pytorch-LICENSE` is the exact PyTorch license file from tag `v2.14.1`, resolved
 to commit `5c4886908584029761b579af026dcfb627c84070`. It is included because the

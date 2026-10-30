@@ -67,6 +67,7 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen3.8 Uzu tile and barrier trials](QWEN38_UZU_REJECTED_TUNING_2026_10_30.md) | Q4 gather, Q8 HC and execution-only WAR trials rejected: component gains did not establish meaningful sampled-generation gains at unchanged quantization without speculation |
 | [Qwen3.8 converted-format speed](QWEN38_UZU_SPEED_2026_10_30.md) | NEON affine restoration reduces median process-to-ready time from 20.54 to 18.09 seconds; exact nucleus-prefix work and sampled controls retain quantization; consistent 77–80 tok/s remains unqualified |
 | [Qwen3.8 Uzu conversion and generation](QWEN38_UZU_FORMAT_2026_10_29.md) | Full quantization-preserving conversion, self-contained load and exact readout/sample parity; paired timing series has substantial throughput drift |
 | [Qwen Metal hotpaths and finite readout checks](QWEN38_METAL_HOTPATHS_2026_10_29.md) | Quiet baseline 73.62 top-k / 69.85 nucleus tok/s; MoE, HC and GDN trials rejected or inconclusive; retained exact SIMD finite checks reduce guard elapsed time, with no reliable end-to-end gain or desktop target acceptance |

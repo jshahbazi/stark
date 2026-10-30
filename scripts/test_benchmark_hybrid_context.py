@@ -5,7 +5,7 @@ import json
 from argparse import Namespace
 
 import pytest
-from benchmark_hybrid_context import model_provenance, run
+from benchmark_hybrid_context import model_provenance, run, validate_args
 
 
 class FakeWorker:
@@ -29,6 +29,122 @@ class FakeWorker:
 
     def close(self):
         pass
+
+
+@pytest.fixture
+def context_args(tmp_path):
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text("{}")
+    (model / "native-source.json").write_text("{}")
+    worker = tmp_path / "worker"
+    worker.write_bytes(b"fake executable")
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text("synthetic context corpus")
+    return Namespace(
+        model=model,
+        worker=worker,
+        output=tmp_path / "report.json",
+        corpus=corpus,
+        input_tokens=65280,
+        tokens=256,
+        replays=3,
+        sampling="greedy",
+    )
+
+
+@pytest.mark.parametrize(
+    "input_tokens, output_tokens, accepted",
+    [(65280, 256, True), (65535, 1, True), (65281, 256, False), (65536, 1, False)],
+)
+def test_context_tool_envelope_includes_exactly_64k(input_tokens, output_tokens, accepted):
+    args = Namespace(input_tokens=input_tokens, tokens=output_tokens, replays=3)
+    if accepted:
+        validate_args(args)
+    else:
+        with pytest.raises(ValueError, match="^context_limit_exceeded$"):
+            validate_args(args)
+
+
+@pytest.mark.parametrize(
+    "advertisement, input_tokens, accepted",
+    [
+        ({}, 16128, True),
+        ({}, 16129, False),
+        ({"max_context_tokens": 16384}, 16128, True),
+        ({"max_context_tokens": 16384}, 65280, False),
+        ({"max_context_tokens": 65536}, 65280, True),
+    ],
+)
+def test_loaded_context_capability_is_checked_before_tokenization(context_args, advertisement, input_tokens, accepted):
+    context_args.input_tokens = input_tokens
+    workers = []
+
+    class ContextWorker(FakeWorker):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.operations = []
+            self.closed = False
+            workers.append(self)
+
+        def read(self):
+            return {**super().read(), **advertisement}
+
+        def request(self, request):
+            self.operations.append(request["operation"])
+            return super().request(request)
+
+        def close(self):
+            self.closed = True
+
+    if accepted:
+        report = run(context_args, worker_factory=ContextWorker)
+        assert report["context_tokens"] == input_tokens + 256
+        assert report["input_tokens"] == input_tokens
+        assert report["repeat_exact"] is True
+        assert workers[0].operations == ["tokenize", "generate", "generate", "generate"]
+        assert all(
+            len(request["input_token_ids"]) == input_tokens
+            and request["context_tokens"] == input_tokens + 256
+            and request["max_new_tokens"] == 256
+            for request in workers[0].generation_requests
+        )
+        assert "synthetic context corpus" not in json.dumps(report)
+        assert "input_token_ids" not in json.dumps(report)
+    else:
+        with pytest.raises(ValueError, match="^worker_context_limit_exceeded$"):
+            run(context_args, worker_factory=ContextWorker)
+        assert workers[0].operations == []
+        assert not context_args.output.exists()
+    assert workers[0].closed
+
+
+@pytest.mark.parametrize("limit", [True, False, 0, -1, 65537, 16384.0, "65536", None])
+def test_malformed_loaded_context_limit_fails_before_tokenization(context_args, limit):
+    workers = []
+
+    class InvalidContextWorker(FakeWorker):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.operations = []
+            self.closed = False
+            workers.append(self)
+
+        def read(self):
+            return {**super().read(), "max_context_tokens": limit}
+
+        def request(self, request):
+            self.operations.append(request["operation"])
+            return super().request(request)
+
+        def close(self):
+            self.closed = True
+
+    with pytest.raises(ValueError, match="^worker_context_limit_invalid$"):
+        run(context_args, worker_factory=InvalidContextWorker)
+    assert workers[0].operations == []
+    assert workers[0].closed
+    assert not context_args.output.exists()
 
 
 @pytest.mark.parametrize("sampling_mode", ["greedy", "stochastic"])

@@ -465,6 +465,52 @@ class BundleConstructionTests(unittest.TestCase):
             )
             self.assertEqual(provenance["license"], "Zlib OR Apache-2.0 OR MIT")
 
+    def test_repository_adaptation_notices_require_matching_hash_and_owned_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "scripts/licenses/distribution"
+            directory.mkdir(parents=True)
+            notice = root / "NOTICE.qwen38-reference"
+            notice.write_text("synthetic adaptation notice\n")
+            entry = {"path": notice.name, "sha256": distribution.sha256(notice)}
+            manifest = directory / "manifest.json"
+
+            def write_manifest():
+                manifest.write_text(
+                    json.dumps(
+                        {
+                            "source_adaptations": {
+                                "qwen38-uzu-architecture": {
+                                    "repository_notices": [entry]
+                                }
+                            }
+                        }
+                    )
+                )
+
+            write_manifest()
+            self.assertEqual(
+                distribution.repository_source_adaptation_notices(
+                    root, directory, "qwen38-uzu-architecture"
+                ),
+                [notice],
+            )
+            notice.write_text("changed notice\n")
+            with self.assertRaisesRegex(
+                distribution.BuildError, "source_adaptation_license_hash_mismatch"
+            ):
+                distribution.repository_source_adaptation_notices(
+                    root, directory, "qwen38-uzu-architecture"
+                )
+            entry["path"] = "../outside-notice"
+            write_manifest()
+            with self.assertRaisesRegex(
+                distribution.BuildError, "source_adaptation_license_file_missing"
+            ):
+                distribution.repository_source_adaptation_notices(
+                    root, directory, "qwen38-uzu-architecture"
+                )
+
     def test_native_and_vendored_licenses_are_copied_into_distribution_notices(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -472,6 +518,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "LICENSE",
                 "LICENSE.ggml-hybrid",
                 "LICENSE.qwen38-reference",
+                "NOTICE.qwen38-reference",
                 "LICENSE.flint-reference",
                 "provenance/UPSTREAM.md",
                 "tools/converter/LICENSE.lalamo",
@@ -480,6 +527,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "vendor/lily-core/LICENSE",
                 "vendor/lily-core/NOTICE",
                 "vendor/lily-core/UPSTREAM.md",
+                "docs/QWEN38_UZU_PROVENANCE.md",
                 "scripts/licenses/distribution/manifest.json",
                 "scripts/licenses/distribution/README.md",
                 "scripts/licenses/distribution/pytorch-LICENSE",
@@ -492,14 +540,19 @@ class BundleConstructionTests(unittest.TestCase):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(f"{name}\n")
-            # Exercise the complete notices shipped with the path dependency;
-            # Cargo's registry-license inventory deliberately skips local crates.
+            # Archived notices remain independent of the removed path package.
             lily_notices = {
                 name: (distribution.ROOT / "vendor/lily-core" / name).read_bytes()
                 for name in ("LICENSE", "NOTICE", "UPSTREAM.md")
             }
             for name, contents in lily_notices.items():
                 (root / "vendor/lily-core" / name).write_bytes(contents)
+            qwen_notices = {
+                name: (distribution.ROOT / name).read_bytes()
+                for name in ("LICENSE.qwen38-reference", "NOTICE.qwen38-reference")
+            }
+            for name, contents in qwen_notices.items():
+                (root / name).write_bytes(contents)
             license_path = root / "scripts/licenses/distribution/pytorch-LICENSE"
             ggml_license_path = root / "scripts/licenses/distribution/ggml-LICENSE"
             sleef_license_path = (
@@ -552,7 +605,13 @@ class BundleConstructionTests(unittest.TestCase):
                                 ),
                             },
                         ],
-                    }
+                    },
+                    "qwen38-uzu-architecture": {
+                        "repository_notices": [
+                            {"path": name, "sha256": distribution.sha256(root / name)}
+                            for name in qwen_notices
+                        ]
+                    },
                 }
             }
             manifest_path.write_text(json.dumps(manifest))
@@ -621,12 +680,27 @@ class BundleConstructionTests(unittest.TestCase):
             )
             for name in (
                 "LICENSE.ggml-hybrid",
-                "LICENSE.qwen38-reference",
                 "LICENSE.flint-reference",
             ):
                 self.assertEqual(
                     (bundle / "share/stark/licenses" / name).read_text(), f"{name}\n"
                 )
+            for name, contents in qwen_notices.items():
+                self.assertEqual(
+                    (bundle / "share/stark/licenses" / name).read_bytes(), contents
+                )
+            qwen_notice = (
+                bundle / "share/stark/licenses/NOTICE.qwen38-reference"
+            ).read_text()
+            self.assertIn("Copyright 2026 Perplexity AI, Inc.", qwen_notice)
+            self.assertIn("Copyright 2026 Fabio Greter", qwen_notice)
+            self.assertIn('THE SOFTWARE IS PROVIDED "AS IS"', qwen_notice)
+            self.assertIn("Apple Inc.", qwen_notice)
+            self.assertTrue(
+                (
+                    bundle / "share/stark/licenses/docs/QWEN38_UZU_PROVENANCE.md"
+                ).is_file()
+            )
             self.assertEqual(
                 (bundle / "share/stark/licenses/ggml-LICENSE").read_text(),
                 "scripts/licenses/distribution/ggml-LICENSE\n",
@@ -693,10 +767,19 @@ class BundleConstructionTests(unittest.TestCase):
             extra = root / "crates" / "engine" / "new.rs"
             extra.write_text("new untracked source\n")
             lily_sources = []
-            for name in ("LICENSE", "NOTICE", "UPSTREAM.md", "src/lib.rs"):
+            for name in ("LICENSE", "NOTICE", "UPSTREAM.md"):
                 source = root / "vendor/lily-core" / name
                 source.parent.mkdir(parents=True, exist_ok=True)
                 source.write_text(f"vendored source {name}\n")
+                lily_sources.append(source)
+            for name in (
+                "LICENSE.qwen38-reference",
+                "NOTICE.qwen38-reference",
+                "docs/QWEN38_UZU_PROVENANCE.md",
+            ):
+                source = root / name
+                source.parent.mkdir(parents=True, exist_ok=True)
+                source.write_text(f"adaptation notice {name}\n")
                 lily_sources.append(source)
             (root / "unrelated.js").write_text("private unrelated file\n")
             with patch.object(distribution, "ROOT", root):

@@ -171,6 +171,31 @@ class SigningWorkflowPolicyTests(unittest.TestCase):
         )
 
 
+class LockfileCoveragePolicyTests(unittest.TestCase):
+    def test_removed_lily_runtime_lockfile_is_not_required_or_scanned(self):
+        files = [
+            "Cargo.lock",
+            "scripts/ci/check_repository.py.lock",
+            "tools/uv.lock",
+            "tools/converter/uv.lock",
+            "tools/stock_benchmark/mlx/uv.lock",
+            "tools/stock_benchmark/mlx_current/uv.lock",
+            "tools/stock_benchmark/vllm/uv.lock",
+        ]
+        self.assertNotIn("vendor/lily-core/Cargo.lock", policy.SCANNED_LOCKFILES)
+        self.assertEqual(policy.check_lockfile_coverage(files), [])
+
+        workflow = yaml.safe_load(
+            (Path(__file__).resolve().parents[2] / ".github/workflows/security.yml").read_text()
+        )
+        security_script = "\n".join(
+            str(step.get("run", ""))
+            for job in workflow["jobs"].values()
+            for step in job.get("steps", [])
+        )
+        self.assertNotIn("vendor/lily-core/Cargo.lock", security_script)
+
+
 class SignedReleasePublicationTests(unittest.TestCase):
     def run_publish(
         self, *, corrupt_checksum: bool = False, existing_version: str = ""

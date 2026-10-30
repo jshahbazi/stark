@@ -16,9 +16,9 @@ use rangemap::RangeSet;
 use crate::backends::{
     common::{
         Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferCompleted, CommandBufferEncoding,
-        CommandBufferExecutable, CommandBufferPending, Context, allocator::bump::BumpAllocator,
+        CommandBufferExecutable, CommandBufferPending, Context, StageProfileCategory, allocator::bump::BumpAllocator,
     },
-    metal::{Metal, MetalContext, buffer::MetalBufferExt, error::MetalError},
+    metal::{Metal, MetalContext, buffer::MetalBufferExt, error::MetalError, stage_profile::StageProfile},
 };
 
 pub struct MetalCommandBuffer;
@@ -47,6 +47,7 @@ pub struct MetalCommandBufferEncoding {
     constant_allocator: Option<BumpAllocator<<Metal as Backend>::GlobalBuffer>>,
     allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
     pub(super) context: Arc<MetalContext>,
+    stage_profile: Option<StageProfile>,
 }
 
 impl MetalCommandBufferEncoding {
@@ -101,6 +102,7 @@ impl MetalCommandBufferEncoding {
             constant_allocator: Some(constant_allocator),
             allocation_pool,
             context,
+            stage_profile: None,
         })
     }
 
@@ -136,6 +138,21 @@ impl CommandBufferEncoding for MetalCommandBufferEncoding {
 
     fn context(&self) -> &MetalContext {
         &self.context
+    }
+
+    fn begin_single_token_profile(&mut self) {
+        if self.stage_profile.is_none() {
+            self.stage_profile = StageProfile::begin(&self.context.device, &self.compute_encoder);
+        }
+    }
+
+    fn stage_profile_checkpoint(
+        &mut self,
+        category: StageProfileCategory,
+    ) {
+        if let Some(profile) = &mut self.stage_profile {
+            profile.checkpoint(&self.compute_encoder, category);
+        }
     }
 
     fn allocate_constant(
@@ -223,6 +240,7 @@ impl CommandBufferEncoding for MetalCommandBufferEncoding {
             constant_allocator,
             allocation_pool: self.allocation_pool.clone(),
             context: self.context.clone(),
+            stage_profile: self.stage_profile.take(),
         }
     }
 }
@@ -245,6 +263,7 @@ pub struct MetalCommandBufferExecutable {
     constant_allocator: BumpAllocator<<Metal as Backend>::GlobalBuffer>,
     allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
     context: Arc<MetalContext>,
+    stage_profile: Option<StageProfile>,
 }
 
 impl CommandBufferExecutable for MetalCommandBufferExecutable {
@@ -259,6 +278,10 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
 
         let constant_allocator = self.constant_allocator;
         let allocation_pool = self.allocation_pool.clone();
+        let stage_profile = self.stage_profile.map(Arc::new);
+        // A caller can abandon Pending without waiting. Retain the heap in
+        // the completion closure as well as Pending until GPU writes finish.
+        let profile_keep_alive = stage_profile.clone();
         let feedback_handler = move |feedback: &ProtocolObject<dyn MTL4CommitFeedback>| {
             let message = if let Some(error) = feedback.error() {
                 Err(error.to_string())
@@ -270,7 +293,7 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
                 command_allocator: command_allocator.clone(),
                 command_buffer: command_buffer.clone(),
             });
-            let _keep_alive = (&constant_allocator, &allocation_pool);
+            let _keep_alive = (&constant_allocator, &allocation_pool, &profile_keep_alive);
         };
 
         let options = MTL4CommitOptions::new();
@@ -280,6 +303,7 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
         MetalCommandBufferPending {
             allocation_pool: self.allocation_pool,
             receiver,
+            stage_profile,
         }
     }
 }
@@ -287,19 +311,22 @@ impl CommandBufferExecutable for MetalCommandBufferExecutable {
 pub struct MetalCommandBufferPending {
     allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
     receiver: mpsc::Receiver<Result<Duration, String>>,
+    stage_profile: Option<Arc<StageProfile>>,
 }
 
 impl CommandBufferPending for MetalCommandBufferPending {
     type CommandBuffer = MetalCommandBuffer;
 
     fn wait_until_completed(self) -> Result<MetalCommandBufferCompleted, MetalError> {
+        let gpu_execution_time =
+            self.receiver.recv().map_err(MetalError::CommandBufferWait)?.map_err(MetalError::CommandBufferExecution)?;
+        if let Some(profile) = &self.stage_profile {
+            profile.complete(gpu_execution_time);
+        }
         Ok(MetalCommandBufferCompleted {
-            gpu_execution_time: self
-                .receiver
-                .recv()
-                .map_err(MetalError::CommandBufferWait)?
-                .map_err(MetalError::CommandBufferExecution)?,
+            gpu_execution_time,
             _allocation_pool: self.allocation_pool,
+            _stage_profile: self.stage_profile,
         })
     }
 }
@@ -307,6 +334,7 @@ impl CommandBufferPending for MetalCommandBufferPending {
 pub struct MetalCommandBufferCompleted {
     gpu_execution_time: Duration,
     _allocation_pool: Arc<<Metal as Backend>::AllocationPool>,
+    _stage_profile: Option<Arc<StageProfile>>,
 }
 
 impl CommandBufferCompleted for MetalCommandBufferCompleted {

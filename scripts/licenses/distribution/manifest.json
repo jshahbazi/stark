@@ -255,6 +255,51 @@
         }
       ],
       "adaptation": "Pinned expf_u10 and positive log1pf_u10 branch for reference-only FP32 SiLU, softplus and decay. The log1p input is exp(x) with source softplus x<=20; the direct linear branch handles x>20. All arithmetic associations and explicit FMAs follow the pinned double-float helpers; legacy text activation/decay kernels remain unchanged."
+    },
+    "qwen38-uzu-architecture": {
+      "license": "Apache-2.0 AND MIT",
+      "repository": "https://github.com/fabiogreter/lily-qwen3.8-flash-next",
+      "upstream_revision": "e22d58fa7cc488493fb1b5d810a198bd29730aeb",
+      "reference_checkout_revision": "5a082f7f2e98019ef8907e8c576b52a5c0c669af",
+      "reference_files": [
+        {
+          "path": "vendor/lily-core/src/kernels/metal/hc.metal",
+          "sha256": "d3c8aadf6ebd6ef53a5e5be13813ddde6038a3e9747de9aa5b90fffdec09eddf"
+        },
+        {
+          "path": "vendor/lily-core/src/kernels/metal/gdn.metal",
+          "sha256": "2df8e02feff4d98fd3aa3be16221f42d6c8ec30b27409fdaa2e97cb944a5e8b7"
+        },
+        {
+          "path": "vendor/lily-core/src/kernels/metal/moe.metal",
+          "sha256": "6eaf2605897e489de39e12b37590b76a164692983314dd2b1b7fe34ee9d56cfc"
+        },
+        {
+          "path": "vendor/lily-core/src/kernels/metal/ple.metal",
+          "sha256": "42f123da080fc9e23e57479329682a828a6111dd8f5729cef1d6075f67afe58d"
+        },
+        {
+          "path": "vendor/lily-core/src/kernels/metal/qsa.metal",
+          "sha256": "4d47fade0990d2b7015a5bfc187c113df4b7068397e9b9f89c80b862e751597c"
+        }
+      ],
+      "reference_scope": "Modified historical Stark extraction; source-level algorithm reference, not a production dependency",
+      "repository_notices": [
+        {
+          "path": "LICENSE.qwen38-reference",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+        },
+        {
+          "path": "NOTICE.qwen38-reference",
+          "sha256": "40198a54a47448daf7321d359543548e636059cbdd97c502d2492a80f9f0c6f3"
+        }
+      ],
+      "provenance_file": "docs/QWEN38_UZU_PROVENANCE.md",
+      "archived_notices": [
+        "vendor/lily-core/LICENSE",
+        "vendor/lily-core/NOTICE",
+        "vendor/lily-core/UPSTREAM.md"
+      ]
     }
   },
   "packages": {

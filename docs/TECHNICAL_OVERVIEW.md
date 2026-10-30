@@ -30,8 +30,9 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | Path | Contents |
 | --- | --- |
 | `src/engine/` | `Engine` (Metal context, capture manager), `LanguageModel` loading, `language_model/stream/` (generation: prefill, decode loop, sampling, lookahead), `language_model/scoring.rs` (next-token readout), `language_model/state.rs` (per-request state), `classifier_model.rs` (loads classifiers produced by the converter's ModernBERT path; no worker runs one) |
-| `src/engine/hybrid/` | Native GLM, Qwen3.8 and Flint loading, execution and request state; explicit Lily-format Qwen checkpoints select the in-process mixed-precision adapter |
-| `vendor/lily-core/` | Pinned Lily Rust/Metal 4 Qwen core, with server, persistence and diagnostics removed; speculative execution disabled; licenses and patch provenance retained |
+| `src/engine/hybrid/` | Native GLM/Flint loading, execution and request state; raw Qwen3.8 exports require Uzu conversion |
+| `vendor/lily-core/` | Retained archival licenses and provenance; no executable crate |
+| `src/encodable_block/qwen38/` | Qwen3.8 HC/GDN/QSA/MoE/paged-PLE architecture using standard Uzu parameters, matrices, buffers and commands |
 | `src/encodable_block/` | The model graph as encodable blocks: `decoder.rs`, `transformer.rs`, `transformer_layer.rs`, `mixer/attention/`, `mixer/delta_net.rs`, `mixer/mamba2.rs`, `mlp/`, `linear/`, `sampling/`, embeddings and normalisation |
 | `src/backends/metal/` | Metal context, command buffers, buffer allocation and retirement, kernel wrappers under `kernel/` (matmul GEMM and GEMV, attention, GDN, sampling, normalization); `.metal` sources live next to their Rust wrappers |
 | `src/backends/cpu/` | CPU reference kernels used by the unit tests (`cpu` feature); not used by the workers |
@@ -41,7 +42,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | `build/` | The build script: scans GPU type definitions, generates Rust bindings for each kernel, and compiles `.metal` sources with Xcode's Metal toolchain into `.metallib` files embedded in the binary (`build/metal/`), or compiles CPU kernels (`build/cpu/`) |
 | `unit/` | The engine unit and benchmark suite; see [Contributing](../CONTRIBUTING.md#engine-tests) |
 
-A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No state outlives a request in either worker.
+A generation request creates a `LanguageModelState` sized to the requested context, prefills through its decoder and samples on the GPU. Ordinary decoders use batches of up to 1,024 tokens; Qwen3.8 batches projections layer by layer in chunks of at most 16, keeps recurrent/cache updates causal, and resolves host token IDs before its next paged PLE lookup. Scoring reads final-position logits in the decoder's type: BF16 for ordinary models and F32 for Qwen3.8. Both workers release request state. See the [Qwen3.8 execution contract](QWEN38_UZU_EXECUTION.md) for its precision changes and pending qualification.
 
 Mixed-precision inference is permitted by [repository policy](../AGENTS.md).
 Activation, accumulation, recurrent-state, cache and weight precision are chosen

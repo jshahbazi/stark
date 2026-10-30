@@ -10,6 +10,7 @@ use crate::{
         Backend, BufferCpuAccessible, BufferRef, CommandBuffer, CommandBufferEncoding, CommandBufferExecutable,
         CommandBufferPending, Context, gpu_types::trie::TrieNode as GpuTrieNode,
     },
+    data_type::DataType,
     encodable_block::{batch_topology::BatchTopology, decoder::DecoderError},
     engine::language_model::{LanguageModel, state::LanguageModelCreateEmptyStateError},
 };
@@ -105,7 +106,8 @@ where
     /// - `context_tokens` sizes the per-layer KV capacity of the temporary
     ///   state; nothing is cached between calls and the state is dropped on
     ///   every exit path, including errors.
-    /// - Logits are read from the engine's BF16 readout and widened to `f32`;
+    /// - BF16 logits are widened to `f32`; architectures with F32 readout
+    ///   retain those bits directly.
     ///   `InvalidOutput` covers both a missing readout and non-finite values.
     /// - The timing fields are wall-clock seconds; `readout_seconds` includes
     ///   the full-vocabulary conversion.
@@ -116,7 +118,7 @@ where
         input: &[u32],
         context_tokens: u32,
     ) -> Result<LanguageModelNextTokenScores, LanguageModelScoreError<B>> {
-        let vocab_size = self.decoder.embedding().vocab_size() as usize;
+        let vocab_size = self.decoder.vocab_size() as usize;
         if input.is_empty() || context_tokens == 0 || input.iter().any(|id| *id as usize >= vocab_size) {
             return Err(LanguageModelScoreError::InvalidInput);
         }
@@ -131,17 +133,22 @@ where
         let started = Instant::now();
         let mut state = self.create_empty_state(Some(context_tokens), 0)?;
         #[cfg(feature = "scoring-last-layer-pruning")]
-        state.transformer_state.enable_scoring_last_layer_pruning();
+        state.decoder_state.enable_scoring_last_layer_pruning();
         let state_creation_seconds = started.elapsed().as_secs_f64();
         let prefill_started = Instant::now();
         // Ordinary stream prefill requires this batch size for attention's
         // hardcoded 1024-token suffix; preserve the same preparation here.
-        let max_batch_size = 1024;
+        let max_batch_size = self.decoder.prefill_chunk_size();
         let number_of_batches = input.len().div_ceil(max_batch_size);
-        state
-            .transformer_state
-            .prepare(((number_of_batches - 1) * max_batch_size) as u32, usize::min(max_batch_size, input.len()) as u32)
-            .map_err(LanguageModelScoreError::Backend)?;
+        if !self.decoder.requires_host_tokens() {
+            state
+                .decoder_state
+                .prepare(
+                    ((number_of_batches - 1) * max_batch_size) as u32,
+                    usize::min(max_batch_size, input.len()) as u32,
+                )
+                .map_err(LanguageModelScoreError::Backend)?;
+        }
         let mut final_logits = None;
         // Declared after state/readout so this guard drains queued GPU work
         // before either resource can be dropped during an error unwind.
@@ -172,10 +179,11 @@ where
                 let batch_dim = BatchTopology::new(&nodes, true);
                 let output = self.decoder.encode(
                     &token_ids,
+                    Some(input_chunk),
                     &batch_dim,
                     output_last.then(|| (input_chunk.len() as u32 - 1..input_chunk.len() as u32).into()),
                     None,
-                    &mut state.transformer_state,
+                    &mut state.decoder_state,
                     &mut command_buffer,
                 )?;
                 if output_last {
@@ -185,7 +193,7 @@ where
                 // are already encoded, and this fresh state is dropped below.
                 if !output_last {
                     state
-                        .transformer_state
+                        .decoder_state
                         .encode_accept(&(0..input_chunk.len() as u32).collect::<Box<[u32]>>(), &mut command_buffer)
                         .map_err(LanguageModelScoreError::Backend)?;
                 }
@@ -194,13 +202,21 @@ where
             // Metal's command-buffer queue barriers order state writes before
             // the next batch while CPU encoding overlaps earlier GPU execution.
             submissions.pending.push(command_buffer.end_encoding().submit());
+            if self.decoder.requires_host_tokens() {
+                // Bound the live workspace of temporal Qwen blocks. Each
+                // completed chunk releases its standard allocation pool.
+                submissions.wait_all().map_err(LanguageModelScoreError::Backend)?;
+            }
         }
         submissions.wait_all().map_err(LanguageModelScoreError::Backend)?;
         let prefill_seconds = prefill_started.elapsed().as_secs_f64();
         let readout_started = Instant::now();
         let final_logits = final_logits.ok_or(LanguageModelScoreError::InvalidOutput)?;
-        // Engine::load_language_model fixes internal readout data type to BF16.
-        let logits: Vec<f32> = (&final_logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect();
+        let logits: Vec<f32> = match self.decoder.logits_data_type() {
+            DataType::BF16 => (&final_logits).as_slice::<bf16>().iter().map(|value| value.to_f32()).collect(),
+            DataType::F32 => (&final_logits).as_slice::<f32>().to_vec(),
+            _ => return Err(LanguageModelScoreError::InvalidOutput),
+        };
         if logits.len() != vocab_size || logits.iter().any(|value| !value.is_finite()) {
             return Err(LanguageModelScoreError::InvalidOutput);
         }

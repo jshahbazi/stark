@@ -112,11 +112,18 @@ impl Dtype {
 const MAX_HEADER_SIZE: usize = 100_000_000;
 
 pub fn read_metadata(file: &File) -> Result<(usize, HashMetadata), HeaderLoadingError> {
+    read_metadata_with_limit(file, MAX_HEADER_SIZE)
+}
+
+pub fn read_metadata_with_limit(
+    file: &File,
+    maximum_header_bytes: usize,
+) -> Result<(usize, HashMetadata), HeaderLoadingError> {
     let mut header_buffer = [0u8; size_of::<u64>()];
     file.read_exact_at(&mut header_buffer, 0).map_err(HeaderLoadingError::UnableToReadHeader)?;
     let metadata_size: usize =
         u64::from_le_bytes(header_buffer).try_into().map_err(|_| HeaderLoadingError::HeaderTooLarge)?;
-    if metadata_size > MAX_HEADER_SIZE {
+    if metadata_size > maximum_header_bytes.min(MAX_HEADER_SIZE) {
         return Err(HeaderLoadingError::HeaderTooLarge);
     }
 

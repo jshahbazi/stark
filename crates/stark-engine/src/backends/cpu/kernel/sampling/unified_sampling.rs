@@ -29,6 +29,7 @@ pub fn unified_sampling<T: ArrayElement + Float>(
     #[specialize] has_top_k: bool,
     #[specialize] has_top_p: bool,
     #[specialize] has_min_p: bool,
+    #[specialize] validate_logits: bool,
 ) {
     for batch_idx in 0..batch_size {
         let mut logits = unsafe {
@@ -37,6 +38,14 @@ pub fn unified_sampling<T: ArrayElement + Float>(
         .iter()
         .map(|logit| logit.to_f32().unwrap())
         .collect::<Vec<f32>>();
+
+        // Validate the complete model readout before a grammar mask or filter
+        // can hide a nonwinning NaN or infinity. The stream rejects this token
+        // sentinel before publishing or reusing the sampled row.
+        if validate_logits && logits.iter().any(|logit| !logit.is_finite()) {
+            unsafe { *output.wrapping_add(batch_idx as usize) = u32::MAX };
+            continue;
+        }
 
         if has_bitmask {
             let bitmask = unsafe {

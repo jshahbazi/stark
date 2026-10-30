@@ -16,6 +16,7 @@ use stark_engine_macros::stark_test;
 
 use super::{
     LanguageModel,
+    execution::DecoderState,
     multimodal::{ImageGrid, ImageTokenIds, MultimodalPrefill, ProjectedImage},
     stream::{LanguageModelStreamOptions, SamplingMethod},
 };
@@ -25,7 +26,7 @@ use crate::{
         gpu_types::trie::TrieNode,
     },
     data_type::DataType,
-    encodable_block::{batch_topology::BatchTopology, decoder::EmbeddingReplacement, transformer::TransformerState},
+    encodable_block::{batch_topology::BatchTopology, decoder::EmbeddingReplacement},
     engine::Engine,
 };
 
@@ -58,6 +59,20 @@ impl TinyModel {
     fn with_rope_mix(
         model_dim: u32,
         mixed_scalar_rope: bool,
+    ) -> Self {
+        Self::with_options(model_dim, mixed_scalar_rope, false, None)
+    }
+
+    #[cfg(all(backend = "metal", feature = "cpu"))]
+    fn split_precision_control(omitted_projection: Option<&str>) -> Self {
+        Self::with_options(512, false, true, omitted_projection)
+    }
+
+    fn with_options(
+        model_dim: u32,
+        mixed_scalar_rope: bool,
+        precision_control: bool,
+        omitted_projection: Option<&str>,
     ) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let directory = std::env::temp_dir().join(format!(
@@ -137,12 +152,29 @@ impl TinyModel {
         );
         tokenizer.save(directory.join("tokenizer.json"), false).unwrap();
 
-        // Distinct signed rows prevent placeholder lookup and a missing copy from
-        // accidentally satisfying the control comparison. Every weight is finite.
+        // Image fixtures retain distinct signed rows for replacement controls.
+        // The precision fixture uses repeated dyadic coordinate classes with
+        // token-dependent amplitudes. Every weight is finite.
         let embeddings = (0..VOCAB)
             .flat_map(|row| {
                 (0..model_dim).map(move |column| {
-                    bf16::from_f32((((row * 13 + column * 7 + row * column * 3) % 29) as f32 - 14.0) / 16.0)
+                    bf16::from_f32(if precision_control {
+                        let amplitude = (1_u32 << (row % 3)) as f32;
+                        // Prompt IDs are5..15. Unused input rows0..4 serve as
+                        // independent tied-readout orientations, so final RMS
+                        // normalization cannot hide a branch direction change.
+                        let pair = match row {
+                            0 => [1.0, 1.0],
+                            1 => [1.0, -1.0],
+                            2 => [2.0, 1.0],
+                            3 => [-1.0, 2.0],
+                            4 => [-2.0, -1.0],
+                            _ => [amplitude, -2.0 * amplitude],
+                        };
+                        pair[(column % 2) as usize]
+                    } else {
+                        (((row * 13 + column * 7 + row * column * 3) % 29) as f32 - 14.0) / 16.0
+                    })
                 })
             })
             .collect::<Vec<_>>();
@@ -182,12 +214,60 @@ impl TinyModel {
                 ("mlp.up_projection", 2 * model_dim, 0.125),
                 ("mlp.down_projection", model_dim, 0.125),
             ] {
+                let scale = if precision_control {
+                    match name {
+                        "mixer.out_projection" => 1.5,
+                        "mlp.up_projection" => 0.5,
+                        "mlp.down_projection" => 1.0,
+                        _ => scale,
+                    }
+                } else {
+                    scale
+                };
+                let mut values = projection(rows, scale);
+                if precision_control && matches!(name, "mixer.out_projection" | "mlp.down_projection") {
+                    for row in 0..rows {
+                        let (diagonal, neighbor) = if name == "mixer.out_projection" {
+                            (
+                                if row.is_multiple_of(2) {
+                                    scale
+                                } else {
+                                    scale / 4.0
+                                },
+                                scale / 8.0,
+                            )
+                        } else if row.is_multiple_of(2) {
+                            (0.5, 1.0)
+                        } else {
+                            (1.0, -0.5)
+                        };
+                        values[(row * model_dim + row % model_dim) as usize] = bf16::from_f32(diagonal);
+                        values[(row * model_dim + (row + 1) % model_dim) as usize] = bf16::from_f32(neighbor);
+                    }
+                }
+                if precision_control && name == "mixer.qkvg_projection" {
+                    // Isolate shared GEMM precision from CPU/Metal trig. Both
+                    // head256 heads keep252 nonzero Q/K coordinates, all V
+                    // coordinates and causal attention; existing image tests
+                    // retain their independent nonzero rotary coverage.
+                    for segment in 0..2 {
+                        for head in 0..2 {
+                            for rotary in 0..4 {
+                                let row = segment * model_dim + head * (model_dim / 2) + rotary;
+                                values[(row * model_dim) as usize..((row + 1) * model_dim) as usize].fill(bf16::ZERO);
+                            }
+                        }
+                    }
+                }
+                if omitted_projection == Some(name) {
+                    values.fill(bf16::ZERO);
+                }
                 Self::matrix(
                     &mut tensors,
                     &mut metadata,
                     &format!("decoder.transformer.layers.{layer}.{name}.weights"),
                     &[rows, model_dim],
-                    projection(rows, scale),
+                    values,
                     "output_input",
                 );
             }
@@ -276,7 +356,7 @@ fn control_tokens(input: &MultimodalPrefill) -> Vec<u64> {
 
 fn encode<B: Backend>(
     model: &LanguageModel<B>,
-    state: &mut TransformerState<B>,
+    state: &mut DecoderState<B>,
     tokens: &[u64],
     positions: Option<&[[u32; 3]]>,
     replacement: Option<EmbeddingReplacement<'_>>,
@@ -300,6 +380,7 @@ fn encode<B: Backend>(
         .decoder
         .encode_with_features(
             &ids,
+            None,
             replacement,
             &topology,
             Some((0..tokens.len() as u32).into()),
@@ -442,8 +523,8 @@ fn fusion_and_cache_parity<B: Backend>(model_dim: u32) {
     assert_eq!(input.position_delta, -2);
     assert!(input.positions.iter().flatten().all(|&position| position < fused.context_length()));
 
-    fused.set_rotary_position_delta(Some(input.position_delta));
-    split.set_rotary_position_delta(Some(input.position_delta));
+    fused.set_rotary_position_delta(Some(input.position_delta)).unwrap();
+    split.set_rotary_position_delta(Some(input.position_delta)).unwrap();
     let continuation = [[6; 3]];
     let expected = encode(&model, &mut control, &[12], Some(&continuation), None);
     let split_expected = encode(&model, &mut split_control, &[12], Some(&continuation), None);
@@ -558,8 +639,8 @@ fn stream_crosses_image_boundary<B: Backend>(model_dim: u32) {
     // The stream queues one accepted input per returned output. Its pending
     // next token remains a token ID and does not affect the physical cache.
     assert_eq!(state.tokens().len(), 1031);
-    assert_eq!(state.transformer_state.context_length(), 1031);
-    assert_eq!(state.transformer_state.rotary_position_delta(), Some(-2));
+    assert_eq!(state.decoder_state.context_length(), 1031);
+    assert_eq!(state.decoder_state.rotary_position_delta(), Some(-2));
 }
 
 #[cfg(backend = "cpu")]
@@ -588,19 +669,19 @@ fn native_image_preflight_rejects_foreign_and_nonfresh_state_before_mutation() {
     let mut state = model.create_empty_state(Some(64), 0).unwrap();
     assert!(model.stream_multimodal(&foreign_input, &mut state, greedy_options(&model)).is_err());
     assert_eq!(state.tokens().len(), 0);
-    assert_eq!(state.transformer_state.context_length(), 0);
-    assert_eq!(state.transformer_state.rotary_position_delta(), None);
+    assert_eq!(state.decoder_state.context_length(), 0);
+    assert_eq!(state.decoder_state.rotary_position_delta(), None);
 
     drop(model.stream(&[5], &mut state, greedy_options(&model)).unwrap());
-    let before = (state.tokens.len(), state.transformer_state.context_length(), state.last_output_token);
+    let before = (state.tokens.len(), state.decoder_state.context_length(), state.last_output_token);
     assert!(model.stream_multimodal(&input, &mut state, greedy_options(&model)).is_err());
-    assert_eq!((state.tokens.len(), state.transformer_state.context_length(), state.last_output_token), before);
-    assert_eq!(state.transformer_state.rotary_position_delta(), None);
+    assert_eq!((state.tokens.len(), state.decoder_state.context_length(), state.last_output_token), before);
+    assert_eq!(state.decoder_state.rotary_position_delta(), None);
 
     let mut foreign_state = foreign.create_empty_state(Some(64), 0).unwrap();
     assert!(model.stream_multimodal(&input, &mut foreign_state, greedy_options(&model)).is_err());
     assert_eq!(foreign_state.tokens().len(), 0);
-    assert_eq!(foreign_state.transformer_state.context_length(), 0);
+    assert_eq!(foreign_state.decoder_state.context_length(), 0);
 }
 
 #[cfg(backend = "cpu")]
@@ -615,8 +696,8 @@ fn native_image_preflight_rejects_mixed_scalar_and_multimodal_rope() {
     let mut state = model.create_empty_state(Some(64), 0).unwrap();
     assert!(model.stream_multimodal(&input, &mut state, greedy_options(&model)).is_err());
     assert_eq!(state.tokens().len(), 0);
-    assert_eq!(state.transformer_state.context_length(), 0);
-    assert_eq!(state.transformer_state.rotary_position_delta(), None);
+    assert_eq!(state.decoder_state.context_length(), 0);
+    assert_eq!(state.decoder_state.rotary_position_delta(), None);
 }
 
 #[cfg(backend = "cpu")]
@@ -639,8 +720,8 @@ fn native_image_stream_reserves_output_headroom_and_stops_at_context_capacity() 
         Err(LanguageModelStreamError::ContextOverflow)
     ));
     assert!(full.tokens().is_empty());
-    assert_eq!(full.transformer_state.context_length(), 0);
-    assert_eq!(full.transformer_state.rotary_position_delta(), None);
+    assert_eq!(full.decoder_state.context_length(), 0);
+    assert_eq!(full.decoder_state.rotary_position_delta(), None);
     assert_eq!(full.last_output_token, None);
     assert!(!full.multimodal_failed);
 
@@ -655,8 +736,8 @@ fn native_image_stream_reserves_output_headroom_and_stops_at_context_capacity() 
         assert_eq!(stream.metrics().num_tokens_returned, 1);
     }
     assert_eq!(bounded.tokens().len(), 10);
-    assert_eq!(bounded.transformer_state.context_length(), 10);
-    assert_eq!(bounded.transformer_state.rotary_position_delta(), Some(-2));
+    assert_eq!(bounded.decoder_state.context_length(), 10);
+    assert_eq!(bounded.decoder_state.rotary_position_delta(), Some(-2));
     assert_eq!(bounded.last_output_token, None);
     assert!(!bounded.multimodal_failed);
 }
@@ -683,10 +764,10 @@ fn native_image_setup_failure_fences_state_and_fresh_request_recovers() {
         Err(LanguageModelStreamError::Decoder(DecoderError::InvalidInput(_)))
     ));
     assert!(failed.multimodal_failed);
-    assert_eq!(failed.transformer_state.rotary_position_delta(), None);
+    assert_eq!(failed.decoder_state.rotary_position_delta(), None);
     assert_eq!(failed.last_output_token, None);
     assert_eq!(failed.tokens().len(), 0);
-    assert_eq!(failed.transformer_state.context_length(), 0);
+    assert_eq!(failed.decoder_state.context_length(), 0);
 
     assert!(matches!(
         model.stream_multimodal(&valid, &mut failed, greedy_options(&model)),
@@ -697,7 +778,7 @@ fn native_image_setup_failure_fences_state_and_fresh_request_recovers() {
         Err(LanguageModelStreamError::InvalidMultimodal)
     ));
     assert!(failed.multimodal_failed);
-    assert_eq!(failed.transformer_state.rotary_position_delta(), None);
+    assert_eq!(failed.decoder_state.rotary_position_delta(), None);
     assert_eq!(failed.last_output_token, None);
 
     let mut fresh = model.create_empty_state(Some(64), 0).unwrap();
@@ -707,8 +788,8 @@ fn native_image_setup_failure_fences_state_and_fresh_request_recovers() {
     }
     assert!(!fresh.multimodal_failed);
     assert_eq!(fresh.tokens().len(), 10);
-    assert_eq!(fresh.transformer_state.context_length(), 10);
-    assert_eq!(fresh.transformer_state.rotary_position_delta(), Some(-2));
+    assert_eq!(fresh.decoder_state.context_length(), 10);
+    assert_eq!(fresh.decoder_state.rotary_position_delta(), Some(-2));
     assert!(fresh.last_output_token.is_some());
 }
 
@@ -724,4 +805,102 @@ fn native_image_fusion_matches_lookup_and_chunked_decoder_metal() {
     // Metal attention instantiates head widths 64 and larger. Rotate the same
     // four-channel prefix while exercising its actual GPU feature copy path.
     fusion_and_cache_parity::<crate::backends::metal::Metal>(128);
+}
+
+#[cfg(all(backend = "metal", feature = "cpu"))]
+#[stark_test]
+fn ordinary_dense_language_model_split_k_prefill_scores_match_cpu_and_repeat() {
+    use crate::backends::{
+        common::{
+            gpu_types::gemm::{GemmBPrologueKind, GemmDTransform},
+            kernel::matmul::MatmulShape,
+        },
+        cpu::Cpu,
+        metal::{GemmEngine, GemmKernel, Metal},
+    };
+
+    // H512 gives supported head256 attention and real split-K dense
+    // projections. The existing H128 image fixture generally does not split.
+    // This loads ordinary LanguageModelConfig and uses plain text only.
+    let fixture = TinyModel::split_precision_control(None);
+    let input = (0..33).map(|index| 5 + (index * 3 % 11)).collect::<Vec<u32>>();
+    let cpu_engine = Engine::<Cpu>::new().expect("ordinary CPU engine");
+    let cpu_model = cpu_engine.load_language_model(&fixture.directory).expect("ordinary CPU model");
+    let reference = cpu_model.score_next_token(&input, 64).expect("ordinary CPU scoring");
+
+    let engine = Engine::<Metal>::new().expect("ordinary Metal engine");
+    let model = engine.load_language_model(&fixture.directory).expect("ordinary Metal model");
+    // Match ordinary scoring's optional final-row split. Both geometries
+    // have M>8 and select GEMM.
+    // Assert its actual qkv shape's plan partitions, so this integration
+    // anchor cannot silently become an unrelated unsplit-only test.
+    let shape = MatmulShape {
+        m: if model.decoder.prefill_cache_skips_trailing_layers() {
+            32
+        } else {
+            33
+        },
+        n: 3 * 512,
+        k: 512,
+        b_transpose: true,
+        b_leading_dimension: None,
+        b_prologue: GemmBPrologueKind::FullPrecision,
+        b_bits: None,
+        b_group_size: None,
+        signed_codes: false,
+        a_full_precision: true,
+        gathered: false,
+        params_layout: None,
+        d_transform: GemmDTransform::empty(),
+    };
+    let gemm = GemmKernel::new(DataType::BF16, DataType::BF16, DataType::BF16);
+    let engine_kind = if model.engine.context.supports_mxu {
+        GemmEngine::Mxu
+    } else {
+        GemmEngine::Simdgroup
+    };
+    let plan = gemm.select_plan_for_engine(&shape, engine_kind, &model.engine.context).expect("ordinary qkv plan");
+    assert!(plan.partition_count() > 1, "ordinary LanguageModel anchor did not select split-K");
+
+    let scores = model.score_next_token(&input, 64).expect("ordinary Metal scoring");
+    let repeated = model.score_next_token(&input, 64).expect("ordinary repeated Metal scoring");
+    assert_close(&scores.logits, &reference.logits, "ordinary dense CPU/Metal score control");
+    assert_identical(&scores.logits, &repeated.logits);
+    for omitted in ["mixer.out_projection", "mlp.down_projection"] {
+        let altered = TinyModel::split_precision_control(Some(omitted));
+        let altered_model = engine.load_language_model(&altered.directory).expect("ordinary ablation model");
+        let altered_scores = altered_model.score_next_token(&input, 64).expect("ordinary ablation scoring");
+        assert!(
+            altered_scores.logits.iter().zip(&scores.logits).any(|(a, b)| a.to_bits() != b.to_bits()),
+            "ordinary precision fixture did not expose omitted projection={omitted}"
+        );
+    }
+    let (maximum_absolute, rms, maximum_ratio) = error_aggregates(&scores.logits, &reference.logits);
+    eprintln!(
+        "ordinary_dense_split_k_control model_dim=512 prompt_rows=33 vocabulary={VOCAB} qkv_partitions={} max_abs={maximum_absolute:.9e} rms={rms:.9e} existing_tolerance_ratio={maximum_ratio:.9e} repeated_readout_identical=true",
+        plan.partition_count()
+    );
+}
+
+#[cfg(all(backend = "metal", feature = "cpu"))]
+#[stark_test]
+fn ordinary_dense_realistic_cpu_metal_precision_observation() {
+    use crate::backends::{cpu::Cpu, metal::Metal};
+    // Retain the original H512 failure as a separate observation rather than
+    // broadening the existing tolerance. This does not qualify model quality
+    // or attribute its CPU/Metal difference to the split-K correction.
+    let fixture = TinyModel::new(512);
+    let input = (0..33).map(|index| 5 + (index * 3 % 11)).collect::<Vec<u32>>();
+    let cpu_engine = Engine::<Cpu>::new().expect("ordinary CPU engine");
+    let cpu_model = cpu_engine.load_language_model(&fixture.directory).expect("ordinary CPU model");
+    let expected = cpu_model.score_next_token(&input, 64).expect("ordinary CPU scoring");
+    let engine = Engine::<Metal>::new().expect("ordinary Metal engine");
+    let model = engine.load_language_model(&fixture.directory).expect("ordinary Metal model");
+    let actual = model.score_next_token(&input, 64).expect("ordinary Metal scoring");
+    let repeated = model.score_next_token(&input, 64).expect("ordinary repeated scoring");
+    assert_identical(&actual.logits, &repeated.logits);
+    let (absolute, rms, ratio) = error_aggregates(&actual.logits, &expected.logits);
+    eprintln!(
+        "ordinary_realistic_precision_observation model_dim=512 prompt_rows=33 max_abs={absolute:.9e} rms={rms:.9e} original_tolerance_ratio={ratio:.9e} quality_acceptance_threshold=none repeated_readout_identical=true"
+    );
 }

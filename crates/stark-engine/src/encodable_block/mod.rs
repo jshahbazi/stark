@@ -11,6 +11,7 @@ pub mod mlp;
 pub mod normalization;
 pub mod per_layer_embedding;
 pub mod prediction_head;
+pub(crate) mod qwen38;
 pub mod sampling;
 pub mod transformer;
 pub mod transformer_layer;

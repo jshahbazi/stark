@@ -105,7 +105,10 @@ CONSTRAINT(
 CONSTRAINT(
     A_PROLOGUE == GemmAPrologueKind::FullPrecision ||
     (TRANSPOSE_B && B_PROLOGUE != GemmBPrologueKind::FullPrecision))
-CONSTRAINT(A_PROLOGUE == GemmAPrologueKind::FullPrecision || (AT == "bfloat" && DT == "bfloat"))
+// Integer-activation split-K partitions retain F32 accumulator outputs too.
+CONSTRAINT(
+    A_PROLOGUE == GemmAPrologueKind::FullPrecision ||
+    (AT == "bfloat" && (DT == "bfloat" || DT == "float")))
 CONSTRAINT((A_PROLOGUE == GemmAPrologueKind::FullPrecision) == (A_GROUP_SIZE == 0))
 // The integer schedule drains one weight group at a time, so an activation
 // group narrower than the weight group has no kernel.

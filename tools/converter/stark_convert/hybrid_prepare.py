@@ -3,6 +3,8 @@
 This path preserves quantized bytes. It downloads metadata and weights only;
 repository Python, speculative sidecars and foreign inference engines are never
 requested or executed. Native load and execution remain separate checks.
+Qwen3.8 recipes identify existing source receipts; new Qwen3.8 imports use
+stark-convert to create the canonical Stark artifact.
 """
 
 from __future__ import annotations
@@ -81,6 +83,11 @@ _METADATA = [
     "LICENSE",
     "LICENSE.txt",
 ]
+
+_QWEN38_CONVERSION_REQUIRED = (
+    "Qwen3.8 requires canonical Stark conversion. "
+    "Run stark-convert with the checkpoint repository or local source and --output instead."
+)
 
 
 def _json(path: Path, limit: int = 1024 * 1024):
@@ -337,6 +344,10 @@ def prepared_identity(directory: Path) -> dict | None:
 
 def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
     source = SOURCES[choice]
+    if source["architecture"] == "qwen4_exp":
+        # Keep the pinned recipes for recognizing existing provenance receipts.
+        # New Qwen imports use the same canonical converter as other models.
+        raise ValueError(_QWEN38_CONVERSION_REQUIRED)
     output = output.absolute()
     if output.exists() or output.is_symlink():
         raise ValueError("output already exists")
@@ -425,6 +436,9 @@ def main(argv=None):
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
     args = parser.parse_args(argv)
+    if SOURCES[args.model]["architecture"] == "qwen4_exp":
+        print(_QWEN38_CONVERSION_REQUIRED, file=sys.stderr)
+        return 1
     try:
         receipt = prepare(args.model, args.output, offline=args.offline)
     except (Exception, KeyboardInterrupt):

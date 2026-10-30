@@ -47,6 +47,8 @@ pub enum LanguageModelStreamError<B: Backend> {
     ForeignState,
     #[error("Invalid multimodal input or request state")]
     InvalidMultimodal,
+    #[error("Invalid decoder execution state")]
+    InvalidExecutionState,
 }
 
 impl<B: Backend> LanguageModel<B> {
@@ -65,9 +67,9 @@ impl<B: Backend> LanguageModel<B> {
             || self.speculator.is_some()
             || state.multimodal_failed
             || !state.tokens.is_empty()
-            || state.transformer_state.context_length() != 0
+            || state.decoder_state.context_length() != 0
             || state.last_output_token.is_some()
-            || state.transformer_state.rotary_position_delta().is_some()
+            || state.decoder_state.rotary_position_delta().is_some()
         {
             return Err(LanguageModelStreamError::InvalidMultimodal);
         }

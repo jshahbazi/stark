@@ -1,3 +1,21 @@
+# Archived Lily extraction provenance
+
+The executable Rust/Metal extraction and its Cargo manifests were removed on
+2026-10-30 as part of the full standard Uzu execution implementation. This
+directory retains licenses, attribution and this historical source-bound
+record. It is not a Cargo package and is not linked into production workers.
+
+Current Qwen3.8 execution is implemented under
+`crates/stark-engine/src/encodable_block/qwen38/` and the corresponding
+standard backend kernel folders. Its implementation provenance is recorded in
+[Qwen3.8 Uzu provenance](../../docs/QWEN38_UZU_PROVENANCE.md).
+
+The record below describes the former extraction at its historical revision.
+Its source paths and validation commands apply to that historical checkout;
+they are not current production execution instructions.
+
+---
+
 # Upstream provenance
 
 - Project: [lily-qwen3.8-flash-next](https://github.com/fabiogreter/lily-qwen3.8-flash-next)

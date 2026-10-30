@@ -2,7 +2,7 @@
 
 The architecture and fixed projection policy follow Lily revision
 e22d58fa7cc488493fb1b5d810a198bd29730aeb, Apache-2.0; see
-vendor/lily-core/{LICENSE,NOTICE,UPSTREAM.md}. Upstream attribution names
+LICENSE.qwen38-reference, NOTICE.qwen38-reference and docs/QWEN38_UZU_PROVENANCE.md. Upstream attribution names
 Copyright 2026 Perplexity AI, Inc. and Copyright 2026 Fabio Greter.
 Stark's Uzu extension uses typed configuration and canonical MLXSpec storage.
 No checkpoint Python, quantizer, or source-folder runtime bridge is used.

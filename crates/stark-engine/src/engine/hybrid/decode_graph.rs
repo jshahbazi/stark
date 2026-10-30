@@ -62,6 +62,7 @@ pub(crate) struct DecodeGraph {
     scratch: Vec<(Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     scratch_bytes: usize,
     single_encoder: bool,
+    #[cfg(test)]
     serial_projection_levels: bool,
     byte_loads: bool,
     vector8: bool,
@@ -70,6 +71,7 @@ pub(crate) struct DecodeGraph {
     projection_level: bool,
     projection_checks: Vec<DeviceVector>,
     separate_finite: bool,
+    #[cfg(test)]
     phase_timing: bool,
 }
 
@@ -80,6 +82,7 @@ impl DecodeGraph {
 
     /// A Qwen-only experimental transport. Every dependent dispatch inserts
     /// an explicit buffer barrier; projection levels admit independent work.
+    #[cfg(test)]
     pub fn new_parallel() -> Result<Self> {
         Self::new_with_encoder(true)
     }
@@ -141,6 +144,7 @@ impl DecodeGraph {
                 scratch: vec![(scratch, 256)],
                 scratch_bytes: 1024 * 1024,
                 single_encoder,
+                #[cfg(test)]
                 serial_projection_levels: std::env::var_os("STARK_QWEN38_SERIAL_LEVELS")
                     .is_some_and(|value| value == "1"),
                 byte_loads: std::env::var_os("STARK_HYBRID_BYTE_LOADS").is_some_and(|value| value == "1"),
@@ -150,6 +154,7 @@ impl DecodeGraph {
                 projection_level: false,
                 projection_checks: Vec::new(),
                 separate_finite: std::env::var_os("STARK_HYBRID_SEPARATE_FINITE").is_some_and(|value| value == "1"),
+                #[cfg(test)]
                 phase_timing,
             })
         })
@@ -354,6 +359,7 @@ impl DecodeGraph {
     /// before this level; no projection may consume another projection's output.
     /// The dependency-level schedule follows Lily's design at e22d58f, expressed
     /// with Stark's tracked Metal encoder and unchanged F32 operators.
+    #[cfg(test)]
     pub fn begin_projection_level(&mut self) -> Result<()> {
         if self.projection_level {
             return Err(Error::Invalid("nested decode projection level"));
@@ -369,6 +375,7 @@ impl DecodeGraph {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn end_projection_level(&mut self) -> Result<()> {
         if self.serial_projection_levels {
             return Ok(());
@@ -426,6 +433,7 @@ impl DecodeGraph {
         Ok(output)
     }
 
+    #[cfg(test)]
     pub fn add(
         &mut self,
         a: &DeviceVector,
@@ -657,6 +665,7 @@ impl DecodeGraph {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn indexed(
         &mut self,
         matrix: &MappedMatrix,
@@ -781,6 +790,7 @@ impl DecodeGraph {
         Ok(output)
     }
 
+    #[cfg(test)]
     pub fn qwen_hyperconnection(
         &mut self,
         weights: &weights::Weights,
@@ -840,6 +850,7 @@ impl DecodeGraph {
         ))
     }
 
+    #[cfg(test)]
     pub fn qwen_gdn(
         &mut self,
         weights: &weights::Weights,
@@ -944,6 +955,7 @@ impl DecodeGraph {
 
     /// Diagnostic only. Encoder timing labels stage samples in one command;
     /// legacy phase timing splits commands and adds synchronous completions.
+    #[cfg(test)]
     pub fn diagnostic_checkpoint(
         &mut self,
         name: &'static str,

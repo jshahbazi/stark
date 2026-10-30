@@ -12,10 +12,11 @@ import os
 import re
 import subprocess
 
-from .chat import Worker, _popen_with_gpu_memory
+from .chat import ChatError, Worker, _popen_with_gpu_memory
 
 LETTERS = "ABCDEFGHIJKLMNOP"
 MAX_CONTEXT_TOKENS = 16384
+MAX_SUPPORTED_CONTEXT_TOKENS = 65536
 SYSTEM = (
     "Select the answer that best satisfies the question using the provided text. "
     "Reply with one uppercase option letter only."
@@ -32,7 +33,24 @@ class DecisionProtocolError(Exception):
     """An invalid or unsuccessful native response; the worker must be closed."""
 
 
+def worker_context_limit(ready, *, legacy=False):
+    value = ready.get("max_context_tokens", MAX_CONTEXT_TOKENS if legacy else None)
+    if type(value) is not int or not 1 <= value <= MAX_SUPPORTED_CONTEXT_TOKENS:
+        raise DecisionProtocolError
+    return value
+
+
 class ScoreWorker(Worker):
+    def read(self, cancelled=None, request_id=None):
+        reply = super().read(cancelled=cancelled, request_id=request_id)
+        if reply.get("ready") is True:
+            try:
+                self.max_context_tokens = worker_context_limit(reply, legacy=True)
+            except DecisionProtocolError:
+                self.close()
+                raise ChatError("Stark returned an invalid scoring context limit.") from None
+        return reply
+
     def __init__(self, executable, model, timeout, gpu_memory_callback=None):
         self.timeout = timeout
         self.pending = b""
@@ -148,7 +166,10 @@ def decide(worker, codec, template, text, question, answers, vocab_size):
     if len(set(candidates)) != len(candidates):
         raise DecisionInputError("This model cannot distinguish the required answer letters.")
     ids = token_ids(worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False}), vocab_size)
-    if len(ids) > MAX_CONTEXT_TOKENS:
+    limit = getattr(worker, "max_context_tokens", MAX_CONTEXT_TOKENS)
+    if type(limit) is not int or not 1 <= limit <= MAX_SUPPORTED_CONTEXT_TOKENS:
+        raise DecisionProtocolError
+    if len(ids) > limit:
         raise DecisionInputError("The decision exceeds the context limit. Use shorter text or fewer answers.")
     reply = worker.request(
         {

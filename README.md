@@ -70,7 +70,7 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 
 | Family / adapter | Named models and checkpoint coverage |
 | --- | --- |
-| **Qwen3.8-Flash-Next** | Prepared native-source `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` and `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`; typed Uzu text conversion is checked against the pinned Lily checkpoint for readout and sampled-generation parity |
+| **Qwen3.8-Flash-Next** | Typed Uzu text conversion of the supported `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` source layout; a full standard-backend decoder is implemented, with numerical and performance qualification pending |
 | **GLM-5.3-Flash** | `unsloth/GLM-5.3-Flash-GGUF` (`UD-Q2_K_XL`) |
 | **Recursive Flint** | `RecursiveSI/flint-int4` |
 | Qwen3 dense | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, **Polaris-4B-Preview** (`POLARIS-Project/Polaris-4B-Preview`) |
@@ -88,7 +88,7 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 
 For models using the converter, supported floating Safetensors layouts produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Lily-format Qwen3.8 text, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
 
-Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Lily-format Qwen3.8 also converts to a self-contained typed Uzu text artifact with canonical MLX storage and the same specialized Qwen kernels. It preserves quantization and omits vision and MTP. The [Uzu-format study](docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records exact readout and sampled-generation controls for the pinned artifact. Their current Stark paths accept text input.
+Qwen3.8-Flash-Next requires a canonical typed Uzu artifact and loads through `Engine::load_language_model` and the standard `LanguageModel` API. Its full 48-layer architecture uses normal Uzu parameter loading, matrix dispatch, buffers and commands, including HC, GDN, QSA, MoE and paged n-gram PLE blocks. Raw Qwen3.8 exports require conversion. Weight quantization is preserved; vision, MTP and speculation are disabled. See the [current execution contract](docs/QWEN38_UZU_EXECUTION.md) for precision changes, the implemented 64K text limit and pending qualification. Earlier Lily-derived [storage/parity results](docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) describe their recorded executor and do not qualify this implementation. GLM-5.3-Flash and Flint retain their prepared native hybrid paths; use the [preparation guide](docs/NATIVE_HYBRID_MODELS.md) and [Flint setup](docs/FLINT.md).
 
 #### Images
 

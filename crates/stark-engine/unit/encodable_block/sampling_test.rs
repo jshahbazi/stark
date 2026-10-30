@@ -43,8 +43,13 @@ fn do_sampling_backend<B: Backend, T: ArrayElement + Float>(
     vocab_size: usize,
     method: &SamplingMethod,
     batch_size: u32,
+    validate_logits: bool,
 ) -> Result<SamplingTestResults, TestCaseError> {
-    let sampling = Sampling::<B>::new(T::data_type(), vocab_size as u32);
+    let sampling = if validate_logits {
+        Sampling::<B>::new_checked(T::data_type(), vocab_size as u32)
+    } else {
+        Sampling::<B>::new(T::data_type(), vocab_size as u32)
+    };
 
     let mut command_buffer = context.create_command_buffer(None, None).unwrap();
     let logits_buffer = command_buffer.allocate_constant_from_slice(logits).unwrap();
@@ -175,6 +180,7 @@ fn test_sampling_prop() {
                 sampling_case.vocab_size,
                 &sampling_case.method,
                 sampling_case.batch_size as u32,
+                false,
             ))
             .compare_results()?
         });
@@ -210,22 +216,110 @@ fn native_sampling_options_reject_invalid_effective_values() {
     assert!(method(Some(0.7), Some(1), Some(0.9), Some(1.0)).validate(63).is_ok());
 }
 
+fn finite_readout_backend<B: Backend, T: ArrayElement + Float>(
+    context: &B::Context
+) -> Result<SamplingTestResults, TestCaseError> {
+    // Span several lanes and per-thread scan iterations. The poisoned value
+    // belongs to the second row and is hidden by the grammar mask when used.
+    const VOCAB: usize = 2049;
+    let low = <T as NumCast>::from(-4.0_f32).unwrap();
+    let high = <T as NumCast>::from(3.0_f32).unwrap();
+    let mut finite = vec![low; VOCAB * 2];
+    finite[17] = high;
+    finite[VOCAB + 19] = high;
+    let mask_words = VOCAB.div_ceil(u32::BITS as usize);
+    let mut mask = vec![0_u32; mask_words * 2];
+    mask[0] = 1 << 17;
+    mask[mask_words] = 1 << 19;
+    let methods = [
+        SamplingMethod::Greedy,
+        SamplingMethod::Stochastic {
+            temperature: Some(0.75),
+            top_k: Some(1),
+            top_p: Some(0.9),
+            min_p: Some(0.1),
+            repetition_penalty: None,
+            suffix_repetition_length: None,
+        },
+    ];
+    let mut results = Vec::new();
+    for method in &methods {
+        let seeds = matches!(method, SamplingMethod::Stochastic { .. }).then_some([7_u64, 11]);
+        for bitmask in [None, Some(mask.as_slice())] {
+            let normal = do_sampling_backend::<B, T>(
+                context,
+                &finite,
+                seeds.as_ref().map(|s| s.as_slice()),
+                bitmask,
+                VOCAB,
+                method,
+                2,
+                true,
+            )?;
+            prop_assert_eq!(&normal.0, &[17, 19], "finite sampling changed");
+            let unchecked = do_sampling_backend::<B, T>(
+                context,
+                &finite,
+                seeds.as_ref().map(|s| s.as_slice()),
+                bitmask,
+                VOCAB,
+                method,
+                2,
+                false,
+            )?;
+            prop_assert_eq!(&normal.0, &unchecked.0, "checked mode changed finite sampling");
+            results.extend(normal.0);
+            for bad in [T::nan(), T::infinity(), T::neg_infinity()] {
+                let mut logits = finite.clone();
+                logits[VOCAB * 2 - 1] = bad;
+                let rejected = do_sampling_backend::<B, T>(
+                    context,
+                    &logits,
+                    seeds.as_ref().map(|s| s.as_slice()),
+                    bitmask,
+                    VOCAB,
+                    method,
+                    2,
+                    true,
+                )?;
+                prop_assert_eq!(&rejected.0, &[17, u32::MAX], "nonwinning nonfinite readout was not rejected");
+                results.extend(rejected.0);
+            }
+        }
+    }
+    // A finite row with every token intentionally masked retains the existing
+    // empty-candidate fallback. Only a nonfinite original readout is rejected.
+    let masked = do_sampling_backend::<B, T>(
+        context,
+        &finite[..VOCAB],
+        None,
+        Some(&vec![0; mask_words]),
+        VOCAB,
+        &SamplingMethod::Greedy,
+        1,
+        true,
+    )?;
+    prop_assert_eq!(&masked.0, &[0]);
+    results.extend(masked.0);
+    for bad in [T::nan(), T::infinity(), T::neg_infinity()] {
+        let rejected =
+            do_sampling_backend::<B, T>(context, &[bad; 3], None, None, 3, &SamplingMethod::Greedy, 1, true)?;
+        prop_assert_eq!(&rejected.0, &[u32::MAX]);
+        results.extend(rejected.0);
+    }
+    Ok(SamplingTestResults(results))
+}
+
 #[stark_test]
-fn native_sampling_keeps_nonfinite_candidates_within_vocabulary() {
+fn native_sampling_rejects_full_nonfinite_readout_before_masks_and_filters() {
     let contexts = TestContextes::new();
     let check = || -> Result<(), TestCaseError> {
-        for logits in [[f32::NAN; 3], [f32::NEG_INFINITY; 3], [1.0, 3.0, 2.0]] {
-            for_each_context!(contexts, |context: C| do_sampling_backend::<<C as Context>::Backend, f32>(
-                context,
-                &logits,
-                None,
-                None,
-                3,
-                &SamplingMethod::Greedy,
-                1,
-            ))
+        for_each_context!(contexts, |context: C| finite_readout_backend::<<C as Context>::Backend, f32>(context))
             .compare_results()?;
-        }
+        for_each_context!(contexts, |context: C| finite_readout_backend::<<C as Context>::Backend, half::bf16>(
+            context
+        ))
+        .compare_results()?;
         Ok(())
     };
     check().unwrap();

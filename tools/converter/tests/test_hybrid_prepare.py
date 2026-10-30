@@ -175,7 +175,32 @@ def test_lily_q4_xl_recipe_is_pinned_and_quantization_label_is_distinct():
     assert source["required_files"] == ["LICENSE", "README.md"]
 
 
-def test_lily_q4_xl_preparation_preserves_config_metadata_and_import_identity(tmp_path, monkeypatch):
+@pytest.mark.parametrize("choice", ["qwen38-mixed", "qwen38-lily-q4-xl"])
+def test_qwen38_preparation_requires_conversion_before_any_io(tmp_path, monkeypatch, choice):
+    def unexpected_download(*_args, **_kwargs):
+        pytest.fail("Qwen3.8 source preparation must not download weights")
+
+    monkeypatch.setattr(hybrid, "snapshot_download", unexpected_download)
+    output = tmp_path / "new-parent" / "model"
+    with pytest.raises(ValueError, match="stark-convert"):
+        hybrid.prepare(choice, output)
+    assert not output.parent.exists()
+
+
+@pytest.mark.parametrize("choice", ["qwen38-mixed", "qwen38-lily-q4-xl"])
+def test_qwen38_preparation_cli_explains_canonical_conversion(tmp_path, monkeypatch, capsys, choice):
+    def unexpected_download(*_args, **_kwargs):
+        pytest.fail("Qwen3.8 source preparation must not download weights")
+
+    monkeypatch.setattr(hybrid, "snapshot_download", unexpected_download)
+    output = tmp_path / "model"
+    assert hybrid.main([choice, "--output", str(output)]) == 1
+    assert "stark-convert" in capsys.readouterr().err
+    assert not output.exists()
+    assert not output.with_name(output.name + ".native-download").exists()
+
+
+def test_legacy_lily_q4_xl_receipt_preserves_provenance_without_runtime_admission(tmp_path, monkeypatch):
     source = {**hybrid.SOURCES["qwen38-lily-q4-xl"], "weight_bytes": 55}
     monkeypatch.setitem(hybrid.SOURCES, "qwen38-lily-q4-xl", source)
     calls = []
@@ -210,7 +235,24 @@ def test_lily_q4_xl_preparation_preserves_config_metadata_and_import_identity(tm
 
     monkeypatch.setattr(hybrid, "snapshot_download", download)
     output = tmp_path / "qwen38-lily-q4-xl"
-    receipt = hybrid.prepare("qwen38-lily-q4-xl", output, offline=True)
+    output.mkdir()
+    # Build a pre-existing source receipt. New source preparation is rejected
+    # above; this fixture covers provenance display and local-import migration.
+    download(
+        source["weights_repo"],
+        local_dir=output,
+        allow_patterns=source["weights_patterns"],
+        revision=source["weights_revision"],
+        local_files_only=True,
+    )
+    download(
+        source["metadata_repo"],
+        local_dir=output,
+        allow_patterns=hybrid._METADATA,
+        revision=source["metadata_revision"],
+        local_files_only=True,
+    )
+    receipt = hybrid.finish_metadata(output, "qwen38-lily-q4-xl")
 
     assert len(calls) == 2
     assert all(repo == source["weights_repo"] for repo, _ in calls)
@@ -233,7 +275,7 @@ def test_lily_q4_xl_preparation_preserves_config_metadata_and_import_identity(tm
     from stark_convert.model_inventory import model_display
 
     assert hybrid.prepared_identity(output)["quantization"] == source["quantization"]
-    assert model_valid(output)
+    assert not model_valid(output)
     display = model_display({"id": "lily", "name": "Lily Q4 XL", "path": str(output)})
     assert display["quantization"] == source["quantization"]
 
@@ -287,7 +329,7 @@ def test_preparation_cli_never_prints_exception_payload(tmp_path, monkeypatch, c
         raise RuntimeError("private upstream exception")
 
     monkeypatch.setattr(hybrid, "prepare", fail)
-    assert hybrid.main(["qwen38-mixed", "--output", str(tmp_path / "model")]) == 1
+    assert hybrid.main(["glm53-q2", "--output", str(tmp_path / "model")]) == 1
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "private upstream exception" not in captured.err

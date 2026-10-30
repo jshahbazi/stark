@@ -26,6 +26,7 @@ pub(super) struct EncoderTiming {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     samples: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     intervals: Vec<Interval>,
+    #[cfg(test)]
     labeled: usize,
     reference: Option<(u64, u64)>,
 }
@@ -54,6 +55,7 @@ impl EncoderTiming {
             device,
             samples,
             intervals: Vec::new(),
+            #[cfg(test)]
             labeled: 0,
             reference: None,
         })
@@ -94,6 +96,7 @@ impl EncoderTiming {
         }
     }
 
+    #[cfg(test)]
     pub fn label_completed(
         &mut self,
         category: &'static str,

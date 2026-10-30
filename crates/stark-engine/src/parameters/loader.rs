@@ -6,11 +6,16 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
     fs::File,
+    io,
+    sync::Arc,
 };
 
 use super::{
     error::ParameterLoaderError,
-    safetensors_metadata::{HeaderLoadingError, read_metadata as read_st_metadata},
+    safetensors_metadata::{
+        HashMetadata, HeaderLoadingError, read_metadata as read_st_metadata,
+        read_metadata_with_limit as read_st_metadata_with_limit,
+    },
 };
 use crate::{
     array::{ArrayElement, size_for_shape},
@@ -41,6 +46,7 @@ pub struct ParameterLoader<'a, B: Backend> {
     metadata: HashMap<String, String>,
     validated_tensors: RefCell<HashSet<String>>,
     file: &'a File,
+    region_file: RefCell<Option<Arc<File>>>,
     numerical_profile: NumericalProfile,
 }
 
@@ -49,7 +55,25 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
         file: &'a File,
         context: &'a B::Context,
     ) -> Result<Self, ParameterLoaderError<B>> {
-        let (global_offset, st_metadata) = read_st_metadata(file)?;
+        Self::from_metadata(file, context, read_st_metadata(file)?)
+    }
+
+    /// Reject an advertised safetensors header length before allocating or
+    /// reading its JSON buffer. The limit can tighten the standard ceiling of
+    /// 100,000,000 bytes, and cannot increase it.
+    pub fn new_with_header_limit(
+        file: &'a File,
+        context: &'a B::Context,
+        maximum_header_bytes: usize,
+    ) -> Result<Self, ParameterLoaderError<B>> {
+        Self::from_metadata(file, context, read_st_metadata_with_limit(file, maximum_header_bytes)?)
+    }
+
+    fn from_metadata(
+        file: &'a File,
+        context: &'a B::Context,
+        (global_offset, st_metadata): (usize, HashMetadata),
+    ) -> Result<Self, ParameterLoaderError<B>> {
         let file_length = file.metadata()?.len();
         let index = st_metadata
             .tensors
@@ -88,6 +112,7 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             metadata,
             validated_tensors: RefCell::new(HashSet::new()),
             file,
+            region_file: RefCell::new(None),
             numerical_profile: NumericalProfile::Legacy,
         })
     }
@@ -105,6 +130,85 @@ impl<'a, B: Backend> ParameterLoader<'a, B> {
             loader: self,
             prefix: None,
         }
+    }
+
+    /// Bounded original header bytes for architecture-specific strict admission.
+    /// This does not mark any tensor consumed or read a tensor payload.
+    pub(crate) fn bounded_header(
+        &self,
+        maximum: usize,
+    ) -> io::Result<(u64, Vec<u8>, u64)> {
+        let file_len = self.file.metadata()?.len();
+        let mut length = [0_u8; 8];
+        self.file.read_exact_at(&mut length, 0)?;
+        let count = usize::try_from(u64::from_le_bytes(length))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid parameter header"))?;
+        let start = 8_u64
+            .checked_add(count as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid parameter header"))?;
+        if count == 0 || count > maximum || start > file_len {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid parameter header"));
+        }
+        let mut bytes = vec![0_u8; count];
+        self.file.read_exact_at(&mut bytes, 8)?;
+        Ok((start, bytes, file_len))
+    }
+
+    pub(crate) fn read_file_exact_at(
+        &self,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> io::Result<()> {
+        let end = offset
+            .checked_add(destination.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parameter region overflow"))?;
+        if end > self.file.metadata()?.len() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "parameter region exceeds file"));
+        }
+        self.file.read_exact_at(destination, offset)
+    }
+}
+
+/// An owned, validated tensor span. Paging survives the construction loader and
+/// cannot read another tensor's bytes through an unchecked relative offset.
+#[derive(Clone)]
+pub struct ValidatedFileRegion {
+    file: Arc<File>,
+    offset: u64,
+    length: u64,
+    shape: Box<[u32]>,
+    data_type: DataType,
+}
+
+impl ValidatedFileRegion {
+    pub fn len(&self) -> u64 {
+        self.length
+    }
+    pub fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+    pub fn shape(&self) -> &[u32] {
+        &self.shape
+    }
+    pub fn data_type(&self) -> DataType {
+        self.data_type
+    }
+    pub fn read_exact_into(
+        &self,
+        offset: u64,
+        destination: &mut [u8],
+    ) -> io::Result<()> {
+        let end = offset
+            .checked_add(destination.len() as u64)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parameter region overflow"))?;
+        if end > self.length {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "read exceeds validated tensor region"));
+        }
+        let absolute = self
+            .offset
+            .checked_add(offset)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parameter region overflow"))?;
+        self.file.read_exact_at(destination, absolute)
     }
 }
 
@@ -149,6 +253,25 @@ impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, false> {
 }
 
 impl<'a, 'leaf, B: Backend> ParameterLeaf<'a, 'leaf, B, true> {
+    pub fn file_region(&self) -> Result<ValidatedFileRegion, ParameterLoaderError<B>> {
+        let shared = self.loader.region_file.borrow().as_ref().cloned();
+        let file = match shared {
+            Some(file) => file,
+            None => {
+                let file = Arc::new(self.loader.file.try_clone()?);
+                *self.loader.region_file.borrow_mut() = Some(file.clone());
+                file
+            },
+        };
+        Ok(ValidatedFileRegion {
+            file,
+            offset: self.metadata.offset as u64,
+            length: self.metadata.size as u64,
+            shape: self.metadata.shape.clone(),
+            data_type: self.metadata.data_type,
+        })
+    }
+
     pub fn read_slice<T: ArrayElement>(&self) -> Result<Box<[T]>, ParameterLoaderError<B>> {
         let element_count = self.metadata.size / std::mem::size_of::<T>();
         let mut data = vec![T::zeroed(); element_count];
@@ -251,7 +374,7 @@ mod payload_tests {
 
     use stark_engine_macros::stark_test;
 
-    use super::{NumericalProfile, ParameterLoader};
+    use super::{FileExt, NumericalProfile, ParameterLoader};
     use crate::{
         backends::{
             common::{Backend, BufferRef, Context},
@@ -301,6 +424,43 @@ mod payload_tests {
         let leaf = tree.leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap();
         assert_eq!(&*leaf.read_slice::<u8>().unwrap(), &[4, 5, 6]);
         assert_eq!(leaf.read_buffer().unwrap().copyout::<u8>(), [4, 5, 6]);
+    }
+
+    #[stark_test]
+    fn configured_header_limit_rejects_prefix_before_allocation_or_parse() {
+        const LIMIT: usize = 8 * 1024 * 1024;
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let file = tensor_file(0, &[]);
+        file.set_len(8).unwrap();
+        file.write_all_at(&((LIMIT + 1) as u64).to_le_bytes(), 0).unwrap();
+        assert!(matches!(
+            ParameterLoader::<Cpu>::new_with_header_limit(&file, context.as_ref(), LIMIT),
+            Err(ParameterLoaderError::HeaderLoadingError(HeaderLoadingError::HeaderTooLarge))
+        ));
+        assert!(file.metadata().unwrap().len() == 8, "oversized-header fixture allocated a payload");
+        let valid = tensor_file(3, &[4, 5, 6]);
+        let loader = ParameterLoader::<Cpu>::new_with_header_limit(&valid, context.as_ref(), LIMIT).unwrap();
+        let tree = loader.tree();
+        let leaf = tree.leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap();
+        assert!(leaf.read_slice::<u8>().unwrap().as_ref() == [4, 5, 6]);
+    }
+
+    #[stark_test]
+    fn validated_file_region_survives_loader_drop_and_enforces_its_span() {
+        let context = <Cpu as Backend>::Context::new().unwrap();
+        let region = {
+            let file = tensor_file(3, &[4, 5, 6]);
+            let loader = ParameterLoader::<Cpu>::new(&file, &context).unwrap();
+            assert!(loader.bounded_header(1).is_err());
+            loader.tree().leaf("weight").unwrap().validate(&[3], DataType::U8).unwrap().file_region().unwrap()
+        };
+        let mut bytes = [0_u8; 3];
+        region.read_exact_into(0, &mut bytes).unwrap();
+        assert!(bytes == [4, 5, 6], "owned parameter region changed bytes");
+        assert!(region.read_exact_into(3, &mut [0]).is_err());
+        assert!(region.read_exact_into(u64::MAX, &mut [0, 0]).is_err());
+        region.read_exact_into(3, &mut []).unwrap();
+        assert!(region.shape() == [3] && region.data_type() == DataType::U8 && region.len() == 3);
     }
 
     #[stark_test]

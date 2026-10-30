@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
 
+// Existing family/image limit; only an admitted backend capability may raise it.
 pub(crate) const MAX_CONTEXT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -369,6 +370,9 @@ pub(crate) trait GenerationBackend {
 
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
+    fn request_context_limit(&self) -> u32 {
+        MAX_CONTEXT_TOKENS
+    }
     fn eos_token_ids(&self) -> &[u32];
     fn tokenize(
         &mut self,
@@ -451,6 +455,10 @@ fn write_reply(
 }
 
 impl<B: GenerationBackend> GenerationWorker<B> {
+    fn max_context_tokens(&self) -> u32 {
+        self.backend.request_context_limit().min(65_536).min(self.backend.max_context_length().unwrap_or(u32::MAX))
+    }
+
     #[cfg(test)]
     pub(crate) fn new(backend: B) -> Result<Self, &'static str> {
         Self::new_with_media(backend, None)
@@ -478,7 +486,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         options: &GenerationOptions,
     ) -> Result<(), &'static str> {
         if options.context_tokens == 0
-            || options.context_tokens > MAX_CONTEXT_TOKENS
+            || options.context_tokens > self.backend.request_context_limit().min(65_536)
             || options.max_new_tokens == 0
             || options.max_new_tokens > MAX_NEW_TOKENS
             || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
@@ -798,7 +806,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     let mut readiness = json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
         "mode":"text-generation-v1","operations":["tokenize","decode","generate"],
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
-        "max_context_tokens":MAX_CONTEXT_TOKENS.min(worker.backend.max_context_length().unwrap_or(MAX_CONTEXT_TOKENS)),
+        "max_context_tokens":worker.max_context_tokens(),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
@@ -901,6 +909,8 @@ mod tests {
     }
 
     struct FakeBackend {
+        context_limit: u32,
+        model_maximum: u32,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
         generation_calls: usize,
@@ -938,7 +948,10 @@ mod tests {
             8
         }
         fn max_context_length(&self) -> Option<u32> {
-            Some(1024)
+            Some(self.model_maximum)
+        }
+        fn request_context_limit(&self) -> u32 {
+            self.context_limit
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
@@ -1091,6 +1104,8 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            context_limit: MAX_CONTEXT_TOKENS,
+            model_maximum: 1024,
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
             generation_calls: 0,
@@ -1114,6 +1129,27 @@ mod tests {
     }
     fn standard() -> Value {
         json!({"operation":"generate","input_token_ids":[2],"context_tokens":16,"max_new_tokens":8})
+    }
+
+    #[test]
+    fn extended_context_is_opt_in_and_remains_bounded_by_the_loaded_model() {
+        let mut worker = worker();
+        worker.backend.model_maximum = 65_536;
+        assert_eq!(worker.max_context_tokens(), 16_384);
+        let mut request = standard();
+        request["context_tokens"] = 16_385.into();
+        assert_eq!(post(&mut worker, request.clone())["error"], "invalid_generation_request");
+        assert_eq!(worker.backend.generation_calls, 0);
+        worker.backend.context_limit = 65_536;
+        assert_eq!(worker.max_context_tokens(), 65_536);
+        request["context_tokens"] = 65_536.into();
+        assert!(post(&mut worker, request.clone()).get("error").is_none());
+        request["context_tokens"] = 65_537.into();
+        assert_eq!(post(&mut worker, request.clone())["error"], "invalid_generation_request");
+        worker.backend.model_maximum = 32_768;
+        assert_eq!(worker.max_context_tokens(), 32_768);
+        request["context_tokens"] = 65_536.into();
+        assert_eq!(post(&mut worker, request)["error"], "context_overflow");
     }
     fn post(
         worker: &mut GenerationWorker<FakeBackend>,

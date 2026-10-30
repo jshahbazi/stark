@@ -221,7 +221,7 @@ pub struct Weights {
     bank_views: Mutex<StaticViewCache>,
     // Tensor geometry is immutable after open; avoid rescanning every bank
     // for each routed projection. Memory-budget admission remains live below.
-    #[cfg(feature = "metal")]
+    #[cfg(all(test, feature = "metal"))]
     indexed_bank_geometry_admitted: bool,
 }
 
@@ -249,7 +249,7 @@ impl Weights {
             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
             #[cfg(feature = "metal")]
             bank_views: Mutex::new(StaticViewCache::new(0)),
-            #[cfg(feature = "metal")]
+            #[cfg(all(test, feature = "metal"))]
             indexed_bank_geometry_admitted: false,
         };
         let mut splits = BTreeMap::new();
@@ -312,11 +312,14 @@ impl Weights {
     /// CPU-mapped. These are immutable buffer wrappers, not a page-lock promise.
     #[cfg(feature = "metal")]
     fn configure_bank_views(&mut self) -> Result<()> {
-        self.indexed_bank_geometry_admitted =
-            self.tensors.values().filter(|tensor| tensor.shape.len() == 3).all(|tensor| {
-                tensor.shape[0].checked_mul(tensor.shape[1]).is_some_and(|rows| rows <= MAX_VECTOR)
-                    && tensor.shape[2] <= MAX_VECTOR
-            });
+        #[cfg(test)]
+        {
+            self.indexed_bank_geometry_admitted =
+                self.tensors.values().filter(|tensor| tensor.shape.len() == 3).all(|tensor| {
+                    tensor.shape[0].checked_mul(tensor.shape[1]).is_some_and(|rows| rows <= MAX_VECTOR)
+                        && tensor.shape[2] <= MAX_VECTOR
+                });
+        }
         let mut spans = HashMap::new();
         for tensor in self.tensors.values().filter(|tensor| tensor.shape.len() == 3) {
             let mut banks = vec![tensor];
@@ -916,7 +919,7 @@ impl Weights {
 
     /// Only a complete admitted rank-three inventory permits device-side bank
     /// indexing. Partial admission must retain the bounded CPU selection path.
-    #[cfg(feature = "metal")]
+    #[cfg(all(test, feature = "metal"))]
     pub(super) fn indexed_banks_admitted(&self) -> bool {
         self.bank_views.lock().is_ok_and(|cache| cache.limit > 0) && self.indexed_bank_geometry_admitted
     }
@@ -1024,7 +1027,7 @@ impl Weights {
         )
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(test, feature = "metal"))]
     pub(super) fn encode_indexed_matvec(
         &self,
         graph: &mut super::weight_metal::DecodeGraph,
@@ -1119,7 +1122,7 @@ impl Weights {
 
     /// Qwen DeltaNet's projections, recurrent update and output projection
     /// share one submission and keep the recurrent matrix on the GPU.
-    #[cfg(feature = "metal")]
+    #[cfg(all(test, feature = "metal"))]
     pub(super) fn qwen_gdn(
         &self,
         prefix: &str,
@@ -1164,7 +1167,7 @@ impl Weights {
 
     /// Qwen hyperconnection's dependent projections and stream mixture share
     /// one submission. Normalization stays in the source scalar path.
-    #[cfg(feature = "metal")]
+    #[cfg(all(test, feature = "metal"))]
     pub(super) fn qwen_hyperconnection(
         &self,
         down_name: &str,

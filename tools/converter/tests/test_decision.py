@@ -6,7 +6,14 @@ from pathlib import Path
 import pytest
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
-from stark_convert.decision import DecisionInputError, DecisionProtocolError, decide, validate_inputs
+from stark_convert.decision import (
+    DecisionInputError,
+    DecisionProtocolError,
+    ScoreWorker,
+    decide,
+    validate_inputs,
+    worker_context_limit,
+)
 
 
 class Worker:
@@ -50,6 +57,63 @@ def evaluate(worker, answers=None):
         ["First", "Second"] if answers is None else answers,
         1000,
     )
+
+
+@pytest.mark.parametrize("value", [None, True, 0, -1, 65537, "65536", 65536.0])
+def test_ready_context_limit_rejects_invalid_capabilities(value):
+    with pytest.raises(DecisionProtocolError):
+        worker_context_limit({"max_context_tokens": value}, legacy=True)
+
+
+def test_ready_context_limit_preserves_legacy_fallback_and_accepts_bounded_advertisement():
+    assert worker_context_limit({}, legacy=True) == 16384
+    assert worker_context_limit({"max_context_tokens": 65536}, legacy=True) == 65536
+    with pytest.raises(DecisionProtocolError):
+        worker_context_limit({})
+
+
+@pytest.mark.parametrize("advertised,expected", [(None, 16384), (16384, 16384), (65536, 65536)])
+def test_score_worker_stores_its_ready_capacity(monkeypatch, advertised, expected):
+    reply = {"ready": True}
+    if advertised is not None:
+        reply["max_context_tokens"] = advertised
+    monkeypatch.setattr("stark_convert.chat.Worker.read", lambda self, **kwargs: reply)
+    worker = ScoreWorker.__new__(ScoreWorker)
+    assert worker.read() == reply
+    assert worker.max_context_tokens == expected
+
+
+def test_score_worker_closes_on_an_invalid_ready_capacity(monkeypatch):
+    from stark_convert.chat import ChatError
+
+    monkeypatch.setattr(
+        "stark_convert.chat.Worker.read",
+        lambda self, **kwargs: {"ready": True, "max_context_tokens": True},
+    )
+    worker = ScoreWorker.__new__(ScoreWorker)
+    closed = []
+    worker.close = lambda: closed.append(True)
+    with pytest.raises(ChatError, match="invalid scoring context limit"):
+        worker.read()
+    assert closed == [True]
+
+
+@pytest.mark.parametrize(
+    "limit,length,accepted",
+    [(None, 16384, True), (None, 16385, False), (65536, 65535, True), (65536, 65536, True), (65536, 65537, False)],
+)
+def test_decision_uses_the_worker_context_capability_without_truncation(limit, length, accepted):
+    worker = Worker(tokenize=lambda text, ids: ids if len(text) == 1 else [1] * length)
+    if limit is not None:
+        worker.max_context_tokens = limit
+    if accepted:
+        assert evaluate(worker)["input_tokens"] == length
+        assert worker.requests[-1]["context_tokens"] == length
+        assert len(worker.requests[-1]["input_token_ids"]) == length
+    else:
+        with pytest.raises(DecisionInputError, match="context limit"):
+            evaluate(worker)
+        assert all(request["operation"] != "score" for request in worker.requests)
 
 
 def test_decision_uses_model_template_ordered_letter_mapping_and_uncalibrated_readout():

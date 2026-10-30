@@ -76,8 +76,8 @@ impl NativeBackend {
             .as_ref()
             .map(|config| {
                 config
-                    .get("decoder_config")
-                    .and_then(|decoder| decoder.get("vocab_size"))
+                    .pointer("/decoder_config/vocab_size")
+                    .or_else(|| config.pointer("/decoder_config/architecture/vocab_size"))
                     .and_then(Value::as_u64)
                     .filter(|size| *size > 0 && *size <= u32::MAX as u64)
                     .map(|size| size as usize)
@@ -137,6 +137,12 @@ impl GenerationBackend for NativeBackend {
         match &self.model {
             NativeModel::Text(model) => model.max_context_length(),
             NativeModel::Vision(model) => model.max_context_length(),
+        }
+    }
+    fn request_context_limit(&self) -> u32 {
+        match &self.model {
+            NativeModel::Text(model) if model.is_qwen38() => 65_536,
+            _ => crate::generation::MAX_CONTEXT_TOKENS,
         }
     }
     fn eos_token_ids(&self) -> &[u32] {

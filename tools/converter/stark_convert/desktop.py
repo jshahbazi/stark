@@ -31,7 +31,14 @@ from .chat import (
     load_template,
     read_model_config,
 )
-from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
+from .decision import (
+    DecisionInputError,
+    DecisionProtocolError,
+    ScoreWorker,
+    decide,
+    validate_inputs,
+    worker_context_limit,
+)
 from .desktop_media import DesktopAttachments
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
@@ -81,8 +88,21 @@ def terminate(process):
         process.wait()
 
 
+def _qwen38_source(path):
+    """A source export needs conversion even when a legacy receipt is present."""
+    try:
+        return read_model_config(path).get("model_type") == "qwen4_exp"
+    except Exception:
+        return False
+
+
 def model_valid(path):
-    if prepared_identity(path) is not None:
+    if _qwen38_source(path):
+        return False
+    identity = prepared_identity(path)
+    if identity is not None:
+        if identity["architecture"] == "qwen4_exp":
+            return False
         try:
             load_template(path)
             return True
@@ -979,7 +999,9 @@ class Desktop:
             converted = model_valid(path)
             try:
                 local_config = read_model_config(path)
-                is_stark = "decoder_config" in local_config or "stark_native_hybrid" in local_config
+                is_stark = "decoder_config" in local_config or (
+                    "stark_native_hybrid" in local_config and local_config.get("model_type") != "qwen4_exp"
+                )
             except Exception:
                 is_stark = False
             if is_stark and not converted:
@@ -1023,6 +1045,11 @@ class Desktop:
                 ),
                 None,
             )
+        legacy_previous = None
+        if previous is not None and _qwen38_source(Path(previous["path"])):
+            # Re-import a legacy source through the ordinary converter. Keep
+            # its registration until the replacement is published atomically.
+            legacy_previous, previous = previous, None
         if previous is not None:
             if not model_valid(Path(previous["path"])):
                 raise DesktopError("The installed model folder is missing or incomplete.")
@@ -1106,11 +1133,18 @@ class Desktop:
             with self.lock:
                 if epoch != self.epoch:
                     return
-                self.models.append(model)
+                previous_index = self.models.index(legacy_previous) if legacy_previous in self.models else None
+                if previous_index is None:
+                    self.models.append(model)
+                else:
+                    self.models[previous_index] = model
                 try:
                     self.persist()
                 except BaseException:
-                    self.models.remove(model)
+                    if previous_index is None:
+                        self.models.remove(model)
+                    else:
+                        self.models[previous_index] = legacy_previous
                     raise
                 managed = None  # The registry now owns the managed folder.
                 self.finish_install_progress(epoch, skipped=converted)
@@ -1181,6 +1215,8 @@ class Desktop:
 
     def run(self, epoch, identifier, mode="chat"):
         model = next((m for m in self.models if m["id"] == identifier), None)
+        if model is not None and _qwen38_source(Path(model["path"])):
+            raise DesktopError("Import this Qwen3.8 source again to create a converted Stark model.")
         if model is None or not model_valid(Path(model["path"])):
             raise DesktopError("Select an installed model whose folder is still available.")
         vision = read_model_config(Path(model["path"])).get("type") == "Qwen35VisionLanguageModelConfig"
@@ -1219,6 +1255,13 @@ class Desktop:
         if vision:
             codec, template = load_template(Path(model["path"]), expected_hashes=worker.image_input)
         if mode == "decision":
+            try:
+                decision_context_limit = worker_context_limit(ready, legacy=True)
+            except DecisionProtocolError:
+                self.close_worker()
+                raise DesktopError(
+                    "Stark could not load this model for decisions. Check model support and memory."
+                ) from None
             if (
                 ready.get("ready") is not True
                 or ready.get("mode") != "exact-token-scoring-cache-v1"
@@ -1233,6 +1276,7 @@ class Desktop:
                 self.codec, self.template = codec, template
                 self.active_model, self.active_mode = identifier, mode
                 self.vocab_size = ready["vocab_size"]
+                worker.max_context_tokens = decision_context_limit
                 self.messages = []
                 self.emit("ready", epoch, model_id=identifier, mode=mode)
                 self.status("ready", "Ready", epoch)
@@ -1240,10 +1284,10 @@ class Desktop:
         if (
             ready.get("ready") is not True
             or ready.get("mode") != "text-generation-v1"
-            or not isinstance(ready.get("max_context_tokens"), int)
-            or ready["max_context_tokens"] < 2
-            or not isinstance(ready.get("max_new_tokens"), int)
-            or ready["max_new_tokens"] < 1
+            or type(ready.get("max_context_tokens")) is not int
+            or not 2 <= ready["max_context_tokens"] <= 65536
+            or type(ready.get("max_new_tokens")) is not int
+            or not 1 <= ready["max_new_tokens"] <= 4096
         ):
             self.close_worker()
             raise DesktopError("Stark could not load this model. Check model support and available memory.")
@@ -1253,7 +1297,7 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             self.codec, self.template = codec, template
-            self.context_limit = min(16384, ready["max_context_tokens"])
+            self.context_limit = ready["max_context_tokens"]
             self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(self.context, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
@@ -1429,7 +1473,7 @@ class Desktop:
             {"operation": "tokenize", "text": prompt, "add_special_tokens": False}, cancelled=cancelled
         )
         count = tokens.get("token_count")
-        if not isinstance(count, int):
+        if type(count) is not int:
             raise ValueError
         if count + maximum > context:
             raise DesktopError("Conversation is full. Start a new conversation and try again.")

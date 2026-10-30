@@ -5,7 +5,7 @@ use thiserror::Error;
 
 use crate::{
     backends::common::Backend,
-    encodable_block::{dflash::DFlashState, sampling::PRng, transformer::TransformerState},
+    encodable_block::{dflash::DFlashState, sampling::PRng},
     engine::language_model::LanguageModel,
 };
 
@@ -27,7 +27,7 @@ pub struct LanguageModelState<B: Backend> {
     pub(super) tokens: Vec<u64>,
     pub(super) last_output_token: Option<u64>, // TODO: this leaks previous LanguageModelStreamOptions
     pub(super) prng: PRng,
-    pub(super) transformer_state: TransformerState<B>,
+    pub(super) decoder_state: super::execution::DecoderState<B>,
     pub(super) speculator_state: Option<DFlashState<B>>,
     pub(super) max_context_length: Option<u32>,
     pub(super) multimodal_failed: bool,
@@ -48,7 +48,7 @@ impl<B: Backend> LanguageModelState<B> {
 
     #[cfg(test)]
     pub(crate) fn vision_validation_state(&self) -> (u32, Option<i64>) {
-        (self.transformer_state.context_length(), self.transformer_state.rotary_position_delta())
+        (self.decoder_state.context_length(), self.decoder_state.rotary_position_delta())
     }
 }
 
@@ -84,7 +84,7 @@ impl<B: Backend> LanguageModel<B> {
 
         let prng = PRng::new(sampling_seed);
 
-        let transformer_state = self
+        let decoder_state = self
             .decoder
             .create_empty_state(max_context_length, &self.engine.context)
             .map_err(LanguageModelCreateEmptyStateError::Backend)?;
@@ -103,7 +103,7 @@ impl<B: Backend> LanguageModel<B> {
             tokens,
             last_output_token,
             prng,
-            transformer_state,
+            decoder_state,
             speculator_state,
             max_context_length,
             multimodal_failed: false,

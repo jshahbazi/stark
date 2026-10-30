@@ -50,6 +50,7 @@ pub(crate) use buffer::{
 };
 pub(crate) use command_buffer::{
     CommandBuffer, CommandBufferCompleted, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending,
+    StageProfileCategory,
 };
 pub(crate) use context::Context;
 pub(crate) use device_capabilities::DeviceCapabilities;

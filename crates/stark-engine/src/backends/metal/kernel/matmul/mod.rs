@@ -297,6 +297,99 @@ impl MatmulKernel for MatmulMetalKernel {
 
 #[cfg(test)]
 impl MatmulMetalKernel {
+    /// Force an already-compiled Q4/group64 gathered GEMV tile for private
+    /// shape tuning. Group/reduction lanes and K accumulation stay unchanged.
+    pub fn encode_with_gemv_tile(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        simdgroups: u32,
+        results_per_simdgroup: u32,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        let compiled = match (simdgroups, results_per_simdgroup) {
+            (2, 1 | 2 | 4) | (4, 2 | 4 | 8) | (8, 2 | 4) => true,
+            (8, 8) => shape.k.is_multiple_of(512),
+            _ => false,
+        };
+        if !compiled
+            || !shape.gathered
+            || shape.b_bits != Some(4)
+            || shape.b_group_size != Some(64)
+            || shape.b_prologue != GemmBPrologueKind::ScaleBiasDequant
+            || shape.params_layout != Some(QuantParamsLayout::GroupOutput)
+            || (self.weights_data_type, self.input_data_type, self.output_data_type)
+                != (DataType::BF16, DataType::BF16, DataType::BF16)
+        {
+            return Err(MetalError::KernelDispatchFailed("test GEMV tile is not compiled for this shape".into()));
+        }
+        let tile = gemv::GemvTile::quantized(simdgroups, results_per_simdgroup, 1, 32, 4);
+        let specialization = GemvSpecialization::select_tile(
+            &shape,
+            self.weights_data_type,
+            self.input_data_type,
+            self.output_data_type,
+            tile,
+        )
+        .ok_or_else(|| MetalError::KernelDispatchFailed("test GEMV tile is incompatible with this shape".into()))?;
+        self.gemv.encode(arguments, specialization, &self.output_work, command_buffer).map_err(MetalError::from)
+    }
+
+    pub fn encode_with_gemm_partition_count(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        engine: gemm::GemmEngine,
+        partition_count: u32,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        let group = shape.b_group_size.unwrap_or(1);
+        if partition_count == 0
+            || group == 0
+            || shape.k == 0
+            || !shape.k.is_multiple_of(partition_count)
+            || !(shape.k / partition_count).is_multiple_of(group)
+        {
+            return Err(MetalError::KernelDispatchFailed("test GEMM partition count is not group-aligned".into()));
+        }
+        let mut plan = self.gemm.select_plan_for_engine(&shape, engine, command_buffer.context())?;
+        plan.split_k = partition_count;
+        self.gemm.encode_plan(arguments, plan, &self.output_work, command_buffer)
+    }
+
+    pub fn encode_with_unsplit_gemm_engine(
+        &mut self,
+        arguments: MatmulArguments<
+            '_,
+            Metal,
+            impl BufferRef<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+            impl BufferMut<Backend = Metal>,
+            impl BufferRef<Backend = Metal>,
+        >,
+        engine: gemm::GemmEngine,
+        command_buffer: &mut MetalCommandBufferEncoding,
+    ) -> Result<(), MetalError> {
+        let shape = MatmulShape::from_arguments(&arguments);
+        let mut plan = self.gemm.select_plan_for_engine(&shape, engine, command_buffer.context())?;
+        plan.split_k = 1;
+        self.gemm.encode_plan(arguments, plan, &self.output_work, command_buffer)
+    }
+
     pub fn encode_with_gemm_engine(
         &mut self,
         arguments: MatmulArguments<

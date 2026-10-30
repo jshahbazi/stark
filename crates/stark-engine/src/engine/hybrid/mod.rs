@@ -1,7 +1,7 @@
-//! Architecture-specific execution for GLM5-Next, Qwen4-Exp and Recursive Flint.
+//! Architecture-specific execution for GLM5-Next and Recursive Flint.
 //!
 //! These models carry distinct recurrent state, sparse attention and residual
-//! streams. Qwen3.8 also admits the typed Uzu converted architecture extension.
+//! streams. Converted Qwen3.8 executes through the standard LanguageModel API.
 
 pub mod activity;
 pub mod finite_guard;
@@ -9,14 +9,12 @@ pub mod flint;
 pub mod glm;
 #[cfg(feature = "metal")]
 mod glm_metal;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-mod lily;
 pub mod math;
 pub mod profile;
-pub mod qwen;
-#[cfg(feature = "metal")]
+#[cfg(test)]
+mod qwen;
+#[cfg(all(test, feature = "metal"))]
 mod qwen_metal;
-mod uzu;
 #[cfg(feature = "metal")]
 mod weight_metal;
 pub mod weights;
@@ -33,6 +31,8 @@ pub enum Error {
     Invalid(&'static str),
     #[error("unsupported native hybrid model: {0}")]
     Unsupported(&'static str),
+    #[error("native Qwen3.8 checkpoint requires Uzu conversion")]
+    ConversionRequired,
     #[error("native hybrid model I/O failed")]
     Io(#[from] std::io::Error),
     #[error("native hybrid model metadata is invalid")]
@@ -82,22 +82,26 @@ fn extend_eos(
 /// Detect only the explicitly implemented architectures; never infer one
 /// from a repository name or load repository-provided Python code.
 pub fn recognizes(path: &Path) -> Result<bool> {
-    let value = config(path)?;
-    Ok(value.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE)
-        || matches!(value.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")))
+    Ok(native_format(&config(path)?)?.is_some())
+}
+
+/// Native hybrid dispatch never admits the converted Qwen architecture.
+/// Every native Qwen3.8 export requires conversion; no source precision or
+/// marker can select the former F32 executor around the standard Uzu decoder.
+fn native_format(config: &Value) -> Result<Option<&str>> {
+    if config.get("type").and_then(Value::as_str) == Some("Qwen38LanguageModelConfig") {
+        return Ok(None);
+    }
+    let format = config.get("model_type").and_then(Value::as_str);
+    if format == Some("qwen4_exp") {
+        return Err(Error::ConversionRequired);
+    }
+    Ok(format.filter(|format| matches!(*format, "glm5_next" | "flint")))
 }
 
 enum Forward {
     Flint(flint::FlintModel),
     Glm(glm::GlmModel),
-    Qwen(qwen::QwenModel),
-    #[cfg(all(feature = "metal", target_os = "macos"))]
-    Lily(Box<lily::LilyModel>),
-}
-
-fn mixed_precision_checkpoint(config: &Value) -> bool {
-    config.get("model_type").and_then(Value::as_str) == Some("qwen4_exp")
-        && config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
 }
 
 pub struct Model {
@@ -111,9 +115,7 @@ pub struct Model {
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
         let outer = config(path)?;
-        if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
-            return Self::load_uzu(path);
-        }
+        let format = native_format(&outer)?.ok_or(Error::Unsupported("use the standard language-model loader"))?;
         let text = outer.get("text_config").unwrap_or(&outer);
         let vocab_size = text
             .get("vocab_size")
@@ -161,31 +163,13 @@ impl Model {
         if eos.is_empty() {
             return Err(Error::Invalid("EOS IDs"));
         }
-        let (forward, max_context) = if mixed_precision_checkpoint(&outer) {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            {
-                let model = lily::LilyModel::load(path)?;
-                if model.vocab_size() != vocab_size || model.position() != 0 {
-                    return Err(Error::Invalid("mixed precision metadata mismatch"));
-                }
-                let context = max_context.min(model.max_context() as u32);
-                (Forward::Lily(Box::new(model)), context)
-            }
-            #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            {
-                return Err(Error::Unsupported("mixed precision checkpoint requires macOS Metal"));
-            }
-        } else {
-            #[cfg(feature = "metal")]
-            weight_metal::initialize()?;
-            let weights = weights::Weights::open(path)?;
-            let forward = match outer.get("model_type").and_then(Value::as_str) {
-                Some("flint") => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
-                Some("glm5_next") => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
-                Some("qwen4_exp") => Forward::Qwen(qwen::QwenModel::new(weights, &outer)?),
-                _ => return Err(Error::Unsupported("architecture")),
-            };
-            (forward, max_context)
+        #[cfg(feature = "metal")]
+        weight_metal::initialize()?;
+        let weights = weights::Weights::open(path)?;
+        let forward = match format {
+            "flint" => Forward::Flint(flint::FlintModel::new(weights, &outer)?),
+            "glm5_next" => Forward::Glm(glm::GlmModel::new(weights, &outer)?),
+            _ => return Err(Error::Unsupported("architecture")),
         };
         Ok(Self {
             forward,
@@ -194,56 +178,6 @@ impl Model {
             max_context,
             eos,
         })
-    }
-
-    fn load_uzu(path: &Path) -> Result<Self> {
-        let config = uzu::read_config(path)?;
-        let architecture = &config.decoder_config.architecture;
-        let vocab_size = architecture.vocab_size as usize;
-        let tokenizer = Arc::new(
-            Tokenizer::from_file(path.join("tokenizer.json")).map_err(|_| Error::Invalid("Uzu Qwen tokenizer"))?,
-        );
-        let vocab = tokenizer.get_vocab(true);
-        if vocab.is_empty() || vocab.values().any(|&id| id as usize >= vocab_size) {
-            return Err(Error::Invalid("Uzu Qwen tokenizer vocabulary"));
-        }
-        let mut eos = architecture.eos_token_id.to_vec();
-        for &stop in &config.generation_config.stop_token_ids {
-            let id = u32::try_from(stop).map_err(|_| Error::Invalid("Uzu Qwen stop identifiers"))?;
-            if !eos.contains(&id) {
-                eos.push(id);
-            }
-        }
-        if let crate::config::token_codec::AnyTokenCodecConfig::ChatCodecConfig(codec) = &config.token_codec_config
-            && let Some(token) = &codec.eos_token
-        {
-            let id = tokenizer.token_to_id(token).ok_or(Error::Invalid("Uzu Qwen EOS token"))?;
-            if !eos.contains(&id) {
-                eos.push(id);
-            }
-        }
-        if eos.iter().any(|id| *id as usize >= vocab_size || !vocab.values().any(|value| value == id)) {
-            return Err(Error::Invalid("Uzu Qwen EOS identifiers"));
-        }
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        {
-            let model = lily::LilyModel::load_uzu(path, &config.decoder_config)?;
-            if model.vocab_size() != vocab_size || model.position() != 0 {
-                return Err(Error::Invalid("Uzu Qwen architecture metadata mismatch"));
-            }
-            let max_context = architecture.max_position_embeddings.min(model.max_context() as u32);
-            Ok(Self {
-                forward: Forward::Lily(Box::new(model)),
-                tokenizer,
-                vocab_size,
-                max_context,
-                eos,
-            })
-        }
-        #[cfg(not(all(feature = "metal", target_os = "macos")))]
-        {
-            Err(Error::Unsupported("Uzu Qwen converted execution requires macOS Metal"))
-        }
     }
 
     pub fn tokenizer(&self) -> &Arc<Tokenizer> {
@@ -265,9 +199,6 @@ impl Model {
         match &mut self.forward {
             Forward::Flint(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
-            Forward::Qwen(model) => model.reset(),
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            Forward::Lily(model) => model.reset(),
         }
     }
 
@@ -281,9 +212,6 @@ impl Model {
             match &mut self.forward {
                 Forward::Flint(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
-                Forward::Qwen(model) => model.step(token),
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                Forward::Lily(model) => model.step(token),
             }
             .and_then(|logits| {
                 if logits.len() != self.vocab_size || logits.iter().any(|x| !x.is_finite()) {
@@ -311,9 +239,6 @@ impl Model {
             match &mut self.forward {
                 Forward::Flint(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
-                Forward::Qwen(model) => model.ingest(token),
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                Forward::Lily(model) => model.ingest(token),
             }
         };
         if result.is_err() {
@@ -322,95 +247,52 @@ impl Model {
         result
     }
 
-    /// A native GPU greedy readout is available for the mixed-precision core.
+    /// Native hybrid families currently expose synchronous full readouts.
     pub fn supports_greedy_readout(&self) -> bool {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if matches!(self.forward, Forward::Lily(_)) {
-            return true;
-        }
         false
     }
 
-    /// Opt-in aggregate GPU stage timestamps for the BF16 backend. Profiling
-    /// perturbs execution and is never enabled for production rate comparisons.
     pub fn set_bf16_stage_profiling(
         &mut self,
-        enabled: bool,
+        _enabled: bool,
     ) -> Result<()> {
-        match &mut self.forward {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            Forward::Lily(model) => model.set_stage_profiling(enabled),
-            _ => {
-                let _ = enabled;
-                Err(Error::Unsupported("BF16 stage profiling unavailable"))
-            },
-        }
+        Err(Error::Unsupported("BF16 stage profiling unavailable"))
     }
 
-    /// The mixed-precision backend can overlap encoding around a host sampler.
     pub fn supports_sampled_decode(&self) -> bool {
-        self.supports_greedy_readout()
+        false
     }
 
-    /// Continue a validated full-logit readout using the caller's sampler.
-    /// The callback runs only for requested draws; cleanup never samples.
     pub fn sampled_decode<'a>(
         &'a mut self,
-        first: u32,
-        remaining: usize,
-        sample: impl FnMut(&[f32]) -> Result<u32> + 'a,
+        _first: u32,
+        _remaining: usize,
+        _sample: impl FnMut(&[f32]) -> Result<u32> + 'a,
     ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
-        match &mut self.forward {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            Forward::Lily(model) => Ok(Box::new(model.sampled_decode(first, remaining, sample)?)),
-            _ => {
-                let _ = (first, remaining, sample);
-                Err(Error::Unsupported("native sampled stream unavailable"))
-            },
-        }
+        Err(Error::Unsupported("native sampled stream unavailable"))
     }
 
     pub fn step_greedy(
         &mut self,
         token: u32,
     ) -> Result<u32> {
-        let result = if token as usize >= self.vocab_size {
+        self.reset();
+        if token as usize >= self.vocab_size {
             Err(Error::Invalid("token ID"))
         } else {
-            match &mut self.forward {
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                Forward::Lily(model) => model.step_greedy(token),
-                _ => Err(Error::Unsupported("native greedy readout unavailable")),
-            }
-        };
-        if result.is_err() {
-            self.reset();
-        }
-        result
-    }
-    /// Continue an already validated greedy draw within one serialized request.
-    /// Dropping the iterator drains submitted work before the model is reusable.
-    pub fn greedy_decode(
-        &mut self,
-        first: u32,
-        remaining: usize,
-    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + '_>> {
-        match &mut self.forward {
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            Forward::Lily(model) => Ok(Box::new(model.greedy_decode(first, remaining)?)),
-            _ => {
-                let _ = (first, remaining);
-                Err(Error::Unsupported("native greedy stream unavailable"))
-            },
+            Err(Error::Unsupported("native greedy readout unavailable"))
         }
     }
 
-    /// Includes failures found while draining an early-dropped greedy stream.
+    pub fn greedy_decode(
+        &mut self,
+        _first: u32,
+        _remaining: usize,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + '_>> {
+        Err(Error::Unsupported("native greedy stream unavailable"))
+    }
+
     pub fn is_fenced(&self) -> bool {
-        #[cfg(all(feature = "metal", target_os = "macos"))]
-        if let Forward::Lily(model) = &self.forward {
-            return model.is_fenced();
-        }
         false
     }
 }
@@ -422,14 +304,50 @@ mod tests {
     use super::*;
 
     #[stark_test]
-    fn mixed_precision_selection_requires_explicit_architecture_and_format() {
-        assert!(mixed_precision_checkpoint(&serde_json::json!({
-            "model_type": "qwen4_exp", "lily": {"format": "qwen4_exp-affine-v1"}
-        })));
-        assert!(!mixed_precision_checkpoint(&serde_json::json!({"model_type": "qwen4_exp"})));
-        assert!(!mixed_precision_checkpoint(&serde_json::json!({
-            "model_type": "flint", "lily": {"format": "qwen4_exp-affine-v1"}
-        })));
+    fn dispatch_excludes_converted_qwen_and_rejects_all_native_qwen_exports() {
+        assert!(native_format(&serde_json::json!({"type":"Qwen38LanguageModelConfig"})).unwrap().is_none());
+        for marker in
+            [serde_json::json!({"format":"qwen4_exp-affine-v1"}), serde_json::json!({"format":"unknown"}), Value::Null]
+        {
+            assert!(matches!(
+                native_format(&serde_json::json!({"model_type":"qwen4_exp","lily":marker})),
+                Err(Error::ConversionRequired)
+            ));
+        }
+        assert!(matches!(
+            native_format(&serde_json::json!({"model_type":"qwen4_exp"})),
+            Err(Error::ConversionRequired)
+        ));
+        for architecture in ["glm5_next", "flint"] {
+            assert_eq!(native_format(&serde_json::json!({"model_type":architecture})).unwrap(), Some(architecture));
+        }
+        assert!(native_format(&serde_json::json!({"model_type":"unimplemented"})).unwrap().is_none());
+    }
+
+    #[stark_test]
+    fn native_qwen_conversion_requirement_precedes_tokenizer_and_weight_access() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "stark-native-qwen-conversion-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&directory).unwrap();
+        std::fs::write(
+            directory.join("config.json"),
+            br#"{"model_type":"qwen4_exp","lily":{"format":"qwen4_exp-affine-v1"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(recognizes(&directory), Err(Error::ConversionRequired)));
+        assert!(matches!(Model::load(&directory), Err(Error::ConversionRequired)));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[stark_test]

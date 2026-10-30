@@ -22,3 +22,10 @@ pub struct GemmPlan {
     pub(super) tiling: GemmTiling,
     pub(super) split_k: u32,
 }
+
+#[cfg(test)]
+impl GemmPlan {
+    pub fn partition_count(self) -> u32 {
+        self.split_k
+    }
+}

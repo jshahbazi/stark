@@ -74,7 +74,7 @@ def exact_prefix(ids: list[int], count: int) -> list[int]:
 def validate_args(args: argparse.Namespace) -> None:
     if args.input_tokens < 1 or args.tokens < 1 or args.replays not in (3, 5):
         raise ValueError("invalid_benchmark_limits")
-    if args.input_tokens + args.tokens > 16384:
+    if args.input_tokens + args.tokens > 65536:
         raise ValueError("context_limit_exceeded")
     if getattr(args, "sampling", "greedy") == "stochastic":
         temperature = getattr(args, "temperature", 1.0)
@@ -138,8 +138,10 @@ def run(args: argparse.Namespace, worker_factory=Worker, host_metrics_factory=No
         ready = worker.read()
         if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
             raise ValueError("worker_not_ready")
-        worker_context = ready.get("max_context_tokens")
-        if type(worker_context) is int and args.input_tokens + args.tokens > worker_context:
+        worker_context = ready.get("max_context_tokens", 16384)
+        if type(worker_context) is not int or not 1 <= worker_context <= 65536:
+            raise ValueError("worker_context_limit_invalid")
+        if args.input_tokens + args.tokens > worker_context:
             raise ValueError("worker_context_limit_exceeded")
         tokenized = worker.request({"operation": "tokenize", "text": corpus_text, "add_special_tokens": False})
         tokenized_ids = tokenized.get("token_ids")

@@ -67,6 +67,7 @@ PUBLIC KERNEL(UnifiedSampling) (
   const bool has_top_k SPECIALIZE,
   const bool has_top_p SPECIALIZE,
   const bool has_min_p SPECIALIZE,
+  const bool validate_logits SPECIALIZE,
   threadgroup Logit shared[THREADGROUP_SIZE_IN_SIMDS],
   const ThreadContext thread_context,
   uint batch_idx GROUPS(batch_size),
@@ -95,9 +96,16 @@ PUBLIC KERNEL(UnifiedSampling) (
 
   float thread_pre_filter_logit_max = -INFINITY;
   float thread_pre_filter_logit_norm = 0.0;
+  uint32_t thread_invalid_readout = 0;
   Logit thread_post_gumbel_logit_max = Logit::LOWEST;
   for (uint32_t logit_index = thread_idx; logit_index < vocab_size; logit_index += THREADGROUP_SIZE) {
     Logit logit = Logit::load(logits, logit_index);
+
+    // Inspect every original value before masks can hide it. A bitwise test
+    // also preserves this contract when Metal is compiled with fast math.
+    if (validate_logits) {
+      thread_invalid_readout |= (as_type<uint32_t>(logit.value) & 0x7f800000u) == 0x7f800000u;
+    }
 
     if (has_bitmask) {
       bool mask = (bitmask[logit_index / BITS_IN_U32] >> (logit_index % BITS_IN_U32)) & 0b1;
@@ -126,6 +134,19 @@ PUBLIC KERNEL(UnifiedSampling) (
 
     thread_post_gumbel_logit_max = logit > thread_post_gumbel_logit_max ? logit : thread_post_gumbel_logit_max;
   }
+  if (validate_logits) {
+    uint32_t invalid_readout = threadgroup_cooperative_reduce<SimdReduceMax<uint32_t>, THREADGROUP_SIZE>(
+        thread_invalid_readout,
+        (threadgroup uint32_t*)shared,
+        thread_context
+    );
+    if (invalid_readout != 0) {
+      if (thread_idx == 0) {
+        *output = numeric_limits<uint32_t>::max();
+      }
+      return;
+    }
+  }
   float pre_filter_logit_max;
   if (has_top_p || has_min_p) {
     pre_filter_logit_max = threadgroup_cooperative_reduce<SimdReduceMax<float>, THREADGROUP_SIZE>(
@@ -152,7 +173,7 @@ PUBLIC KERNEL(UnifiedSampling) (
   );
 
   for (uint32_t iteration = 0; iteration < MAX_ITERS; iteration++) {
-    // Empty/nonfinite candidate sets and exhausted filters have no readable index.
+    // Empty candidate sets and exhausted filters have no readable index.
     // A bounded vocabulary token is the deterministic fallback for this case.
     if (candidate_logit_post_gumbel.index >= vocab_size) {
       *output = 0;

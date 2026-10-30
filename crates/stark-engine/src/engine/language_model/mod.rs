@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io,
-    io::BufReader,
+    io::Read,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -13,12 +13,16 @@ use tokenizers::Tokenizer;
 use crate::{
     backends::common::{Backend, Context, DeviceCapabilities, Kernels, kernel::ContextRingUpdateKernel},
     config::{
-        model::{generation::GenerationConfig, language_model::LanguageModelConfig},
+        model::{
+            AnyModelConfig, generation::GenerationConfig, language_model::LanguageModelConfig,
+            qwen38_language_model::Qwen38LanguageModelConfig,
+        },
         token_codec::AnyTokenCodecConfig,
     },
     data_type::DataType,
     encodable_block::{
         decoder::{Decoder, DecoderError},
+        qwen38::Qwen38Decoder,
         sampling::{Sampling, SamplingMethod},
     },
     engine::Engine,
@@ -26,6 +30,7 @@ use crate::{
     speculators::dflash_tfm::{DFlashSpeculatorLoadError, DFlashTfmSpeculator},
 };
 
+mod execution;
 pub(crate) mod multimodal;
 #[cfg(test)]
 mod multimodal_tests;
@@ -58,7 +63,7 @@ pub mod grammar;
 pub struct LanguageModel<B: Backend> {
     pub(super) model_identity: Arc<()>,
     engine: Arc<Engine<B>>,
-    decoder: Decoder<B>,
+    decoder: execution::DecoderExecution<B>,
     speculator: Option<DFlashTfmSpeculator<B>>,
     sampling: Sampling<B>,
     context_ring_update: <B::Kernels as Kernels>::ContextRingUpdateKernel,
@@ -71,6 +76,8 @@ pub struct LanguageModel<B: Backend> {
 
 #[derive(Debug, Error)]
 pub enum EngineLoadLanguageModelError<B: Backend> {
+    #[error("Unsupported or invalid language-model configuration")]
+    InvalidModelConfig,
     #[error("Tokenizer vocabulary exceeds decoder vocabulary")]
     InvalidTokenizerVocabulary,
     #[error("I/O error: {0}")]
@@ -94,14 +101,44 @@ impl<B: Backend> Engine<B> {
         self: &Arc<Self>,
         model_path: &Path,
     ) -> Result<LanguageModel<B>, EngineLoadLanguageModelError<B>> {
-        let config: LanguageModelConfig =
-            serde_json::from_reader(BufReader::new(File::open(model_path.join("config.json"))?))?;
+        const CONFIG_LIMIT: u64 = 8 * 1024 * 1024;
+        let config_path = model_path.join("config.json");
+        let metadata = std::fs::metadata(&config_path)?;
+        if !metadata.is_file() || metadata.len() > CONFIG_LIMIT {
+            return Err(EngineLoadLanguageModelError::InvalidModelConfig);
+        }
+        let mut config_bytes = Vec::new();
+        File::open(config_path)?.take(CONFIG_LIMIT + 1).read_to_end(&mut config_bytes)?;
+        if config_bytes.len() as u64 > CONFIG_LIMIT {
+            return Err(EngineLoadLanguageModelError::InvalidModelConfig);
+        }
+        let config: AnyModelConfig = serde_json::from_slice(&config_bytes)?;
+        let qwen38 = matches!(&config, AnyModelConfig::Qwen38LanguageModelConfig(_));
 
+        if qwen38 {
+            for name in ["config.json", "model.safetensors", "tokenizer.json"] {
+                let metadata = std::fs::symlink_metadata(model_path.join(name))?;
+                if !metadata.is_file() || metadata.file_type().is_symlink() {
+                    return Err(EngineLoadLanguageModelError::InvalidModelConfig);
+                }
+            }
+        }
         let weights_file = File::open(model_path.join("model.safetensors"))?;
-        let weight_loader = ParameterLoader::new(&weights_file, &*self.context)?;
+        let weight_loader = if qwen38 {
+            ParameterLoader::new_with_header_limit(&weights_file, &*self.context, CONFIG_LIMIT as usize)?
+        } else {
+            ParameterLoader::new(&weights_file, &*self.context)?
+        };
 
-        let model =
-            self.language_model_from_config(model_path, config, &weight_loader, None, SpeculatorPolicy::Discover)?;
+        let model = match config {
+            AnyModelConfig::LanguageModelConfig(config) => {
+                self.language_model_from_config(model_path, config, &weight_loader, None, SpeculatorPolicy::Discover)?
+            },
+            AnyModelConfig::Qwen38LanguageModelConfig(config) => {
+                self.qwen38_language_model_from_config(model_path, config, &weight_loader)?
+            },
+            _ => return Err(EngineLoadLanguageModelError::InvalidModelConfig),
+        };
         weight_loader.tree().assert_all_tensors_validated()?;
         Ok(model)
     }
@@ -167,7 +204,7 @@ impl<B: Backend> Engine<B> {
         Ok(LanguageModel {
             model_identity: Arc::new(()),
             engine: self.clone(),
-            decoder,
+            decoder: execution::DecoderExecution::Standard(Box::new(decoder)),
             speculator,
             sampling,
             context_ring_update,
@@ -176,6 +213,58 @@ impl<B: Backend> Engine<B> {
             tokenizer,
             #[cfg(grammar)]
             vocab_size,
+        })
+    }
+
+    fn qwen38_language_model_from_config(
+        self: &Arc<Self>,
+        model_path: &Path,
+        config: Qwen38LanguageModelConfig,
+        weights: &ParameterLoader<B>,
+    ) -> Result<LanguageModel<B>, EngineLoadLanguageModelError<B>> {
+        let tokenizer = Arc::new(Tokenizer::from_file(model_path.join("tokenizer.json"))?);
+        let vocabulary = config.decoder_config.architecture.vocab_size;
+        let vocab = tokenizer.get_vocab(true);
+        if vocabulary == 0 || vocab.is_empty() || vocab.values().any(|&id| id >= vocabulary) {
+            return Err(EngineLoadLanguageModelError::InvalidTokenizerVocabulary);
+        }
+        let decoder =
+            Qwen38Decoder::new(self.context.as_ref(), &config.decoder_config, weights).map_err(DecoderError::Qwen38)?;
+        let decoder = execution::DecoderExecution::Qwen38(Box::new(decoder));
+        let mut generation_config = config.generation_config;
+        let mut stops = generation_config.stop_token_ids.to_vec();
+        stops.extend(config.decoder_config.architecture.eos_token_id.iter().map(|&id| u64::from(id)));
+        let end_of_thinking_tag = match &config.token_codec_config {
+            AnyTokenCodecConfig::ChatCodecConfig(codec) => {
+                if let Some(eos) = &codec.eos_token {
+                    stops.push(u64::from(
+                        tokenizer.token_to_id(eos).ok_or(EngineLoadLanguageModelError::InvalidTokenizerVocabulary)?,
+                    ));
+                }
+                codec.end_of_thinking_tag.clone()
+            },
+            AnyTokenCodecConfig::RawTextCodecConfig(_) => None,
+        };
+        if stops.iter().any(|&id| id >= u64::from(vocabulary) || !vocab.values().any(|&value| u64::from(value) == id)) {
+            return Err(EngineLoadLanguageModelError::InvalidTokenizerVocabulary);
+        }
+        stops.sort_unstable();
+        stops.dedup();
+        generation_config.stop_token_ids = stops.into_boxed_slice();
+        let context_ring_update = <B::Kernels as Kernels>::ContextRingUpdateKernel::new(&self.context)
+            .map_err(EngineLoadLanguageModelError::Backend)?;
+        Ok(LanguageModel {
+            model_identity: Arc::new(()),
+            engine: self.clone(),
+            decoder,
+            speculator: None,
+            sampling: Sampling::new_checked(DataType::F32, vocabulary),
+            context_ring_update,
+            generation_config,
+            end_of_thinking_tag,
+            tokenizer,
+            #[cfg(grammar)]
+            vocab_size: vocabulary as usize,
         })
     }
 }
@@ -210,6 +299,11 @@ mod speculator_policy_tests {
 }
 
 impl<B: Backend> LanguageModel<B> {
+    /// The admitted decoder variant, independent of source-directory metadata.
+    pub fn is_qwen38(&self) -> bool {
+        matches!(&self.decoder, execution::DecoderExecution::Qwen38(_))
+    }
+
     pub fn max_context_length(&self) -> Option<u32> {
         self.decoder.max_context_length()
     }

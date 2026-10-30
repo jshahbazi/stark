@@ -55,6 +55,9 @@ SOURCE_PATHS = (
     "tools/converter",
     "apps/menu-bar",
     "LICENSE",
+    "LICENSE.qwen38-reference",
+    "NOTICE.qwen38-reference",
+    "docs/QWEN38_UZU_PROVENANCE.md",
     "provenance/UPSTREAM.md",
     "scripts/licenses/distribution",
     *RECIPE_INPUTS,
@@ -499,6 +502,37 @@ def source_adaptation_notices(directory: Path, key: str) -> list[Path]:
     return paths
 
 
+def repository_source_adaptation_notices(
+    root: Path, directory: Path, key: str
+) -> list[Path]:
+    """Check repository-level licenses for code adapted into the main engine."""
+    manifest = directory / "manifest.json"
+    if not manifest.is_file():
+        raise BuildError("source_adaptation_license_manifest_missing")
+    document = json.loads(manifest.read_text())
+    adaptations = (
+        document.get("source_adaptations") if isinstance(document, dict) else None
+    )
+    entry = adaptations.get(key) if isinstance(adaptations, dict) else None
+    notices = entry.get("repository_notices") if isinstance(entry, dict) else None
+    if not isinstance(notices, list) or not notices:
+        raise BuildError("source_adaptation_license_entry_missing")
+    paths = []
+    for notice in notices:
+        if not isinstance(notice, dict):
+            raise BuildError("source_adaptation_license_metadata_invalid")
+        filename, digest = notice.get("path"), notice.get("sha256")
+        if not isinstance(filename, str) or not isinstance(digest, str):
+            raise BuildError("source_adaptation_license_metadata_invalid")
+        path = root / filename
+        if not path.resolve().is_relative_to(root.resolve()) or not path.is_file():
+            raise BuildError("source_adaptation_license_file_missing")
+        if sha256(path) != digest:
+            raise BuildError("source_adaptation_license_hash_mismatch")
+        paths.append(path)
+    return paths
+
+
 def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
     """Include upstream native notices without relying on an extra Cargo tool.
 
@@ -512,6 +546,7 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "LICENSE",
         "LICENSE.ggml-hybrid",
         "LICENSE.qwen38-reference",
+        "NOTICE.qwen38-reference",
         "LICENSE.flint-reference",
         "provenance/UPSTREAM.md",
         "tools/converter/LICENSE.lalamo",
@@ -520,11 +555,17 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "vendor/lily-core/LICENSE",
         "vendor/lily-core/NOTICE",
         "vendor/lily-core/UPSTREAM.md",
+        "docs/QWEN38_UZU_PROVENANCE.md",
     ):
         destination = notices / name
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / name, destination)
     supplemental_directory = ROOT / "scripts" / "licenses" / "distribution"
+    # Adapted Qwen kernels live in the standard backend, so their root notices
+    # remain required independently of Cargo's dependency inventory.
+    repository_source_adaptation_notices(
+        ROOT, supplemental_directory, "qwen38-uzu-architecture"
+    )
     source_licenses = source_adaptation_notices(
         supplemental_directory, "pytorch-bf16-vision-layernorm-moments"
     )

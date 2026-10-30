@@ -1,6 +1,6 @@
 //! Serialized text generation through Stark's native hybrid-family forward.
 
-use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 use rayon::prelude::*;
 use stark_engine::engine::hybrid::{Model, finite_guard, profile};
@@ -9,20 +9,14 @@ use crate::{
     cancel::CancelSignal,
     generation::{
         GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
-        native_result_after_cleanup,
     },
     text_stop::StopFilter,
 };
 
-#[path = "hybrid_nucleus.rs"]
-mod nucleus;
-
 pub(crate) struct HybridBackend {
     model: Model,
     cancellation: Option<CancelSignal>,
-    profile_output: Option<ProfileOutput>,
     probability_mapper: ProbabilityMapper,
-    nucleus_sampler: nucleus::NucleusSampler,
 }
 
 const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
@@ -58,13 +52,6 @@ impl ProbabilityMapper {
     }
 }
 
-// Reference and nucleus paths share one scalar exp implementation. Preserve
-// F32 subtraction/division before crossing its F32 argument boundary.
-#[inline(never)]
-fn probability_exp_f32(value: f32) -> f64 {
-    (value as f64).exp()
-}
-
 fn probability_values(
     logits: &[f32],
     indices: &[usize],
@@ -78,80 +65,13 @@ fn probability_values(
             probabilities.resize(indices.len(), 0.0);
             pool.install(|| {
                 probabilities.par_iter_mut().zip(indices.par_iter()).for_each(|(p, &i)| {
-                    *p = probability_exp_f32((logits[i] - max) / temperature);
+                    *p = (((logits[i] - max) / temperature) as f64).exp();
                 });
             });
             return probabilities;
         }
     }
-    indices.iter().map(|&i| probability_exp_f32((logits[i] - max) / temperature)).collect()
-}
-
-#[derive(serde::Serialize)]
-struct AggregateProfile {
-    schema_version: u8,
-    scope: &'static str,
-    success: bool,
-    input_tokens: usize,
-    sampled_tokens: Option<usize>,
-    output_tokens: Option<usize>,
-    counters: BTreeMap<&'static str, profile::Counter>,
-}
-
-/// Explicit diagnostic output contains only aggregate numeric counters. A new
-/// private file is required; an existing file or symlink is never overwritten.
-struct ProfileOutput {
-    file: File,
-    failed: bool,
-}
-
-impl ProfileOutput {
-    fn open(path: &Path) -> Result<Self, &'static str> {
-        #[cfg(unix)]
-        {
-            use std::{fs::OpenOptions, os::unix::fs::OpenOptionsExt};
-
-            let file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(path)
-                .map_err(|_| "native_profile_output_unavailable")?;
-            Ok(Self {
-                file,
-                failed: false,
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = path;
-            Err("native_profile_output_unavailable")
-        }
-    }
-
-    fn write(
-        &mut self,
-        record: &AggregateProfile,
-    ) -> Result<(), &'static str> {
-        if self.failed {
-            return Err("native_profile_output_failed");
-        }
-        let result = (|| {
-            let mut bytes = serde_json::to_vec(record).map_err(|_| "native_profile_output_failed")?;
-            bytes.push(b'\n');
-            self.file.write_all(&bytes).and_then(|()| self.file.flush()).map_err(|_| "native_profile_output_failed")
-        })();
-        self.failed |= result.is_err();
-        result
-    }
-}
-
-impl Drop for HybridBackend {
-    fn drop(&mut self) {
-        if self.profile_output.is_some() {
-            profile::enable(false);
-        }
-    }
+    indices.iter().map(|&i| (((logits[i] - max) / temperature) as f64).exp()).collect()
 }
 
 impl HybridBackend {
@@ -159,20 +79,14 @@ impl HybridBackend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
-        let profile_output = std::env::var_os("STARK_QWEN38_PROFILE_OUTPUT")
-            .map(|path| ProfileOutput::open(Path::new(&path)))
-            .transpose()?;
-        let mut model = Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
-        if profile_output.is_some() {
-            model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
-            profile::enable(true);
-        }
+        let model = Model::load(path).map_err(|error| match error {
+            stark_engine::engine::hybrid::Error::ConversionRequired => "model_conversion_required",
+            _ => "hybrid_model_load_failed",
+        })?;
         Ok(Self {
             model,
             cancellation,
-            profile_output,
             probability_mapper: ProbabilityMapper::default(),
-            nucleus_sampler: nucleus::NucleusSampler::default(),
         })
     }
 
@@ -185,9 +99,6 @@ impl HybridBackend {
         let started = Instant::now();
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
-        let gpu_greedy = matches!(options.sampling, Sampling::Greedy {}) && self.model.supports_greedy_readout();
-        let sampled_decode =
-            matches!(options.sampling, Sampling::Stochastic { .. }) && self.model.supports_sampled_decode();
         let cancellation = &mut self.cancellation;
         let mut cancelled = || match cancellation.as_mut() {
             Some(signal) => signal.check(options.request_id),
@@ -197,62 +108,34 @@ impl HybridBackend {
             return Err("invalid_generation_request");
         }
         let mut logits = Vec::new();
-        let mut greedy_token = None;
         for (index, &token) in input.iter().enumerate() {
             if cancelled()? {
                 return Err("generation_cancelled");
             }
             if index + 1 == input.len() {
-                if gpu_greedy {
-                    greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
-                } else {
-                    logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
-                }
+                logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
             } else {
                 self.model.ingest(token).map_err(|_| "native_generation_failed")?;
             }
         }
         let model = &mut self.model;
         let probability_mapper = &mut self.probability_mapper;
-        let nucleus_sampler = &mut self.nucleus_sampler;
         let mut previous = None;
         let mut rng = options.seed;
-        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if gpu_greedy {
-            let first = greedy_token.take().ok_or("native_generation_failed")?;
-            let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
-            let tail = model
-                .greedy_decode(first, budget.saturating_sub(1))
-                .map_err(|_| "native_generation_failed")?
-                .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
-            Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
-        } else if sampled_decode {
-            let first = nucleus_sampler.sample(&logits, &options.sampling, &mut rng, probability_mapper)?;
-            let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
-            let tail = model
-                .sampled_decode(first, budget.saturating_sub(1), |readout| {
-                    nucleus_sampler
-                        .sample(readout, &options.sampling, &mut rng, probability_mapper)
-                        .map_err(|_| stark_engine::engine::hybrid::Error::Invalid("sampled token selection failed"))
-                })
-                .map_err(|_| "native_generation_failed")?
-                .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
-            Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
-        } else {
-            Box::new(std::iter::from_fn(|| {
-                if let Some(token) = previous {
-                    match model.step(token) {
-                        Ok(next) => logits = next,
-                        Err(_) => return Some(Err("native_generation_failed")),
-                    }
+        let tokens = std::iter::from_fn(|| {
+            if let Some(token) = previous {
+                match model.step(token) {
+                    Ok(next) => logits = next,
+                    Err(_) => return Some(Err("native_generation_failed")),
                 }
-                let token = match sample_with_mapper(&logits, &options.sampling, &mut rng, Some(probability_mapper)) {
-                    Ok(token) => token,
-                    Err(error) => return Some(Err(error)),
-                };
-                previous = Some(token);
-                Some(Ok(u64::from(token)))
-            }))
-        };
+            }
+            let token = match sample_with_mapper(&logits, &options.sampling, &mut rng, Some(&mut *probability_mapper)) {
+                Ok(token) => token,
+                Err(error) => return Some(Err(error)),
+            };
+            previous = Some(token);
+            Some(Ok(u64::from(token)))
+        });
         let mut decoder = tokenizer.decode_stream(false);
         let mut filter = StopFilter::new(options.stop.clone());
         let mut raw = String::new();
@@ -276,9 +159,7 @@ impl HybridBackend {
             },
             &mut cancelled,
         );
-        // The collector has dropped its iterator and drained any submitted
-        // lookahead, including EOS, cancellation and callback-error exits.
-        let mut result = native_result_after_cleanup(result, self.model.is_fenced())?;
+        let mut result = result?;
         if needs_text {
             let full = tokenizer.decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
             let suffix = full.strip_prefix(&raw).ok_or("decoding_failed")?;
@@ -331,30 +212,11 @@ impl GenerationBackend for HybridBackend {
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
-        self.nucleus_sampler.clear();
         let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
             .map_err(|_| "inference_activity_unavailable")?;
-        if self.profile_output.is_some() {
-            profile::reset();
-        }
         self.model.reset();
-        if self.profile_output.as_ref().is_some_and(|output| output.failed) {
-            return Err("native_profile_output_failed");
-        }
         let result = self.generate_inner(input, options, on_text);
         self.model.reset();
-        self.nucleus_sampler.clear();
-        if let Some(output) = self.profile_output.as_mut() {
-            output.write(&AggregateProfile {
-                schema_version: 1,
-                scope: "qwen38_bf16_aggregate_profile",
-                success: result.is_ok(),
-                input_tokens: input.len(),
-                sampled_tokens: result.as_ref().ok().map(|tokens| tokens.sampled_tokens),
-                output_tokens: result.as_ref().ok().map(|tokens| tokens.generated_token_ids.len()),
-                counters: profile::snapshot(),
-            })?;
-        }
         result
     }
     fn cancelled(
@@ -578,108 +440,6 @@ mod tests {
     use stark_engine::engine::hybrid::math;
 
     use super::*;
-
-    struct ProfileDirectory(std::path::PathBuf);
-
-    impl ProfileDirectory {
-        fn new() -> Self {
-            use std::sync::atomic::{AtomicU64, Ordering};
-
-            static SEQUENCE: AtomicU64 = AtomicU64::new(0);
-            loop {
-                let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
-                let path =
-                    std::env::temp_dir().join(format!("stark-sampler-profile-{}-{sequence}", std::process::id()));
-                match std::fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
-                    Err(_) => panic!("private profile test directory unavailable"),
-                }
-            }
-        }
-    }
-
-    impl Drop for ProfileDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    fn aggregate_profile_fixture(success: bool) -> AggregateProfile {
-        AggregateProfile {
-            schema_version: 1,
-            scope: "qwen38_bf16_aggregate_profile",
-            success,
-            input_tokens: 2,
-            sampled_tokens: success.then_some(3),
-            output_tokens: success.then_some(3),
-            counters: BTreeMap::from([(
-                "sample.select",
-                profile::Counter {
-                    calls: 3,
-                    seconds: 0.002,
-                    bytes: 0,
-                    max_bytes: 0,
-                },
-            )]),
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn profile_output_is_private_jsonl_with_only_aggregate_fields() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = ProfileDirectory::new();
-        let path = directory.0.join("profile.jsonl");
-        let mut output = ProfileOutput::open(&path).unwrap();
-        output.write(&aggregate_profile_fixture(true)).unwrap();
-        output.write(&aggregate_profile_fixture(false)).unwrap();
-        assert!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o077 == 0);
-        let contents = std::fs::read_to_string(&path).unwrap();
-        let records =
-            contents.lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();
-        assert!(records.len() == 2);
-        for record in &records {
-            let fields = record.as_object().unwrap();
-            let allowed =
-                ["schema_version", "scope", "success", "input_tokens", "sampled_tokens", "output_tokens", "counters"];
-            assert!(fields.len() == allowed.len() && fields.keys().all(|key| allowed.contains(&key.as_str())));
-            assert!(record["schema_version"] == 1);
-            assert!(record["counters"]["sample.select"]["calls"] == 3);
-        }
-        assert!(records[0]["success"] == true && records[1]["success"] == false);
-        assert!(records[1]["sampled_tokens"].is_null() && records[1]["output_tokens"].is_null());
-        assert!(contents.ends_with('\n'));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn profile_output_does_not_replace_files_or_follow_leaf_symlinks() {
-        let directory = ProfileDirectory::new();
-        let existing = directory.0.join("existing.jsonl");
-        std::fs::write(&existing, b"existing metadata").unwrap();
-        assert!(ProfileOutput::open(&existing).is_err());
-        let link = directory.0.join("link.jsonl");
-        std::os::unix::fs::symlink(&existing, &link).unwrap();
-        assert!(ProfileOutput::open(&link).is_err());
-        assert!(std::fs::read(&existing).unwrap() == b"existing metadata");
-    }
-
-    #[test]
-    fn profile_output_write_failure_is_sticky_and_authored() {
-        let directory = ProfileDirectory::new();
-        let path = directory.0.join("read-only.jsonl");
-        std::fs::write(&path, b"existing metadata").unwrap();
-        let mut output = ProfileOutput {
-            file: File::open(&path).unwrap(),
-            failed: false,
-        };
-        assert!(output.write(&aggregate_profile_fixture(true)) == Err("native_profile_output_failed"));
-        assert!(output.failed);
-        assert!(output.write(&aggregate_profile_fixture(false)) == Err("native_profile_output_failed"));
-        assert!(std::fs::read(&path).unwrap() == b"existing metadata");
-    }
 
     #[test]
     fn hybrid_sampling_preserves_greedy_ties_and_filters() {

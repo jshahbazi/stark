@@ -15,6 +15,7 @@ use metal::{
 };
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
+#[cfg(test)]
 pub(super) use super::qwen_metal::{Gdn as QwenGdnState, Geometry as QwenGdnGeometry};
 use super::{Error, Result, profile, weights};
 
@@ -31,18 +32,25 @@ struct Executor {
     library: Retained<ProtocolObject<dyn MTLLibrary>>,
     pipelines: PipelineCache,
     ffn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
+    #[cfg(test)]
     hc_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
+    #[cfg(test)]
     gdn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     graph_pipelines: Mutex<HashMap<&'static str, PipelineState>>,
+    #[cfg(test)]
     indexed_pipelines: PipelineCache,
     checked_matrix_pipelines: PipelineCache,
     typed_matrix_pipelines: PipelineCache,
+    #[cfg(test)]
     typed_indexed_pipelines: PipelineCache,
     chunk32_matrix_pipelines: PipelineCache,
+    #[cfg(test)]
     chunk32_indexed_pipelines: PipelineCache,
     uint4_matrix_pipelines: PipelineCache,
+    #[cfg(test)]
     uint4_indexed_pipelines: PipelineCache,
     factored_matrix_pipelines: PipelineCache,
+    #[cfg(test)]
     factored_indexed_pipelines: PipelineCache,
     ordered_rms: bool,
     #[cfg(test)]
@@ -336,6 +344,7 @@ pub(super) fn mapped_ffn(
 /// Native Qwen hyperconnection's dependent low-rank projections and read/write
 /// gates, encoded with one completion boundary. Normalization remains on the
 /// CPU so the established grouped F32 sum order is preserved.
+#[cfg(test)]
 pub(super) fn mapped_qwen_hyperconnection(
     operations: &[MappedOperation<'_>],
     normalized: &[f32],
@@ -366,6 +375,7 @@ pub(super) fn mapped_qwen_hyperconnection(
     objc2::rc::autoreleasepool(|_| executor()?.run_qwen_hyperconnection(operations, &parameters, normalized, streams))
 }
 
+#[cfg(test)]
 pub(super) fn mapped_qwen_gdn(
     operations: &[MappedOperation<'_>; 5],
     state: &mut QwenGdnState,
@@ -470,11 +480,16 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_vector_matvec.metal"));
             source.push_str(include_str!("packed_block_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
+            #[cfg(test)]
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("../../../unit/fixtures/hybrid_qwen_legacy_extensions.metal"));
             source.push_str(include_str!("affine_uint_matvec.metal"));
             source.push_str(include_str!("affine_chunk32_matvec.metal"));
+            #[cfg(test)]
             source.push_str(include_str!("qwen_graph.metal"));
+            #[cfg(test)]
             source.push_str(include_str!("qwen_attention.metal"));
             #[cfg(test)]
             source.push_str(include_str!("../../../unit/fixtures/hybrid_tiled_experiment.metal"));
@@ -491,18 +506,25 @@ fn executor() -> Result<&'static Executor> {
                 library,
                 pipelines: Mutex::new(HashMap::new()),
                 ffn_pipelines: Mutex::new(None),
+                #[cfg(test)]
                 hc_pipelines: Mutex::new(None),
+                #[cfg(test)]
                 gdn_pipelines: Mutex::new(None),
                 graph_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
                 indexed_pipelines: Mutex::new(HashMap::new()),
                 checked_matrix_pipelines: Mutex::new(HashMap::new()),
                 typed_matrix_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
                 typed_indexed_pipelines: Mutex::new(HashMap::new()),
                 chunk32_matrix_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
                 chunk32_indexed_pipelines: Mutex::new(HashMap::new()),
                 uint4_matrix_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
                 uint4_indexed_pipelines: Mutex::new(HashMap::new()),
                 factored_matrix_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
                 factored_indexed_pipelines: Mutex::new(HashMap::new()),
                 ordered_rms: std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1"),
                 #[cfg(test)]
@@ -637,6 +659,7 @@ impl Executor {
         Ok(values)
     }
 
+    #[cfg(test)]
     fn gdn_pipelines(&self) -> Result<(PipelineState, PipelineState)> {
         let mut pipelines = self.gdn_pipelines.lock().map_err(|_| Error::Invalid("Metal GDN pipeline cache failed"))?;
         if let Some(pipelines) = &*pipelines {
@@ -659,6 +682,7 @@ impl Executor {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn run_qwen_gdn(
         &self,
         operations: &[MappedOperation<'_>; 5],
@@ -776,6 +800,7 @@ impl Executor {
         Ok(values)
     }
 
+    #[cfg(test)]
     fn hc_pipelines(&self) -> Result<(PipelineState, PipelineState)> {
         let mut pipelines = self.hc_pipelines.lock().map_err(|_| Error::Invalid("Metal HC pipeline cache failed"))?;
         if let Some(pipelines) = &*pipelines {
@@ -793,6 +818,7 @@ impl Executor {
         Ok(result)
     }
 
+    #[cfg(test)]
     fn run_qwen_hyperconnection(
         &self,
         operations: &[MappedOperation<'_>],

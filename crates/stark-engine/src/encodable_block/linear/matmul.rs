@@ -132,7 +132,7 @@ impl<B: Backend> LinearMatmul<B> {
         self.matrix.try_prepare_a8_storage().then_some(quantization)
     }
 
-    pub(super) fn encode_with_a(
+    pub(crate) fn encode_with_a(
         &self,
         a: MatmulA<impl BufferRef<Backend = B>>,
         batch_dim: u32,

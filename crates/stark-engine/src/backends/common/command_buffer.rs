@@ -17,10 +17,36 @@ pub trait CommandBuffer {
     type Completed: CommandBufferCompleted<CommandBuffer = Self>;
 }
 
+/// Fixed diagnostic categories; never populated from model or request text.
+#[derive(Clone, Copy)]
+#[repr(usize)]
+pub enum StageProfileCategory {
+    Embedding,
+    HcRead,
+    HcInject,
+    Gdn,
+    Qsa,
+    Moe,
+    Ple,
+    FinalHc,
+    Head,
+    Sampling,
+}
+
 pub trait CommandBufferEncoding {
     type CommandBuffer: CommandBuffer<Encoding = Self>;
 
     fn context(&self) -> &<<Self::CommandBuffer as CommandBuffer>::Backend as Backend>::Context;
+
+    /// Optional bounded diagnostics. Backends retain normal execution when
+    /// profiling is disabled or unavailable.
+    fn begin_single_token_profile(&mut self) {}
+
+    fn stage_profile_checkpoint(
+        &mut self,
+        _category: StageProfileCategory,
+    ) {
+    }
 
     fn allocate_constant(
         &mut self,

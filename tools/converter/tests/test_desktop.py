@@ -974,6 +974,95 @@ def test_output_limit_metadata_reserves_prompt_capacity(desktop, model):
     assert desktop.api_models()[0]["max_output_tokens"] == 511
 
 
+def test_context_capability_reaches_settings_and_api_then_clamps_on_model_change(desktop, model):
+    identifier = installed(desktop, model)
+    for limit in (65536, 16384):
+        with patch(
+            "stark_convert.desktop.Worker.read",
+            return_value={
+                "ready": True,
+                "mode": "text-generation-v1",
+                "max_context_tokens": limit,
+                "max_new_tokens": 4096,
+            },
+        ):
+            desktop.dispatch({"command": "run", "model_id": identifier})
+            finish(desktop)
+        assert desktop.context_limit == limit
+        assert desktop.api_models()[0]["context_length"] == limit
+        ready = [event for event in events(desktop) if event["event"] == "ready"][-1]
+        assert ready["max_context_tokens"] == limit
+        if limit == 65536:
+            desktop.dispatch(advanced_options(context_tokens=65536, max_new_tokens=256))
+            assert desktop.context == 65536
+        else:
+            assert desktop.context == 16384
+
+
+@pytest.mark.parametrize("limit", [True, 0, 65537, "65536"])
+def test_invalid_advertised_context_does_not_publish_a_chat_worker(desktop, model, limit):
+    identifier = installed(desktop, model)
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": limit,
+            "max_new_tokens": 4096,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    assert desktop.worker is None
+    assert not any(event["event"] == "ready" for event in events(desktop))
+
+
+@pytest.mark.parametrize("maximum", [True, False, 0, -1, 4097, 1.0, "4096", None])
+def test_invalid_advertised_output_limit_does_not_publish_a_chat_worker(desktop, model, maximum):
+    identifier = installed(desktop, model)
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": 65536,
+            "max_new_tokens": maximum,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    assert desktop.worker is None
+    assert not any(event["event"] == "ready" for event in events(desktop))
+
+
+@pytest.mark.parametrize(
+    "count, token_ids",
+    [(True, [2]), (False, []), (1.0, [2]), ("1", [2]), (None, [])],
+)
+def test_malformed_token_count_stops_before_generation_and_fences_worker(desktop, model, count, token_ids):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    with patch.object(
+        desktop.worker, "request", return_value={"token_count": count, "token_ids": token_ids}
+    ) as request:
+        with pytest.raises(APIError) as failure:
+            desktop.api_complete(
+                {"model": identifier, "messages": [{"role": "user", "content": "synthetic count fixture"}]}
+            )
+        assert failure.value.status == 503
+        assert failure.value.code == "generation_failed"
+        assert [call.args[0]["operation"] for call in request.call_args_list] == ["tokenize"]
+    assert process.poll() is not None
+    assert desktop.worker is None
+    assert desktop.active_model is None
+    assert desktop.messages == []
+    assert desktop.job is None
+    assert not any(event["event"] in ("reply", "metrics") for event in events(desktop))
+    assert "synthetic count fixture" not in desktop.output.getvalue()
+
+
 def test_advanced_context_budget_rejection_leaves_history_unchanged(desktop, model):
     running(desktop, model)
     desktop.dispatch(advanced_options(context_tokens=21, max_new_tokens=2))

@@ -34,7 +34,7 @@ pub struct GemmKernel {
     weights_data_type: DataType,
     input_data_type: DataType,
     output_data_type: DataType,
-    kernels: HashMap<GemmSpecialization, GemmMetalKernel>,
+    kernels: HashMap<(GemmSpecialization, DataType), GemmMetalKernel>,
     split_k_reduce: HashMap<GemmDTransform, GemmSplitKReduceMetalKernel>,
 }
 
@@ -57,15 +57,16 @@ impl GemmKernel {
         &mut self,
         context: &MetalContext,
         specialization: GemmSpecialization,
+        output_data_type: DataType,
     ) -> Result<&GemmMetalKernel, MetalError> {
-        match self.kernels.entry(specialization) {
+        match self.kernels.entry((specialization, output_data_type)) {
             Entry::Occupied(entry) => Ok(entry.into_mut()),
             Entry::Vacant(entry) => {
                 let kernel = GemmMetalKernel::new(
                     context,
                     self.input_data_type,
                     self.weights_data_type,
-                    self.output_data_type,
+                    output_data_type,
                     specialization.tiling,
                     specialization.transpose_b,
                     specialization.use_mxu,
@@ -313,7 +314,7 @@ impl GemmKernel {
             a_prologue,
             a_group_size,
         )?;
-        let kernel = self.get_or_create(command_buffer.context(), specialization)?;
+        let kernel = self.get_or_create(command_buffer.context(), specialization, self.output_data_type)?;
         kernel.encode(
             a_full_precision,
             weights,
@@ -388,11 +389,14 @@ impl GemmKernel {
         )?;
 
         let elem = (m as usize) * (n as usize);
-        let slice_bytes = elem * self.output_data_type.size_in_bytes();
+        // Split partitions are accumulator intermediates. Rounding each to
+        // BF16/F16 loses cancellation before the final reduction; retain F32
+        // and cast only once when the reducer writes the requested output.
+        let slice_bytes = elem * DataType::F32.size_in_bytes();
         let mut temp = command_buffer.allocate_scratch(split_k as usize * slice_bytes)?;
         let mut params = gemm_params(shape, plan, 1.0, scale_strides, zero_point_strides);
         params.aligned_inner_iterations = kp / k_step;
-        let part_kernel = self.get_or_create(command_buffer.context(), part_spec)?;
+        let part_kernel = self.get_or_create(command_buffer.context(), part_spec, DataType::F32)?;
         part_kernel.encode(
             a_full_precision,
             weights,

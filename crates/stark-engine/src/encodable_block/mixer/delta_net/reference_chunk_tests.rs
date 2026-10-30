@@ -8,7 +8,7 @@ use super::*;
 use crate::{
     array::ArrayElement,
     backends::common::{
-        Buffer, BufferRef, CommandBufferExecutable, CommandBufferPending, Context, kernel::ReferenceGDNQKL2Kernel,
+        Buffer, CommandBufferExecutable, CommandBufferPending, Context, kernel::ReferenceGDNQKL2Kernel,
     },
     tests::helpers::{buffer_to_vec, create_buffer, create_buffer_with_data, for_each_backend},
 };

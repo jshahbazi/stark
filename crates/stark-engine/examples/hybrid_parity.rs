@@ -1,4 +1,4 @@
-//! Compare a private source-bound fixture with the native hybrid forward path.
+//! Compare private Flint/GLM source-bound fixtures with their native forward paths.
 //!
 //! The fixture directory contains config.json, tokens.json (an array of token
 //! IDs), weights, and reference.f32 (little-endian rows of vocabulary logits).
@@ -8,12 +8,11 @@ use std::{fs, path::Path, time::Instant};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use stark_engine::engine::hybrid::{flint::FlintModel, glm::GlmModel, qwen::QwenModel, weights::Weights};
+use stark_engine::engine::hybrid::{flint::FlintModel, glm::GlmModel, weights::Weights};
 
 enum Model {
     Flint(FlintModel),
     Glm(GlmModel),
-    Qwen(QwenModel),
 }
 
 impl Model {
@@ -24,7 +23,6 @@ impl Model {
         match self {
             Self::Flint(model) => model.step(token),
             Self::Glm(model) => model.step(token),
-            Self::Qwen(model) => model.step(token),
         }
     }
 
@@ -32,7 +30,6 @@ impl Model {
         match self {
             Self::Flint(model) => model.reset(),
             Self::Glm(model) => model.reset(),
-            Self::Qwen(model) => model.reset(),
         }
     }
 }
@@ -52,6 +49,13 @@ fn run() -> Result<bool, &'static str> {
     let path = Path::new(&args[0]);
     let config: Value = serde_json::from_slice(&fs::read(path.join("config.json")).map_err(|_| "missing config")?)
         .map_err(|_| "invalid config")?;
+    let family = config.get("model_type").and_then(Value::as_str).ok_or("missing model type")?;
+    if family == "qwen4_exp" {
+        return Err("model_conversion_required");
+    }
+    if !matches!(family, "flint" | "glm5_next") {
+        return Err("unsupported model type");
+    }
     let tokens: Vec<u32> = serde_json::from_slice(&fs::read(path.join("tokens.json")).map_err(|_| "missing tokens")?)
         .map_err(|_| "invalid token fixture")?;
     if tokens.is_empty() || tokens.len() > 4096 {
@@ -69,11 +73,9 @@ fn run() -> Result<bool, &'static str> {
     }
     let width = reference.len() / tokens.len();
     let weights = Weights::open(path).map_err(|_| "native weight admission failed")?;
-    let family = config.get("model_type").and_then(Value::as_str).ok_or("missing model type")?;
     let mut model = match family {
         "flint" => Model::Flint(FlintModel::new(weights, &config).map_err(|_| "native model admission failed")?),
         "glm5_next" => Model::Glm(GlmModel::new(weights, &config).map_err(|_| "native model admission failed")?),
-        "qwen4_exp" => Model::Qwen(QwenModel::new(weights, &config).map_err(|_| "native model admission failed")?),
         _ => return Err("unsupported model type"),
     };
     let started = Instant::now();

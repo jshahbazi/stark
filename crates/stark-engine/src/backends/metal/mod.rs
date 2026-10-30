@@ -8,8 +8,9 @@ mod heaps;
 mod kernel;
 pub mod memory_usage;
 mod metal_extensions;
+mod stage_profile;
 
 pub use backend::Metal;
 pub use context::MetalContext; // TODO: This should be removed
 #[cfg(test)]
-pub use kernel::matmul::gemm::GemmEngine;
+pub use kernel::matmul::gemm::{GemmEngine, GemmKernel};

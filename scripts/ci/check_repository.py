@@ -29,7 +29,6 @@ APPROVED_RUNNERS = {"ubuntu-24.04", "macos-26"}
 # security.yml. Update this inventory and both scanner/gate inputs together.
 SCANNED_LOCKFILES = {
     "Cargo.lock",
-    "vendor/lily-core/Cargo.lock",
     "scripts/ci/check_repository.py.lock",
     "tools/uv.lock",
     "tools/converter/uv.lock",

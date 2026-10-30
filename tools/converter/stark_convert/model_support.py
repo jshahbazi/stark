@@ -272,7 +272,7 @@ def preflight_model(
                     mode,
                     "unsupported",
                     "unsupported_qwen38_metadata",
-                    "Qwen3.8 metadata is outside the implemented Lily text contract.",
+                    "Qwen3.8 metadata is outside the implemented quantization-preserving text conversion contract.",
                 )
         return _report(
             family,

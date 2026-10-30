@@ -18,6 +18,7 @@ use stark_engine::{
 
 use crate::cache::{CacheEntry, LastScoreCache};
 
+// Existing family limit; only the admitted Qwen decoder opts into 64K requests.
 const MAX_CONTEXT_TOKENS: u32 = 16384;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
@@ -70,7 +71,7 @@ struct NativeBackend {
 }
 
 enum NativeModel {
-    Dense(Box<LanguageModel<Metal>>),
+    Uzu(Box<LanguageModel<Metal>>),
     Hybrid(Box<stark_engine::engine::hybrid::Model>),
 }
 
@@ -84,6 +85,9 @@ struct NativeScores {
 trait ScoringBackend {
     fn vocab_size(&self) -> usize;
     fn max_context_length(&self) -> Option<u32>;
+    fn request_context_limit(&self) -> u32 {
+        MAX_CONTEXT_TOKENS
+    }
     fn peak_memory_usage(&self) -> Option<usize>;
     fn tokenize(
         &mut self,
@@ -142,11 +146,12 @@ fn validate_score(
     context: u32,
     temperature: f64,
     vocab_size: usize,
+    context_limit: u32,
 ) -> Result<(), &'static str> {
     if input.is_empty()
         || !(2..=16).contains(&candidates.len())
         || context == 0
-        || context > MAX_CONTEXT_TOKENS
+        || context > context_limit.min(65_536)
         || !temperature.is_finite()
         || temperature <= 0.0
         || input.iter().chain(candidates).any(|id| *id as usize >= vocab_size)
@@ -208,10 +213,14 @@ impl NativeBackend {
         }
         let hybrid = stark_engine::engine::hybrid::recognizes(path).map_err(|error| match error {
             stark_engine::engine::hybrid::Error::Io(_) => "model_config_unavailable",
+            stark_engine::engine::hybrid::Error::ConversionRequired => "model_conversion_required",
             _ => "invalid_model_config",
         })?;
         if hybrid {
-            let model = stark_engine::engine::hybrid::Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
+            let model = stark_engine::engine::hybrid::Model::load(path).map_err(|error| match error {
+                stark_engine::engine::hybrid::Error::ConversionRequired => "model_conversion_required",
+                _ => "hybrid_model_load_failed",
+            })?;
             let vocab_size = model.vocab_size();
             return Ok(Self {
                 engine: None,
@@ -223,8 +232,8 @@ impl NativeBackend {
             serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
                 .map_err(|_| "invalid_model_config")?;
         let vocab_size = config
-            .get("decoder_config")
-            .and_then(|decoder| decoder.get("vocab_size"))
+            .pointer("/decoder_config/vocab_size")
+            .or_else(|| config.pointer("/decoder_config/architecture/vocab_size"))
             .and_then(Value::as_u64)
             .filter(|size| *size > 0 && *size <= u32::MAX as u64)
             .ok_or("invalid_model_config")? as usize;
@@ -232,7 +241,7 @@ impl NativeBackend {
         let model = engine.load_language_model(path).map_err(|_| "model_load_failed")?;
         Ok(Self {
             engine: Some(engine),
-            model: NativeModel::Dense(Box::new(model)),
+            model: NativeModel::Uzu(Box::new(model)),
             vocab_size,
         })
     }
@@ -244,8 +253,14 @@ impl ScoringBackend for NativeBackend {
     }
     fn max_context_length(&self) -> Option<u32> {
         match &self.model {
-            NativeModel::Dense(model) => model.max_context_length(),
+            NativeModel::Uzu(model) => model.max_context_length(),
             NativeModel::Hybrid(model) => Some(model.max_context_length()),
+        }
+    }
+    fn request_context_limit(&self) -> u32 {
+        match &self.model {
+            NativeModel::Uzu(model) if model.is_qwen38() => 65_536,
+            _ => MAX_CONTEXT_TOKENS,
         }
     }
     fn peak_memory_usage(&self) -> Option<usize> {
@@ -257,7 +272,7 @@ impl ScoringBackend for NativeBackend {
         special: bool,
     ) -> Result<Vec<u32>, &'static str> {
         let tokenizer = match &self.model {
-            NativeModel::Dense(model) => model.tokenizer(),
+            NativeModel::Uzu(model) => model.tokenizer(),
             NativeModel::Hybrid(model) => model.tokenizer(),
         };
         tokenizer.encode(text, special).map(|encoding| encoding.get_ids().to_vec()).map_err(|_| "tokenization_failed")
@@ -267,7 +282,7 @@ impl ScoringBackend for NativeBackend {
         input: &[u32],
         context: u32,
     ) -> Result<NativeScores, &'static str> {
-        let NativeModel::Dense(model) = &self.model else {
+        let NativeModel::Uzu(model) = &self.model else {
             let NativeModel::Hybrid(model) = &mut self.model else {
                 unreachable!()
             };
@@ -313,6 +328,10 @@ impl ScoringBackend for NativeBackend {
 }
 
 impl<B: ScoringBackend> ScoreWorker<B> {
+    fn max_context_tokens(&self) -> u32 {
+        self.backend.request_context_limit().min(65_536).min(self.backend.max_context_length().unwrap_or(u32::MAX))
+    }
+
     fn new(
         backend: B,
         enabled: bool,
@@ -393,6 +412,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                     context_tokens,
                     temperature,
                     self.backend.vocab_size(),
+                    self.backend.request_context_limit(),
                 )?;
                 if self.backend.max_context_length().is_some_and(|maximum| context_tokens > maximum) {
                     return Err("context_overflow");
@@ -522,6 +542,7 @@ pub(super) fn run_lines(
         "cache_key":"exact-token-ids+context-tokens+model-instance",
         "cache":worker.telemetry(false),
         "load_seconds":started.elapsed().as_secs_f64(),"vocab_size":worker.backend.vocab_size(),
+        "max_context_tokens":worker.max_context_tokens(),
         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
     )
     .map_err(|_| "protocol_write_failed")?;
@@ -568,14 +589,14 @@ mod tests {
         let directory = Directory(path);
         // Deliberately incomplete configurations fail before any Metal
         // allocation. The error identifies which real loader was selected.
-        for config in [
-            json!({"type":"Qwen38LanguageModelConfig"}),
-            json!({"model_type":"glm5_next"}),
-            json!({"model_type":"qwen4_exp"}),
-            json!({"model_type":"flint"}),
+        for (config, expected) in [
+            (json!({"type":"Qwen38LanguageModelConfig"}), "invalid_model_config"),
+            (json!({"model_type":"glm5_next"}), "hybrid_model_load_failed"),
+            (json!({"model_type":"qwen4_exp"}), "model_conversion_required"),
+            (json!({"model_type":"flint"}), "hybrid_model_load_failed"),
         ] {
             std::fs::write(directory.0.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
-            assert!(matches!(NativeBackend::load(&directory.0), Err("hybrid_model_load_failed")));
+            assert!(matches!(NativeBackend::load(&directory.0), Err(code) if code == expected));
         }
         std::fs::write(directory.0.join("config.json"), br#"{"type":"LanguageModelConfig"}"#).unwrap();
         assert!(matches!(NativeBackend::load(&directory.0), Err("invalid_model_config")));
@@ -584,6 +605,8 @@ mod tests {
     }
 
     struct FakeBackend {
+        context_limit: u32,
+        model_maximum: u32,
         calls: usize,
         fail_score: bool,
         invalid_output: bool,
@@ -594,7 +617,10 @@ mod tests {
             6
         }
         fn max_context_length(&self) -> Option<u32> {
-            Some(MAX_CONTEXT_TOKENS)
+            Some(self.model_maximum)
+        }
+        fn request_context_limit(&self) -> u32 {
+            self.context_limit
         }
         fn peak_memory_usage(&self) -> Option<usize> {
             None
@@ -637,6 +663,8 @@ mod tests {
     ) -> ScoreWorker<FakeBackend> {
         ScoreWorker::new(
             FakeBackend {
+                context_limit: MAX_CONTEXT_TOKENS,
+                model_maximum: MAX_CONTEXT_TOKENS,
                 calls: 0,
                 fail_score: false,
                 invalid_output: false,
@@ -665,6 +693,36 @@ mod tests {
     }
     fn standard() -> Value {
         request(&[1, 2], &[2, 3], 8192, 1.22)
+    }
+
+    #[test]
+    fn extended_context_is_opt_in_and_failures_clear_the_exact_context_cache() {
+        let mut worker = worker(true, false);
+        worker.backend.model_maximum = 65_536;
+        assert_eq!(worker.max_context_tokens(), 16_384);
+        assert_eq!(post(&mut worker, request(&[1, 2], &[2, 3], 16_385, 1.0))["error"], "invalid_scoring_request");
+        assert_eq!(worker.backend.calls, 0);
+        worker.backend.context_limit = 65_536;
+        assert_eq!(worker.max_context_tokens(), 65_536);
+        let long = request(&[1, 2], &[2, 3], 65_536, 1.0);
+        assert_eq!(post(&mut worker, long.clone())["cache_hit"], false);
+        assert_eq!(post(&mut worker, long.clone())["cache_hit"], true);
+        assert_eq!(post(&mut worker, request(&[1, 2], &[2, 3], 16_384, 1.0))["cache_hit"], false);
+        assert_eq!(post(&mut worker, request(&[1, 2], &[2, 3], 65_537, 1.0))["error"], "invalid_scoring_request");
+        assert_eq!(post(&mut worker, long.clone())["cache_hit"], false);
+        worker.backend.model_maximum = 32_768;
+        assert_eq!(worker.max_context_tokens(), 32_768);
+        assert_eq!(post(&mut worker, long)["error"], "context_overflow");
+    }
+
+    #[test]
+    fn full_64k_production_request_fits_the_existing_byte_and_candidate_envelope() {
+        let input = vec![999_999; 65_536];
+        let request = request(&input, &[1, 2], 65_536, 1.0);
+        assert!(serde_json::to_vec(&request).unwrap().len() < MAX_REQUEST_BYTES);
+        assert_eq!(validate_score(&input, &[1, 2], 65_536, 1.0, 1_000_000, 65_536), Ok(()));
+        assert!(validate_score(&input, &(0..17).collect::<Vec<_>>(), 65_536, 1.0, 1_000_000, 65_536).is_err());
+        assert!(validate_score(&input, &[1, 2], 65_536, 1.0, 1_000_000, 16_384).is_err());
     }
 
     #[test]
@@ -926,19 +984,19 @@ mod tests {
         assert!(calibrated_probabilities(&[], 1.22).is_err());
         for temperature in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert!(calibrated_probabilities(&[0.0, 1.0], temperature).is_err());
-            assert!(validate_score(&[1], &[2, 3], 8192, temperature, 100).is_err());
+            assert!(validate_score(&[1], &[2, 3], 8192, temperature, 100, MAX_CONTEXT_TOKENS).is_err());
         }
         assert!(calibrated_probabilities(&[f64::NAN, 0.0], 1.22).is_err());
         assert!(candidate_readout(&[f32::INFINITY, 0.0], &[0, 1], 1.22).is_err());
         assert!(candidate_readout(&[0.0, 0.0], &[0, 2], 1.22).is_err());
-        assert!(validate_score(&[], &[2, 3], 8192, 1.22, 100).is_err());
-        assert!(validate_score(&[1], &[2, 2], 8192, 1.22, 100).is_err());
-        assert!(validate_score(&[100], &[2, 3], 8192, 1.22, 100).is_err());
-        assert!(validate_score(&[1], &[2], 8192, 1.22, 100).is_err());
-        assert!(validate_score(&[1], &(0..17).collect::<Vec<_>>(), 8192, 1.22, 100).is_err());
-        assert_eq!(validate_score(&[1, 2], &[2, 3], 1, 1.22, 100), Err("context_overflow"));
-        assert_eq!(validate_score(&[1, 2], &[2, 3], 2, 1.22, 100), Ok(()));
-        assert!(validate_score(&[1], &[2, 3], 16385, 1.22, 100).is_err());
+        assert!(validate_score(&[], &[2, 3], 8192, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
+        assert!(validate_score(&[1], &[2, 2], 8192, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
+        assert!(validate_score(&[100], &[2, 3], 8192, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
+        assert!(validate_score(&[1], &[2], 8192, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
+        assert!(validate_score(&[1], &(0..17).collect::<Vec<_>>(), 8192, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
+        assert_eq!(validate_score(&[1, 2], &[2, 3], 1, 1.22, 100, MAX_CONTEXT_TOKENS), Err("context_overflow"));
+        assert_eq!(validate_score(&[1, 2], &[2, 3], 2, 1.22, 100, MAX_CONTEXT_TOKENS), Ok(()));
+        assert!(validate_score(&[1], &[2, 3], 16385, 1.22, 100, MAX_CONTEXT_TOKENS).is_err());
     }
 
     #[test]

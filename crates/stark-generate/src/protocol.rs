@@ -76,6 +76,9 @@ pub fn main() {
                     // Preserve the ordinary loader's established unavailable-
                     // config error while keeping malformed metadata bounded.
                     Err(stark_engine::engine::hybrid::Error::Io(_)) => false,
+                    Err(stark_engine::engine::hybrid::Error::ConversionRequired) => {
+                        return Err("model_conversion_required");
+                    },
                     Err(_) => return Err("invalid_model_config"),
                 }
             } else {
