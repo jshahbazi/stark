@@ -70,3 +70,23 @@ Metal traces are removed to reclaim disk space. Compact private source
 snapshots, patches, aggregate results and their identities remain available.
 Historical binary hashes continue to identify the original runs even when
 their rebuildable executable files have been removed.
+
+## Model-copy cleanup after preserving the branch
+
+The optimized existing worker was subsequently validated directly against the
+retained original Lily checkpoint, revision
+`0f94842e3682b49acace4daeb4cf2e65a6f94f83`. Three sampled 4K/256 replays
+completed with the same output hash as the converted-format fast-path run:
+`621ca90417af420aaf9defdc957f7cc1f57f318c08d908be764834abb382b0d0`.
+Warm decode throughput was 77.1778 tok/s. Worker identity and sampling settings
+were unchanged; this check establishes that retaining the converted weight
+file is unnecessary for the current fast-path workload.
+
+At the user's request, the redundant canonical Uzu artifact and the older
+PipeNetwork Qwen checkpoint with different quantization were removed. Their
+configuration, source receipts, indexes and small metadata were saved under
+the ignored `runtime/native-hybrid/removed-model-metadata-20261030-v1/` in the
+primary checkout. The original Lily checkpoint, its quantization policy and
+the GLM checkpoint remain. Resume this experimental Uzu branch by reconstructing
+the canonical artifact from the retained pinned Lily source and verifying
+the recorded model hash before reusing earlier qualification results.
