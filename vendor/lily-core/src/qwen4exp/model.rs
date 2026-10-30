@@ -38,8 +38,9 @@ use crate::kernels::gdn::{
 };
 use crate::kernels::hc::{
     HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16, hc_inject_bf16,
-    hc_mix_bf16, hc_read_down_q8_rows, hc_read_down_q8_decode_rows, hc_read_up_mix_q8_cached, hc_read_up_mix_q8_cached_rows,
-    hc_read_up_mix_q8_rows, rmsnorm_grouped_bf16, silu_scaled_bf16,
+    hc_mix_bf16, hc_read_down_q8_decode_rows, hc_read_down_q8_rows,
+    hc_read_up_mix_q8_cached, hc_read_up_mix_q8_cached_rows, hc_read_up_mix_q8_rows,
+    rmsnorm_grouped_bf16, silu_scaled_bf16,
 };
 use crate::kernels::norm::rmsnorm_bf16;
 use crate::kernels::ple;
@@ -866,7 +867,6 @@ impl HcScratch {
             inv_rms: prefix_rows(&self.inv_rms, m)?,
         })
     }
-
 }
 
 /// Per-step intermediates, allocated once. Projection outputs that share one
@@ -2159,6 +2159,7 @@ impl Qwen4ExpModel {
         let pos = state.pos;
         let conv_slot = state.conv_slot;
         let verify = matches!(mode, BatchMode::Verify { .. } | BatchMode::VerifyHost);
+        let profile_exact = matches!(mode, BatchMode::VerifyHost);
         pass.set_label(if verify { "verify" } else { "prefill" });
         self.set_cache_position(verify.then_some(pos));
         if !verify && m > GATED_PREFILL_ROWS {
@@ -2191,6 +2192,9 @@ impl Qwen4ExpModel {
             None => Rope::Delta(state.rope_delta),
         };
 
+        if profile_exact {
+            pass.profile_stage(crate::metal::stage_profile::Phase::Embedding)?;
+        }
         quant::gather_rows_quant(
             ctx,
             &pass,
@@ -2323,9 +2327,23 @@ impl Qwen4ExpModel {
                     anyhow::anyhow!("verify pass without spec scratch")
                 })?;
                 if matches!(mode, BatchMode::VerifyHost) {
-                    self.hc_read_verify_exact(ctx, &pass, &self.weights.final_mixer, &ps.hyper, ps)?;
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
+                    self.hc_read_verify_exact(
+                        ctx,
+                        &pass,
+                        &self.weights.final_mixer,
+                        &ps.hyper,
+                        ps,
+                    )?;
                 } else {
-                    self.hc_read_batched(ctx, &pass, &self.weights.final_mixer, &ps.hyper, s, ps)?;
+                    self.hc_read_batched(
+                        ctx,
+                        &pass,
+                        &self.weights.final_mixer,
+                        &ps.hyper,
+                        s,
+                        ps,
+                    )?;
                 }
                 self.trace_stage(
                     ctx,
@@ -2337,6 +2355,7 @@ impl Qwen4ExpModel {
                 )?;
                 let logits = prefix_rows(&sp.logits, m)?;
                 if matches!(mode, BatchMode::VerifyHost) {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Head)?;
                     project_mat_decode_exact(
                         ctx,
                         &pass,
@@ -2365,6 +2384,7 @@ impl Qwen4ExpModel {
                 )?;
                 let BatchMode::Verify { params, step0 } = mode else {
                     s.sync.signal_done(&pass)?;
+                    pass.finish_stage_profile()?;
                     return pass.end();
                 };
                 // One draw per row; the rows share the sampler scratch (and
@@ -2429,8 +2449,12 @@ impl Qwen4ExpModel {
     ) -> Result<()> {
         let cfg = &self.config;
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
+        let profile_exact = capture.is_some_and(|c| c.exact);
         self.trace_stage(ctx, pass, layer_index, "input", hyper, ps.m)?;
         if let Some((w, p, pst)) = ple {
+            if profile_exact {
+                pass.profile_stage(crate::metal::stage_profile::Phase::Ple)?;
+            }
             self.ple_batched(
                 ctx,
                 pass,
@@ -2448,6 +2472,9 @@ impl Qwen4ExpModel {
 
         self.trace_stage(ctx, pass, layer_index, "post_ple", hyper, ps.m)?;
 
+        if profile_exact {
+            pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
+        }
         if capture.is_some_and(|c| c.exact) {
             self.hc_read_verify_exact(ctx, pass, &layer.attn_hc, hyper, ps)?;
         } else {
@@ -2456,6 +2483,9 @@ impl Qwen4ExpModel {
         self.trace_stage(ctx, pass, layer_index, "mixer_input", &ps.hc.mixed, ps.m)?;
         match (&layer.mixer, lstate) {
             (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
+                if profile_exact {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
+                }
                 self.gdn_batched(
                     ctx,
                     pass,
@@ -2474,6 +2504,7 @@ impl Qwen4ExpModel {
                 LayerState::Attn { k_cache, v_cache, idx_keys, blk_keys },
             ) => {
                 if capture.is_some_and(|c| c.exact) {
+                    pass.profile_stage(crate::metal::stage_profile::Phase::Qsa)?;
                     let Rope::Delta(delta) = rope else {
                         anyhow::bail!("exact verify requires text rotary positions");
                     };
@@ -2492,6 +2523,9 @@ impl Qwen4ExpModel {
         }
         pass.level_barrier(&[&ps.branch_out])?;
         self.trace_stage(ctx, pass, layer_index, "mixer_output", &ps.branch_out, ps.m)?;
+        if profile_exact {
+            pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
+        }
         hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
         pass.level_barrier(&[hyper])?;
 
@@ -2510,6 +2544,9 @@ impl Qwen4ExpModel {
             mlp_act: &ps.mlp_act,
             dequant: &s.dequant,
         };
+        if profile_exact {
+            pass.profile_stage(crate::metal::stage_profile::Phase::Moe)?;
+        }
         let injected = if capture.is_some_and(|c| c.exact) {
             prefill_moe_decode_exact_with_injection(
                 ctx,
@@ -2560,16 +2597,46 @@ impl Qwen4ExpModel {
         self.hc_read_rows(ctx, pass, hc, hyper, &ps.hc, ps.m, &s.dequant)
     }
 
-    fn hc_read_verify_exact(&self, ctx: &MetalContext, pass: &ComputePass<'_>,
-        hc: &HcWeights, hyper: &Tensor, ps: &PrefillScratch) -> Result<()> {
+    fn hc_read_verify_exact(
+        &self,
+        ctx: &MetalContext,
+        pass: &ComputePass<'_>,
+        hc: &HcWeights,
+        hyper: &Tensor,
+        ps: &PrefillScratch,
+    ) -> Result<()> {
         let (h, g) = (self.config.hidden_size, self.config.hc_count);
         let out = &ps.hc;
-        hc_read_down_q8_decode_rows(ctx, pass, hyper, &hc.norm, &hc.down,
-            hc.inject.as_ref(), &out.down, &out.inj, &out.inv_rms, &out.act,
-            h, g, self.config.rms_norm_eps, NORM_WEIGHT_BIAS)?;
+        hc_read_down_q8_decode_rows(
+            ctx,
+            pass,
+            hyper,
+            &hc.norm,
+            &hc.down,
+            hc.inject.as_ref(),
+            &out.down,
+            &out.inj,
+            &out.inv_rms,
+            &out.act,
+            h,
+            g,
+            self.config.rms_norm_eps,
+            NORM_WEIGHT_BIAS,
+        )?;
         pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
-        hc_read_up_mix_q8_cached_rows(ctx, pass, &hc.up, &out.act, hyper, &hc.norm,
-            &out.inv_rms, &out.mixed, h, g, NORM_WEIGHT_BIAS)?;
+        hc_read_up_mix_q8_cached_rows(
+            ctx,
+            pass,
+            &hc.up,
+            &out.act,
+            hyper,
+            &hc.norm,
+            &out.inv_rms,
+            &out.mixed,
+            h,
+            g,
+            NORM_WEIGHT_BIAS,
+        )?;
         pass.level_barrier(&[&out.mixed])
     }
 

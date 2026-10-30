@@ -20,23 +20,49 @@ pub const MAX_CONTEXT: usize = 16_384;
 
 /// Only aggregate static phase categories leave the native counter module.
 fn record_gpu_profile() {
+    record_gpu_profile_for(false);
+}
+
+fn record_gpu_profile_for(mtp_verify: bool) {
     if !profile::enabled() {
         return;
     }
     for pass in stage_profile::take() {
-        profile::record("qwen.mixed.gpu.command", pass.command_gpu_seconds, 0);
-        profile::record("qwen.mixed.gpu.measured", pass.measured_seconds, 0);
-        profile::record("qwen.mixed.profile_resolve", pass.resolve_seconds, 0);
+        let (command, measured, resolve) = if mtp_verify {
+            ("qwen.mtp.verify.gpu.command", "qwen.mtp.verify.gpu.measured", "qwen.mtp.verify.profile_resolve")
+        } else {
+            ("qwen.mixed.gpu.command", "qwen.mixed.gpu.measured", "qwen.mixed.profile_resolve")
+        };
+        profile::record(command, pass.command_gpu_seconds, 0);
+        profile::record(measured, pass.measured_seconds, 0);
+        profile::record(resolve, pass.resolve_seconds, 0);
         for sample in pass.samples {
-            let name = match sample.phase {
-                stage_profile::Phase::Embedding => "qwen.mixed.gpu.embedding",
-                stage_profile::Phase::Ple => "qwen.mixed.gpu.ple",
-                stage_profile::Phase::Hc => "qwen.mixed.gpu.hc",
-                stage_profile::Phase::Gdn => "qwen.mixed.gpu.gdn",
-                stage_profile::Phase::Qsa => "qwen.mixed.gpu.qsa",
-                stage_profile::Phase::Moe => "qwen.mixed.gpu.moe",
-                stage_profile::Phase::Head => "qwen.mixed.gpu.head",
-                stage_profile::Phase::Draw => "qwen.mixed.gpu.draw",
+            let name = if mtp_verify {
+                match sample.phase {
+                    stage_profile::Phase::Embedding => "qwen.mtp.verify.gpu.embedding",
+                    stage_profile::Phase::Ple => "qwen.mtp.verify.gpu.ple",
+                    stage_profile::Phase::Hc => "qwen.mtp.verify.gpu.hc",
+                    stage_profile::Phase::Gdn => "qwen.mtp.verify.gpu.gdn",
+                    stage_profile::Phase::Qsa => "qwen.mtp.verify.gpu.qsa",
+                    stage_profile::Phase::Moe => "qwen.mtp.verify.gpu.moe",
+                    stage_profile::Phase::MoeGateUp => "qwen.mtp.verify.gpu.moe_gate_up_shared_down",
+                    stage_profile::Phase::MoeDown => "qwen.mtp.verify.gpu.moe_down",
+                    stage_profile::Phase::Head => "qwen.mtp.verify.gpu.head",
+                    stage_profile::Phase::Draw => "qwen.mtp.verify.gpu.draw",
+                }
+            } else {
+                match sample.phase {
+                    stage_profile::Phase::Embedding => "qwen.mixed.gpu.embedding",
+                    stage_profile::Phase::Ple => "qwen.mixed.gpu.ple",
+                    stage_profile::Phase::Hc => "qwen.mixed.gpu.hc",
+                    stage_profile::Phase::Gdn => "qwen.mixed.gpu.gdn",
+                    stage_profile::Phase::Qsa => "qwen.mixed.gpu.qsa",
+                    stage_profile::Phase::Moe => "qwen.mixed.gpu.moe",
+                    stage_profile::Phase::MoeGateUp => "qwen.mixed.gpu.moe_gate_up_shared_down",
+                    stage_profile::Phase::MoeDown => "qwen.mixed.gpu.moe_down",
+                    stage_profile::Phase::Head => "qwen.mixed.gpu.head",
+                    stage_profile::Phase::Draw => "qwen.mixed.gpu.draw",
+                }
             };
             profile::record(name, sample.gpu_seconds, 0);
         }
@@ -555,31 +581,41 @@ impl MtpDecode<'_> {
         } else {
             Vec::new()
         };
-        self.stats.draft_seconds += started.elapsed().as_secs_f64();
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.draft_seconds += elapsed;
+        profile::record("qwen.mtp.draft", elapsed, 0);
         let started = Instant::now();
         let verified = self
             .model
             .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
             .map_err(|_| Error::Invalid("MTP verify failed"))?;
-        self.stats.verify_seconds += started.elapsed().as_secs_f64();
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.verify_seconds += elapsed;
+        profile::record("qwen.mtp.verify", elapsed, 0);
+        record_gpu_profile_for(true);
         let mut accepted = 0;
-        for (i, readout) in verified.logits.iter().enumerate() {
-            let proposal = proposals.get(i).copied();
-            let token = self.sampler.target(readout, proposal)?;
-            if token as usize >= self.model.config.vocab_size {
-                return Err(Error::Invalid("MTP target output ID"));
+        {
+            let _scope = profile::Scope::new("qwen.mtp.target_sampling");
+            for (i, readout) in verified.logits.iter().enumerate() {
+                let proposal = proposals.get(i).copied();
+                let token = self.sampler.target(readout, proposal)?;
+                if token as usize >= self.model.config.vocab_size {
+                    return Err(Error::Invalid("MTP target output ID"));
+                }
+                self.queue.push_back(token);
+                if proposal != Some(token) {
+                    break;
+                }
+                accepted += 1;
             }
-            self.queue.push_back(token);
-            if proposal != Some(token) {
-                break;
-            }
-            accepted += 1;
         }
         let started = Instant::now();
         self.model
             .finish_host_verify(self.context, self.state, self.scratch, &verified, accepted)
             .map_err(|_| Error::Invalid("MTP rollback failed"))?;
-        self.stats.rollback_seconds += started.elapsed().as_secs_f64();
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.rollback_seconds += elapsed;
+        profile::record("qwen.mtp.finish", elapsed, 0);
         self.stats.rounds += 1;
         self.stats.proposed += proposals.len();
         self.stats.accepted += accepted;

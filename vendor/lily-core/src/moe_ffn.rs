@@ -698,6 +698,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
         }
         None => &ms.indices,
     };
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeGateUp)?;
     moe::moe_gate_up_decode_rows(
         ctx,
         pass,
@@ -717,6 +718,7 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
         &ms.shared_out,
     )?;
     pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeDown)?;
     if let Some(injection) = injection {
         moe::moe_down_combine_inject_decode_rows(
             ctx,

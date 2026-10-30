@@ -30,6 +30,8 @@ pub enum Phase {
     Gdn,
     Qsa,
     Moe,
+    MoeGateUp,
+    MoeDown,
     Head,
     Draw,
 }
