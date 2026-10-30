@@ -21,9 +21,9 @@ use crate::engine::{
     RowsInFlight, RowsStepTiming, ScratchApi, SnapshotApi, VisionMode, VisionTower,
 };
 use crate::kernels::attention::{
-    KvCache, KvFormat, MAX_SEQ, k_norm_rope_scatter_decode, kv_dequant_q8,
-    q_norm_rope_split_decode, rope_neox, scatter_kv, sdpa_decode, sdpa_prefill,
-    sdpa_split_scratch_splits, split_q_gate,
+    KvCache, KvFormat, MAX_SEQ, k_norm_rope_scatter_decode_with_bias, kv_dequant_q8,
+    q_norm_rope_split_decode_with_bias, rope_neox, scatter_kv, sdpa_decode,
+    sdpa_prefill, sdpa_split_scratch_splits, split_q_gate,
 };
 use crate::kernels::elementwise::{
     add_bf16, copy_words, gather_row_bf16, sigmoid_mul_bf16,
@@ -69,7 +69,6 @@ use super::weights::{
 
 /// Every RMSNorm in this model is zero-centered: gain = 1 + weight. (The GDN
 /// GatedNorm is the exception and uses a plain gain.)
-pub(super) const NORM_WEIGHT_BIAS: f32 = 1.0;
 
 /// Prompt tokens processed by one prefill command buffer.
 const PREFILL_CHUNK: usize = 4096;
@@ -2439,7 +2438,7 @@ impl Qwen4ExpModel {
                 h,
                 g,
                 cfg.rms_norm_eps,
-                NORM_WEIGHT_BIAS,
+                self.config.norm_weight_bias(),
             )?;
             pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
             hc_read_up_mix_q8_rows(
@@ -2453,7 +2452,7 @@ impl Qwen4ExpModel {
                 &out.mixed,
                 h,
                 g,
-                NORM_WEIGHT_BIAS,
+                self.config.norm_weight_bias(),
             )?;
             return pass.level_barrier(&[&out.mixed]);
         }
@@ -2467,7 +2466,7 @@ impl Qwen4ExpModel {
             h,
             g,
             cfg.rms_norm_eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&out.hn])?;
         project_mat(ctx, pass, &out.hn, &hc.down, &out.down, dequant)?;
@@ -2510,7 +2509,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
@@ -2525,7 +2524,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
         ple::ple_gate_value_bf16(
@@ -2541,7 +2540,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
         if let Some(keep) = conv_capture {
@@ -2720,10 +2719,10 @@ impl Qwen4ExpModel {
             &w.k_norm,
             &ps.k_new,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         // Indexer: queries for this chunk, raw keys into the cache.
-        qsa::qsa_prep_q(
+        qsa::qsa_prep_q_with_bias(
             ctx,
             pass,
             &ps.idx_qk,
@@ -2735,10 +2734,19 @@ impl Qwen4ExpModel {
             theta,
             eps,
             rope,
+            self.config.norm_weight_bias(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &ps.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[&ps.q, &ps.gate, &ps.k_new, &ps.idx_q, idx_keys])?;
-        rmsnorm_bf16(ctx, pass, &ps.q, &w.q_norm, &ps.q, eps, NORM_WEIGHT_BIAS)?;
+        rmsnorm_bf16(
+            ctx,
+            pass,
+            &ps.q,
+            &w.q_norm,
+            &ps.q,
+            eps,
+            self.config.norm_weight_bias(),
+        )?;
         rope_neox(
             ctx,
             pass,
@@ -2756,7 +2764,7 @@ impl Qwen4ExpModel {
                 let first_block = p / ratio;
                 let complete = (p + m) / ratio;
                 if complete > first_block {
-                    qsa::qsa_block_keys(
+                    qsa::qsa_block_keys_with_bias(
                         ctx,
                         pass,
                         idx_keys,
@@ -2769,6 +2777,7 @@ impl Qwen4ExpModel {
                         theta,
                         eps,
                         rope,
+                        self.config.norm_weight_bias(),
                     )?;
                 }
             }
@@ -2781,7 +2790,7 @@ impl Qwen4ExpModel {
                 );
                 let first_min = pos.min / ratio;
                 if (pos.max + 1) / ratio > first_min {
-                    qsa::qsa_block_keys(
+                    qsa::qsa_block_keys_with_bias(
                         ctx,
                         pass,
                         idx_keys,
@@ -2794,6 +2803,7 @@ impl Qwen4ExpModel {
                         theta,
                         eps,
                         rope,
+                        self.config.norm_weight_bias(),
                     )?;
                 }
             }
@@ -3121,7 +3131,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         quant::gather_rows_quant(ctx, pass, &self.weights.embed_tokens, ids, &ps.x)?;
         if !overrides.is_empty() {
@@ -3146,7 +3156,7 @@ impl Qwen4ExpModel {
             &mtp.norm_embedding,
             &ps.x,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[hyper, &ps.x])?;
         project_mat(ctx, pass, &ps.x, &mtp.fc_embedding, &ps.branch_out, &s.dequant)?;
@@ -3238,7 +3248,7 @@ impl Qwen4ExpModel {
             &w.k_norm,
             &ps.k_new,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &ps.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[&ps.k_new, idx_keys])?;
@@ -3257,7 +3267,7 @@ impl Qwen4ExpModel {
         let first_block = pos / ratio;
         let complete = (pos + m) / ratio;
         if complete > first_block {
-            qsa::qsa_block_keys(
+            qsa::qsa_block_keys_with_bias(
                 ctx,
                 pass,
                 idx_keys,
@@ -3270,6 +3280,7 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 rope,
+                self.config.norm_weight_bias(),
             )?;
         }
         pass.level_barrier(&[&ps.k_new, blk_keys])?;
@@ -3481,7 +3492,7 @@ impl Qwen4ExpModel {
             h,
             g,
             cfg.rms_norm_eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
         hc_read_up_mix_q8_cached(
@@ -3495,7 +3506,7 @@ impl Qwen4ExpModel {
             &out.mixed,
             h,
             g,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&out.mixed])
     }
@@ -3524,7 +3535,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         quant::gemv_quant(ctx, pass, &w.key_proj, &p.emb, &p.key)?;
@@ -3539,7 +3550,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
         ple::ple_gate_value_bf16(
@@ -3555,7 +3566,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
         ple::ple_conv1d_step(
@@ -3668,15 +3679,35 @@ impl Qwen4ExpModel {
         quant::gemv_quant(ctx, pass, &w.qkv_proj, &s.hc.mixed, &s.attn_qkv)?;
         quant::gemv_quant(ctx, pass, &w.indexer.qk_proj, &s.hc.mixed, &s.idx_qk)?;
         pass.level_barrier(&[&s.attn_qkv, &s.idx_qk])?;
-        q_norm_rope_split_decode(
-            ctx, pass, &s.qg, &w.q_norm, &s.q, &s.gate, rot, pos, theta, eps,
+        q_norm_rope_split_decode_with_bias(
+            ctx,
+            pass,
+            &s.qg,
+            &w.q_norm,
+            &s.q,
+            &s.gate,
+            rot,
+            pos,
+            theta,
+            eps,
             rope_delta,
+            self.config.norm_weight_bias(),
         )?;
-        k_norm_rope_scatter_decode(
-            ctx, pass, &s.k_new, &w.k_norm, k_cache, rot, pos, theta, eps, rope_delta,
+        k_norm_rope_scatter_decode_with_bias(
+            ctx,
+            pass,
+            &s.k_new,
+            &w.k_norm,
+            k_cache,
+            rot,
+            pos,
+            theta,
+            eps,
+            rope_delta,
+            self.config.norm_weight_bias(),
         )?;
         scatter_kv(ctx, pass, v_cache, &s.v_new, pos)?;
-        qsa::qsa_prep_q(
+        qsa::qsa_prep_q_with_bias(
             ctx,
             pass,
             &s.idx_qk,
@@ -3688,6 +3719,7 @@ impl Qwen4ExpModel {
             theta,
             eps,
             Rope::Delta(rope_delta),
+            self.config.norm_weight_bias(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &s.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[
@@ -3702,7 +3734,7 @@ impl Qwen4ExpModel {
             // This token completes a block: its key becomes selectable from
             // the next position on (and this one, beyond the dense limit).
             let block = len / idx.compress_ratio - 1;
-            qsa::qsa_block_keys(
+            qsa::qsa_block_keys_with_bias(
                 ctx,
                 pass,
                 idx_keys,
@@ -3715,6 +3747,7 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 Rope::Delta(rope_delta),
+                self.config.norm_weight_bias(),
             )?;
             pass.level_barrier(&[blk_keys])?;
         }

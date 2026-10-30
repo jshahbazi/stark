@@ -99,6 +99,50 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// Direct views of the official MLX-Serve Qwen pack. Name aliases only:
+    /// every dtype, shape, file and byte interval remains unchanged. The
+    /// external PLE table is exposed as one logical shard without copying.
+    pub fn open_qwen_external_mlx(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let original = Self::open(dir)?;
+        let mut tensors = HashMap::new();
+        for (name, meta) in original.tensors {
+            let alias = if let Some(tail) = name.strip_prefix("language_model.model.") {
+                format!("model.language_model.{tail}")
+            } else if let Some(tail) = name.strip_prefix("language_model.lm_head.") {
+                format!("lm_head.{tail}")
+            } else if let Some(tail) = name.strip_prefix("language_model.mtp.") {
+                format!("mtp.{tail}")
+            } else {
+                name
+            };
+            let alias = alias.replace(".mlp.switch_mlp.", ".mlp.experts.");
+            ensure!(
+                tensors.insert(alias, meta).is_none(),
+                "official MLX alias collision"
+            );
+        }
+        let table = parse_shard_header(&dir.join("ngram_table.bin"))?;
+        ensure!(
+            table.len() == 3,
+            "official MLX PLE table must contain exactly three planes"
+        );
+        for (name, meta) in table {
+            ensure!(
+                matches!(name.as_str(), "weight" | "scales" | "biases"),
+                "unexpected official MLX PLE plane"
+            );
+            let alias = format!(
+                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.{name}"
+            );
+            ensure!(
+                tensors.insert(alias, meta).is_none(),
+                "official MLX PLE alias collision"
+            );
+        }
+        Ok(Self { tensors })
+    }
+
     /// Opens the checkpoint under `dir`, via `model.safetensors.index.json`
     /// when present or a single `model.safetensors` otherwise.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
@@ -432,4 +476,65 @@ fn parse_shard_header(path: &Path) -> Result<HashMap<String, TensorMeta>> {
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod official_mlx_alias_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+
+    #[test]
+    fn aliases_preserve_dtype_shape_intervals_and_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "stark-official-mlx-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let write = |name: &str, header: serde_json::Value, bytes: &[u8]| {
+            let header = serde_json::to_vec(&header).unwrap();
+            let mut f = File::create(dir.join(name)).unwrap();
+            f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(&header).unwrap();
+            f.write_all(bytes).unwrap();
+        };
+        write(
+            "model.safetensors",
+            json!({
+                "language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[1,1],"data_offsets":[0,4]},
+                "language_model.model.layers.0.attn_hyper_connection.block_inject_weight.weight":{"dtype":"BF16","shape":[1,2],"data_offsets":[4,8]},
+                "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight":{"dtype":"U32","shape":[1,1,1],"data_offsets":[8,12]}
+            }),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        );
+        write(
+            "ngram_table.bin",
+            json!({
+                "weight":{"dtype":"U32","shape":[1,4],"data_offsets":[0,16]},
+                "scales":{"dtype":"BF16","shape":[1,1],"data_offsets":[16,18]},
+                "biases":{"dtype":"BF16","shape":[1,1],"data_offsets":[18,20]}
+            }),
+            &[42; 20],
+        );
+        let ckpt = Checkpoint::open_qwen_external_mlx(&dir).unwrap();
+        assert_eq!(
+            ckpt.read("model.language_model.embed_tokens.weight").unwrap(),
+            [1, 2, 3, 4]
+        );
+        let gate = "model.language_model.layers.0.attn_hyper_connection.block_inject_weight.weight";
+        assert_eq!(ckpt.meta(gate).unwrap().dtype, SafetensorsDType::BF16);
+        assert_eq!(ckpt.meta(gate).unwrap().shape, [1, 2]);
+        assert_eq!(ckpt.read(gate).unwrap(), [5, 6, 7, 8]);
+        assert_eq!(
+            ckpt.read("model.language_model.layers.0.mlp.experts.gate_proj.weight")
+                .unwrap(),
+            [9, 10, 11, 12]
+        );
+        assert_eq!(ckpt.read("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.scales").unwrap(),[42,42]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

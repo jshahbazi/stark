@@ -46,6 +46,31 @@ Stark adds an explicit, disabled-by-default Metal 4 stage profiler in `src/metal
 
 Every successful pass wait also awaits all asynchronous completion feedback before accepting outputs, then checks the context's sticky fault. A signaled GPU fence alone is insufficient: framework error feedback can arrive afterward. Command resources remain held until these checks succeed, and failed checks retain the fault-safe cleanup drain.
 
+## Official MLX-Serve affine checkpoint adapter
+
+Stark adds direct loading for the external-table affine Qwen checkpoint dialect
+used by MLX-Serve 26.10.3. Tensor-name aliases retain each source file, byte
+interval, dtype and shape. The external `ngram_table.bin` is mapped as one
+logical PLE shard. Q4/Q8 code, scale and bias planes remain unchanged; the small
+BF16 HC injection and shared-expert gate matrices use direct BF16 projection
+dispatch with F32 accumulation. This adapter does not requantize weights.
+
+The PLE hash-control derivation in `src/qwen4exp/config.rs` is adapted from
+[`src/qwen4_exp.zig`](https://github.com/ddalcu/mlx-serve/blob/046b647686419df06c6c7132fb1d15d76185c3e5/src/qwen4_exp.zig)
+at MLX-Serve revision `046b647686419df06c6c7132fb1d15d76185c3e5`
+(tag `v26.10.3`), Copyright 2026 David Dalcu, MIT licensed. Its copyright and
+permission notice are retained in [LICENSE.mlx-serve](LICENSE.mlx-serve).
+The external-pack folded-normalization policy follows the same revision's
+[`resolveAndFoldQwen4Norms`](https://github.com/ddalcu/mlx-serve/blob/046b647686419df06c6c7132fb1d15d76185c3e5/src/model.zig).
+GDN's plain-gain normalization remains separate.
+
+The original Lily Metal shader bytes remain unchanged by this adapter.
+Folded attention/indexer normalization uses distinct compiled variants of the
+existing source; the original entry points retain Lily's delta-weight gains.
+`src/kernels/metal/official_gate.metal` is a new Stark implementation for the
+direct BF16 gates. Lily's affine HC, GDN, MoE and projection paths remain
+available under their existing precision and geometry admission checks.
+
 ## Validation status
 
 This provenance document records no build, runtime, numerical, source-parity, or performance validation. Do not infer upstream parity or a performance improvement from the extraction. Record future validation separately with its toolchain, revision, configuration, and results.

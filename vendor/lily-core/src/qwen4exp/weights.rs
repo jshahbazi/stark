@@ -193,6 +193,13 @@ pub struct SessionContext {
 /// every base must be in the same group, and the loader's row concatenation
 /// rejects slices of different packed widths anyway.
 fn expected_bits(storage: StoragePolicy, bases: &[&str]) -> usize {
+    if storage.external_mlx()
+        && bases.len() == 1
+        && (bases[0].ends_with(".block_inject_weight")
+            || bases[0].ends_with(".mlp.shared_expert_gate"))
+    {
+        return 16;
+    }
     let fixed_q8 = bases.len() == 1 && {
         let b = bases[0];
         b.ends_with(".mlp.gate")
@@ -579,7 +586,11 @@ pub fn load(
             && session_context.is_none(),
         "vendored Lily core requires resident experts and has no session persistence"
     );
-    let ckpt = Checkpoint::open(&dir)?;
+    let ckpt = if config.storage.external_mlx() {
+        Checkpoint::open_qwen_external_mlx(&dir)?
+    } else {
+        Checkpoint::open(&dir)?
+    };
     load_checkpoint(ctx, ckpt, config, storage, with_mtp, with_vision, machine_memory)
 }
 
@@ -609,7 +620,7 @@ pub fn load_checkpoint(
     // The config must match the weights in both directions: a tower in the
     // files that config.json does not declare would otherwise be skipped
     // silently; a declared tower whose tensors are missing fails below.
-    if config.vision.is_none() {
+    if config.vision.is_none() && !config.storage.external_mlx() {
         let stray = ckpt.names().filter(|n| n.starts_with(VISION_PREFIX)).count();
         ensure!(
             stray == 0,

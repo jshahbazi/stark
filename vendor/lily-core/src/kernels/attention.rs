@@ -13,6 +13,41 @@ pub const MAX_SEQ: usize = 262144;
 /// Attention Metal source shared with compile tests.
 pub const SOURCE: &str = include_str!("metal/attention.metal");
 
+/// Distinct compiled entry points for the official pack's already-folded
+/// Q/K gains. The Lily bias-one source and pipeline names stay unchanged.
+fn decode_norm_shader(
+    name: &'static str,
+    bias: f32,
+) -> Result<(&'static str, &'static str)> {
+    if bias == 1.0 {
+        return Ok((name, SOURCE));
+    }
+    ensure!(bias == 0.0, "attention norm convention");
+    static FOLDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let source = FOLDED.get_or_init(|| {
+        let mut source = SOURCE.replace("1.0f + float(w[tid])", "float(w[tid])");
+        for name in [
+            "q_norm_rope_split_decode_bf16",
+            "k_norm_rope_scatter_decode_bf16",
+            "k_norm_rope_scatter_decode_q8",
+        ] {
+            source = source.replace(name, &format!("{name}_folded"));
+        }
+        source
+    });
+    let name = match name {
+        "q_norm_rope_split_decode_bf16" => "q_norm_rope_split_decode_bf16_folded",
+        "k_norm_rope_scatter_decode_bf16" => "k_norm_rope_scatter_decode_bf16_folded",
+        "k_norm_rope_scatter_decode_q8" => "k_norm_rope_scatter_decode_q8_folded",
+        _ => anyhow::bail!("unknown attention norm kernel"),
+    };
+    Ok((name, source.as_str()))
+}
+
+#[cfg(test)]
+#[path = "official_attention_norm_tests.rs"]
+mod official_attention_norm_tests;
+
 // Head dimension compiled into the tensor-ops kernel.
 const FA_D: usize = 256;
 
@@ -400,6 +435,26 @@ pub fn q_norm_rope_split_decode(
     eps: f32,
     rope_delta: i64,
 ) -> Result<()> {
+    q_norm_rope_split_decode_with_bias(
+        ctx, pass, qg, w, q, gate, rot, pos, theta, eps, rope_delta, 1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn q_norm_rope_split_decode_with_bias(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qg: &Tensor,
+    w: &Tensor,
+    q: &Tensor,
+    gate: &Tensor,
+    rot: usize,
+    pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+    norm_bias: f32,
+) -> Result<()> {
     let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
     let d = *q.shape().last().ok_or_else(|| anyhow::anyhow!("0-d q"))?;
     let heads = q.numel() / d;
@@ -411,8 +466,9 @@ pub fn q_norm_rope_split_decode(
     for tensor in [qg, w, q, gate] {
         ensure!(tensor.dtype() == DType::BF16, "fused Q prep requires BF16");
     }
-    let pipeline =
-        ctx.pipeline("q_norm_rope_split_decode_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) =
+        decode_norm_shader("q_norm_rope_split_decode_bf16", norm_bias)?;
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[qg.binding(), w.binding(), q.binding(), gate.binding()],
@@ -443,6 +499,25 @@ pub fn k_norm_rope_scatter_decode<'c>(
     eps: f32,
     rope_delta: i64,
 ) -> Result<()> {
+    k_norm_rope_scatter_decode_with_bias(
+        ctx, pass, k, w, cache, rot, pos, theta, eps, rope_delta, 1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn k_norm_rope_scatter_decode_with_bias<'c>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    k: &Tensor,
+    w: &Tensor,
+    cache: impl Into<Kv<'c>>,
+    rot: usize,
+    pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+    norm_bias: f32,
+) -> Result<()> {
     let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
     let cache = cache.into();
     let format = cache.format()?;
@@ -467,11 +542,9 @@ pub fn k_norm_rope_scatter_decode<'c>(
     let grid = Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (256, 1, 1) };
     match format {
         KvFormat::Bf16 => {
-            let pipeline = ctx.pipeline(
-                "k_norm_rope_scatter_decode_bf16",
-                SOURCE,
-                MslVersion::V3_1,
-            )?;
+            let (name, source) =
+                decode_norm_shader("k_norm_rope_scatter_decode_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_at(
                 &pipeline,
                 &[k.binding(), w.binding(), cache.values.binding()],
@@ -480,11 +553,9 @@ pub fn k_norm_rope_scatter_decode<'c>(
             )
         }
         KvFormat::Q8 => {
-            let pipeline = ctx.pipeline(
-                "k_norm_rope_scatter_decode_q8",
-                SOURCE,
-                MslVersion::V3_1,
-            )?;
+            let (name, source) =
+                decode_norm_shader("k_norm_rope_scatter_decode_q8", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_at(
                 &pipeline,
                 &[

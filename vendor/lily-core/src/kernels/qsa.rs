@@ -11,6 +11,34 @@ use crate::metal::{ComputePass, Grid, MetalContext, MslVersion, Param};
 use crate::tensor::{DType, Tensor};
 
 const SOURCE: &str = include_str!("metal/qsa.metal");
+
+fn norm_shader(name: &'static str, bias: f32) -> Result<(&'static str, &'static str)> {
+    if bias == 1.0 {
+        return Ok((name, SOURCE));
+    }
+    ensure!(bias == 0.0, "QSA norm convention");
+    static FOLDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let source = FOLDED.get_or_init(|| {
+        let mut source = SOURCE.replace("1.0f + float(w[tid])", "float(w[tid])");
+        for name in [
+            "qsa_prep_q_bf16",
+            "qsa_prep_q_mrope_bf16",
+            "qsa_block_keys_bf16",
+            "qsa_block_keys_mrope_bf16",
+        ] {
+            source = source.replace(name, &format!("{name}_folded"));
+        }
+        source
+    });
+    let name = match name {
+        "qsa_prep_q_bf16" => "qsa_prep_q_bf16_folded",
+        "qsa_prep_q_mrope_bf16" => "qsa_prep_q_mrope_bf16_folded",
+        "qsa_block_keys_bf16" => "qsa_block_keys_bf16_folded",
+        "qsa_block_keys_mrope_bf16" => "qsa_block_keys_mrope_bf16_folded",
+        _ => anyhow::bail!("unknown QSA norm kernel"),
+    };
+    Ok((name, source.as_str()))
+}
 const TG: usize = 256;
 /// Largest split (attended tokens per threadgroup) of the sparse attention
 /// kernel: its threadgroup arrays are sized for it.
@@ -105,6 +133,26 @@ pub fn qsa_prep_q<'t>(
     eps: f32,
     rope: Rope<'_>,
 ) -> Result<()> {
+    qsa_prep_q_with_bias(
+        ctx, pass, qk, w, q, n_heads, rot, base_pos, theta, eps, rope, 1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qsa_prep_q_with_bias<'t>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qk: &Tensor,
+    w: &Tensor,
+    q: &Tensor,
+    n_heads: usize,
+    rot: usize,
+    base_pos: impl Into<Pos<'t>>,
+    theta: f32,
+    eps: f32,
+    rope: Rope<'_>,
+    norm_bias: f32,
+) -> Result<()> {
     let base_pos = base_pos.into();
     let d = INDEXER_D;
     ensure!(
@@ -126,7 +174,8 @@ pub fn qsa_prep_q<'t>(
     match rope {
         Rope::Delta(delta) => {
             let delta = Rope::delta_i32(delta)?.to_ne_bytes();
-            let pipeline = ctx.pipeline("qsa_prep_q_bf16", SOURCE, MslVersion::V3_1)?;
+            let (name, source) = norm_shader("qsa_prep_q_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_with(
                 &pipeline,
                 &[qk.binding(), w.binding(), q.binding()],
@@ -145,8 +194,8 @@ pub fn qsa_prep_q<'t>(
         Rope::Rows { positions, base } => {
             let pos_base =
                 Rope::check_rows(positions, base, base_pos.min, base_pos.max, m)?;
-            let pipeline =
-                ctx.pipeline("qsa_prep_q_mrope_bf16", SOURCE, MslVersion::V3_1)?;
+            let (name, source) = norm_shader("qsa_prep_q_mrope_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_with(
                 &pipeline,
                 &[qk.binding(), w.binding(), q.binding(), positions.binding()],
@@ -219,6 +268,39 @@ pub fn qsa_block_keys<'t>(
     eps: f32,
     rope: Rope<'_>,
 ) -> Result<()> {
+    qsa_block_keys_with_bias(
+        ctx,
+        pass,
+        cache,
+        w,
+        blocks,
+        ratio,
+        first_block,
+        count,
+        rot,
+        theta,
+        eps,
+        rope,
+        1.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn qsa_block_keys_with_bias<'t>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    cache: &Tensor,
+    w: &Tensor,
+    blocks: &Tensor,
+    ratio: usize,
+    first_block: impl Into<Pos<'t>>,
+    count: impl Into<Pos<'t>>,
+    rot: usize,
+    theta: f32,
+    eps: f32,
+    rope: Rope<'_>,
+    norm_bias: f32,
+) -> Result<()> {
     let (first_block, count) = (first_block.into(), count.into());
     if count.max == 0 {
         return Ok(());
@@ -250,8 +332,8 @@ pub fn qsa_block_keys<'t>(
     match rope {
         Rope::Delta(delta) => {
             let delta = Rope::delta_i32(delta)?.to_ne_bytes();
-            let pipeline =
-                ctx.pipeline("qsa_block_keys_bf16", SOURCE, MslVersion::V3_1)?;
+            let (name, source) = norm_shader("qsa_block_keys_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_with(
                 &pipeline,
                 &[cache.binding(), w.binding(), blocks.binding()],
@@ -279,8 +361,8 @@ pub fn qsa_block_keys<'t>(
                 last_first_token,
                 1,
             )?;
-            let pipeline =
-                ctx.pipeline("qsa_block_keys_mrope_bf16", SOURCE, MslVersion::V3_1)?;
+            let (name, source) = norm_shader("qsa_block_keys_mrope_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_with(
                 &pipeline,
                 &[cache.binding(), w.binding(), blocks.binding(), positions.binding()],
@@ -731,3 +813,7 @@ pub fn qsa_attention_query<'t, 'c>(
         },
     )
 }
+
+#[cfg(test)]
+#[path = "official_qsa_norm_tests.rs"]
+mod official_qsa_norm_tests;

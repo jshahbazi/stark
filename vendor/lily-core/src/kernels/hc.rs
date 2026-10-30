@@ -187,7 +187,12 @@ pub fn fused_read_supported(
         && h.is_multiple_of(16)
         && q8(down)
         && q8(up)
-        && inject.is_none_or(|w| q8(w) && w.group_size == down.group_size)
+        && inject.is_none_or(|w| {
+            (q8(w) && w.group_size == down.group_size)
+                || (w.bits == 16
+                    && w.codes.dtype() == DType::BF16
+                    && w.in_features() == groups * h)
+        })
 }
 
 /// Validates the arguments of the fused down kernels for `rows` rows;
@@ -228,13 +233,21 @@ fn check_read_down(
     let n_inj = match inject {
         Some(inject) => {
             let n = inject.out_features();
-            check_hc_q8(inject, n, k, "write-gate inject weight")?;
-            ensure!(
-                inject.group_size == down.group_size,
-                "inject group size {} != down group size {}",
-                inject.group_size,
-                down.group_size
-            );
+            if inject.bits == 16 {
+                ensure!(
+                    inject.codes.dtype() == DType::BF16
+                        && inject.codes.shape() == [n, k],
+                    "BF16 write-gate shape"
+                );
+            } else {
+                check_hc_q8(inject, n, k, "write-gate inject weight")?;
+                ensure!(
+                    inject.group_size == down.group_size,
+                    "inject group size {} != down group size {}",
+                    inject.group_size,
+                    down.group_size
+                );
+            }
             ensure!(
                 inj_out.numel() == rows * n && inj_out.dtype() == DType::BF16,
                 "inject output must be BF16 [{rows}, {n}]"
@@ -273,6 +286,29 @@ fn dispatch_read_down(
     eps: f32,
     w_bias: f32,
 ) -> Result<()> {
+    if let Some(inject) = inject.filter(|weight| weight.bits == 16) {
+        dispatch_read_down(
+            ctx,
+            pass,
+            name,
+            hyper,
+            w,
+            down,
+            None,
+            down_out,
+            inj_out,
+            inv_rms,
+            act_out,
+            (r, 0),
+            h,
+            groups,
+            eps,
+            w_bias,
+        )?;
+        return crate::kernels::quant::hc_dense_bf16_inject(
+            ctx, pass, hyper, w, inject, inj_out, h, groups, eps, w_bias,
+        );
+    }
     // Without an inject weight its bindings are never read; bind the down
     // weight (and output) so every slot names a resident buffer.
     let (inj_w, inj_y) = match inject {

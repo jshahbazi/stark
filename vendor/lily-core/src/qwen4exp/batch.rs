@@ -628,7 +628,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
@@ -643,7 +643,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
         ple::ple_gate_value_bf16(
@@ -659,7 +659,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
         for (r, row) in rows.iter().enumerate() {
@@ -821,7 +821,7 @@ impl Qwen4ExpModel {
                 a.pos,
                 a.rope_delta
             );
-            q_norm_rope_split_decode(
+            q_norm_rope_split_decode_with_bias(
                 ctx,
                 pass,
                 &ps.qg.view(r * nq * 2 * hd, &[nq, 2 * hd])?,
@@ -833,8 +833,9 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 a.rope_delta,
+                self.config.norm_weight_bias(),
             )?;
-            k_norm_rope_scatter_decode(
+            k_norm_rope_scatter_decode_with_bias(
                 ctx,
                 pass,
                 &ps.k_new.view(r * nkv * hd, &[nkv, hd])?,
@@ -845,6 +846,7 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 a.rope_delta,
+                self.config.norm_weight_bias(),
             )?;
             scatter_kv(
                 ctx,
@@ -853,7 +855,7 @@ impl Qwen4ExpModel {
                 &ps.v_new.view(r * nkv * hd, &[nkv, hd])?,
                 a.pos,
             )?;
-            qsa::qsa_prep_q(
+            qsa::qsa_prep_q_with_bias(
                 ctx,
                 pass,
                 &idx_qk(r)?,
@@ -865,6 +867,7 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 Rope::Delta(a.rope_delta),
+                self.config.norm_weight_bias(),
             )?;
             qsa::qsa_scatter_keys(ctx, pass, &idx_qk(r)?, a.idx_keys, nh, a.pos)?;
         }
@@ -876,7 +879,7 @@ impl Qwen4ExpModel {
         for a in rows {
             let len = a.pos + 1;
             if len.is_multiple_of(ratio) {
-                qsa::qsa_block_keys(
+                qsa::qsa_block_keys_with_bias(
                     ctx,
                     pass,
                     a.idx_keys,
@@ -889,6 +892,7 @@ impl Qwen4ExpModel {
                     theta,
                     eps,
                     Rope::Delta(a.rope_delta),
+                    self.config.norm_weight_bias(),
                 )?;
                 completes = true;
             }
@@ -1019,7 +1023,7 @@ impl Qwen4ExpModel {
                 a.pos,
                 a.rope_delta
             );
-            k_norm_rope_scatter_decode(
+            k_norm_rope_scatter_decode_with_bias(
                 ctx,
                 pass,
                 &ps.k_new.view(r * nkv * hd, &[nkv, hd])?,
@@ -1030,6 +1034,7 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 a.rope_delta,
+                self.config.norm_weight_bias(),
             )?;
             scatter_kv(
                 ctx,
@@ -1046,7 +1051,7 @@ impl Qwen4ExpModel {
         for a in rows {
             let len = a.pos + 1;
             if len.is_multiple_of(ratio) {
-                qsa::qsa_block_keys(
+                qsa::qsa_block_keys_with_bias(
                     ctx,
                     pass,
                     a.idx_keys,
@@ -1059,6 +1064,7 @@ impl Qwen4ExpModel {
                     theta,
                     eps,
                     Rope::Delta(a.rope_delta),
+                    self.config.norm_weight_bias(),
                 )?;
                 completes = true;
             }
@@ -1125,7 +1131,7 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         quant::gather_rows_quant(ctx, pass, &self.weights.embed_tokens, ids, &ps.x)?;
         pass.level_barrier(&[&ps.hc.hn, &ps.x])?;
@@ -1146,7 +1152,7 @@ impl Qwen4ExpModel {
             &mtp.norm_embedding,
             &ps.x,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[hyper, &ps.x])?;
         project_mat(ctx, pass, &ps.x, &mtp.fc_embedding, &ps.branch_out, &s.dequant)?;

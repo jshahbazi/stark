@@ -97,7 +97,13 @@ enum Forward {
 
 fn mixed_precision_checkpoint(config: &Value) -> bool {
     config.get("model_type").and_then(Value::as_str) == Some("qwen4_exp")
-        && config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
+        && (config.pointer("/lily/format").and_then(Value::as_str) == Some("qwen4_exp-affine-v1")
+            || (config.pointer("/ngram_table/file").and_then(Value::as_str) == Some("ngram_table.bin")
+                && config.pointer("/ngram_table/bits").and_then(Value::as_u64) == Some(4)
+                && config.pointer("/ngram_table/group_size").and_then(Value::as_u64) == Some(32)
+                && config.pointer("/quantization/mode").and_then(Value::as_str) == Some("affine")
+                && config.pointer("/quantization/bits").and_then(Value::as_u64) == Some(4)
+                && config.pointer("/quantization/group_size").and_then(Value::as_u64) == Some(64)))
 }
 
 pub struct Model {
@@ -430,6 +436,29 @@ mod tests {
         assert!(!mixed_precision_checkpoint(&serde_json::json!({
             "model_type": "flint", "lily": {"format": "qwen4_exp-affine-v1"}
         })));
+    }
+
+    #[stark_test]
+    fn mixed_precision_selection_admits_exact_external_affine_contract() {
+        let config = serde_json::json!({
+            "model_type": "qwen4_exp",
+            "quantization": {"mode": "affine", "bits": 4, "group_size": 64},
+            "ngram_table": {"file": "ngram_table.bin", "bits": 4, "group_size": 32}
+        });
+        assert!(mixed_precision_checkpoint(&config));
+        for (pointer, replacement) in [
+            ("/model_type", serde_json::json!("flint")),
+            ("/quantization/mode", serde_json::json!("nvfp4")),
+            ("/quantization/bits", serde_json::json!(8)),
+            ("/quantization/group_size", serde_json::json!(32)),
+            ("/ngram_table/file", serde_json::json!("../ngram_table.bin")),
+            ("/ngram_table/bits", serde_json::json!(8)),
+            ("/ngram_table/group_size", serde_json::json!(64)),
+        ] {
+            let mut invalid = config.clone();
+            *invalid.pointer_mut(pointer).unwrap() = replacement;
+            assert!(!mixed_precision_checkpoint(&invalid), "{pointer}");
+        }
     }
 
     #[stark_test]
