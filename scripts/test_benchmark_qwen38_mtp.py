@@ -118,9 +118,7 @@ def test_same_worker_pairs_routes_and_emits_private_aggregates(tmp_path, top_k):
         "top_p": 0.95,
         **({} if top_k == 0 else {"top_k": top_k}),
     }
-    generated_requests = [
-        request for request in worker.requests if request["operation"] == "generate"
-    ]
+    generated_requests = [request for request in worker.requests if request["operation"] == "generate"]
     assert [request["mtp_drafts"] for request in generated_requests[:2]] == [0, 2]
     assert len(generated_requests) == 2 + 2 * args.blocks
     assert all(set(pair["order"]) == {"off", "on"} for pair in report["pairs"])
@@ -128,8 +126,7 @@ def test_same_worker_pairs_routes_and_emits_private_aggregates(tmp_path, top_k):
     other = "on" if leading[0] == "off" else "off"
     assert leading == [leading[0], other, other, leading[0]]
     assert all(
-        pair["routes"]["off"]["requested_drafts"] == 0
-        and pair["routes"]["on"]["requested_drafts"] == 2
+        pair["routes"]["off"]["requested_drafts"] == 0 and pair["routes"]["on"]["requested_drafts"] == 2
         for pair in report["pairs"]
     )
     assert all(
@@ -189,9 +186,7 @@ def test_rejects_output_limits_outside_benchmark_range(tmp_path, tokens):
         run(args, worker_factory=FakeWorker)
 
 
-@pytest.mark.parametrize(
-    "bad_reply", ["missing_decode", "out_of_vocab", "off_activity"]
-)
+@pytest.mark.parametrize("bad_reply", ["missing_decode", "out_of_vocab", "off_activity"])
 def test_rejects_invalid_timing_ids_or_disabled_route_stats(tmp_path, bad_reply):
     args = make_args(tmp_path)
 

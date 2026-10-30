@@ -49,12 +49,7 @@ def validate_args(args: argparse.Namespace) -> None:
         raise ValueError("invalid_benchmark_limits")
     if args.input_tokens + args.tokens > 16384:
         raise ValueError("context_limit_exceeded")
-    if (
-        args.top_k < 0
-        or not 0 < args.top_p <= 1
-        or not math.isfinite(args.top_p)
-        or not 0 <= args.seed <= 2**64 - 1
-    ):
+    if args.top_k < 0 or not 0 < args.top_p <= 1 or not math.isfinite(args.top_p) or not 0 <= args.seed <= 2**64 - 1:
         raise ValueError("invalid_sampling_parameters")
 
 
@@ -66,9 +61,7 @@ def sampling_options(args: argparse.Namespace) -> dict:
 
 
 def _valid_ids(value) -> bool:
-    return isinstance(value, list) and all(
-        type(token) is int and token >= 0 for token in value
-    )
+    return isinstance(value, list) and all(type(token) is int and token >= 0 for token in value)
 
 
 def _validate_result(
@@ -112,30 +105,17 @@ def _validate_result(
         if type(value) is not int or value < 0:
             raise ValueError("invalid_mtp_statistics")
         counts[key] = value
-    if (
-        counts["accepted"] > counts["proposed"]
-        or counts["verified_rows"] < counts["accepted"]
-    ):
+    if counts["accepted"] > counts["proposed"] or counts["verified_rows"] < counts["accepted"]:
         raise ValueError("invalid_mtp_statistics")
-    timings = {
-        key: stats.get(key)
-        for key in ("draft_seconds", "verify_seconds", "rollback_seconds")
-    }
+    timings = {key: stats.get(key) for key in ("draft_seconds", "verify_seconds", "rollback_seconds")}
     if any(
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        or value < 0
+        not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value) or value < 0
         for key, value in timings.items()
     ):
         raise ValueError("invalid_mtp_timings")
     if route == "off" and any((*counts.values(), *timings.values())):
         raise ValueError("disabled_mtp_has_activity")
-    if (
-        route == "on"
-        and args.tokens > drafts + 1
-        and (counts["rounds"] == 0 or counts["proposed"] == 0)
-    ):
+    if route == "on" and args.tokens > drafts + 1 and (counts["rounds"] == 0 or counts["proposed"] == 0):
         raise ValueError("enabled_mtp_has_no_draft_activity")
     decode_seconds = result.get("decode_seconds")
     if (
@@ -162,21 +142,14 @@ def _validate_result(
     }
     for key in ("prefill_seconds", "output_tokens_per_second", "generation_seconds"):
         value = result.get(key)
-        if (
-            isinstance(value, (int, float))
-            and not isinstance(value, bool)
-            and math.isfinite(value)
-            and value >= 0
-        ):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
             item[key] = value
     return item
 
 
 def _atomic_report(path: Path, report: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2)
@@ -260,9 +233,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         with _profile_env_removed():
             worker = worker_factory(args.worker.resolve(), args.model.resolve(), 3600)
     else:
-        worker = worker_factory(
-            args.worker.resolve(), args.model.resolve(), 3600, env=env
-        )
+        worker = worker_factory(args.worker.resolve(), args.model.resolve(), 3600, env=env)
     try:
         ready = worker.read()
         if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
@@ -279,14 +250,9 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         if type(vocab_size) is not int or vocab_size < 1:
             raise ValueError("worker_vocabulary_unavailable")
         worker_context = ready.get("max_context_tokens", 16384)
-        if (
-            type(worker_context) is not int
-            or args.input_tokens + args.tokens > worker_context
-        ):
+        if type(worker_context) is not int or args.input_tokens + args.tokens > worker_context:
             raise ValueError("worker_context_limit_exceeded")
-        tokenized = worker.request(
-            {"operation": "tokenize", "text": corpus_text, "add_special_tokens": False}
-        )
+        tokenized = worker.request({"operation": "tokenize", "text": corpus_text, "add_special_tokens": False})
         tokenized_ids = tokenized.get("token_ids")
         if (
             "error" in tokenized
@@ -349,10 +315,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
                 item["block"] = block
                 pair["routes"][route] = item
                 report["requests"].append(item)
-            if any(
-                pair["routes"][route]["sampled_tokens"] != args.tokens
-                for route in order
-            ):
+            if any(pair["routes"][route]["sampled_tokens"] != args.tokens for route in order):
                 raise ValueError("unequal_output_counts")
             report.setdefault("pairs", []).append(pair)
 
@@ -360,11 +323,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         for route in ("off", "on"):
             items = [item for item in report["requests"] if item["route"] == route]
             route_hashes = [item["output_sha256"] for item in items]
-            route_hashes.extend(
-                item["output_sha256"]
-                for item in report["warmups"]
-                if item["route"] == route
-            )
+            route_hashes.extend(item["output_sha256"] for item in report["warmups"] if item["route"] == route)
             seconds = sum(item["decode_seconds"] for item in items)
             steps = sum(item["sampled_tokens"] - 1 for item in items)
             report["route_summary"][route] = {
@@ -372,9 +331,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
                 "pooled_decode_steps": steps,
                 "pooled_decode_seconds": seconds,
                 "pooled_decode_tokens_per_second": steps / seconds if seconds else None,
-                "median_wall_seconds": statistics.median(
-                    item["wall_seconds"] for item in items
-                ),
+                "median_wall_seconds": statistics.median(item["wall_seconds"] for item in items),
                 "deterministic_within_route": len(set(route_hashes)) == 1,
                 "mtp_totals": {
                     key: sum(item["mtp"][key] for item in items)
@@ -384,10 +341,8 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
         report["paired_block_rates"] = [
             {
                 "block": pair["block"],
-                "off_tok_s": (pair["routes"]["off"]["sampled_tokens"] - 1)
-                / pair["routes"]["off"]["decode_seconds"],
-                "on_tok_s": (pair["routes"]["on"]["sampled_tokens"] - 1)
-                / pair["routes"]["on"]["decode_seconds"],
+                "off_tok_s": (pair["routes"]["off"]["sampled_tokens"] - 1) / pair["routes"]["off"]["decode_seconds"],
+                "on_tok_s": (pair["routes"]["on"]["sampled_tokens"] - 1) / pair["routes"]["on"]["decode_seconds"],
             }
             for pair in report["pairs"]
         ]
@@ -395,23 +350,12 @@ def run(args: argparse.Namespace, worker_factory=Worker, *, rng=None) -> dict:
             report["route_summary"]["off"]["deterministic_within_route"]
             and report["route_summary"]["on"]["deterministic_within_route"]
             and len(
-                {
-                    item["output_sha256"]
-                    for item in report["requests"]
-                    if item["route"] == "off"
-                }
-                | {
-                    item["output_sha256"]
-                    for item in report["requests"]
-                    if item["route"] == "on"
-                }
+                {item["output_sha256"] for item in report["requests"] if item["route"] == "off"}
+                | {item["output_sha256"] for item in report["requests"] if item["route"] == "on"}
             )
             == 1
         )
-        report["passed"] = all(
-            value["deterministic_within_route"]
-            for value in report["route_summary"].values()
-        )
+        report["passed"] = all(value["deterministic_within_route"] for value in report["route_summary"].values())
         _atomic_report(args.output, report)
         return report
     finally:
@@ -428,9 +372,7 @@ def main(argv=None) -> int:
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--blocks", type=int, default=4)
     parser.add_argument("--drafts", type=int, choices=(1, 2, 3), default=1)
-    parser.add_argument(
-        "--top-k", type=int, default=20, help="Zero disables top-k filtering."
-    )
+    parser.add_argument("--top-k", type=int, default=20, help="Zero disables top-k filtering.")
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args(argv)
