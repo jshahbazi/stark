@@ -226,7 +226,9 @@ between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
 The generation worker can also load the checkpoint's existing MTP head and
 enable one to three draft tokens per request through `mtp_drafts`. It is off
-by default. Draft and target distributions use Stark's complete-logit CPU
+by default. The generic `mtp: true` request option chooses the loaded model's
+recommended count; readiness exposes per-model MTP support and limits.
+Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
 quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,
 captures GDN and convolution state, and rejection restores the committed

@@ -32,6 +32,7 @@ The client renders the converted model's chat template in a Jinja sandbox, keeps
 | `--context-tokens N` | smaller of 8192 and the worker limit | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
+| `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
 Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes the same settings through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)).
@@ -57,7 +58,7 @@ Start the worker with `--model-path PATH`, where `PATH` is a converted model dir
 On success the first line is:
 
 ```json
-{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":16384,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1"}
+{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":16384,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1","mtp":{"supported":false,"max_drafts":0,"recommended_drafts":0,"default_drafts":0,"operations":[]}}
 ```
 
 | Field | Meaning |
@@ -70,6 +71,7 @@ On success the first line is:
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
+| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; see [MTP](#multi-token-prediction) |
 
 An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
 
@@ -111,7 +113,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, 1 through 4,096. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
-| `mtp_drafts` | Optional integer, default 0 (disabled). Values 1–3 enable exact MTP on a supported native Lily or official mixed-affine Qwen3.8 checkpoint containing its trained head; other models return `mtp_not_supported`. Applies to text `generate` only. |
+| `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
+| `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -159,18 +162,52 @@ over those candidates; omitting top-k uses the full vocabulary. Seeded requests
 are reproducible on the same build and hardware; they are not expected to match
 another engine token for token.
 
-### Qwen3.8 multi-token prediction
+<a id="qwen38-multi-token-prediction"></a>
 
-An admitted native Qwen3.8 checkpoint containing its trained MTP head adds
-`mtp: {"supported": true, "max_drafts": 3, "default_drafts": 0,
-"sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness for Lily-format weights.
-Official mixed-affine weights report
-`verification: "batched-affine-decode-exact-v1"`.
+### Multi-token prediction
+
+Every worker reports `mtp` capabilities from its loaded backend. Unsupported
+models report `supported: false`, zero draft counts and an empty `operations`
+list. Supported models report their own recommendation and maximum:
+
+```json
+{"supported":true,"max_drafts":3,"recommended_drafts":2,"default_drafts":0,"sampling":"exact-rejection-v1","verification":"batched-affine-decode-exact-v1","operations":["generate"]}
+```
+
+The contract supports additional model backends without a global draft limit
+or model-name check in callers. A backend advertises support only after it
+has loaded and admitted its MTP implementation. A checkpoint's declared head
+alone does not establish runtime support. Capabilities stay fixed for the
+worker lifetime; a contradictory backend capability or completion
+acknowledgement fences the worker.
+
+Use `"mtp": true` for the recommendation, `"mtp": false` to disable it, or
+`"mtp_drafts": N` for an explicit supported depth. Omission disables MTP in
+the native protocol. `mtp` requires a boolean and `mtp_drafts` an unsigned
+integer; `null` and conflicting selectors are rejected. Completion metadata
+reports the resolved `enabled` state and `drafts` limit,
+`sampling` and `verification`, plus backend counters when available.
+Selection is request-local, so changing it requires no model reload and does
+not carry a mode into later native requests. Current operations are text-only.
+
+Native Lily and official mixed-affine Qwen3.8 checkpoints with their trained
+head currently implement this capability. They recommend two drafts with a
+maximum of three. Lily-format weights report
+`verification: "batched-decode-exact-v1"`; official mixed-affine weights
+report `verification: "batched-affine-decode-exact-v1"`.
 Responses retain the same route label. The generation worker loads
 the head with the checkpoint's existing quantization, including its memory
 cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized and start with fresh state.
+
+The desktop backend remembers an opt-in preference per registered model;
+its API can inherit or override that preference. See
+[the backend configuration contract](LOCAL_API.md#mtp-capabilities-and-per-model-preferences).
+Terminal `--mtp` applies only to that terminal session and does not modify the
+model library. Older exact-MTP workers without a recommendation remain
+compatible: the Python host uses at most two drafts, bounded by their
+advertised maximum. Missing or malformed capabilities keep MTP unavailable.
 
 Both target and draft use complete F32 readouts and the existing temperature,
 top-k, top-p and min-p filtering policy. The host accepts a proposed token with

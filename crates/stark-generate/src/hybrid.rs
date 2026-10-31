@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, finite_guard, profile};
+use stark_engine::engine::hybrid::{Model, MtpCapabilities, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
@@ -401,11 +401,8 @@ impl GenerationBackend for HybridBackend {
     fn runtime_identity(&self) -> Option<serde_json::Value> {
         Some(serde_json::json!({"backend":"stark_native_hybrid_metal","execution":"autoregressive"}))
     }
-    fn supports_mtp(&self) -> bool {
-        self.model.supports_mtp()
-    }
-    fn mtp_verification(&self) -> &'static str {
-        self.model.mtp_verification()
+    fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        self.model.mtp_capabilities()
     }
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()

@@ -19,6 +19,20 @@ def test_normalizes_messages_and_defaults():
     )
     assert result["messages"] == [{"role": "system", "content": "ab"}, {"role": "assistant", "content": ""}]
     assert result["sampling"] == {"mode": "greedy"}
+    assert result["mtp"] is None
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mtp_boolean_override_is_preserved(enabled):
+    assert parse(mtp=enabled)["mtp"] is enabled
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true", [], {}])
+def test_mtp_override_requires_an_explicit_boolean(value):
+    with pytest.raises(APIError) as error:
+        parse(mtp=value)
+    assert error.value.status == 400
+    assert error.value.code == "invalid_request"
 
 
 @pytest.mark.parametrize("reasoning", ["", "synthetic reasoning"])

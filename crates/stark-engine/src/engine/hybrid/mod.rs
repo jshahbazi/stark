@@ -41,6 +41,16 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Loaded-model MTP policy. Recommendations select the depth when a caller
+/// enables MTP without choosing an explicit draft count; MTP remains opt-in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MtpCapabilities {
+    pub max_drafts: usize,
+    pub recommended_drafts: usize,
+    pub sampling: &'static str,
+    pub verification: &'static str,
+}
+
 /// Caller-owned complete-vocabulary sampling. A round records draft
 /// distributions before target verification consumes them in prefix order.
 pub trait MtpSampler {
@@ -402,6 +412,14 @@ impl Model {
             return model.supports_mtp();
         }
         false
+    }
+
+    pub fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.mtp_capabilities();
+        }
+        None
     }
 
     pub fn mtp_verification(&self) -> &'static str {

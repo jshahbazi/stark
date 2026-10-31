@@ -6,6 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use stark_engine::engine::hybrid::MtpCapabilities;
 
 use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
 
@@ -13,6 +14,16 @@ pub(crate) const MAX_CONTEXT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_EXTRA_STOPS: usize = 256;
+
+/// An omitted setting uses its default, while an explicitly present null is
+/// invalid. Serde's ordinary Option<T> would otherwise conflate the two.
+fn present_value<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -83,8 +94,10 @@ enum Request {
         seed: u64,
         #[serde(default)]
         sampling: Sampling,
-        #[serde(default)]
-        mtp_drafts: u32,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp: Option<bool>,
+        #[serde(default, deserialize_with = "present_value")]
+        mtp_drafts: Option<u32>,
         #[serde(default)]
         stop_token_ids: Vec<u32>,
         #[serde(default)]
@@ -392,11 +405,8 @@ pub(crate) trait GenerationBackend {
     fn supports_images(&self) -> bool {
         false
     }
-    fn supports_mtp(&self) -> bool {
-        false
-    }
-    fn mtp_verification(&self) -> &'static str {
-        "batched-decode-exact-v1"
+    fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        None
     }
     fn mtp_metadata(&self) -> Option<Value> {
         None
@@ -442,6 +452,7 @@ pub(crate) type TextCallback<'a> = dyn FnMut(&str) -> Result<(), &'static str> +
 
 pub(crate) struct GenerationWorker<B: GenerationBackend> {
     backend: B,
+    mtp: Option<MtpCapabilities>,
     media: Option<MediaStore>,
     prepared: Option<PreparedRequest<B::PreparedImage>>,
 }
@@ -472,17 +483,57 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         backend: B,
         media: Option<MediaStore>,
     ) -> Result<Self, &'static str> {
+        let mtp = backend.mtp_capabilities();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
+            || mtp.is_some_and(|capabilities| {
+                capabilities.max_drafts == 0
+                    || capabilities.max_drafts > u32::MAX as usize
+                    || !(1..=capabilities.max_drafts).contains(&capabilities.recommended_drafts)
+                    || capabilities.sampling != "exact-rejection-v1"
+                    || capabilities.verification.is_empty()
+                    || capabilities.verification.len() > 128
+                    || !capabilities
+                        .verification
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            })
         {
             return Err("invalid_model_config");
         }
         Ok(Self {
             backend,
+            mtp,
             media,
             prepared: None,
         })
+    }
+
+    fn resolve_mtp(
+        &self,
+        enabled: Option<bool>,
+        drafts: Option<u32>,
+    ) -> Result<u32, &'static str> {
+        if self.backend.mtp_capabilities() != self.mtp {
+            return Err("invalid_generation_output");
+        }
+        if enabled.is_some() && drafts.is_some() {
+            return Err("invalid_generation_request");
+        }
+        let drafts = match (enabled, drafts) {
+            (Some(true), None) => self.mtp.ok_or("mtp_not_supported")?.recommended_drafts as u32,
+            (Some(false) | None, None) => 0,
+            (None, Some(drafts)) => drafts,
+            (Some(_), Some(_)) => unreachable!("conflicting MTP settings rejected"),
+        };
+        if drafts > 0 {
+            let capabilities = self.mtp.ok_or("mtp_not_supported")?;
+            if drafts as usize > capabilities.max_drafts {
+                return Err("invalid_generation_request");
+            }
+        }
+        Ok(drafts)
     }
 
     fn validate_options(
@@ -493,7 +544,6 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || options.context_tokens > MAX_CONTEXT_TOKENS
             || options.max_new_tokens == 0
             || options.max_new_tokens > MAX_NEW_TOKENS
-            || options.mtp_drafts > 3
             || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
             || options.stop.len() > 4
             || options.stop.iter().any(|s| s.is_empty() || s.chars().count() > 1024)
@@ -502,9 +552,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         {
             return Err("invalid_generation_request");
         }
-        if options.mtp_drafts > 0 && !self.backend.supports_mtp() {
-            return Err("mtp_not_supported");
-        }
+        self.resolve_mtp(None, Some(options.mtp_drafts))?;
         if self.backend.max_context_length().is_some_and(|max| options.context_tokens > max) {
             return Err("context_overflow");
         }
@@ -566,7 +614,27 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             "input_tokens_per_second":tokens_per_second(input_tokens, generated.prefill_seconds),
             "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
             "timing_method":"first-token-wall-clock-v1"});
-        if let Some(metadata) = self.backend.mtp_metadata() {
+        if self.backend.mtp_capabilities() != self.mtp {
+            return Err("invalid_generation_output");
+        }
+        if let Some(capabilities) = self.mtp {
+            let mut metadata = self.backend.mtp_metadata().unwrap_or_else(|| json!({}));
+            let fields = metadata.as_object_mut().ok_or("invalid_generation_output")?;
+            let enabled = options.mtp_drafts > 0;
+            for (name, expected) in [
+                ("enabled", json!(enabled)),
+                ("drafts", json!(options.mtp_drafts)),
+                ("sampling", json!(capabilities.sampling)),
+                ("verification", json!(capabilities.verification)),
+            ] {
+                if let Some(value) = fields.get(name) {
+                    if *value != expected {
+                        return Err("invalid_generation_output");
+                    }
+                } else {
+                    fields.insert(name.to_owned(), expected);
+                }
+            }
             reply["mtp"] = metadata;
         }
         Ok(reply)
@@ -614,6 +682,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 max_new_tokens,
                 seed,
                 sampling,
+                mtp,
                 mtp_drafts,
                 stop_token_ids,
                 stream,
@@ -625,7 +694,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     max_new_tokens,
                     seed,
                     sampling,
-                    mtp_drafts,
+                    mtp_drafts: self.resolve_mtp(mtp, mtp_drafts)?,
                     eos_token_ids: self.backend.eos_token_ids().to_vec(),
                     extra_stop_token_ids: stop_token_ids,
                     stop,
@@ -826,11 +895,14 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
-    if worker.backend.supports_mtp() {
-        readiness["mtp"] = json!({"supported":true,"max_drafts":3,
-            "default_drafts":0,"sampling":"exact-rejection-v1",
-            "verification":worker.backend.mtp_verification()});
-    }
+    readiness["mtp"] = match worker.mtp {
+        Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
+            "recommended_drafts":capabilities.recommended_drafts,"default_drafts":0,
+            "sampling":capabilities.sampling,"verification":capabilities.verification,
+            "operations":["generate"]}),
+        None => json!({"supported":false,"max_drafts":0,"recommended_drafts":0,
+            "default_drafts":0,"operations":[]}),
+    };
     if worker.media.is_some() && worker.backend.supports_images() {
         let identity = worker
             .backend
@@ -933,13 +1005,16 @@ mod tests {
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
         generation_calls: usize,
+        tokenization_calls: usize,
         inputs: Vec<Vec<u32>>,
         seeds: Vec<u64>,
         sampling: Vec<Sampling>,
         drained: Arc<AtomicBool>,
         invalid_tokenization: bool,
         images: bool,
-        mtp: bool,
+        mtp: Option<MtpCapabilities>,
+        omit_mtp_metadata: bool,
+        mtp_reply_override: Option<Value>,
         mtp_requests: Vec<u32>,
         image_schema: u32,
         family_version: u32,
@@ -974,11 +1049,17 @@ mod tests {
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
         }
-        fn supports_mtp(&self) -> bool {
+        fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
             self.mtp
         }
         fn mtp_metadata(&self) -> Option<Value> {
-            self.mtp.then(|| {
+            if self.omit_mtp_metadata {
+                return None;
+            }
+            if let Some(metadata) = &self.mtp_reply_override {
+                return Some(metadata.clone());
+            }
+            self.mtp.map(|_| {
                 let drafts = self.mtp_requests.last().copied().unwrap_or(0);
                 json!({"enabled":drafts > 0,"drafts":drafts,"sampling":"exact-rejection-v1"})
             })
@@ -988,6 +1069,7 @@ mod tests {
             _: &str,
             special: bool,
         ) -> Result<Vec<u32>, &'static str> {
+            self.tokenization_calls += 1;
             Ok(if self.invalid_tokenization {
                 vec![8]
             } else if special {
@@ -1135,13 +1217,16 @@ mod tests {
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
             generation_calls: 0,
+            tokenization_calls: 0,
             inputs: Vec::new(),
             seeds: Vec::new(),
             sampling: Vec::new(),
             drained: Arc::new(AtomicBool::new(true)),
             invalid_tokenization: false,
             images: false,
-            mtp: false,
+            mtp: None,
+            omit_mtp_metadata: false,
+            mtp_reply_override: None,
             mtp_requests: Vec::new(),
             image_schema: 2,
             family_version: 1,
@@ -1159,6 +1244,27 @@ mod tests {
         json!({"operation":"generate","input_token_ids":[2],"context_tokens":16,"max_new_tokens":8})
     }
 
+    fn capabilities(
+        max_drafts: usize,
+        recommended_drafts: usize,
+    ) -> MtpCapabilities {
+        MtpCapabilities {
+            max_drafts,
+            recommended_drafts,
+            sampling: "exact-rejection-v1",
+            verification: "fake-model-exact-v1",
+        }
+    }
+
+    fn mtp_worker(
+        max_drafts: usize,
+        recommended_drafts: usize,
+    ) -> GenerationWorker<FakeBackend> {
+        let mut backend = worker().backend;
+        backend.mtp = Some(capabilities(max_drafts, recommended_drafts));
+        GenerationWorker::new(backend).unwrap()
+    }
+
     #[test]
     fn mtp_requests_are_opt_in_bounded_and_require_model_support() {
         let mut worker = worker();
@@ -1166,7 +1272,7 @@ mod tests {
         request["mtp_drafts"] = json!(1);
         assert_eq!(post(&mut worker, request.clone())["error"], "mtp_not_supported");
         assert_eq!(worker.backend.generation_calls, 0);
-        worker.backend.mtp = true;
+        worker = mtp_worker(3, 2);
         request["mtp_drafts"] = json!(4);
         assert_eq!(post(&mut worker, request.clone())["error"], "invalid_generation_request");
         assert_eq!(worker.backend.generation_calls, 0);
@@ -1189,6 +1295,193 @@ mod tests {
         assert_eq!(readiness["mtp"]["supported"], true);
         assert_eq!(readiness["mtp"]["default_drafts"], 0);
         assert_eq!(readiness["mtp"]["max_drafts"], 3);
+        assert_eq!(readiness["mtp"]["recommended_drafts"], 2);
+        assert_eq!(readiness["mtp"]["operations"], json!(["generate"]));
+    }
+
+    #[test]
+    fn mtp_toggle_uses_each_models_recommendation_and_does_not_persist() {
+        for (maximum, recommended) in [(1, 1), (3, 2), (5, 4)] {
+            let mut worker = mtp_worker(maximum, recommended);
+            let mut output = Vec::new();
+            run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+            let readiness: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(readiness["mtp"]["max_drafts"], maximum);
+            assert_eq!(readiness["mtp"]["recommended_drafts"], recommended);
+            let mut request = standard();
+            request["sampling"] = json!({"mode":"stochastic","temperature":1.0,"top_p":0.95});
+            request["seed"] = json!(42);
+            for enabled in [true, false, true] {
+                request["mtp"] = json!(enabled);
+                let reply = post(&mut worker, request.clone());
+                assert!(reply.get("error").is_none());
+                assert_eq!(reply["mtp"]["enabled"], enabled);
+                assert_eq!(
+                    reply["mtp"]["drafts"],
+                    if enabled {
+                        recommended
+                    } else {
+                        0
+                    }
+                );
+                assert_eq!(reply["mtp"]["sampling"], "exact-rejection-v1");
+                assert_eq!(reply["mtp"]["verification"], "fake-model-exact-v1");
+            }
+            request.as_object_mut().unwrap().remove("mtp");
+            assert!(post(&mut worker, request.clone()).get("error").is_none());
+            request["mtp_drafts"] = json!(maximum);
+            assert!(post(&mut worker, request.clone()).get("error").is_none());
+            request["mtp_drafts"] = json!(maximum + 1);
+            assert_eq!(post(&mut worker, request)["error"], "invalid_generation_request");
+            assert_eq!(worker.backend.mtp_requests, [recommended as u32, 0, recommended as u32, 0, maximum as u32]);
+            assert_eq!(worker.backend.seeds, [42; 5]);
+            assert!(worker.backend.sampling.iter().all(|sampling| {
+                *sampling
+                    == Sampling::Stochastic {
+                        temperature: 1.0,
+                        top_k: None,
+                        top_p: Some(0.95),
+                        min_p: None,
+                    }
+            }));
+        }
+    }
+
+    #[test]
+    fn unsupported_mtp_toggle_off_is_valid_and_errors_do_not_touch_model() {
+        let mut worker = worker();
+        let mut request = standard();
+        request.as_object_mut().unwrap().remove("input_token_ids");
+        request["rendered_prompt"] = json!("synthetic prompt");
+        request["mtp"] = json!(true);
+        assert_eq!(post(&mut worker, request.clone())["error"], "mtp_not_supported");
+        assert_eq!(worker.backend.tokenization_calls, 0);
+        assert_eq!(worker.backend.generation_calls, 0);
+        request["mtp"] = json!(false);
+        assert!(post(&mut worker, request).get("error").is_none());
+        assert_eq!(worker.backend.mtp_requests, [0]);
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let readiness: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            readiness["mtp"],
+            json!({"supported":false,"max_drafts":0,
+            "recommended_drafts":0,"default_drafts":0,"operations":[]})
+        );
+    }
+
+    #[test]
+    fn conflicting_or_malformed_mtp_settings_are_recoverable_before_inference() {
+        let mut worker = mtp_worker(5, 4);
+        for enabled in [true, false] {
+            for drafts in [0, 1, 5] {
+                let mut request = standard();
+                request.as_object_mut().unwrap().remove("input_token_ids");
+                request["rendered_prompt"] = json!("synthetic prompt");
+                request["mtp"] = json!(enabled);
+                request["mtp_drafts"] = json!(drafts);
+                assert_eq!(post(&mut worker, request)["error"], "invalid_generation_request");
+            }
+        }
+        for malformed in [json!(null), json!(0), json!(1), json!("true"), json!({}), json!([])] {
+            let mut request = standard();
+            request["mtp"] = malformed;
+            assert_eq!(post(&mut worker, request)["error"], "invalid_request");
+        }
+        assert_eq!(worker.backend.tokenization_calls, 0);
+        assert_eq!(worker.backend.generation_calls, 0);
+        assert!(post(&mut worker, standard()).get("error").is_none());
+    }
+
+    #[test]
+    fn invalid_model_mtp_descriptors_fail_startup() {
+        let mut invalid = vec![
+            capabilities(0, 0),
+            capabilities(3, 0),
+            capabilities(3, 4),
+            MtpCapabilities {
+                sampling: "",
+                ..capabilities(3, 2)
+            },
+            MtpCapabilities {
+                sampling: "approximate-v1",
+                ..capabilities(3, 2)
+            },
+            MtpCapabilities {
+                verification: " ",
+                ..capabilities(3, 2)
+            },
+            MtpCapabilities {
+                verification: "unknown:policy",
+                ..capabilities(3, 2)
+            },
+            MtpCapabilities {
+                verification: "éxact-v1",
+                ..capabilities(3, 2)
+            },
+            MtpCapabilities {
+                verification: "01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890",
+                ..capabilities(3, 2)
+            },
+        ];
+        if let Ok(maximum) = usize::try_from(u64::from(u32::MAX) + 1) {
+            invalid.push(capabilities(maximum, 1));
+        }
+        for capabilities in invalid {
+            let mut backend = worker().backend;
+            backend.mtp = Some(capabilities);
+            assert!(matches!(GenerationWorker::new(backend), Err("invalid_model_config")));
+        }
+    }
+
+    #[test]
+    fn changing_backend_mtp_capabilities_during_a_worker_lifetime_fences_output() {
+        let mut worker = mtp_worker(3, 2);
+        worker.backend.mtp = Some(capabilities(5, 4));
+        let mut output = Vec::new();
+        assert_eq!(
+            worker.process_line(&serde_json::to_vec(&standard()).unwrap(), &mut output),
+            Err("native_operation_failed")
+        );
+        assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["error"], "invalid_generation_output");
+        assert_eq!(worker.backend.generation_calls, 0);
+    }
+
+    #[test]
+    fn mtp_acknowledgement_does_not_require_backend_specific_statistics() {
+        let mut worker = mtp_worker(5, 4);
+        worker.backend.omit_mtp_metadata = true;
+        let mut request = standard();
+        request["mtp"] = json!(true);
+        let reply = post(&mut worker, request);
+        assert_eq!(
+            reply["mtp"],
+            json!({"enabled":true,"drafts":4,
+            "sampling":"exact-rejection-v1","verification":"fake-model-exact-v1"})
+        );
+    }
+
+    #[test]
+    fn contradictory_mtp_backend_acknowledgements_fence_output() {
+        for metadata in [
+            json!(null),
+            json!([]),
+            json!({"enabled":false}),
+            json!({"drafts":1}),
+            json!({"sampling":"approximate"}),
+            json!({"verification":"other-policy"}),
+        ] {
+            let mut worker = mtp_worker(3, 2);
+            worker.backend.mtp_reply_override = Some(metadata);
+            let mut request = standard();
+            request["mtp"] = json!(true);
+            let mut output = Vec::new();
+            assert_eq!(
+                worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output),
+                Err("native_operation_failed")
+            );
+            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["error"], "invalid_generation_output");
+        }
     }
     fn post(
         worker: &mut GenerationWorker<FakeBackend>,

@@ -297,7 +297,17 @@ impl LilyModel {
     }
 
     pub fn supports_mtp(&self) -> bool {
-        self.model.has_mtp()
+        self.mtp_capabilities().is_some()
+    }
+
+    pub fn mtp_capabilities(&self) -> Option<super::MtpCapabilities> {
+        let max_drafts = self.model.max_drafts();
+        (max_drafts > 0).then(|| super::MtpCapabilities {
+            max_drafts,
+            recommended_drafts: 2.min(max_drafts),
+            sampling: "exact-rejection-v1",
+            verification: self.mtp_verification(),
+        })
     }
 
     pub fn mtp_verification(&self) -> &'static str {
@@ -539,7 +549,10 @@ impl LilyModel {
         drafts: usize,
         sampler: &'a mut dyn MtpSampler,
     ) -> Result<MtpDecode<'a>> {
-        if self.is_fenced() || !self.mtp_enabled || !self.supports_mtp() || !(1..=3).contains(&drafts) {
+        if self.is_fenced()
+            || !self.mtp_enabled
+            || !self.mtp_capabilities().is_some_and(|capabilities| (1..=capabilities.max_drafts).contains(&drafts))
+        {
             return Err(Error::Invalid("MTP stream admission failed"));
         }
         admitted_sampled_start(self.state.pos, self.pending.len(), self.last_full_readout, first, self.vocab_size)?;
