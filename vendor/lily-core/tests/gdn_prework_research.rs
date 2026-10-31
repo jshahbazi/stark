@@ -518,6 +518,7 @@ fn prepared_gdn_component_abba_after_exactness() -> Result<()> {
             mean * 1e6,
             digests[index]
         );
+        println!("gdn_component_samples arm={name} gpu_seconds={:?}", times[index]);
     }
     Ok(())
 }
