@@ -3,13 +3,13 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, MtpCapabilities, finite_guard, profile};
+use stark_engine::engine::hybrid::{Model, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
-        native_result_after_cleanup,
+        GeneratedTokens, GenerationBackend, GenerationOptions, MtpCapabilities, Sampling, TextCallback,
+        collect_tokens_controlled, native_result_after_cleanup,
     },
     text_stop::StopFilter,
 };
@@ -402,7 +402,12 @@ impl GenerationBackend for HybridBackend {
         Some(serde_json::json!({"backend":"stark_native_hybrid_metal","execution":"autoregressive"}))
     }
     fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
-        self.model.mtp_capabilities()
+        self.model.mtp_capabilities().map(|capabilities| MtpCapabilities {
+            max_drafts: capabilities.max_drafts,
+            recommended_drafts: capabilities.recommended_drafts,
+            sampling: capabilities.sampling,
+            verification: capabilities.verification,
+        })
     }
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()

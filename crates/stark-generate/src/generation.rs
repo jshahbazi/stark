@@ -6,7 +6,6 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use stark_engine::engine::hybrid::MtpCapabilities;
 
 use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
 
@@ -14,6 +13,16 @@ pub(crate) const MAX_CONTEXT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_EXTRA_STOPS: usize = 256;
+
+/// Protocol policy independent of the optional native/Metal dependency.
+/// Native backends translate their loaded model's capabilities at this boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MtpCapabilities {
+    pub max_drafts: usize,
+    pub recommended_drafts: usize,
+    pub sampling: &'static str,
+    pub verification: &'static str,
+}
 
 /// An omitted setting uses its default, while an explicitly present null is
 /// invalid. Serde's ordinary Option<T> would otherwise conflate the two.
