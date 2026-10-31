@@ -1,0 +1,669 @@
+{
+  "schema": "stark-qwen38-mtp-combination-v1",
+  "date": "2026-10-31",
+  "status": "locally_validated_and_aggregate_audited",
+  "execution_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+  "native_source_inventory_sha256": "5c09cd52b2fb8ad85e8b2734693e2df1a4304ec3b9f698a715f4bb238ea0ddba",
+  "final_worker_sha256": "7142467b0036a99af262a903cd8c85d3a1768da0a1c67813f5feab5fa857e09a",
+  "initial_combination": {
+    "source_commit": "4ba628e1efbe56005feda9ded03ae15b7374aa17",
+    "worker_sha256": "7ddc77fe64a51ff676634ece31eb5f69506a0a613a649a90ef9970fab5c03dd6"
+  },
+  "host_change": {
+    "source_commit": "615355a6b2022e0fb5a1a0d4566652925f5cf71d",
+    "worker_sha256": "3d75a47eefbab5cd25aff2aaae67aa6969c032ebda0d8417501c5e6c1928cd60"
+  },
+  "preserved_original": {
+    "branch": "codex/qwen38-exact-mtp",
+    "head": "a060ff31500f2338fdff7c309e3081f833ecdf73",
+    "native_source": "a1a2a5f4168235680164e0bffb6dd874df4771d2",
+    "worker_sha256": "81945ba24640c044ca43dd91b76577d361f063c290a7a905181da8183c4b6f06",
+    "identity_index_sha256": "d67337277cb62766260fdfcbcd80c8985e86b87e1e12983da09ce73678d2f099",
+    "unchanged": true
+  },
+  "host": {
+    "chip": "Apple M5 Max",
+    "gpu_cores": 40,
+    "memory_gib": 128,
+    "macos": "26.7.1",
+    "build": "25G241",
+    "power": "AC Automatic",
+    "desktop_and_clock_drift": "uncontrolled; full model jobs serialized",
+    "discarded_overlapping_timing_attempts": 2
+  },
+  "protocol": {
+    "input_tokens": 4096,
+    "sampled_outputs": 256,
+    "context_tokens": 4352,
+    "useful_decode_advances": 255,
+    "temperature": 1.0,
+    "top_p": 0.95,
+    "seed": 42,
+    "mtp_drafts": 2,
+    "default_mtp_drafts": 0,
+    "exact_sampling": "exact-rejection-v1",
+    "prefix_reuse": false,
+    "stage_profiling": false,
+    "same_quantization": true,
+    "corpus_sha256": "daecdf178c6429a721f9e1b5ae379c664adb8f8af55b381535355636ec469955",
+    "input_sha256": "fd1222c74a823b3a6cf5ed3ffd3dd22cb627afde17c21cef8b2150ac9e14b322"
+  },
+  "checkpoints": {
+    "lily": {
+      "repository": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
+      "revision": "0f94842e3682b49acace4daeb4cf2e65a6f94f83",
+      "shards": 55,
+      "bytes": 106905155192,
+      "configuration_sha256": "2a91155be52ebbb0f6dff20e61dcd8ae7484154a56b4afe067246c59da46f899",
+      "native_source_receipt_sha256": "7f5c685f35fc4c5d1509f6379feb1a965cb625f7a1ce76a0b5fe69983561dd30",
+      "verifier": "batched-decode-exact-v1",
+      "current_stat_matches": 55,
+      "stat_fields": [
+        "inode",
+        "size",
+        "mtime_ns"
+      ],
+      "device_id_excluded": true,
+      "payloads_rehashed_this_run": false
+    },
+    "official": {
+      "repository": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+      "revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+      "files": 113,
+      "bytes": 107326639344,
+      "manifest_sha256": "11246ebbea8a24a988517ebeb59623b857df89120e5ae3becd48807194542ef6",
+      "complete_hash_receipt_sha256": "e112599b932abf197011afe5eb91bc1f8a2bb55716eda470b6ee4ef0fcb275e8",
+      "verifier": "serial-decode-exact-v1",
+      "current_stat_matches": 113,
+      "payloads_rehashed_this_run": false
+    }
+  },
+  "results": {
+    "final_lily_top_k_20": {
+      "passed": true,
+      "report_file": "lily-final-top20-d2-16pairs.json",
+      "report_sha256": "1de181eae8618cd6b2576a6f8aa66e0bc7419b93787ce7c32995902b792430e2",
+      "routes": {
+        "off": {
+          "requests": 16,
+          "pooled_decode_tokens_per_second": 72.97071139716714,
+          "minimum": 69.31279669789421,
+          "median": 73.33651049480474,
+          "maximum": 78.80802906720236,
+          "at_least_77": 1,
+          "at_least_80": 0,
+          "median_wall_seconds": 5.503723062000063,
+          "halves": {
+            "first": 75.24857677651718,
+            "last": 70.82670152678034
+          },
+          "output_sha256": "621ca90417af420aaf9defdc957f7cc1f57f318c08d908be764834abb382b0d0",
+          "mtp_totals": {
+            "rounds": 0,
+            "proposed": 0,
+            "accepted": 0,
+            "verified_rows": 0
+          }
+        },
+        "on": {
+          "requests": 16,
+          "pooled_decode_tokens_per_second": 82.84803046057941,
+          "minimum": 78.60961074127788,
+          "median": 84.13763926763518,
+          "maximum": 85.82166376064977,
+          "at_least_77": 16,
+          "at_least_80": 13,
+          "median_wall_seconds": 5.14345535450002,
+          "halves": {
+            "first": 85.17607521254568,
+            "last": 80.6438608443063
+          },
+          "output_sha256": "3e3ab0caeb1b7dcc58c1b8dac0c0cf27810756fe538b7548754d315baadb149c",
+          "mtp_totals": {
+            "rounds": 1552,
+            "proposed": 3088,
+            "accepted": 2528,
+            "verified_rows": 4640
+          }
+        }
+      },
+      "paired_blocks": 16,
+      "paired_on_wins": 16,
+      "pooled_speedup_percent": 13.536004890580976,
+      "analyzer_sha256": "92fec7e9e12cbc0f9db576397abec22a3f0dda54895e25a267b4b732fc3642a6"
+    },
+    "final_lily_nucleus": {
+      "passed": true,
+      "report_file": "lily-final-nucleus-d2-8pairs.json",
+      "report_sha256": "30f5aa9a3895e9f20dcb4d5fcda67d42fc9d335c59727ca5c0e30fb41e378885",
+      "routes": {
+        "off": {
+          "requests": 8,
+          "pooled_decode_tokens_per_second": 73.2846519259351,
+          "minimum": 71.96285023684244,
+          "median": 73.4008693387179,
+          "maximum": 75.33597536185319,
+          "at_least_77": 0,
+          "at_least_80": 0,
+          "median_wall_seconds": 5.480611853500022,
+          "halves": {
+            "first": 74.0443837280498,
+            "last": 72.54035222690867
+          },
+          "output_sha256": "9c33d3a4ef1fef97562e00f7f88b5dc287aacadb16b50c4739aec28dbea1b614",
+          "mtp_totals": {
+            "rounds": 0,
+            "proposed": 0,
+            "accepted": 0,
+            "verified_rows": 0
+          }
+        },
+        "on": {
+          "requests": 8,
+          "pooled_decode_tokens_per_second": 74.53036995893784,
+          "minimum": 73.39029187462981,
+          "median": 74.71722719469744,
+          "maximum": 75.3029541275373,
+          "at_least_77": 0,
+          "at_least_80": 0,
+          "median_wall_seconds": 5.484875895499954,
+          "halves": {
+            "first": 75.01549102433137,
+            "last": 74.05148308003827
+          },
+          "output_sha256": "64c3861cfdfd7142f2910823bda99d63af853aba57ec7c3eccac9ca0190b62c6",
+          "mtp_totals": {
+            "rounds": 840,
+            "proposed": 1664,
+            "accepted": 1200,
+            "verified_rows": 2504
+          }
+        }
+      },
+      "paired_blocks": 8,
+      "paired_on_wins": 7,
+      "pooled_speedup_percent": 1.699834822524271,
+      "analyzer_sha256": "92fec7e9e12cbc0f9db576397abec22a3f0dda54895e25a267b4b732fc3642a6"
+    },
+    "host_source_abba": {
+      "report_sha256": "adbe7c85fd4f89faff488ccfea0d4a1c9fd8a498a6ddab5f70570d845c372b64",
+      "worker_sha256": {
+        "baseline": "81945ba24640c044ca43dd91b76577d361f063c290a7a905181da8183c4b6f06",
+        "candidate": "3d75a47eefbab5cd25aff2aaae67aa6969c032ebda0d8417501c5e6c1928cd60"
+      },
+      "measured_requests": 16,
+      "excluded_warmups": 8,
+      "load_order": [
+        "baseline",
+        "candidate",
+        "candidate",
+        "baseline"
+      ],
+      "summary": {
+        "baseline": {
+          "off": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 14.244647209,
+            "pooled_tokens_per_second": 71.60584499106074,
+            "mtp_counts": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 12.89259946,
+            "pooled_tokens_per_second": 79.11515464081593,
+            "mtp_counts": {
+              "rounds": 388,
+              "proposed": 772,
+              "accepted": 632,
+              "verified_rows": 1160
+            }
+          }
+        },
+        "candidate": {
+          "off": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 14.795866876,
+            "pooled_tokens_per_second": 68.93817094654428,
+            "mtp_counts": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 12.451974958000001,
+            "pooled_tokens_per_second": 81.91471661647394,
+            "mtp_counts": {
+              "rounds": 388,
+              "proposed": 772,
+              "accepted": 632,
+              "verified_rows": 1160
+            }
+          }
+        },
+        "candidate_on_relative_percent": 3.538591295647553
+      },
+      "benchmark_script_sha256": "a3a272ccf95d6ad94ca25d458f7f8b67b598228092e80227e74f7080734571d8"
+    },
+    "nucleus_source_abba": {
+      "report_sha256": "2fd32572c863c38ffa13d17a752e87e63f61d0fb5dbfcd6e66bbaf047908249b",
+      "worker_sha256": {
+        "baseline": "3d75a47eefbab5cd25aff2aaae67aa6969c032ebda0d8417501c5e6c1928cd60",
+        "candidate": "7142467b0036a99af262a903cd8c85d3a1768da0a1c67813f5feab5fa857e09a"
+      },
+      "measured_requests": 16,
+      "excluded_warmups": 8,
+      "load_order": [
+        "baseline",
+        "candidate",
+        "candidate",
+        "baseline"
+      ],
+      "summary": {
+        "baseline": {
+          "off": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 14.77905975,
+            "pooled_tokens_per_second": 69.01656920359903,
+            "mtp_counts": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 15.224026749,
+            "pooled_tokens_per_second": 66.99935679415431,
+            "mtp_counts": {
+              "rounds": 420,
+              "proposed": 832,
+              "accepted": 600,
+              "verified_rows": 1252
+            }
+          }
+        },
+        "candidate": {
+          "off": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 14.297668333,
+            "pooled_tokens_per_second": 71.3403036245966,
+            "mtp_counts": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "decode_steps": 1020,
+            "decode_seconds": 13.493902709,
+            "pooled_tokens_per_second": 75.58969573122035,
+            "mtp_counts": {
+              "rounds": 420,
+              "proposed": 832,
+              "accepted": 600,
+              "verified_rows": 1252
+            }
+          }
+        },
+        "candidate_on_relative_percent": 12.82152448635976
+      },
+      "benchmark_script_sha256": "a3a272ccf95d6ad94ca25d458f7f8b67b598228092e80227e74f7080734571d8"
+    },
+    "official_initial_serial_drafts": {
+      "1": {
+        "passed": true,
+        "report_file": "official-top20-d1-4pairs-final.json",
+        "report_sha256": "3bb20a6e4450ab1c478199b8f5aa0330ab42dd553816a610cf63873174b00e0c",
+        "verifier": "serial-decode-exact-v1",
+        "drafts": 1,
+        "routes": {
+          "off": {
+            "requests": 4,
+            "pooled_decode_tokens_per_second": 44.22396965144061,
+            "minimum": 43.635084298627056,
+            "median": 44.130007599435395,
+            "maximum": 45.02948537324223,
+            "median_wall_seconds": 9.56744372899999,
+            "output_sha256": "cf67e22bcf0d71a09bd998471f860b6da8fd4383a75c82b0bc5a3a00a2b7dafb",
+            "mtp_totals": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            },
+            "scopes_seconds": {
+              "draft_seconds": 0.0,
+              "verify_seconds": 0.0,
+              "rollback_seconds": 0.0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "pooled_decode_tokens_per_second": 36.82745485448055,
+            "minimum": 35.83440059244804,
+            "median": 37.1222844206888,
+            "maximum": 37.268283537322134,
+            "median_wall_seconds": 10.723289271000056,
+            "output_sha256": "e4629ac170f6327981beb1d981b60db98ca7033ec207968fb786b0f6186cfc81",
+            "mtp_totals": {
+              "rounds": 560,
+              "proposed": 556,
+              "accepted": 460,
+              "verified_rows": 1116
+            },
+            "scopes_seconds": {
+              "draft_seconds": 1.5704842840000002,
+              "verify_seconds": 25.338282383,
+              "rollback_seconds": 0.5766784739999998
+            }
+          }
+        },
+        "paired_on_wins": 0,
+        "paired_blocks": 4,
+        "pooled_speedup_percent": -16.725126340437235,
+        "analyzer_sha256": "79261d1bcd70abad57a57f5ef3108bb22cfd5105135e87b94ce6dd9e09d590c2",
+        "analysis_sha256": "9b910d34df076015213a019554f53ec2268d66c9d13745dfed71d8fc5a7ad2ac"
+      },
+      "2": {
+        "passed": true,
+        "report_file": "official-top20-d2-8pairs-final.json",
+        "report_sha256": "3a023807a228a9dbbf543002f1c17f1a78942ab66f4589c640d0f68ea1b839c9",
+        "verifier": "serial-decode-exact-v1",
+        "drafts": 2,
+        "routes": {
+          "off": {
+            "requests": 8,
+            "pooled_decode_tokens_per_second": 52.36652358065658,
+            "minimum": 45.66754772947109,
+            "median": 53.97404786064315,
+            "maximum": 63.19664100048929,
+            "median_wall_seconds": 7.745681417000014,
+            "output_sha256": "cf67e22bcf0d71a09bd998471f860b6da8fd4383a75c82b0bc5a3a00a2b7dafb",
+            "mtp_totals": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            },
+            "scopes_seconds": {
+              "draft_seconds": 0.0,
+              "verify_seconds": 0.0,
+              "rollback_seconds": 0.0
+            }
+          },
+          "on": {
+            "requests": 8,
+            "pooled_decode_tokens_per_second": 36.46907492160681,
+            "minimum": 30.95233914186876,
+            "median": 37.2839262136233,
+            "maximum": 42.38132874772896,
+            "median_wall_seconds": 9.897456686999988,
+            "output_sha256": "f83299da4a915ce999d38ab157da2225417349edb92e994178dffe92c98f7418",
+            "mtp_totals": {
+              "rounds": 848,
+              "proposed": 1672,
+              "accepted": 1192,
+              "verified_rows": 2520
+            },
+            "scopes_seconds": {
+              "draft_seconds": 4.009834334,
+              "verify_seconds": 50.565677957000005,
+              "rollback_seconds": 1.102740007
+            }
+          }
+        },
+        "paired_on_wins": 0,
+        "paired_blocks": 8,
+        "pooled_speedup_percent": -30.35803710468581,
+        "analyzer_sha256": "79261d1bcd70abad57a57f5ef3108bb22cfd5105135e87b94ce6dd9e09d590c2",
+        "analysis_sha256": "737b58307fc4390e1887061706a0d5782d7eb564648d57e941fec85373891b45"
+      },
+      "3": {
+        "passed": true,
+        "report_file": "official-top20-d3-4pairs-final.json",
+        "report_sha256": "cdfa96d206c8b36b921579edc0d85a19577b64a4e115941da134731f9224a93f",
+        "verifier": "serial-decode-exact-v1",
+        "drafts": 3,
+        "routes": {
+          "off": {
+            "requests": 4,
+            "pooled_decode_tokens_per_second": 49.7647772663959,
+            "minimum": 45.66880419056947,
+            "median": 50.699083309779525,
+            "maximum": 52.54062240033379,
+            "median_wall_seconds": 8.45712658299999,
+            "output_sha256": "cf67e22bcf0d71a09bd998471f860b6da8fd4383a75c82b0bc5a3a00a2b7dafb",
+            "mtp_totals": {
+              "rounds": 0,
+              "proposed": 0,
+              "accepted": 0,
+              "verified_rows": 0
+            },
+            "scopes_seconds": {
+              "draft_seconds": 0.0,
+              "verify_seconds": 0.0,
+              "rollback_seconds": 0.0
+            }
+          },
+          "on": {
+            "requests": 4,
+            "pooled_decode_tokens_per_second": 30.845683516298582,
+            "minimum": 30.516525248198047,
+            "median": 30.754534699812993,
+            "maximum": 31.372215961259517,
+            "median_wall_seconds": 11.651442521000149,
+            "output_sha256": "ba062290e11ba81697b51e3766cdd82409716785cba3fd48df5edd1841a5be9e",
+            "mtp_totals": {
+              "rounds": 368,
+              "proposed": 1104,
+              "accepted": 652,
+              "verified_rows": 1472
+            },
+            "scopes_seconds": {
+              "draft_seconds": 2.5834192089999997,
+              "verify_seconds": 29.845072578999996,
+              "rollback_seconds": 0.5174584099999999
+            }
+          }
+        },
+        "paired_on_wins": 0,
+        "paired_blocks": 4,
+        "pooled_speedup_percent": -38.01703692718546,
+        "analyzer_sha256": "79261d1bcd70abad57a57f5ef3108bb22cfd5105135e87b94ce6dd9e09d590c2",
+        "analysis_sha256": "b70090db80653daede6545816e8683984c7217d7a2587f6a770aa7e00025d73e"
+      }
+    }
+  },
+  "validation": {
+    "generator": {
+      "passed": true,
+      "report_sha256": "d49af5d3fa27d54bbe49e7eb18b9ad35f803c51bd59a6cde406da6197a5a5159",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [
+        {
+          "passed": 78,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "test_executions": 78
+    },
+    "scorer": {
+      "passed": true,
+      "report_sha256": "2076c539331908d388c5045f525a3fdeefcc302fa517bf5deb2d8230ea9c6968",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 20,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "test_executions": 41
+    },
+    "generator_clippy": {
+      "passed": true,
+      "report_sha256": "1a398d7ba9fcb097d4da92de1c137a74f08b8e9b9a86a06b88c70dd7228dcbab",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [],
+      "test_executions": 0
+    },
+    "scorer_clippy": {
+      "passed": true,
+      "report_sha256": "b40be6de1f9e9ad528c0d14c965738b7357b9b496f2cdafd5610983da9f84bb2",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [],
+      "test_executions": 0
+    },
+    "native_cpu_metal": {
+      "passed": true,
+      "report_sha256": "011148fcb15b30c872f3107891ca2936e1b93c68104694e2b11a6dbfcfba95f0",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [
+        {
+          "passed": 673,
+          "failed": 0,
+          "ignored": 48
+        },
+        {
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "test_executions": 683
+    },
+    "vendor_default": {
+      "passed": true,
+      "report_sha256": "607f6f1bd8944c0d045e14dd896f5ad74c7df29db1810b8a1b02512f38147323",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "groups": [
+        {
+          "passed": 72,
+          "failed": 0,
+          "ignored": 47
+        },
+        {
+          "passed": 0,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "test_executions": 72
+    },
+    "mtp_component_controls": {
+      "passed": true,
+      "tests": 9,
+      "report_sha256": "8e1bfff25791370e13b6869e3652b0ae1e81c65f971806ed0ea6ece16d45bbc4"
+    },
+    "target_lily": {
+      "passed": true,
+      "report_sha256": "f2da85cc4335e681daa8b2b07a9b9223acd5231e96b20210eef84957bcdce511",
+      "source_commit": "615355a6b2022e0fb5a1a0d4566652925f5cf71d",
+      "target_readouts": 140,
+      "target_f32_values": 34764800,
+      "target_unequal_values": 0,
+      "target_maximum_error": 0.0,
+      "draft_head_readouts": 4,
+      "draft_head_note": "Actual proposal distribution retained; catch-up roundoff allowed."
+    },
+    "target_official": {
+      "passed": true,
+      "report_sha256": "db30e69fea8472017a6a24a4952c62c9bf39e4123a82c13e83b13e9a86b14d2a",
+      "source_commit": "2c78ea6cecc85393d8688cc73b20ecd5ed97ae04",
+      "target_readouts": 140,
+      "target_f32_values": 34764800,
+      "target_unequal_values": 0,
+      "target_maximum_error": 0.0,
+      "draft_head_readouts": 4,
+      "draft_head_note": "Actual proposal distribution retained; catch-up roundoff allowed."
+    },
+    "lifecycle_top_k": {
+      "passed": true,
+      "generation_requests": 23,
+      "bounded_tail_cases": 15,
+      "greedy_on_off_hash_equal": true,
+      "partial_group_stop_recovered": true,
+      "stream_cancellation_recovered": true,
+      "invalid_mtp_request_recovered": true,
+      "worker_sha256": "7142467b0036a99af262a903cd8c85d3a1768da0a1c67813f5feab5fa857e09a",
+      "validator_sha256": "0ab598d00753ccac355266f1f9f110ee8a06ac4a3baf21bd1ef0e0e24d8a634e",
+      "reference_output_sha256": "fa72c84f083868e5f9e88ea55fa1250fdc1d8ef59875d6a0328240103fc0a970"
+    },
+    "lifecycle_nucleus": {
+      "passed": true,
+      "generation_requests": 23,
+      "bounded_tail_cases": 15,
+      "greedy_on_off_hash_equal": true,
+      "partial_group_stop_recovered": true,
+      "stream_cancellation_recovered": true,
+      "invalid_mtp_request_recovered": true,
+      "worker_sha256": "7142467b0036a99af262a903cd8c85d3a1768da0a1c67813f5feab5fa857e09a",
+      "validator_sha256": "17b2ac085e53fb16d10f3d6dbb5c222a2991d94db0e03fcadae55cb8d3fcf389",
+      "reference_output_sha256": "ae448947503f380d9a2cb025cd9aa6feba9da0d85bec8db89705880eca13da56"
+    },
+    "python_benchmark_tests": 31,
+    "format_policy_and_ruff": "passed",
+    "independent_aggregate_audit_sha256": "20256a06a8a43bd98586933a4c02337cc0b38f4d243d154a04deb419da9d886e",
+    "independent_aggregate_audit_passed": true,
+    "independent_source_review": "no actionable issues"
+  },
+  "limits": [
+    "Different windows do not isolate the change from the previous 78.33 tok/s result.",
+    "Host ABBA uplift (3.54%) is smaller than reference load drift (7.10%).",
+    "Nucleus ABBA uplift (12.82%) includes a 3.37% off-control difference.",
+    "The observed top-k 77 tok/s floor is bounded to 16 requests; halves show remaining drift.",
+    "Nucleus whole-call medians are essentially equal; no 77 tok/s floor was observed.",
+    "Official results measure the initial serial fallback, not a fully batched official verifier.",
+    "Quantization differs between checkpoints; results do not establish engine-independent ranking.",
+    "Original model source receipt verification labels remain unchanged; local validation is separate."
+  ]
+}

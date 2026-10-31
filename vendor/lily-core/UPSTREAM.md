@@ -22,6 +22,13 @@ prefix rollback. Legacy Lily batched verification is rejected for official
 weights because its target arithmetic and cache layout differ. The adapter
 reports the serial route explicitly; enabling MTP does not establish a speedup.
 
+Host verification retains an owned flat F32 readout and lends complete rows
+to the caller, eliminating the second per-row allocation and copy. The
+buffer remains owned through sampling and prefix rollback. The original
+Stark chunked finite guard in `src/finite_guard.rs` validates these and draft
+readouts without changing any values; exact shape checks remain separate.
+These host changes alter no GPU arithmetic or checkpoint precision.
+
 Upstream environment-variable selection and diagnostics are disabled in the Stark integration. Precision is selected per operation: BF16 inputs and activations, F32 reductions, F32 logit buffers and F32 GDN recurrent state, plus explicitly selected Q8 attention K/V. Official head values are rounded to BF16 before widening into the F32 buffer. This policy description does not itself establish numerical equivalence or answer quality; source-bound component and model controls are recorded separately.
 
 The upstream Metal shaders originate at the pinned revision. Stark modifies five of those files:

@@ -192,6 +192,11 @@ The official mixed-affine path executes ordinary target decode separately
 for each row. Its ValueKey GDN state, stock HC arithmetic, affine-64 cache and
 BF16-valued vocabulary head require that serial fallback; the Lily batch
 kernels do not preserve those boundaries. Uzu text conversions omit the head.
+
+Unbounded nucleus requests can reuse a proved prefix for both draft and
+target distributions. Retained IDs, probability terms, cumulative totals
+and RNG consumption match the full-order sampler; uncertain boundaries
+fall back to that reference. Top-k requests retain their existing route.
 It is disabled by default.
 
 ### Streaming
