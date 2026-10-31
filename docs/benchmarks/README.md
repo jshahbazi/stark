@@ -93,6 +93,7 @@ rejected, inconclusive and deferred outcomes with source and evidence links.
 
 | Study | Outcome |
 | --- | --- |
+| [Qwen3.8 GDN prework research](../archive/experiments/qwen38-gdn-prework-2026-10-31/README.md) | CPU-only prototype: shares repeated Q/K normalization and gate preparation; offline Metal compilation and opt-in GPU harness build pass; GPU correctness and performance unmeasured; supersedes no benchmark |
 | [Qwen3.8 matched-checkpoint Metal optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | Same-checkpoint maximum 66.81 vs 61.17 tok/s (+9.21%), no speculation; exact stock component controls and retained Lily parity; 77–80 tok/s and whole-model quality equivalence remain unestablished |
 | [Qwen3.8 converted-format speed](QWEN38_UZU_SPEED_2026_10_30.md) | NEON affine restoration reduces median process-to-ready time from 20.54 to 18.09 seconds; exact nucleus-prefix work and sampled controls retain quantization; consistent 77–80 tok/s remains unqualified |
 | [Qwen3.8 Uzu conversion and generation](QWEN38_UZU_FORMAT_2026_10_29.md) | Full quantization-preserving conversion, self-contained load and exact readout/sample parity; paired timing series has substantial throughput drift |

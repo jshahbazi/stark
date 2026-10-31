@@ -1,0 +1,37 @@
+{
+  "scope": "CPU ownership and offline compilation only",
+  "ownership": {
+    "convolution_channel_owners": 10240,
+    "history_element_owners": 30720,
+    "gate_element_owners": 96,
+    "state_element_owners": 786432,
+    "raw_element_owners": 6144,
+    "history_steps_checked": 4,
+    "baseline_qk_normalizations_per_layer": 384,
+    "prepared_qk_normalizations_per_layer": 32,
+    "baseline_gate_pairs_per_layer": 192,
+    "prepared_gate_pairs_per_layer": 48,
+    "prepared_qkv_bytes": 20480,
+    "additional_gate_scratch_bytes": 384
+  },
+  "compiler": "Apple metal version 32023.883 (metalfe-32023.883)",
+  "flags": [
+    "-std=metal3.1",
+    "-fmetal-math-mode=safe",
+    "-fmetal-math-fp32-functions=fast",
+    "-Wno-c++17-extensions",
+    "-Werror"
+  ],
+  "entrypoints": [
+    "qwen38_gdn_conv_prepare_research",
+    "qwen38_gdn_recurrence_research",
+    "qwen38_gdn_recurrence_staged_research"
+  ],
+  "prototype_sha256": "505ee3ed6dc23fa4bc17974cdc3dd048213293ff319b83d63c836c7ef130645e",
+  "harness_sha256": "9225956ce55766258c47f643d0e7549b6536adcf5dde81d3d3e7060bd8b47ab9",
+  "reference_source_sha256": {
+    "gdn.metal": "78ca01774e89e1fea05190234171704cc6a2bca4b24415cee2aa45cdd5ac6844",
+    "official_gdn_k1_helper.metal": "6cfe8926c91f02bf14dbca0c4e68a36f8b27cc381bcb9b23e9ff2185e226b78e"
+  },
+  "air_ir_sha256": "ac79031969a8a12fb1dd7896dc05c8fe05918b73c8a92d96dd508ae922ba2c39"
+}
