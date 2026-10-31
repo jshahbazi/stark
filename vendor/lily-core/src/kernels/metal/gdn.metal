@@ -169,6 +169,196 @@ kernel void NAME(device const bfloat* q       [[buffer(0)]],                  \
 GDN_STEP_GATED_WRAPPER(gdn_step_gated, float)
 #undef GDN_STEP_GATED_WRAPPER
 
+// Stark's short verification scan retains the ordinary decode helper and
+// output-rounding boundary. All rows of one value head run in one threadgroup.
+kernel void gdn_verify_gated_exact(device const bfloat* qkv [[buffer(0)]],
+                                  device const bfloat* a [[buffer(1)]],
+                                  device const bfloat* b [[buffer(2)]],
+                                  device const float* a_log [[buffer(3)]],
+                                  device const bfloat* dt_bias [[buffer(4)]],
+                                  device float* state [[buffer(5)]],
+                                  device const bfloat* z [[buffer(6)]],
+                                  device const float* norm_w [[buffer(7)]],
+                                  device bfloat* out [[buffer(8)]],
+                                  device float* mid [[buffer(9)]],
+                                  constant uint& M [[buffer(10)]],
+                                  constant uint& H [[buffer(11)]],
+                                  constant uint& HK [[buffer(12)]],
+                                  constant uint& mid_count [[buffer(13)]],
+                                  constant float& scale [[buffer(14)]],
+                                  constant float& eps [[buffer(15)]],
+                                  constant uint& gate_act [[buffer(16)]],
+                                  uint h [[threadgroup_position_in_grid]],
+                                  uint tid [[thread_index_in_threadgroup]],
+                                  uint sg [[simdgroup_index_in_threadgroup]],
+                                  uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float q_norm[DIM];
+    threadgroup float k_norm[DIM];
+    threadgroup float part_q[DIM / 32];
+    threadgroup float part_k[DIM / 32];
+    threadgroup float gates[4];
+    threadgroup float norm_part[DIM / 32];
+    threadgroup float inv_rms;
+    const uint C = (2 * HK + H) * DIM;
+    for (uint row = 0; row < M; ++row) {
+        device const bfloat* raw = qkv + (ulong)row * C;
+        const float o = gdn_step_body(raw, raw + HK * DIM, raw + 2 * HK * DIM,
+            a + (ulong)row * H, b + (ulong)row * H, a_log, dt_bias, state,
+            scale, H / HK, h, tid, sg, lane, q_norm, k_norm, part_q, part_k, gates);
+        const float rv = float(bfloat(o));
+        const float ss = simd_sum(rv * rv);
+        if (lane == 0) {
+            norm_part[sg] = ss;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float total = 0.0f;
+            for (uint i = 0; i < DIM / 32; ++i) {
+                total += norm_part[i];
+            }
+            inv_rms = rsqrt(total / float(DIM) + eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const ulong at = ((ulong)row * H + h) * DIM + tid;
+        const float gate = float(z[at]);
+        const float act = gate_activation(gate, gate_act);
+        out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
+        if (row < mid_count) {
+            for (uint k0 = 0; k0 < DIM; ++k0) {
+                const ulong index = ((ulong)h * DIM + k0) * DIM + tid;
+                mid[(ulong)row * H * DIM * DIM + index] = state[index];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup | mem_flags::mem_device);
+    }
+}
+
+// Register-resident alternative of the same short scan. Each thread retains
+// its state column; captures preserve the exact F32 row boundary for rollback.
+kernel void gdn_verify_gated_exact_register(device const bfloat* qkv [[buffer(0)]],
+                                           device const bfloat* a [[buffer(1)]],
+                                           device const bfloat* b [[buffer(2)]],
+                                           device const float* a_log [[buffer(3)]],
+                                           device const bfloat* dt_bias [[buffer(4)]],
+                                           device float* state [[buffer(5)]],
+                                           device const bfloat* z [[buffer(6)]],
+                                           device const float* norm_w [[buffer(7)]],
+                                           device bfloat* out [[buffer(8)]],
+                                           device float* mid [[buffer(9)]],
+                                           constant uint& M [[buffer(10)]],
+                                           constant uint& H [[buffer(11)]],
+                                           constant uint& HK [[buffer(12)]],
+                                           constant uint& mid_count [[buffer(13)]],
+                                           constant float& scale [[buffer(14)]],
+                                           constant float& eps [[buffer(15)]],
+                                           constant uint& gate_act [[buffer(16)]],
+                                           uint h [[threadgroup_position_in_grid]],
+                                           uint tid [[thread_index_in_threadgroup]],
+                                           uint sg [[simdgroup_index_in_threadgroup]],
+                                           uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float q_norm[DIM];
+    threadgroup float k_norm[DIM];
+    threadgroup float part_q[DIM / 32];
+    threadgroup float part_k[DIM / 32];
+    threadgroup float gates[4];
+    threadgroup float norm_part[DIM / 32];
+    threadgroup float inv_rms;
+    const uint C = (2 * HK + H) * DIM;
+    const uint hk = h / (H / HK);
+    device float* st = state + (ulong)h * DIM * DIM;
+    float column[DIM];
+    for (uint k0 = 0; k0 < DIM; ++k0) {
+        column[k0] = st[k0 * DIM + tid];
+    }
+    for (uint row = 0; row < M; ++row) {
+        device const bfloat* raw = qkv + (ulong)row * C;
+        float qv = float(raw[hk * DIM + tid]);
+        float kv = float(raw[(HK + hk) * DIM + tid]);
+        float sq = simd_sum(qv * qv);
+        float sk = simd_sum(kv * kv);
+        if (lane == 0) {
+            part_q[sg] = sq;
+            part_k[sg] = sk;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float tq = 0.0f;
+            float tk = 0.0f;
+            for (uint i = 0; i < DIM / 32; ++i) {
+                tq += part_q[i];
+                tk += part_k[i];
+            }
+            gates[0] = 1.0f / max(sqrt(tq), 1e-12f);
+            gates[1] = 1.0f / max(sqrt(tk), 1e-12f);
+            float x = float(a[(ulong)row * H + h]) + float(dt_bias[h]);
+            float softplus = x > 20.0f ? x : log(1.0f + exp(x));
+            gates[2] = exp(-exp(a_log[h]) * softplus);
+            gates[3] = 1.0f / (1.0f + exp(-float(b[(ulong)row * H + h])));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        q_norm[tid] = qv * gates[0] * scale;
+        k_norm[tid] = kv * gates[1];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float decay = gates[2];
+        float beta = gates[3];
+        float kv_pred = 0.0f;
+        for (uint k0 = 0; k0 < DIM; k0 += GDN_STEP_RB) {
+            float sv[GDN_STEP_RB];
+            _Pragma("clang loop unroll(full)")
+            for (uint j = 0; j < GDN_STEP_RB; ++j) {
+                sv[j] = column[k0 + j];
+            }
+            _Pragma("clang loop unroll(full)")
+            for (uint j = 0; j < GDN_STEP_RB; ++j) {
+                kv_pred += k_norm[k0 + j] * sv[j] * decay;
+            }
+        }
+        const float v_new = (float(raw[(2 * HK + h) * DIM + tid]) - kv_pred) * beta;
+        float o = 0.0f;
+        for (uint k0 = 0; k0 < DIM; k0 += GDN_STEP_RB) {
+            float sv[GDN_STEP_RB];
+            _Pragma("clang loop unroll(full)")
+            for (uint j = 0; j < GDN_STEP_RB; ++j) {
+                sv[j] = column[k0 + j];
+            }
+            _Pragma("clang loop unroll(full)")
+            for (uint j = 0; j < GDN_STEP_RB; ++j) {
+                const float updated = sv[j] * decay + k_norm[k0 + j] * v_new;
+                column[k0 + j] = updated;
+                o += q_norm[k0 + j] * updated;
+            }
+        }
+        const float rv = float(bfloat(o));
+        const float ss = simd_sum(rv * rv);
+        if (lane == 0) {
+            norm_part[sg] = ss;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float total = 0.0f;
+            for (uint i = 0; i < DIM / 32; ++i) {
+                total += norm_part[i];
+            }
+            inv_rms = rsqrt(total / float(DIM) + eps);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        const ulong at = ((ulong)row * H + h) * DIM + tid;
+        const float gate = float(z[at]);
+        const float act = gate_activation(gate, gate_act);
+        out[at] = bfloat(norm_w[tid] * rv * inv_rms * act);
+        if (row < mid_count) {
+            for (uint k0 = 0; k0 < DIM; ++k0) {
+                const ulong index = ((ulong)h * DIM + k0) * DIM + tid;
+                mid[(ulong)row * H * DIM * DIM + index] = column[k0];
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    for (uint k0 = 0; k0 < DIM; ++k0) {
+        st[k0 * DIM + tid] = column[k0];
+    }
+}
+
 // Normalizes q/k rows for the register scan.
 kernel void gdn_qk_l2norm(device const bfloat* qkv   [[buffer(0)]],  // [M, C]
                           device bfloat*       qk    [[buffer(1)]],  // [M, 2*HK*DIM]

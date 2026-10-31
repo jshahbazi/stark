@@ -111,6 +111,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, 1 through 4,096. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
+| `mtp_drafts` | Optional integer, default 0 (disabled). Values 1–3 enable exact MTP on a supported Lily-format Qwen3.8 checkpoint; other models return `mtp_not_supported`. Applies to text `generate` only. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -135,6 +136,7 @@ The terminal reply:
 | `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, `verification: "batched-decode-exact-v1"`, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -150,7 +152,40 @@ Greedy decoding is the default. Stochastic sampling supplies a temperature and o
 
 `temperature` must be finite, positive and at most 100. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface.
 
-The sampler applies temperature before filtering and evaluates top-k and top-p against the same full-vocabulary distribution, so its output differs from samplers that apply top-k and then renormalise before top-p. Seeded requests are reproducible on the same build and hardware; they are not expected to match another engine token for token.
+The converted-model sampler applies temperature before filtering and evaluates
+top-k and top-p against the same full-vocabulary distribution. The native hybrid
+sampler retains top-k candidates first, then computes the mass used by top-p
+over those candidates; omitting top-k uses the full vocabulary. Seeded requests
+are reproducible on the same build and hardware; they are not expected to match
+another engine token for token.
+
+### Qwen3.8 multi-token prediction
+
+An admitted Lily-format Qwen3.8 checkpoint containing its trained MTP head adds
+`mtp: {"supported": true, "max_drafts": 3, "default_drafts": 0,
+"sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness. The generation worker loads
+the head with the checkpoint's existing quantization. Set `mtp_drafts` to 1,
+2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
+Requests on one worker remain serialized and start with fresh state.
+
+Both target and draft use complete F32 readouts and the existing temperature,
+top-k, top-p and min-p filtering policy. The host accepts a proposed token with
+probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
+The bonus token uses the target distribution. This is exact rejection sampling;
+there is no candidate cap or approximate acceptance threshold. Batched
+verification retains ordinary decode arithmetic and its precision boundaries. Exact sampling preserves the target
+distribution, rather than requiring identical token sequences at the same seed
+with MTP on and off. Each route is reproducible on matching builds and hardware.
+
+Draft randomness is separate from target randomness. Draft distributions remain
+in request memory only. Rejected suffixes rewind GDN recurrent state,
+convolution windows, n-gram history and the draft head's committed history.
+Early termination drains work and rewinds a partly delivered group without
+calling the sampler during cleanup. MTP adds memory and verification work, so
+its benefit depends on acceptance and the workload. The verifier evaluates
+up to four positions in one graph, reusing weights while retaining each
+position's decode arithmetic and recurrent-state update order.
+It is disabled by default.
 
 ### Streaming
 
@@ -178,7 +213,7 @@ Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [e
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `invalid_image_preparation_output`, `decoding_failed`, `cancel_channel_failed` |
 | Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
 

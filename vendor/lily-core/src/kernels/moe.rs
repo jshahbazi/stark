@@ -9,6 +9,287 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/moe.metal");
+const DECODE_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/moe.metal"),
+    "\n",
+    include_str!("metal/stark_moe_decode_rows.metal"),
+);
+
+/// Decode's F32 router body over independently addressed rows.
+pub(crate) fn moe_router_topk_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    logits: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    renorm: bool,
+) -> Result<()> {
+    ensure!(
+        logits.shape().len() == 2 && logits.dtype() == DType::F32,
+        "decode router rows require F32 [m,E]"
+    );
+    let (m, e) = (logits.shape()[0], logits.shape()[1]);
+    ensure!((1..=4).contains(&m) && e <= MAX_E && e > 0, "decode router rows geometry");
+    ensure!(
+        indices.dtype() == DType::U32 && indices.numel().is_multiple_of(m),
+        "decode router indices geometry"
+    );
+    let k = indices.numel() / m;
+    ensure!(
+        k > 0
+            && k <= ROUTER_MAX_K
+            && k <= e
+            && scores.numel() == m * k
+            && scores.dtype() == DType::F32,
+        "decode router scores geometry"
+    );
+    let name = match e.div_ceil(32) {
+        0..=8 => "stark_moe_router_decode_rows_e8",
+        9..=16 => "stark_moe_router_decode_rows_e16",
+        _ => "stark_moe_router_decode_rows_e32",
+    };
+    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[logits.binding(), indices.binding(), scores.binding()],
+        &[&u32_bytes(e), &u32_bytes(k), &u32_bytes(renorm as usize)],
+        Grid::Threadgroups {
+            groups: (m, 1, 1),
+            threadgroup: (router_threadgroup(e, renorm), 1, 1),
+        },
+    )
+}
+
+/// Decode's expert gate/up dot and SwiGLU body over row-indexed inputs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_gate_up_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    gate: &QuantWeights,
+    up: &QuantWeights,
+    n: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    y: &Tensor,
+    top_k: usize,
+) -> Result<()> {
+    ensure!(
+        x.shape().len() == 2 && x.dtype() == DType::BF16,
+        "decode expert inputs require BF16 [m,K]"
+    );
+    let (m, k) = (x.shape()[0], x.shape()[1]);
+    ensure!(
+        (1..=4).contains(&m) && (1..=MAX_K).contains(&top_k),
+        "decode expert batch geometry"
+    );
+    ensure!(
+        gate.bits == 4
+            && up.bits == 4
+            && gate.in_features() == k
+            && gate.out_features().is_multiple_of(n),
+        "decode gate weight geometry"
+    );
+    ensure!(
+        (gate.out_features(), gate.in_features(), gate.group_size)
+            == (up.out_features(), up.in_features(), up.group_size),
+        "decode gate/up differ"
+    );
+    ensure!(
+        k.is_multiple_of(gate.group_size) && gate.group_size.is_multiple_of(32),
+        "decode gate packing"
+    );
+    ensure!(
+        indices.dtype() == DType::U32
+            && indices.numel() == m * top_k
+            && y.dtype() == DType::BF16
+            && y.numel() == m * top_k * n,
+        "decode expert output geometry"
+    );
+    let pipeline = ctx.pipeline(
+        "stark_moe_gate_up_decode_rows",
+        DECODE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            gate.codes.binding(),
+            gate.scales.binding(),
+            gate.biases.binding(),
+            up.codes.binding(),
+            up.scales.binding(),
+            up.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            y.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(gate.group_size), &u32_bytes(n), &u32_bytes(top_k)],
+        Grid::Threadgroups { groups: (m, n, top_k), threadgroup: (32, 1, 1) },
+    )
+}
+
+/// Decode's 16-lane, four-simdgroup down/combine body over independent rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_down_combine_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+    top_k: usize,
+) -> Result<()> {
+    let (m, k) = check_decode_rows_down_combine(
+        w, h, x, indices, scores, shared, gate, out, top_k,
+    )?;
+    let pipeline = ctx.pipeline(
+        "stark_moe_down_combine_decode_rows",
+        DECODE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            shared.binding(),
+            gate.binding(),
+            out.binding(),
+        ],
+        &[
+            &u32_bytes(k),
+            &u32_bytes(w.group_size),
+            &u32_bytes(h),
+            &u32_bytes(top_k),
+            &u32_bytes(1),
+        ],
+        Grid::Threadgroups { groups: (m, h / 2, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_decode_rows_down_combine(
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+    top_k: usize,
+) -> Result<(usize, usize)> {
+    ensure!(
+        out.shape().len() == 2 && out.dtype() == DType::BF16,
+        "decode combine requires BF16 [m,H]"
+    );
+    let m = out.shape()[0];
+    ensure!(
+        (1..=4).contains(&m)
+            && (1..=MAX_K).contains(&top_k)
+            && out.shape()[1] == h
+            && h.is_multiple_of(2),
+        "decode combine geometry"
+    );
+    let k = w.in_features();
+    ensure!(
+        w.bits == 4
+            && w.out_features().is_multiple_of(h)
+            && k.is_multiple_of(w.group_size)
+            && w.group_size.is_multiple_of(32),
+        "decode down weight geometry"
+    );
+    ensure!(
+        x.dtype() == DType::BF16 && x.numel() == m * top_k * k,
+        "decode down input geometry"
+    );
+    ensure!(
+        indices.dtype() == DType::U32
+            && indices.numel() == m * top_k
+            && scores.dtype() == DType::F32
+            && scores.numel() == m * top_k,
+        "decode down routes geometry"
+    );
+    ensure!(
+        shared.dtype() == DType::BF16
+            && shared.numel() == m * h
+            && gate.dtype() == DType::F32
+            && gate.numel() == m,
+        "decode shared precision or geometry"
+    );
+    Ok((m, k))
+}
+
+/// Ordinary fused down/combine/HC body, addressed independently per row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn moe_down_combine_inject_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    h: usize,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+    top_k: usize,
+    injection: HcInjection<'_>,
+) -> Result<()> {
+    let (m, k) = check_decode_rows_down_combine(
+        w, h, x, indices, scores, shared, gate, out, top_k,
+    )?;
+    ensure!(injection.groups > 0, "HC injection needs at least one stream");
+    ensure!(
+        injection.hyper.dtype() == DType::BF16
+            && injection.hyper.numel() == m * h * injection.groups,
+        "HC hyper must be BF16 [rows,groups,h]"
+    );
+    ensure!(
+        injection.logits.dtype() == DType::BF16
+            && injection.logits.numel() == m * injection.groups,
+        "HC logits must be BF16 [rows,groups]"
+    );
+    let pipeline = ctx.pipeline(
+        "stark_moe_down_combine_inject_decode_rows",
+        DECODE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            shared.binding(),
+            gate.binding(),
+            out.binding(),
+            injection.hyper.binding(),
+            injection.logits.binding(),
+        ],
+        &[
+            &u32_bytes(k),
+            &u32_bytes(w.group_size),
+            &u32_bytes(h),
+            &u32_bytes(top_k),
+            &u32_bytes(1),
+            &u32_bytes(injection.groups),
+            &(1.0 / injection.groups as f32).to_ne_bytes(),
+        ],
+        Grid::Threadgroups { groups: (m, h / 2, 1), threadgroup: (128, 1, 1) },
+    )
+}
 
 /// Router limits compiled into moe.metal.
 const MAX_E: usize = 1024;

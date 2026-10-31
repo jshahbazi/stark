@@ -4,56 +4,95 @@
 //! external-MLX head values are BF16-rounded in F32 buffers. Lily/reference
 //! head values retain unrounded F32 accumulation outputs.
 //! Every request has fresh logical state. Pending prompt tokens exist only
-//! until its next readout; no prefix/session persistence or speculative head.
+//! until its next readout; no prefix/session persistence. Optional MTP uses
+//! complete host-sampled F32 readouts and request-local rollback captures.
 
-use std::path::Path;
+use std::{collections::VecDeque, path::Path, time::Instant};
 
 use stark_lily_core::{
     engine::{DecodeStateApi, Draw, ScratchApi, VisionMode},
     kernels::{attention::KvFormat, sample::SamplingParams},
     metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
-    qwen4exp::{DecodeState, NgramStorage, Qwen4ExpModel, Scratch},
+    qwen4exp::{DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig},
 };
 
-use super::{Error, Result, profile};
+use super::{Error, MtpSampler, MtpStats, Result, profile};
 
 pub const MAX_CONTEXT: usize = 16_384;
 
 /// Only aggregate static phase categories leave the native counter module.
 fn record_gpu_profile() {
+    record_gpu_profile_for(false);
+}
+
+fn record_gpu_profile_for(mtp_verify: bool) {
     if !profile::enabled() {
         return;
     }
     for pass in stage_profile::take() {
-        profile::record("qwen.mixed.gpu.command", pass.command_gpu_seconds, 0);
-        profile::record("qwen.mixed.gpu.measured", pass.measured_seconds, 0);
-        profile::record("qwen.mixed.profile_resolve", pass.resolve_seconds, 0);
+        let (command, measured, resolve) = if mtp_verify {
+            ("qwen.mtp.verify.gpu.command", "qwen.mtp.verify.gpu.measured", "qwen.mtp.verify.profile_resolve")
+        } else {
+            ("qwen.mixed.gpu.command", "qwen.mixed.gpu.measured", "qwen.mixed.profile_resolve")
+        };
+        profile::record(command, pass.command_gpu_seconds, 0);
+        profile::record(measured, pass.measured_seconds, 0);
+        profile::record(resolve, pass.resolve_seconds, 0);
         let (mut gdn_seconds, mut moe_seconds) = (None, None);
         for sample in pass.samples {
-            let name = match sample.phase {
-                stage_profile::Phase::Embedding => "qwen.mixed.gpu.embedding",
-                stage_profile::Phase::Ple => "qwen.mixed.gpu.ple",
-                stage_profile::Phase::Hc => "qwen.mixed.gpu.hc",
-                stage_profile::Phase::Gdn => "qwen.mixed.gpu.gdn",
-                stage_profile::Phase::GdnInputProjections => "qwen.mixed.gpu.gdn.input_projections",
-                stage_profile::Phase::GdnInputProjectionConv => "qwen.mixed.gpu.gdn.input_projection_conv",
-                stage_profile::Phase::GdnConv => "qwen.mixed.gpu.gdn.conv",
-                stage_profile::Phase::GdnRecurrence => "qwen.mixed.gpu.gdn.recurrence",
-                stage_profile::Phase::GdnRecurrenceNorm => "qwen.mixed.gpu.gdn.recurrence_norm",
-                stage_profile::Phase::GdnNorm => "qwen.mixed.gpu.gdn.norm",
-                stage_profile::Phase::GdnOutProjection => "qwen.mixed.gpu.gdn.out_projection",
-                stage_profile::Phase::Qsa => "qwen.mixed.gpu.qsa",
-                stage_profile::Phase::Moe => "qwen.mixed.gpu.moe",
-                stage_profile::Phase::MoeInputProjections => "qwen.mixed.gpu.moe.input_projections",
-                stage_profile::Phase::MoeRouteSharedActivation => "qwen.mixed.gpu.moe.route_shared_activation",
-                stage_profile::Phase::MoeExpertGateUpSharedDown => "qwen.mixed.gpu.moe.expert_gate_up_shared_down",
-                stage_profile::Phase::MoeExpertDownCombine => "qwen.mixed.gpu.moe.expert_down_combine",
-                stage_profile::Phase::Head => "qwen.mixed.gpu.head",
-                stage_profile::Phase::Draw => "qwen.mixed.gpu.draw",
+            let names = match sample.phase {
+                stage_profile::Phase::Embedding => ("qwen.mixed.gpu.embedding", "qwen.mtp.verify.gpu.embedding"),
+                stage_profile::Phase::Ple => ("qwen.mixed.gpu.ple", "qwen.mtp.verify.gpu.ple"),
+                stage_profile::Phase::Hc => ("qwen.mixed.gpu.hc", "qwen.mtp.verify.gpu.hc"),
+                stage_profile::Phase::Gdn => ("qwen.mixed.gpu.gdn", "qwen.mtp.verify.gpu.gdn"),
+                stage_profile::Phase::GdnInputProjections => {
+                    ("qwen.mixed.gpu.gdn.input_projections", "qwen.mtp.verify.gpu.gdn.input_projections")
+                },
+                stage_profile::Phase::GdnInputProjectionConv => {
+                    ("qwen.mixed.gpu.gdn.input_projection_conv", "qwen.mtp.verify.gpu.gdn.input_projection_conv")
+                },
+                stage_profile::Phase::GdnConv => ("qwen.mixed.gpu.gdn.conv", "qwen.mtp.verify.gpu.gdn.conv"),
+                stage_profile::Phase::GdnRecurrence => {
+                    ("qwen.mixed.gpu.gdn.recurrence", "qwen.mtp.verify.gpu.gdn.recurrence")
+                },
+                stage_profile::Phase::GdnRecurrenceNorm => {
+                    ("qwen.mixed.gpu.gdn.recurrence_norm", "qwen.mtp.verify.gpu.gdn.recurrence_norm")
+                },
+                stage_profile::Phase::GdnNorm => ("qwen.mixed.gpu.gdn.norm", "qwen.mtp.verify.gpu.gdn.norm"),
+                stage_profile::Phase::GdnOutProjection => {
+                    ("qwen.mixed.gpu.gdn.out_projection", "qwen.mtp.verify.gpu.gdn.out_projection")
+                },
+                stage_profile::Phase::Qsa => ("qwen.mixed.gpu.qsa", "qwen.mtp.verify.gpu.qsa"),
+                stage_profile::Phase::Moe => ("qwen.mixed.gpu.moe", "qwen.mtp.verify.gpu.moe"),
+                stage_profile::Phase::MoeInputProjections => {
+                    ("qwen.mixed.gpu.moe.input_projections", "qwen.mtp.verify.gpu.moe.input_projections")
+                },
+                stage_profile::Phase::MoeRouteSharedActivation => {
+                    ("qwen.mixed.gpu.moe.route_shared_activation", "qwen.mtp.verify.gpu.moe.route_shared_activation")
+                },
+                stage_profile::Phase::MoeExpertGateUpSharedDown => (
+                    "qwen.mixed.gpu.moe.expert_gate_up_shared_down",
+                    "qwen.mtp.verify.gpu.moe.expert_gate_up_shared_down",
+                ),
+                stage_profile::Phase::MoeExpertDownCombine => {
+                    ("qwen.mixed.gpu.moe.expert_down_combine", "qwen.mtp.verify.gpu.moe.expert_down_combine")
+                },
+                stage_profile::Phase::MoeGateUp => {
+                    ("qwen.mixed.gpu.moe_gate_up_shared_down", "qwen.mtp.verify.gpu.moe_gate_up_shared_down")
+                },
+                stage_profile::Phase::MoeDown => ("qwen.mixed.gpu.moe_down", "qwen.mtp.verify.gpu.moe_down"),
+                stage_profile::Phase::Head => ("qwen.mixed.gpu.head", "qwen.mtp.verify.gpu.head"),
+                stage_profile::Phase::Draw => ("qwen.mixed.gpu.draw", "qwen.mtp.verify.gpu.draw"),
             };
-            profile::record(name, sample.gpu_seconds, 0);
-            // Parent GDN/MoE counters are inclusive totals. Preserve their
-            // one-record-per-pass call count; do not add parent and children.
+            profile::record(
+                if mtp_verify {
+                    names.1
+                } else {
+                    names.0
+                },
+                sample.gpu_seconds,
+                0,
+            );
             if sample.phase.coarse() != sample.phase {
                 let parent = match sample.phase.coarse() {
                     stage_profile::Phase::Gdn => &mut gdn_seconds,
@@ -64,10 +103,26 @@ fn record_gpu_profile() {
             }
         }
         if let Some(seconds) = gdn_seconds {
-            profile::record("qwen.mixed.gpu.gdn", seconds, 0);
+            profile::record(
+                if mtp_verify {
+                    "qwen.mtp.verify.gpu.gdn"
+                } else {
+                    "qwen.mixed.gpu.gdn"
+                },
+                seconds,
+                0,
+            );
         }
         if let Some(seconds) = moe_seconds {
-            profile::record("qwen.mixed.gpu.moe", seconds, 0);
+            profile::record(
+                if mtp_verify {
+                    "qwen.mtp.verify.gpu.moe"
+                } else {
+                    "qwen.mixed.gpu.moe"
+                },
+                seconds,
+                0,
+            );
         }
     }
 }
@@ -141,19 +196,34 @@ pub struct LilyModel {
     usable: bool,
     last_greedy: Option<GreedyReadout>,
     last_full_readout: Option<usize>,
+    mtp_enabled: bool,
+    mtp_stats: MtpStats,
     // Context ownership outlives every model/state/scratch allocation on drop.
     context: MetalContext,
 }
 
 impl LilyModel {
+    #[cfg(test)]
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_with_mtp(path, false)
+    }
+
+    pub fn load_with_mtp(
+        path: &Path,
+        requested: bool,
+    ) -> Result<Self> {
+        let with_mtp = requested
+            && Qwen4ExpConfig::from_model_dir(path)
+                .map_err(|_| Error::Unsupported("mixed precision checkpoint metadata"))?
+                .mtp
+                .is_some();
         let context =
             MetalContext::new().map_err(|_| Error::Unsupported("mixed precision Metal context unavailable"))?;
         let model = Qwen4ExpModel::load_with(
             &context,
             path,
             NgramStorage::Paged,
-            false,
+            with_mtp,
             VisionMode::Off,
             None,
             None,
@@ -194,6 +264,7 @@ impl LilyModel {
         } else {
             KvFormat::Q8
         });
+        model.set_mtp_enabled(false).map_err(|_| Error::Invalid("MTP initialization failed"))?;
         let state = model
             .new_state(&context, max_context)
             .map_err(|_| Error::Invalid("mixed precision state allocation failed"))?;
@@ -211,6 +282,8 @@ impl LilyModel {
             usable: true,
             last_greedy: None,
             last_full_readout: None,
+            mtp_enabled: false,
+            mtp_stats: MtpStats::default(),
             context,
         })
     }
@@ -221,6 +294,34 @@ impl LilyModel {
 
     pub fn max_context(&self) -> usize {
         self.max_context
+    }
+
+    pub fn supports_mtp(&self) -> bool {
+        self.model.has_mtp()
+    }
+
+    pub fn mtp_verification(&self) -> &'static str {
+        if self.model.config.official_mlx_rounding() {
+            "serial-decode-exact-v1"
+        } else {
+            "batched-decode-exact-v1"
+        }
+    }
+
+    pub fn set_mtp_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        if self.is_fenced() || self.position() != 0 {
+            return Err(Error::Invalid("MTP selection requires a reset request"));
+        }
+        self.model.set_mtp_enabled(enabled).map_err(|_| Error::Unsupported("MTP head unavailable"))?;
+        self.mtp_enabled = enabled;
+        Ok(())
+    }
+
+    pub fn mtp_stats(&self) -> MtpStats {
+        self.mtp_stats
     }
 
     /// Explicit diagnostic mode for future passes; no payload is captured.
@@ -256,6 +357,7 @@ impl LilyModel {
         self.pending.clear();
         self.last_greedy = None;
         self.last_full_readout = None;
+        self.mtp_stats = MtpStats::default();
         // Core waits drain submitted GPU work even on execution failure.
         // A faulted context stays unusable until the worker reloads the model.
         self.usable &= self.state.reset().is_ok();
@@ -427,6 +529,41 @@ impl LilyModel {
         })
     }
 
+    /// Exactness belongs to the caller's sampler; this iterator supplies all
+    /// logits, captures speculative state, and only commits the accepted
+    /// prefix. Dropping an early stream rewinds to its last delivered token.
+    pub fn mtp_decode<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        drafts: usize,
+        sampler: &'a mut dyn MtpSampler,
+    ) -> Result<MtpDecode<'a>> {
+        if self.is_fenced() || !self.mtp_enabled || !self.supports_mtp() || !(1..=3).contains(&drafts) {
+            return Err(Error::Invalid("MTP stream admission failed"));
+        }
+        admitted_sampled_start(self.state.pos, self.pending.len(), self.last_full_readout, first, self.vocab_size)?;
+        admitted_decode_end(self.state.pos, remaining, self.max_context)?;
+        self.last_full_readout = None;
+        self.last_greedy = None;
+        Ok(MtpDecode {
+            model: &self.model,
+            context: &self.context,
+            state: &mut self.state,
+            scratch: &mut self.scratch,
+            usable: &mut self.usable,
+            stats: &mut self.mtp_stats,
+            sampler,
+            pending: first,
+            remaining,
+            drafts,
+            queue: VecDeque::new(),
+            verified: None,
+            delivered: 0,
+            stopped: false,
+        })
+    }
+
     fn check_token(
         &self,
         token: u32,
@@ -547,6 +684,151 @@ impl LilyModel {
         record_gpu_profile();
         self.state.advance(1);
         Ok(())
+    }
+}
+
+pub struct MtpDecode<'a> {
+    model: &'a Qwen4ExpModel,
+    context: &'a MetalContext,
+    state: &'a mut DecodeState,
+    scratch: &'a mut Scratch,
+    usable: &'a mut bool,
+    stats: &'a mut MtpStats,
+    sampler: &'a mut dyn MtpSampler,
+    pending: u32,
+    remaining: usize,
+    drafts: usize,
+    queue: VecDeque<u32>,
+    verified: Option<HostVerification>,
+    delivered: usize,
+    stopped: bool,
+}
+
+impl MtpDecode<'_> {
+    fn round(&mut self) -> Result<()> {
+        self.verified = None;
+        self.delivered = 0;
+        self.sampler.begin_round();
+        let count = self.drafts.min(self.remaining.saturating_sub(1));
+        *self.usable = false;
+        let started = Instant::now();
+        let proposals = if count > 0 {
+            let sampler = &mut *self.sampler;
+            self.model
+                .draft_host(self.context, self.state, self.scratch, self.pending, count, &mut |logits| {
+                    sampler.draft(logits).map_err(|_| std::io::Error::other("MTP draft selection failed").into())
+                })
+                .map_err(|_| Error::Invalid("MTP draft failed"))?
+        } else {
+            Vec::new()
+        };
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.draft_seconds += elapsed;
+        profile::record("qwen.mtp.draft", elapsed, 0);
+        let started = Instant::now();
+        let verified = self
+            .model
+            .verify_host_batched(self.context, self.state, self.scratch, self.pending, &proposals)
+            .map_err(|error| {
+                if profile::enabled() {
+                    // Classify only fixed diagnostic guards. Never emit the
+                    // framework error, request data, or an exception dump.
+                    let category = match error.to_string().as_str() {
+                        "stage profile capacity exceeded" => "qwen.mtp.verify.profile_failure.capacity",
+                        "stage profile changed command buffer count" => {
+                            "qwen.mtp.verify.profile_failure.command_buffers"
+                        },
+                        "stage timestamp duration" => "qwen.mtp.verify.profile_failure.duration",
+                        "stage timestamp order" => "qwen.mtp.verify.profile_failure.order",
+                        "stage timestamp shape" => "qwen.mtp.verify.profile_failure.shape",
+                        "stage profile missing terminal timestamp" => "qwen.mtp.verify.profile_failure.terminal",
+                        "stage trace missing" => "qwen.mtp.verify.profile_failure.missing",
+                        _ => "qwen.mtp.verify.profile_failure.other",
+                    };
+                    profile::record(category, 0.0, 0);
+                }
+                Error::Invalid("MTP verify failed")
+            })?;
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.verify_seconds += elapsed;
+        profile::record("qwen.mtp.verify", elapsed, 0);
+        record_gpu_profile_for(true);
+        let mut accepted = 0;
+        {
+            let _scope = profile::Scope::new("qwen.mtp.target_sampling");
+            for (i, readout) in verified.logits.iter().enumerate() {
+                let proposal = proposals.get(i).copied();
+                let token = self.sampler.target(readout, proposal)?;
+                if token as usize >= self.model.config.vocab_size {
+                    return Err(Error::Invalid("MTP target output ID"));
+                }
+                self.queue.push_back(token);
+                if proposal != Some(token) {
+                    break;
+                }
+                accepted += 1;
+            }
+        }
+        let started = Instant::now();
+        self.model
+            .finish_host_verify(self.context, self.state, self.scratch, &verified, accepted)
+            .map_err(|_| Error::Invalid("MTP rollback failed"))?;
+        let elapsed = started.elapsed().as_secs_f64();
+        self.stats.rollback_seconds += elapsed;
+        profile::record("qwen.mtp.finish", elapsed, 0);
+        self.stats.rounds += 1;
+        self.stats.proposed += proposals.len();
+        self.stats.accepted += accepted;
+        self.stats.verified_rows += proposals.len() + 1;
+        self.pending = *self.queue.back().ok_or(Error::Invalid("MTP round has no output"))?;
+        self.remaining -= self.queue.len();
+        self.verified = Some(verified);
+        *self.usable = true;
+        Ok(())
+    }
+}
+
+impl Iterator for MtpDecode<'_> {
+    type Item = Result<u32>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.stopped {
+            return None;
+        }
+        if self.queue.is_empty() {
+            if self.remaining == 0 {
+                self.verified = None;
+                return None;
+            }
+            if let Err(error) = self.round() {
+                self.stopped = true;
+                *self.usable = false;
+                return Some(Err(error));
+            }
+        }
+        let token = self.queue.pop_front()?;
+        self.delivered += 1;
+        Some(Ok(token))
+    }
+}
+
+impl Drop for MtpDecode<'_> {
+    fn drop(&mut self) {
+        // All passes are synchronous. An early EOS, cancellation or callback
+        // exit can cut inside a verified group: rewind without any sampler or
+        // RNG callback. A rollback fault fences the loaded model.
+        if *self.usable
+            && !self.queue.is_empty()
+            && let Some(verified) = &self.verified
+        {
+            let started = Instant::now();
+            *self.usable = self.delivered > 0
+                && self
+                    .model
+                    .finish_host_verify(self.context, self.state, self.scratch, verified, self.delivered - 1)
+                    .is_ok();
+            self.stats.rollback_seconds += started.elapsed().as_secs_f64();
+        }
     }
 }
 
@@ -945,6 +1227,407 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    #[ignore]
+    #[cfg(debug_assertions)]
+    fn private_checkpoint_mtp_batched_stage_differential() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private checkpoint path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json")).unwrap();
+        let seed = tokenizer.encode("Hello.", false).unwrap().get_ids().to_vec();
+        let prefix: Vec<u32> = seed.iter().copied().cycle().take(64).collect();
+        let mut model = LilyModel::load_with_mtp(path, true).unwrap();
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            model.set_mtp_enabled(false).unwrap();
+            for &token in &prefix[..prefix.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            model.step(*prefix.last().unwrap()).unwrap()
+        };
+        let logits = prefill(&mut model);
+        let pending = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+        model.model.begin_numerical_trace(model.model.config.num_hidden_layers + 1).unwrap();
+        let _ = model.step(pending).unwrap();
+        let reference = model.model.finish_numerical_trace().unwrap();
+        let mut records = Vec::new();
+        for rows in [1usize, 4] {
+            let _ = prefill(&mut model);
+            model.model.begin_numerical_trace(model.model.config.num_hidden_layers + 1).unwrap();
+            let _ = model
+                .model
+                .verify_host_batched(
+                    &model.context,
+                    &mut model.state,
+                    &mut model.scratch,
+                    pending,
+                    &vec![pending; rows - 1],
+                )
+                .unwrap();
+            let candidate = model.model.finish_numerical_trace().unwrap();
+            let differences = reference.compare(&candidate, 0).unwrap();
+            let first = differences.iter().find(|x| x.unequal_values > 0);
+            eprintln!(
+                "{}",
+                serde_json::json!({"scope":"mtp_batched_stage_differential","rows":rows,"compared_stages":differences.len(),"first_divergence":first})
+            );
+            for difference in differences.iter().filter(|x| x.layer < 2) {
+                eprintln!("{}", serde_json::json!({"rows":rows,"difference":difference}));
+            }
+            records.push(serde_json::json!({"rows":rows,"differences":differences}));
+        }
+        if let Some(path) = std::env::var_os("STARK_MTP_BATCH_DIAGNOSTICS") {
+            use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt};
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).unwrap();
+            file.write_all(&serde_json::to_vec(&records).unwrap()).unwrap();
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+    struct NumericalControl {
+        readouts: usize,
+        values: usize,
+        unequal_values: usize,
+        max_absolute_error: f32,
+        max_relative_rms: f64,
+        top1_mismatches: usize,
+        max_changed_top1_gap: f32,
+        max_full_kl: f64,
+        max_full_tv: f64,
+        max_nucleus_tv: f64,
+        max_top20_nucleus_tv: f64,
+    }
+
+    fn control_distribution(
+        logits: &[f32],
+        top_k: Option<usize>,
+        top_p: f64,
+    ) -> Vec<f64> {
+        let mut order: Vec<usize> = (0..logits.len()).collect();
+        order.sort_unstable_by(|&a, &b| logits[b].total_cmp(&logits[a]).then_with(|| a.cmp(&b)));
+        if let Some(k) = top_k {
+            order.truncate(k);
+        }
+        let maximum = logits[order[0]];
+        let weights: Vec<f64> = order.iter().map(|&i| ((logits[i] - maximum) as f64).exp()).collect();
+        let total = weights.iter().sum::<f64>();
+        let mut kept = 0;
+        let mut mass = 0.0;
+        for &weight in &weights {
+            if kept > 0 && mass / total >= top_p {
+                break;
+            }
+            kept += 1;
+            mass += weight;
+        }
+        let mut probabilities = vec![0.0; logits.len()];
+        for (&i, &weight) in order[..kept].iter().zip(&weights) {
+            probabilities[i] = weight / mass;
+        }
+        probabilities
+    }
+
+    /// Full readouts stay in memory. Only numeric aggregate error/counts leave
+    /// this ignored, explicitly supplied checkpoint control.
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_mtp_verify_and_rollback_match_serial() {
+        let path = std::env::var_os("STARK_TEST_MODEL_PATH").expect("private model fixture path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json"))
+            .unwrap_or_else(|_| panic!("private model tokenizer failed"));
+        let input = tokenizer
+            .encode("Hello.", false)
+            .unwrap_or_else(|_| panic!("private fixture tokenization failed"))
+            .get_ids()
+            .to_vec();
+        assert!(!input.is_empty());
+        let mut model = LilyModel::load_with_mtp(path, true).unwrap();
+        assert!(model.supports_mtp());
+        let prefill = |model: &mut LilyModel| {
+            model.reset();
+            model.set_mtp_enabled(true).unwrap();
+            for &token in &input[..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            model.step(*input.last().unwrap()).unwrap()
+        };
+        let argmax = |values: &[f32]| -> u32 {
+            values
+                .iter()
+                .enumerate()
+                .fold((0usize, f32::NEG_INFINITY), |best, (i, &value)| {
+                    if value > best.1 {
+                        (i, value)
+                    } else {
+                        best
+                    }
+                })
+                .0 as u32
+        };
+        let first_logits = prefill(&mut model);
+        let first = argmax(&first_logits);
+        let mut tokens = vec![first];
+        let mut serial = Vec::new();
+        for _ in 0..4 {
+            let logits = model.step(*tokens.last().unwrap()).unwrap();
+            tokens.push(argmax(&logits));
+            serial.push(logits);
+        }
+        let _ = prefill(&mut model);
+        let mut host_serial = Vec::new();
+        for &token in &tokens[..4] {
+            let verified = model
+                .model
+                .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, token, &[])
+                .unwrap();
+            host_serial.push(verified.logits[0].clone());
+            model.model.finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, 0).unwrap();
+        }
+        let mut comparisons = 0usize;
+        let mut unequal = 0usize;
+        let mut max_error = 0.0f32;
+        let mut top1_mismatches = 0usize;
+        let mut phases = [NumericalControl::default(); 4];
+        let mut compare = |left: &[f32], right: &[f32], phase: usize| {
+            let phase = &mut phases[phase];
+            phase.readouts += 1;
+            phase.top1_mismatches += usize::from(argmax(left) != argmax(right));
+            if argmax(left) != argmax(right) {
+                let best = argmax(right) as usize;
+                let second = right
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != best)
+                    .map(|(_, &x)| x)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                phase.max_changed_top1_gap = phase.max_changed_top1_gap.max(right[best] - second);
+            }
+            assert!(left.len() == right.len());
+            top1_mismatches += usize::from(argmax(left) != argmax(right));
+            let mut squared_error = 0.0;
+            let mut squared_reference = 0.0;
+            let previous_unequal = phase.unequal_values;
+            for (&a, &b) in left.iter().zip(right) {
+                comparisons += 1;
+                phase.values += 1;
+                phase.unequal_values += usize::from(a.to_bits() != b.to_bits());
+                phase.max_absolute_error = phase.max_absolute_error.max((a - b).abs());
+                squared_error += ((a - b) as f64).powi(2);
+                squared_reference += (b as f64).powi(2);
+                unequal += usize::from(a.to_bits() != b.to_bits());
+                max_error = max_error.max((a - b).abs());
+            }
+            phase.max_relative_rms = phase.max_relative_rms.max((squared_error / squared_reference).sqrt());
+            if phase.unequal_values == previous_unequal {
+                return;
+            }
+            for (top_k, top_p, category) in [(None, 1.0, 0), (None, 0.95, 1), (Some(20), 0.95, 2)] {
+                let candidate = control_distribution(left, top_k, top_p);
+                let reference = control_distribution(right, top_k, top_p);
+                let tv = reference.iter().zip(&candidate).map(|(&p, &q)| (p - q).abs()).sum::<f64>() * 0.5;
+                match category {
+                    0 => {
+                        let kl = reference
+                            .iter()
+                            .zip(&candidate)
+                            .filter(|(p, _)| **p > 0.0)
+                            .map(|(&p, &q)| p * (p / q).ln())
+                            .sum::<f64>();
+                        phase.max_full_kl = phase.max_full_kl.max(kl);
+                        phase.max_full_tv = phase.max_full_tv.max(tv);
+                    },
+                    1 => phase.max_nucleus_tv = phase.max_nucleus_tv.max(tv),
+                    _ => phase.max_top20_nucleus_tv = phase.max_top20_nucleus_tv.max(tv),
+                }
+            }
+        };
+        for width in 1..=4 {
+            for accepted in 0..width {
+                let _ = prefill(&mut model);
+                let verified = model
+                    .model
+                    .verify_host_batched(
+                        &model.context,
+                        &mut model.state,
+                        &mut model.scratch,
+                        tokens[0],
+                        &tokens[1..width],
+                    )
+                    .unwrap();
+                for (actual, expected) in verified.logits.iter().zip(&serial) {
+                    compare(actual, expected, 0);
+                }
+                for (actual, expected) in verified.logits.iter().zip(&host_serial) {
+                    compare(actual, expected, 3);
+                }
+                model
+                    .model
+                    .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, accepted)
+                    .unwrap();
+                assert!(model.state.pos == input.len() + accepted + 1);
+                let next = model.step(tokens[accepted + 1]).unwrap();
+                let _ = prefill(&mut model);
+                for &token in &tokens[..=accepted] {
+                    let _ = model.step(token).unwrap();
+                }
+                let expected = model.step(tokens[accepted + 1]).unwrap();
+                compare(&next, &expected, 1);
+            }
+        }
+        struct AcceptSampler {
+            calls: std::rc::Rc<std::cell::Cell<usize>>,
+        }
+        impl MtpSampler for AcceptSampler {
+            fn begin_round(&mut self) {}
+            fn draft(
+                &mut self,
+                logits: &[f32],
+            ) -> Result<u32> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32)
+            }
+            fn target(
+                &mut self,
+                logits: &[f32],
+                proposal: Option<u32>,
+            ) -> Result<u32> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(proposal
+                    .unwrap_or_else(|| logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32))
+            }
+        }
+        for pulled in 0..=4 {
+            let logits = prefill(&mut model);
+            let first = argmax(&logits);
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let mut sampler = AcceptSampler {
+                calls: calls.clone(),
+            };
+            let mut stream = model.mtp_decode(first, 5, 3, &mut sampler).unwrap();
+            let mut outputs = Vec::new();
+            for _ in 0..pulled {
+                outputs.push(stream.next().unwrap().unwrap());
+            }
+            let before_drop = calls.get();
+            drop(stream);
+            assert!(!model.is_fenced());
+            assert!(model.position() == input.len() + pulled);
+            assert!(before_drop == calls.get());
+            if pulled > 0 {
+                let pending = *outputs.last().unwrap();
+                let mut next_head = Vec::new();
+                model
+                    .model
+                    .draft_host(&model.context, &mut model.state, &mut model.scratch, pending, 1, &mut |readout| {
+                        next_head = readout.to_vec();
+                        Ok(argmax(readout))
+                    })
+                    .unwrap();
+                let _ = prefill(&mut model);
+                let mut pending = first;
+                for &next in &outputs {
+                    model
+                        .model
+                        .draft_host(&model.context, &mut model.state, &mut model.scratch, pending, 1, &mut |readout| {
+                            Ok(argmax(readout))
+                        })
+                        .unwrap();
+                    let verified = model
+                        .model
+                        .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, pending, &[])
+                        .unwrap();
+                    model
+                        .model
+                        .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, 0)
+                        .unwrap();
+                    pending = next;
+                }
+                let mut expected_head = Vec::new();
+                model
+                    .model
+                    .draft_host(&model.context, &mut model.state, &mut model.scratch, pending, 1, &mut |readout| {
+                        expected_head = readout.to_vec();
+                        Ok(argmax(readout))
+                    })
+                    .unwrap();
+                compare(&next_head, &expected_head, 2);
+            }
+        }
+        // Exercise the configured dense-to-sparse transition and four-token
+        // index blocks against ordinary decode on identical fixed inputs.
+        let dense_limit = model.model.config.indexer.dense_limit();
+        for length in [2047usize, 2048, dense_limit - 2, dense_limit - 1, dense_limit, 4095, 4096] {
+            let prefix: Vec<u32> = input.iter().copied().cycle().take(length).collect();
+            let long_prefill = |model: &mut LilyModel| {
+                model.reset();
+                model.set_mtp_enabled(true).unwrap();
+                for &token in &prefix[..prefix.len() - 1] {
+                    model.ingest(token).unwrap();
+                }
+                model.step(*prefix.last().unwrap()).unwrap()
+            };
+            let logits = long_prefill(&mut model);
+            let fixed = argmax(&logits);
+            let mut expected = Vec::new();
+            for _ in 0..5 {
+                expected.push(model.step(fixed).unwrap());
+            }
+            for accepted in [0usize, 3] {
+                let _ = long_prefill(&mut model);
+                let verified = model
+                    .model
+                    .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, fixed, &[fixed; 3])
+                    .unwrap();
+                for (actual, reference) in verified.logits.iter().zip(&expected) {
+                    compare(actual, reference, 0);
+                }
+                model
+                    .model
+                    .finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, accepted)
+                    .unwrap();
+                assert!(model.state.pos == length + accepted + 1);
+                let next = model.step(fixed).unwrap();
+                compare(&next, &expected[accepted + 1], 1);
+            }
+        }
+        // Selected target errors invalidate the request, without persisting
+        // sampled tokens or leaving a pending command at drop.
+        struct FailSampler;
+        impl MtpSampler for FailSampler {
+            fn begin_round(&mut self) {}
+            fn draft(
+                &mut self,
+                _: &[f32],
+            ) -> Result<u32> {
+                Err(Error::Invalid("fixture sampler failure"))
+            }
+            fn target(
+                &mut self,
+                _: &[f32],
+                _: Option<u32>,
+            ) -> Result<u32> {
+                Err(Error::Invalid("fixture sampler failure"))
+            }
+        }
+        let logits = prefill(&mut model);
+        let mut sampler = FailSampler;
+        assert!(model.mtp_decode(argmax(&logits), 3, 2, &mut sampler).unwrap().next().unwrap().is_err());
+        assert!(model.is_fenced());
+        eprintln!(
+            "{{\"mtp_control\":\"serial_verify_rollback\",\"values\":{comparisons},\"unequal_values\":{unequal},\"max_absolute_error\":{max_error},\"top1_mismatches\":{top1_mismatches}}}"
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({"mtp_control":"distribution_qualification", "phase_names":["verify","rollback","head","host_serial"], "phases":phases})
+        );
+        // The verified target, including the post-rollback continuation,
+        // must preserve every F32 byte. The draft head may have different
+        // roundoff after batched catch-up: its actual q is always recorded
+        // and corrected by exact rejection sampling against this target.
+        assert!([0, 1, 3].iter().all(|&phase| phases[phase].unequal_values == 0));
+    }
 
     #[stark_test]
     fn pending_prompt_tokens_count_toward_the_same_context_limit() {

@@ -16,6 +16,18 @@ const OFFICIAL_SOURCE: &str = include_str!("metal/official_gate.metal");
 #[cfg(test)]
 #[path = "official_gate_tests.rs"]
 mod official_gate_tests;
+const DECODE_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    "\n",
+    include_str!("metal/stark_decode_rows.metal"),
+);
+const GDN_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    "\n",
+    include_str!("metal/stark_packed_rows.metal"),
+    "\n",
+    include_str!("metal/stark_gdn_projection_rows.metal"),
+);
 
 /// Rows each thread of the Q4 gather GEMV accumulates.
 const Q4_GEMV_ROWS: usize = 2;
@@ -183,6 +195,58 @@ pub fn gemv_quant(
     )
 }
 
+/// One dispatch for several decode projections. Each row uses the ordinary
+/// GEMV body, including its raw-code affine arithmetic and lane reduction.
+/// The row axis changes addressing only; it never materializes BF16 weights.
+pub fn gemv_quant_rows_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+) -> Result<()> {
+    let (n, k) = check_quant(w)?;
+    ensure!(
+        x.dtype() == DType::BF16 && x.shape().len() == 2,
+        "decode rows require BF16 [m,K]"
+    );
+    let m = x.shape()[0];
+    ensure!(
+        (1..=4).contains(&m) && x.shape()[1] == k,
+        "decode row projection geometry"
+    );
+    ensure!(y.numel() == m * n, "decode row output geometry");
+    let requested_rows =
+        if w.bits == 4 && y.dtype() == DType::BF16 { Q4_GEMV_ROWS } else { 1 };
+    let packed_rows = if n.is_multiple_of(requested_rows) { requested_rows } else { 1 };
+    let name = match (w.bits, y.dtype(), packed_rows) {
+        (4, DType::BF16, 1) => "stark_decode_rows_q4_bf16",
+        (4, DType::BF16, 2) => "stark_decode_rows_q4_bf16_2row",
+        (4, DType::F32, 1) => "stark_decode_rows_q4_f32",
+        (8, DType::BF16, 1) => "stark_decode_rows_q8_bf16",
+        (8, DType::F32, 1) => "stark_decode_rows_q8_f32",
+        _ => anyhow::bail!("decode row output must be BF16 or F32"),
+    };
+    let pipeline = ctx.pipeline(name, DECODE_ROWS_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            y.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+        // Adjacent groups read the same weight row for distinct inputs.
+        Grid::Threadgroups { groups: (m, n / packed_rows, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "quant_decode_rows_tests.rs"]
+mod decode_rows_tests;
+
 /// Q4 two-row GDN input projection with its four-tap causal convolution.
 /// The complete BF16 projection is preserved in `raw_out`; only its first
 /// `conv_out.numel()` rows additionally update the convolution window/output.
@@ -234,6 +298,104 @@ pub(crate) fn gemv_q4_gdn_conv_step(
         Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) },
     )
 }
+
+/// Exact short-batch Q4 GDN input projection, scatter, and four-tap convolution.
+/// Each output-channel pair shares its weight loads across M independent
+/// ordinary-decode dots. The original input window remains available for
+/// rollback; `capture` receives the pre-convolution BF16 QKV rows directly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gemv_q4_gdn_conv_rows_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    input: &Tensor,
+    qkv: &Tensor,
+    z: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    conv_w: &Tensor,
+    conv_out: &Tensor,
+    capture: Option<&Tensor>,
+) -> Result<()> {
+    let (n, k) = check_quant(w)?;
+    ensure!(w.bits == 4 && n.is_multiple_of(2), "GDN rows require Q4 row pairs");
+    ensure!(input.shape().len() == 2, "GDN rows input must be [M,K]");
+    let m = input.shape()[0];
+    ensure!((1..=4).contains(&m) && input.shape()[1] == k, "GDN rows input geometry");
+    ensure!(
+        [qkv, z, a, b, conv_out]
+            .iter()
+            .all(|t| t.shape().len() == 2 && t.shape()[0] == m),
+        "GDN rows outputs must be [M,width]"
+    );
+    let (c, v, h) = (qkv.shape()[1], z.shape()[1], a.shape()[1]);
+    ensure!(c > 0 && v > 0 && h > 0 && b.shape()[1] == h, "GDN rows widths");
+    ensure!(n == c + v + 2 * h, "GDN rows projection width");
+    ensure!(conv_out.shape() == [m, c], "GDN rows convolution output geometry");
+    ensure!(
+        conv_w.shape() == [4, c]
+            && window_in.numel() == 3 * c
+            && window_out.numel() == 3 * c,
+        "GDN rows convolution requires four taps"
+    );
+    ensure!(
+        [input, qkv, z, a, b, window_in, window_out, conv_w, conv_out]
+            .iter()
+            .all(|t| t.dtype() == DType::BF16),
+        "GDN rows expects BF16 tensors"
+    );
+    if let Some(capture) = capture {
+        ensure!(
+            capture.dtype() == DType::BF16 && capture.shape() == [m, c],
+            "GDN rows capture geometry"
+        );
+    }
+    let (ib, io) = window_in.binding();
+    let (ob, oo) = window_out.binding();
+    ensure!(!(std::ptr::eq(ib, ob) && io == oo), "GDN rows windows must be distinct");
+    let kernel = match m {
+        1 => "stark_q4_gdn_conv_rows_m1",
+        2 => "stark_q4_gdn_conv_rows_m2",
+        3 => "stark_q4_gdn_conv_rows_m3",
+        4 => "stark_q4_gdn_conv_rows_m4",
+        _ => unreachable!(),
+    };
+    let pipeline = ctx.pipeline(kernel, GDN_ROWS_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            input.binding(),
+            qkv.binding(),
+            z.binding(),
+            a.binding(),
+            b.binding(),
+            window_in.binding(),
+            window_out.binding(),
+            conv_w.binding(),
+            conv_out.binding(),
+            capture.unwrap_or(qkv).binding(),
+        ],
+        &[
+            &u32_bytes(k),
+            &u32_bytes(w.group_size),
+            &u32_bytes(c),
+            &u32_bytes(v),
+            &u32_bytes(h),
+            &u32_bytes(usize::from(capture.is_some())),
+            &u32_bytes(4),
+        ],
+        Grid::Threadgroups { groups: (n / 2, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "gdn_projection_rows_tests.rs"]
+mod gdn_projection_rows_tests;
 
 /// Writes `out[N, K] = dequant(W)` in bf16.
 fn dequant_to_bf16(

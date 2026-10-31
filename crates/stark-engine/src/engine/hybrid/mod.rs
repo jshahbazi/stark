@@ -41,6 +41,33 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Caller-owned complete-vocabulary sampling. A round records draft
+/// distributions before target verification consumes them in prefix order.
+pub trait MtpSampler {
+    fn begin_round(&mut self);
+    fn draft(
+        &mut self,
+        logits: &[f32],
+    ) -> Result<u32>;
+    fn target(
+        &mut self,
+        logits: &[f32],
+        proposal: Option<u32>,
+    ) -> Result<u32>;
+}
+
+/// Aggregate request counters. No token, logit or probability data is retained.
+#[derive(Clone, Copy, Debug, Default, serde::Serialize)]
+pub struct MtpStats {
+    pub rounds: usize,
+    pub proposed: usize,
+    pub accepted: usize,
+    pub verified_rows: usize,
+    pub draft_seconds: f64,
+    pub verify_seconds: f64,
+    pub rollback_seconds: f64,
+}
+
 fn json_file(
     path: &Path,
     limit: u64,
@@ -116,6 +143,17 @@ pub struct Model {
 
 impl Model {
     pub fn load(path: &Path) -> Result<Self> {
+        Self::load_with_mtp(path, false)
+    }
+
+    /// Loads the native head when the supported checkpoint declares one.
+    /// Request-level execution remains disabled until explicitly selected.
+    pub fn load_with_mtp(
+        path: &Path,
+        with_mtp: bool,
+    ) -> Result<Self> {
+        #[cfg(not(all(feature = "metal", target_os = "macos")))]
+        let _ = with_mtp;
         let outer = config(path)?;
         if outer.get("type").and_then(Value::as_str) == Some(uzu::CONFIG_TYPE) {
             return Self::load_uzu(path);
@@ -170,7 +208,7 @@ impl Model {
         let (forward, max_context) = if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
-                let model = lily::LilyModel::load(path)?;
+                let model = lily::LilyModel::load_with_mtp(path, with_mtp)?;
                 if model.vocab_size() != vocab_size || model.position() != 0 {
                     return Err(Error::Invalid("mixed precision metadata mismatch"));
                 }
@@ -356,6 +394,59 @@ impl Model {
     /// The mixed-precision backend can overlap encoding around a host sampler.
     pub fn supports_sampled_decode(&self) -> bool {
         self.supports_greedy_readout()
+    }
+
+    pub fn supports_mtp(&self) -> bool {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.supports_mtp();
+        }
+        false
+    }
+
+    pub fn mtp_verification(&self) -> &'static str {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.mtp_verification();
+        }
+        "unavailable"
+    }
+
+    pub fn set_mtp_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.set_mtp_enabled(enabled),
+            _ if !enabled => Ok(()),
+            _ => Err(Error::Unsupported("MTP unavailable")),
+        }
+    }
+
+    pub fn mtp_stats(&self) -> MtpStats {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return model.mtp_stats();
+        }
+        MtpStats::default()
+    }
+
+    pub fn mtp_decode<'a>(
+        &'a mut self,
+        first: u32,
+        remaining: usize,
+        drafts: usize,
+        sampler: &'a mut dyn MtpSampler,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + 'a>> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => Ok(Box::new(model.mtp_decode(first, remaining, drafts, sampler)?)),
+            _ => {
+                let _ = (first, remaining, drafts, sampler);
+                Err(Error::Unsupported("MTP unavailable"))
+            },
+        }
     }
 
     /// Continue a validated full-logit readout using the caller's sampler.

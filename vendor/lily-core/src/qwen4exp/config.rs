@@ -692,6 +692,25 @@ fn official_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value
         offsets.push(total);
         total = total.checked_add(next).context("official MLX PLE capacity")?;
     }
+    let mtp = match t.get("mtp") {
+        None | Some(Value::Null) => Value::Null,
+        Some(m) => {
+            ensure!(
+                m.get("hybrid").and_then(Value::as_bool) == Some(true)
+                    && m.get("num_hidden_layers").and_then(Value::as_u64) == Some(1)
+                    && m.get("layer_types") == Some(&json!(["full_attention"]))
+                    && m.get("mtp_use_hidden_state_from_layer")
+                        .is_none_or(Value::is_null),
+                "unsupported official MLX MTP architecture"
+            );
+            let theta = m
+                .get("rope_theta")
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .context("invalid official MLX MTP rope theta")?;
+            json!({"layers":1,"layer_types":["full_attention"],"rope_theta":theta})
+        }
+    };
     let padded = total.div_ceil(divisor) * divisor;
     ensure!(padded <= u32::MAX as u64, "official MLX PLE exceeds row-ID capacity");
     value["text_config"]["split_ngram_parts"] = json!(1);
@@ -699,6 +718,7 @@ fn official_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value
         "format": FORMAT,
         "quantization": {"default":{"bits":4,"group_size":64}, "ngram_embedding":{"bits":4,"group_size":32}, "q8_groups":["attn","gdn","shared","head"]},
         "ple": {"layer_multipliers":multipliers,"ngram_heads_vocab_sizes":sizes,"ngram_heads_offsets":offsets,"padded_vocab_size":padded},
+        "mtp": mtp,
         "dropped": [VISION_PREFIX]
     });
     Ok(value)
@@ -737,6 +757,25 @@ mod official_mlx_tests {
         assert_eq!(normalized["lily"]["ple"]["ngram_heads_offsets"][15], 300001275u64);
         assert_eq!(normalized["lily"]["ple"]["padded_vocab_size"], 320001536u64);
         assert_eq!(normalized["text_config"]["split_ngram_parts"], 1);
+    }
+
+    #[test]
+    fn official_mtp_metadata_preserves_the_checkpoint_head() {
+        let mut value = metadata();
+        value["text_config"]["mtp"] = json!({
+            "hybrid":true,"num_hidden_layers":1,
+            "layer_types":["full_attention"],
+            "mtp_use_hidden_state_from_layer":null,"rope_theta":10000000
+        });
+        let normalized = official_mlx_config(value.clone()).unwrap();
+        assert_eq!(
+            normalized["lily"]["mtp"],
+            json!({
+                "layers":1,"layer_types":["full_attention"],"rope_theta":10000000.0
+            })
+        );
+        value["text_config"]["mtp"]["mtp_use_hidden_state_from_layer"] = json!(12);
+        assert!(official_mlx_config(value).is_err());
     }
 
     #[test]

@@ -590,8 +590,8 @@ pub fn load(
     expert_usage_out: Option<PathBuf>,
     session_context: Option<SessionContext>,
 ) -> Result<ModelWeights> {
-    ensure!(!with_mtp, "vendored Lily core does not load MTP");
     ensure!(!with_vision, "vendored Lily core does not load vision");
+    ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     ensure!(
         expert_slots.is_none()
             && expert_usage.is_none()
@@ -620,10 +620,8 @@ pub fn load_checkpoint(
     with_vision: bool,
     machine_memory: Option<u64>,
 ) -> Result<ModelWeights> {
-    ensure!(
-        !with_mtp && !with_vision,
-        "vendored Lily core supports text-only non-speculative loading"
-    );
+    ensure!(!with_vision, "vendored Lily core does not load vision");
+    ensure!(!with_mtp || config.mtp.is_some(), "checkpoint has no MTP head");
     // Every buffer allocated from here on that is still alive at the end is
     // a weight, or the expert cache's (filtered out below).
     let recording = ctx.record_buffers()?;
@@ -643,8 +641,12 @@ pub fn load_checkpoint(
         );
     }
     let load_vision = with_vision && config.vision.is_some();
-    let skip =
-        if load_vision { SKIP_PREFIXES_WITH_VISION } else { SKIP_PREFIXES_TEXT_ONLY };
+    let skip: &[&str] = match (load_vision, with_mtp) {
+        (false, false) => SKIP_PREFIXES_TEXT_ONLY,
+        (true, false) => SKIP_PREFIXES_WITH_VISION,
+        (false, true) => &[VISION_PREFIX],
+        (true, true) => &[],
+    };
     let policy = config.storage;
     let loader = Loader::new(
         ctx,

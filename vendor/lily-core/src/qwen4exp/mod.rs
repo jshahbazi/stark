@@ -2,10 +2,16 @@
 //! Qwen3.8-Flash-Next in-process model core.
 //! Modified by Stark: diagnostic/replay tools and disk expert services omitted.
 pub mod config;
+mod host_spec;
+#[cfg(debug_assertions)]
+mod numerical_trace;
+#[cfg(debug_assertions)]
+pub use numerical_trace::{NumericalDifference, NumericalTrace};
 pub mod model;
 pub mod ngram;
 pub mod positions;
 mod spec;
+pub use host_spec::HostVerification;
 mod vision;
 mod vision_weights;
 pub mod weights;

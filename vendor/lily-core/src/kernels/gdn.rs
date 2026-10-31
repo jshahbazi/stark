@@ -135,6 +135,150 @@ pub fn gdn_step_gated_named(
     )
 }
 
+/// Verifies one to four causal rows in one dispatch, preserving ordinary
+/// decode's F32 recurrence, reduction order and BF16 output-rounding boundary.
+/// Each thread retains its state column across the short verification group.
+/// `mid`, when present, receives the state after every row except the last.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_verify_gated_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    norm_w: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    eps: f32,
+    gate_act: GdnGate,
+    mid: Option<&Tensor>,
+) -> Result<()> {
+    gdn_verify_gated_exact_named(
+        ctx,
+        pass,
+        qkv,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        state,
+        z,
+        norm_w,
+        out,
+        scale,
+        num_k_heads,
+        eps,
+        gate_act,
+        mid,
+        "gdn_verify_gated_exact_register",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gdn_verify_gated_exact_named(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    norm_w: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    eps: f32,
+    gate_act: GdnGate,
+    mid: Option<&Tensor>,
+    kernel: &'static str,
+) -> Result<()> {
+    let heads = a_log.numel();
+    ensure!(
+        heads > 0 && num_k_heads > 0 && heads.is_multiple_of(num_k_heads),
+        "invalid GDN verify heads"
+    );
+    ensure!(a.numel().is_multiple_of(heads), "invalid GDN verify rows");
+    let rows = a.numel() / heads;
+    ensure!((1..=4).contains(&rows), "GDN verify requires one to four rows");
+    let dim = GDN_HEAD_DIM;
+    let channels = (2 * num_k_heads + heads) * dim;
+    let values = rows * heads * dim;
+    ensure!(
+        qkv.dtype() == DType::BF16 && qkv.numel() == rows * channels,
+        "invalid GDN verify qkv"
+    );
+    ensure!(
+        a.dtype() == DType::BF16 && b.dtype() == DType::BF16 && b.numel() == a.numel(),
+        "invalid GDN verify gates"
+    );
+    ensure!(
+        a_log.dtype() == DType::F32
+            && dt_bias.dtype() == DType::BF16
+            && dt_bias.numel() == heads,
+        "invalid GDN verify gate weights"
+    );
+    ensure!(
+        state.dtype() == DType::F32 && state.numel() == heads * dim * dim,
+        "invalid GDN verify state"
+    );
+    ensure!(
+        z.dtype() == DType::BF16 && z.numel() == values,
+        "invalid GDN verify output gate"
+    );
+    ensure!(
+        out.dtype() == DType::BF16 && out.numel() == values,
+        "invalid GDN verify output"
+    );
+    ensure!(
+        norm_w.dtype() == DType::F32 && norm_w.numel() == dim,
+        "invalid GDN verify norm"
+    );
+    ensure!(
+        scale.is_finite() && eps.is_finite() && eps > 0.0,
+        "invalid GDN verify scale or epsilon"
+    );
+    if let Some(mid) = mid {
+        ensure!(
+            mid.dtype() == DType::F32 && mid.numel() >= (rows - 1) * state.numel(),
+            "invalid GDN verify captures"
+        );
+    }
+    let captures = if mid.is_some() { rows - 1 } else { 0 };
+    let pipeline = ctx.pipeline(kernel, SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            qkv.binding(),
+            a.binding(),
+            b.binding(),
+            a_log.binding(),
+            dt_bias.binding(),
+            state.binding(),
+            z.binding(),
+            norm_w.binding(),
+            out.binding(),
+            mid.unwrap_or(state).binding(),
+        ],
+        &[
+            &u32_bytes(rows),
+            &u32_bytes(heads),
+            &u32_bytes(num_k_heads),
+            &u32_bytes(captures),
+            &scale.to_ne_bytes(),
+            &eps.to_ne_bytes(),
+            &u32_bytes(gate_act as usize),
+        ],
+        Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (dim, 1, 1) },
+    )
+}
+
 /// Staging for normalized q/k rows and precomputed gates.
 pub struct GdnRegscanStaging<'a> {
     /// BF16 `[M, 2*HK*128]` normalized q then k rows.
@@ -1718,3 +1862,6 @@ fn gdn_prefill_qk_contiguous_value_key_mlx(
 #[cfg(test)]
 #[path = "official_gdn_prefill_qk_tests.rs"]
 mod official_prefill_qk_tests;
+#[cfg(test)]
+#[path = "gdn_verify_exact_tests.rs"]
+mod verify_exact_tests;
