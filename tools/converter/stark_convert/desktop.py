@@ -230,7 +230,7 @@ class Desktop:
         self.api_queue = []
         self.api_queue_limit = 8
         self.api_queue_timeout = 30
-        self.api_context = 16384
+        self.api_context = self.context_limit
         self.api_maximum = 4096
         self.api_vocab = 0
         self.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -1243,8 +1243,8 @@ class Desktop:
         if (
             ready.get("ready") is not True
             or ready.get("mode") != "text-generation-v1"
-            or not isinstance(ready.get("max_context_tokens"), int)
-            or ready["max_context_tokens"] < 2
+            or type(ready.get("max_context_tokens")) is not int
+            or not 2 <= ready["max_context_tokens"] <= 0xFFFFFFFF
             or not isinstance(ready.get("max_new_tokens"), int)
             or ready["max_new_tokens"] < 1
         ):
@@ -1256,7 +1256,7 @@ class Desktop:
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
             self.codec, self.template = codec, template
-            self.context_limit = min(16384, ready["max_context_tokens"])
+            self.context_limit = ready["max_context_tokens"]
             self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(self.context, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)

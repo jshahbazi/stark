@@ -15,7 +15,6 @@ import subprocess
 from .chat import Worker, _popen_with_gpu_memory
 
 LETTERS = "ABCDEFGHIJKLMNOP"
-MAX_CONTEXT_TOKENS = 16384
 SYSTEM = (
     "Select the answer that best satisfies the question using the provided text. "
     "Reply with one uppercase option letter only."
@@ -148,8 +147,6 @@ def decide(worker, codec, template, text, question, answers, vocab_size):
     if len(set(candidates)) != len(candidates):
         raise DecisionInputError("This model cannot distinguish the required answer letters.")
     ids = token_ids(worker.request({"operation": "tokenize", "text": prompt, "add_special_tokens": False}), vocab_size)
-    if len(ids) > MAX_CONTEXT_TOKENS:
-        raise DecisionInputError("The decision exceeds the context limit. Use shorter text or fewer answers.")
     reply = worker.request(
         {
             "operation": "score",

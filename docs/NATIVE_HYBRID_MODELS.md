@@ -224,8 +224,10 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
-This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
-and executes neither MTP nor vision. Source modifications and licenses are
+This path requires macOS 26 and Metal 4, uses the checkpoint's declared context
+maximum, and executes neither MTP nor vision. Initial K/V and decode scratch
+reserve at most 16,384 tokens and grow as needed; that reserve is not a token
+limit. Prefill scratch follows the current state capacity. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
 
 The official mixed-affine MLX checkpoint policy keeps its stored weights and
@@ -391,9 +393,9 @@ record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
 These paths are text-only. The native loader does not execute vision, video,
-audio, MTP or DFlash. The workers retain their 16,384-token context and
-4,096-output-token caps; the upstream advertised maximum context is not a Stark
-memory qualification. A weight set fitting within 128 GiB does not establish
+audio, MTP or DFlash. The workers enforce the loaded model's configured context
+maximum and retain the 4,096-output-token cap; the upstream advertised maximum
+context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.
 
 Generation uses fresh state for every request. Scoring serializes the complete

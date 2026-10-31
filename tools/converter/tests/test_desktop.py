@@ -1115,6 +1115,29 @@ def test_advanced_options_reject_missing_fields_no_model_and_busy(desktop, model
     desktop.dispatch({"command": "stop"})
 
 
+@pytest.mark.parametrize("context_limit", [32768, 262144, 1048576])
+def test_model_context_capacity_reaches_settings_and_api(desktop, model, context_limit):
+    identifier = installed(desktop, model)
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": context_limit,
+            "max_new_tokens": 4096,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    ready = [event for event in events(desktop) if event["event"] == "ready"][-1]
+    assert ready["max_context_tokens"] == context_limit
+    assert desktop.api_models()[0]["context_length"] == context_limit
+    desktop.dispatch(advanced_options(context_tokens=context_limit))
+    assert desktop.context == context_limit
+    with pytest.raises(DesktopError, match="Invalid advanced options"):
+        desktop.dispatch(advanced_options(context_tokens=context_limit + 1))
+
+
 def test_model_change_clamps_options_to_advertised_limits(desktop, model):
     identifier = running(desktop, model)
     desktop.dispatch(advanced_options())

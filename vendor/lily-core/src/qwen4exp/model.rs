@@ -708,7 +708,7 @@ impl QsaScratch {
         qb: usize,
     ) -> Result<Self> {
         let idx = &cfg.indexer;
-        let max_blocks = (max_seq / idx.compress_ratio).max(1);
+        let max_blocks = max_seq.div_ceil(idx.compress_ratio).max(1);
         let k_max = idx.block_topk();
         let slots = qsa::split_scratch_slots(qb, k_max, idx.compress_ratio);
         let nq = cfg.num_attention_heads;
@@ -1820,17 +1820,21 @@ impl Qwen4ExpModel {
         ctx: &MetalContext,
         s: &mut Scratch,
         needed: usize,
+        context_capacity: usize,
     ) -> Result<()> {
         let needed = needed.min(self.prefill_chunk);
         let have = s.prefill.as_ref().map_or(0, |p| p.m);
-        if have < needed {
-            let target = needed.next_power_of_two().min(self.prefill_chunk);
+        let context_have = s.prefill.as_ref().map_or(0, |p| {
+            p.qsa.scores.shape()[1] * self.config.indexer.compress_ratio
+        });
+        if have < needed || context_have < context_capacity {
+            let target = needed.next_power_of_two().min(self.prefill_chunk).max(have);
             s.prefill = None;
             s.prefill = Some(PrefillScratch::new(
                 ctx,
                 &self.config,
                 target,
-                MAX_SEQ,
+                context_capacity,
                 self.ple_table(),
                 self.weights.mtp.is_some(),
                 self.kv_format,
@@ -1979,7 +1983,7 @@ impl Qwen4ExpModel {
         }
         let alloc_started = std::time::Instant::now();
         state.ensure_capacity(ctx, state.pos + tokens.len())?;
-        self.ensure_prefill_scratch(ctx, s, tokens.len())?;
+        self.ensure_prefill_scratch(ctx, s, tokens.len(), state.capacity)?;
         let alloc_secs = alloc_started.elapsed().as_secs_f64();
         crate::stats::record(|c| c.prefill.alloc_secs += alloc_secs);
         let s = &*s;
@@ -4285,7 +4289,31 @@ fn kv_format_from_env() -> Result<Option<KvFormat>> {
 /// Rounds a requested capacity up to the growth step, within the kernel limit.
 fn round_capacity(tokens: usize) -> Result<usize> {
     ensure!(tokens <= MAX_SEQ, "capacity {tokens} exceeds kernel limit {MAX_SEQ}");
-    Ok(tokens.max(1).div_ceil(CAPACITY_STEP).saturating_mul(CAPACITY_STEP).min(MAX_SEQ))
+    let rounded = tokens
+        .max(1)
+        .checked_add(CAPACITY_STEP - 1)
+        .map(|padded| padded / CAPACITY_STEP * CAPACITY_STEP)
+        .ok_or_else(|| anyhow::anyhow!("capacity rounding overflow"))?;
+    ensure!(
+        rounded <= MAX_SEQ,
+        "rounded capacity exceeds signed shader sequence fields"
+    );
+    Ok(rounded)
+}
+
+#[cfg(test)]
+mod context_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn capacity_rounding_supports_published_million_token_windows() {
+        assert_eq!(round_capacity(0).unwrap(), CAPACITY_STEP);
+        assert_eq!(round_capacity(262_145).unwrap(), 270_336);
+        assert_eq!(round_capacity(1_048_576).unwrap(), 1_048_576);
+        assert_eq!(round_capacity(MAX_SEQ).unwrap(), MAX_SEQ);
+        assert!(round_capacity(MAX_SEQ + 1).is_err());
+        assert!(round_capacity(usize::MAX).is_err());
+    }
 }
 
 impl DecodeStateApi for DecodeState {

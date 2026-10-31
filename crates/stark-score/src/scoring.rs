@@ -18,7 +18,6 @@ use stark_engine::{
 
 use crate::cache::{CacheEntry, LastScoreCache};
 
-const MAX_CONTEXT_TOKENS: u32 = 16384;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 
 #[derive(Deserialize)]
@@ -146,7 +145,6 @@ fn validate_score(
     if input.is_empty()
         || !(2..=16).contains(&candidates.len())
         || context == 0
-        || context > MAX_CONTEXT_TOKENS
         || !temperature.is_finite()
         || temperature <= 0.0
         || input.iter().chain(candidates).any(|id| *id as usize >= vocab_size)
@@ -522,6 +520,7 @@ pub(super) fn run_lines(
         "cache_key":"exact-token-ids+context-tokens+model-instance",
         "cache":worker.telemetry(false),
         "load_seconds":started.elapsed().as_secs_f64(),"vocab_size":worker.backend.vocab_size(),
+        "max_context_tokens":worker.backend.max_context_length(),
         "peak_memory_bytes":worker.backend.peak_memory_usage()}),
     )
     .map_err(|_| "protocol_write_failed")?;
@@ -588,13 +587,14 @@ mod tests {
         fail_score: bool,
         invalid_output: bool,
         fail_tokenize: bool,
+        max_context: Option<u32>,
     }
     impl ScoringBackend for FakeBackend {
         fn vocab_size(&self) -> usize {
             6
         }
         fn max_context_length(&self) -> Option<u32> {
-            Some(MAX_CONTEXT_TOKENS)
+            self.max_context
         }
         fn peak_memory_usage(&self) -> Option<usize> {
             None
@@ -641,6 +641,7 @@ mod tests {
                 fail_score: false,
                 invalid_output: false,
                 fail_tokenize: false,
+                max_context: Some(262_144),
             },
             enabled,
             digest,
@@ -703,6 +704,23 @@ mod tests {
             assert_eq!(post(&mut worker, request(input, &[2, 3], context, 1.22))["cache_hit"], false);
         }
         assert_eq!(worker.backend.calls, 4);
+    }
+
+    #[test]
+    fn model_context_capacity_controls_large_requests_and_failures_clear_cache() {
+        let mut worker = worker(true, false);
+        let input = vec![1; 16_385];
+        let large = request(&input, &[2, 3], 262_144, 1.0);
+        let fresh = post(&mut worker, large.clone());
+        assert_eq!(fresh["input_tokens"], 16_385);
+        assert_eq!(fresh["truncated"], false);
+        assert_eq!(post(&mut worker, large.clone())["cache_hit"], true);
+        assert_eq!(worker.backend.calls, 1);
+        assert_eq!(post(&mut worker, request(&input, &[2, 3], 262_145, 1.0))["error"], "context_overflow");
+        assert_eq!(worker.backend.calls, 1);
+        assert_eq!(post(&mut worker, large)["cache_hit"], false);
+        worker.backend.max_context = None;
+        assert_eq!(post(&mut worker, request(&input, &[2, 3], u32::MAX, 1.0))["truncated"], false);
     }
 
     #[test]
@@ -938,7 +956,7 @@ mod tests {
         assert!(validate_score(&[1], &(0..17).collect::<Vec<_>>(), 8192, 1.22, 100).is_err());
         assert_eq!(validate_score(&[1, 2], &[2, 3], 1, 1.22, 100), Err("context_overflow"));
         assert_eq!(validate_score(&[1, 2], &[2, 3], 2, 1.22, 100), Ok(()));
-        assert!(validate_score(&[1], &[2, 3], 16385, 1.22, 100).is_err());
+        assert_eq!(validate_score(&[1], &[2, 3], 16385, 1.22, 100), Ok(()));
     }
 
     #[test]

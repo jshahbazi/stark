@@ -71,7 +71,7 @@ impl Qwen4ExpModel {
         m: usize,
     ) -> Result<()> {
         state.ensure_capacity(ctx, state.pos + m + MAX_DRAFTS)?;
-        self.ensure_prefill_scratch(ctx, s, m)
+        self.ensure_prefill_scratch(ctx, s, m, state.capacity())
     }
 
     /// See [`crate::engine::LanguageModel::verify`].
