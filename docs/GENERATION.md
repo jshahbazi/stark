@@ -35,7 +35,7 @@ The client renders the converted model's chat template in a Jinja sandbox, keeps
 | `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
-Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes the same settings through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)).
+Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits and thinking through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). MTP configuration is available through the backend; its UI control is pending.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
@@ -139,7 +139,7 @@ The terminal reply:
 | `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters when available. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
