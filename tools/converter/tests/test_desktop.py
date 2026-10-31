@@ -1069,7 +1069,8 @@ def test_advanced_options_model_default_empty_override_and_restart(desktop, mode
     assert desktop.thinking is False
     replacement = Desktop(desktop.executable, desktop.data_dir, io.StringIO())
     assert replacement.system_prompt is None
-    assert (replacement.context, replacement.maximum, replacement.thinking) == (8192, 512, False)
+    assert (replacement.context, replacement.maximum, replacement.thinking) == (None, 512, False)
+    assert replacement.context_override is None
 
 
 @pytest.mark.parametrize(
@@ -1115,7 +1116,7 @@ def test_advanced_options_reject_missing_fields_no_model_and_busy(desktop, model
     desktop.dispatch({"command": "stop"})
 
 
-@pytest.mark.parametrize("context_limit", [32768, 262144, 1048576])
+@pytest.mark.parametrize("context_limit", [2, 512, 32768, 262144, 1048576])
 def test_model_context_capacity_reaches_settings_and_api(desktop, model, context_limit):
     identifier = installed(desktop, model)
     with patch(
@@ -1131,11 +1132,71 @@ def test_model_context_capacity_reaches_settings_and_api(desktop, model, context
         finish(desktop)
     ready = [event for event in events(desktop) if event["event"] == "ready"][-1]
     assert ready["max_context_tokens"] == context_limit
+    assert ready["context_tokens"] == context_limit
+    assert desktop.context == context_limit
     assert desktop.api_models()[0]["context_length"] == context_limit
-    desktop.dispatch(advanced_options(context_tokens=context_limit))
+    desktop.dispatch(advanced_options(context_tokens=context_limit, max_new_tokens=min(128, context_limit - 1)))
     assert desktop.context == context_limit
     with pytest.raises(DesktopError, match="Invalid advanced options"):
         desktop.dispatch(advanced_options(context_tokens=context_limit + 1))
+
+
+def test_default_context_follows_model_changes_and_reaches_generation(desktop, model):
+    from stark_convert.chat import Worker
+
+    identifier = running(desktop, model)
+    read = Worker.read
+    for context_limit in [512, 32768, 262144, 1048576, 32768]:
+
+        def ready(worker, limit=context_limit):
+            reply = read(worker)
+            reply["max_context_tokens"] = limit
+            return reply
+
+        with patch(
+            "stark_convert.desktop.Worker.read",
+            autospec=True,
+            side_effect=ready,
+        ):
+            desktop.dispatch({"command": "run", "model_id": identifier})
+            finish(desktop)
+        assert desktop.context == context_limit
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "model default fixture"})
+        finish(desktop)
+    assert request.call_args_list[-1].args[0]["context_tokens"] == 32768
+    assert any(event["event"] == "reply" for event in events(desktop))
+
+
+def test_custom_context_survives_clamps_and_restore_defaults_tracks_models(desktop, model):
+    identifier = running(desktop, model)
+    desktop.dispatch(advanced_options(context_tokens=2048))
+
+    def load(context_limit):
+        with patch(
+            "stark_convert.desktop.Worker.read",
+            return_value={
+                "ready": True,
+                "mode": "text-generation-v1",
+                "max_context_tokens": context_limit,
+                "max_new_tokens": 4096,
+            },
+        ):
+            desktop.dispatch({"command": "run", "model_id": identifier})
+            finish(desktop)
+
+    load(512)
+    assert desktop.context == 512
+    load(262144)
+    assert desktop.context == 2048
+    desktop.dispatch(advanced_options(context_tokens=262144))
+    load(1048576)
+    assert desktop.context == 1048576
+    desktop.dispatch({"command": "reset"})
+    assert desktop.context == 1048576
+    desktop.dispatch({"command": "stop"})
+    load(32768)
+    assert desktop.context == 32768
 
 
 def test_model_change_clamps_options_to_advertised_limits(desktop, model):

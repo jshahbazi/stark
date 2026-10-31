@@ -170,6 +170,26 @@ extension EngineController {
              "message": action == "trash" ? "Its files will move to Trash." : "Its folder will remain on this Mac."]
         }
         switch scenario {
+        case "context-model-defaults":
+            engine.mode = .chat
+            for limit in [2, 512, 32_768, 262_144, 1_048_576] {
+                let output = min(4096, limit - 1)
+                engine.apply(["event": "ready", "mode": "chat", "model_id": "fixture-model",
+                              "max_context_tokens": limit, "context_tokens": limit,
+                              "max_output_tokens": output, "max_new_tokens": min(512, output)])
+                guard engine.contextLimit == limit, engine.options.contextTokens == limit,
+                      engine.apiContextTokens == limit else { return false }
+                let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
+                guard defaults.contextTokens == limit, defaults.maxNewTokens == min(512, output),
+                      defaults.useModelSystemPrompt, defaults.systemPrompt.isEmpty, !defaults.thinking,
+                      engine.configure(defaults) else { return false }
+                let requested = command()
+                guard requested["context_tokens"] as? Int == limit else { return false }
+                engine.apply(["event": "configured", "max_context_tokens": limit, "context_tokens": limit,
+                              "max_output_tokens": output, "max_new_tokens": min(512, output)])
+                guard engine.options.contextTokens == limit, engine.state == "ready" else { return false }
+            }
+            return true
         case "api-keychain-failure-isolated":
             credentialStorage.status = errSecInteractionNotAllowed
             engine.retryAPI()
@@ -1666,6 +1686,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_gpu_memory_percentage_thresholds_and_unavailable_budget(self):
         self.exercise("gpu-memory-budget-indicator")
+
+    def test_model_default_context_and_restore_defaults_use_published_maximum(self):
+        self.exercise("context-model-defaults")
 
     @classmethod
     def setUpClass(cls):

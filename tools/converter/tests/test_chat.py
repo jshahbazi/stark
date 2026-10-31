@@ -32,11 +32,17 @@ def model(tmp_path):
 
 
 class FakeWorker:
-    def __init__(self):
+    def __init__(self, *, context_limit=8192):
         self.requests = []
+        self.context_limit = context_limit
 
     def read(self):
-        return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": 8192, "max_new_tokens": 4096}
+        return {
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": self.context_limit,
+            "max_new_tokens": 4096,
+        }
 
     def request(self, payload):
         self.requests.append(payload)
@@ -44,7 +50,42 @@ class FakeWorker:
 
 
 def options(model, **kwargs):
-    return Namespace(model_path=model, context_tokens=1024, max_new_tokens=32, system=None, thinking=False, **kwargs)
+    values = dict(model_path=model, context_tokens=1024, max_new_tokens=32, system=None, thinking=False)
+    values.update(kwargs)
+    return Namespace(**values)
+
+
+@pytest.mark.parametrize("context_limit", [512, 32768, 262144, 1048576])
+def test_default_context_uses_the_loaded_model_maximum(model, context_limit):
+    worker = FakeWorker(context_limit=context_limit)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["context_tokens"] == context_limit
+
+
+def test_explicit_context_override_is_preserved(model):
+    worker = FakeWorker(context_limit=262144)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=2048), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["context_tokens"] == 2048
+
+
+def test_explicit_context_above_the_model_maximum_is_rejected_before_requests(model):
+    worker = FakeWorker(context_limit=32768)
+    with pytest.raises(ChatError, match="Requested token limits exceed"):
+        run_chat(options(model, context_tokens=32769), worker)
+    assert worker.requests == []
+
+
+def test_context_help_describes_the_model_default(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+    assert "loaded model's maximum" in capsys.readouterr().out
 
 
 def test_history_reset_and_eof(model):

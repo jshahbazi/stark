@@ -261,9 +261,16 @@ struct DecisionResult {
 struct ChatOptions {
     var useModelSystemPrompt = true
     var systemPrompt = ""
-    var contextTokens = 8192
+    var contextTokens = 0
     var maxNewTokens = 512
     var thinking = false
+
+    static func defaults(contextLimit: Int, outputLimit: Int) -> ChatOptions {
+        var options = ChatOptions()
+        options.contextTokens = contextLimit
+        options.maxNewTokens = min(512, outputLimit, max(0, contextLimit - 1))
+        return options
+    }
 }
 
 struct InstallProgress {
@@ -977,7 +984,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var removingModelID: String?
     @Published private(set) var removalError: String?
     @Published var options = ChatOptions()
-    @Published var contextLimit = 8192
+    @Published var contextLimit = 0
     @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
     private var process: Process?
@@ -2494,7 +2501,7 @@ struct AdvancedOptionsView: View {
     }
 
     private var validation: String? {
-        guard let count = Int(context), (2...engine.contextLimit).contains(count) else {
+        guard let count = Int(context), count >= 2, count <= engine.contextLimit else {
             return "Context size must be between 2 and \(engine.contextLimit) tokens."
         }
         guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
@@ -2535,14 +2542,15 @@ struct AdvancedOptionsView: View {
                 .font(.caption).foregroundStyle(.secondary)
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
-            Text("Settings stay in memory for this app session. Switching models may reduce token limits.")
+            Text("Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {
-                    useModelSystemPrompt = true; systemPrompt = ""; thinking = false
-                    let count = min(8192, engine.contextLimit)
-                    context = String(count)
-                    output = String(min(512, engine.outputLimit, count - 1))
+                    let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
+                    useModelSystemPrompt = defaults.useModelSystemPrompt
+                    systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
+                    context = String(defaults.contextTokens)
+                    output = String(defaults.maxNewTokens)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)

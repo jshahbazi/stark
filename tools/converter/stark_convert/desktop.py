@@ -216,11 +216,13 @@ class Desktop:
         self.messages = []
         self.image_identity = None
         self.attachments = None
-        self.context = 8192
+        self.context = None
+        # None tracks each loaded model's maximum; retain custom requests across clamps.
+        self.context_override = None
         self.maximum = 512
         self.system_prompt = None
         self.thinking = False
-        self.context_limit = 8192
+        self.context_limit = 0
         self.output_limit = 512
         self.models = []
         self.api = None
@@ -1258,7 +1260,7 @@ class Desktop:
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
             self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
-            self.context = min(self.context, self.context_limit)
+            self.context = min(self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
             self.api_context = self.context_limit
             self.api_maximum = min(self.output_limit, self.api_context - 1)
@@ -1305,6 +1307,7 @@ class Desktop:
             ):
                 raise DesktopError("Invalid advanced options. Check the model's token limits.")
             self.context, self.maximum = context, maximum
+            self.context_override = None if context == self.context_limit else context
             self.system_prompt, self.thinking = system, thinking
             self.reset()
             self.emit("configured", **self.settings_summary())

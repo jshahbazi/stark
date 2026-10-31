@@ -29,7 +29,7 @@ The client renders the converted model's chat template in a Jinja sandbox, keeps
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
 | `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
-| `--context-tokens N` | smaller of 8192 and the worker limit | Context budget for prompt plus reply |
+| `--context-tokens N` | loaded model's maximum context | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
