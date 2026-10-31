@@ -13,6 +13,15 @@ Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary singl
 
 `src/qwen4exp/numerical_trace.rs` provides explicit in-memory stage comparisons in debug builds. Only aggregate mismatch counts, errors and named non-cryptographic fingerprints leave the scope. It has no file or environment interface, and release builds omit the capture fields and probes.
 
+The official mixed-affine adapter also admits the checkpoint's declared
+single-layer hybrid MTP head. Existing collision-checked aliases expose its
+72 tensor planes without changing storage or quantization; the head shares
+the trunk vocabulary projection. Host verification uses ordinary serial
+decode for this policy, including its F32 ValueKey GDN captures and exact
+prefix rollback. Legacy Lily batched verification is rejected for official
+weights because its target arithmetic and cache layout differ. The adapter
+reports the serial route explicitly; enabling MTP does not establish a speedup.
+
 Upstream environment-variable selection and diagnostics are disabled in the Stark integration. Precision is selected per operation: BF16 inputs and activations, F32 reductions, F32 logit buffers and F32 GDN recurrent state, plus explicitly selected Q8 attention K/V. Official head values are rounded to BF16 before widening into the F32 buffer. This policy description does not itself establish numerical equivalence or answer quality; source-bound component and model controls are recorded separately.
 
 The upstream Metal shaders originate at the pinned revision. Stark modifies five of those files:

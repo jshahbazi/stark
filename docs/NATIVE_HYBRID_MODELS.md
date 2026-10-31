@@ -228,12 +228,17 @@ The generation worker can also load the checkpoint's existing MTP head and
 enable one to three draft tokens per request through `mtp_drafts`. It is off
 by default. Draft and target distributions use Stark's complete-logit CPU
 sampler with exact probability-ratio rejection and residual correction;
-quantization is unchanged. Batched verification retains ordinary decode arithmetic,
+quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,
 captures GDN and convolution state, and rejection restores the committed
 prefix and n-gram history. The
 head and its speculative state add memory. See the
 [generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
 aggregate counters and sampling semantics. Scoring keeps MTP disabled.
+The official mixed-affine checkpoint's existing one-layer head is also
+supported, using `serial-decode-exact-v1` verification to preserve its
+ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
+Lily weights retain `batched-decode-exact-v1`; official batched verification
+fails closed until kernels preserving its target arithmetic are qualified.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and does not execute vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
@@ -413,7 +418,8 @@ record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
 These paths are text-only. They do not execute vision, video, audio or DFlash.
-MTP is available only through the Lily-format generation path described above.
+MTP is available through the native Lily and official mixed-affine generation
+paths described above when the checkpoint contains its trained head.
 The workers retain their 16,384-token context and
 4,096-output-token caps; the upstream advertised maximum context is not a Stark
 memory qualification. A weight set fitting within 128 GiB does not establish

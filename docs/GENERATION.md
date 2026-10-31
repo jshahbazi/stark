@@ -111,7 +111,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, 1 through 4,096. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
-| `mtp_drafts` | Optional integer, default 0 (disabled). Values 1–3 enable exact MTP on a supported Lily-format Qwen3.8 checkpoint; other models return `mtp_not_supported`. Applies to text `generate` only. |
+| `mtp_drafts` | Optional integer, default 0 (disabled). Values 1–3 enable exact MTP on a supported native Lily or official mixed-affine Qwen3.8 checkpoint containing its trained head; other models return `mtp_not_supported`. Applies to text `generate` only. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -136,7 +136,7 @@ The terminal reply:
 | `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
-| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, `verification: "batched-decode-exact-v1"`, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -161,10 +161,13 @@ another engine token for token.
 
 ### Qwen3.8 multi-token prediction
 
-An admitted Lily-format Qwen3.8 checkpoint containing its trained MTP head adds
+An admitted native Qwen3.8 checkpoint containing its trained MTP head adds
 `mtp: {"supported": true, "max_drafts": 3, "default_drafts": 0,
-"sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness. The generation worker loads
-the head with the checkpoint's existing quantization. Set `mtp_drafts` to 1,
+"sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness for Lily-format weights.
+Official mixed-affine weights report `verification: "serial-decode-exact-v1"`.
+Responses retain the same route label. The generation worker loads
+the head with the checkpoint's existing quantization, including its memory
+cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
 Requests on one worker remain serialized and start with fresh state.
 
@@ -172,7 +175,7 @@ Both target and draft use complete F32 readouts and the existing temperature,
 top-k, top-p and min-p filtering policy. The host accepts a proposed token with
 probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
 The bonus token uses the target distribution. This is exact rejection sampling;
-there is no candidate cap or approximate acceptance threshold. Batched
+there is no candidate cap or approximate acceptance threshold. Target
 verification retains ordinary decode arithmetic and its precision boundaries. Exact sampling preserves the target
 distribution, rather than requiring identical token sequences at the same seed
 with MTP on and off. Each route is reproducible on matching builds and hardware.
@@ -182,9 +185,13 @@ in request memory only. Rejected suffixes rewind GDN recurrent state,
 convolution windows, n-gram history and the draft head's committed history.
 Early termination drains work and rewinds a partly delivered group without
 calling the sampler during cleanup. MTP adds memory and verification work, so
-its benefit depends on acceptance and the workload. The verifier evaluates
+its benefit depends on acceptance and the workload. The Lily verifier evaluates
 up to four positions in one graph, reusing weights while retaining each
 position's decode arithmetic and recurrent-state update order.
+The official mixed-affine path executes ordinary target decode separately
+for each row. Its ValueKey GDN state, stock HC arithmetic, affine-64 cache and
+BF16-valued vocabulary head require that serial fallback; the Lily batch
+kernels do not preserve those boundaries. Uzu text conversions omit the head.
 It is disabled by default.
 
 ### Streaming
