@@ -26,9 +26,22 @@ final class ControllerCredentialStorage: APICredentialStorage {
     var status: OSStatus = errSecSuccess
     var key = Data(String(repeating: "a", count: 64).utf8)
     var replacementStatus: OSStatus = errSecSuccess
-    func read() -> (OSStatus, Data?) { (status, key) }
+    var readGate: DispatchSemaphore?
+    var replaceGate: DispatchSemaphore?
+    private let countLock = NSLock()
+    private var reads = 0
+    private var replaces = 0
+    var readCount: Int { countLock.lock(); defer { countLock.unlock() }; return reads }
+    var replaceCount: Int { countLock.lock(); defer { countLock.unlock() }; return replaces }
+    func read() -> (OSStatus, Data?) {
+        countLock.lock(); reads += 1; countLock.unlock()
+        readGate?.wait()
+        return (status, key)
+    }
     func add(_ data: Data) -> OSStatus { key = data; return errSecSuccess }
     func replace(_ data: Data) -> OSStatus {
+        countLock.lock(); replaces += 1; countLock.unlock()
+        replaceGate?.wait()
         if replacementStatus == errSecSuccess { key = data }
         return replacementStatus
     }
@@ -91,8 +104,8 @@ extension EngineController {
         func staged() -> [String] {
             try! FileManager.default.contentsOfDirectory(atPath: engine.attachmentStaging!.root.path)
         }
-        func pump(_ complete: () -> Bool) -> Bool {
-            let deadline = Date().addingTimeInterval(2)
+        func pump(timeout: TimeInterval = 2, _ complete: () -> Bool) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
             while !complete() && Date() < deadline {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.01))
             }
@@ -159,36 +172,96 @@ extension EngineController {
         case "api-keychain-failure-isolated":
             credentialStorage.status = errSecInteractionNotAllowed
             engine.retryAPI()
-            guard noCommandSent(), engine.apiKey.isEmpty, engine.state == "ready",
+            guard pump({ !engine.apiCredentialBusy }), noCommandSent(), engine.apiKey.isEmpty, engine.state == "ready",
                   engine.loadedID == "fixture-model", engine.apiMessage.contains("Unlock") else { return false }
             credentialStorage.status = errSecSuccess
             engine.retryAPI()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
             let configured = command()
             return configured["command"] as? String == "configure_api" &&
                 configured["port"] as? Int == 8000 && configured["api_key"] as? String == String(repeating: "a", count: 64)
         case "api-reuse-rotation-and-connection-events":
-            engine.retryAPI(); _ = command()
+            engine.retryAPI()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
+            _ = command()
             let original = engine.apiKey
             engine.apply(["event": "connection", "base_url": "http://127.0.0.1:8000/v1", "api_key": "ignored-untrusted-key"])
             guard engine.apiKey == original else { return false }
-            engine.retryAPI(); _ = command()
+            engine.retryAPI()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
+            _ = command()
             guard engine.apiKey == original else { return false }
             credentialStorage.replacementStatus = errSecNotAvailable
             engine.regenerateAPIKey()
-            guard noCommandSent(), engine.apiKey == original else { return false }
+            guard pump({ !engine.apiCredentialBusy }), noCommandSent(), engine.apiKey == original else { return false }
             credentialStorage.replacementStatus = errSecSuccess
             engine.regenerateAPIKey()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
             let changed = command()
             return engine.apiKey != original && changed["api_key"] as? String == engine.apiKey && engine.state == "ready"
         case "api-port-settings-and-conflict":
             engine.configureAPIPort("invalid")
             guard noCommandSent(), engine.apiPort == 8000, engine.state == "ready" else { return false }
             engine.configureAPIPort("12345")
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
             let configured = command()
             engine.apply(["event": "connection", "base_url": "http://127.0.0.1:8000/v1", "message": "Port 12345 is occupied."])
             let reopened = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults)
             return configured["port"] as? Int == 12345 && engine.apiPort == 12345 && reopened.apiPort == 12345 &&
                 engine.apiBaseURL == "http://127.0.0.1:8000/v1" && engine.state == "ready" && engine.loadedID == "fixture-model"
+        case "api-blocked-read-keeps-main-loop-usable":
+            let gate = DispatchSemaphore(value: 0)
+            credentialStorage.readGate = gate
+            defer { gate.signal() }
+            engine.retryAPI()
+            guard engine.apiCredentialBusy, noCommandSent(), engine.state == "ready" else { return false }
+            for _ in 0..<20 {
+                engine.retryAPI(); engine.regenerateAPIKey(); engine.configureAPIPort("12345")
+            }
+            guard engine.apiPort == 8000, engine.send(["command": "list"]), command()["command"] as? String == "list",
+                  pump(timeout: 3, { engine.apiMessage.contains("Waiting for macOS Keychain access") }),
+                  engine.apiCredentialBusy, credentialStorage.readCount == 1, engine.loadedID == "fixture-model" else { return false }
+            gate.signal()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
+            return command()["command"] as? String == "configure_api" && credentialStorage.readCount == 1
+        case "api-blocked-replacement-remains-pending":
+            engine.retryAPI()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
+            _ = command()
+            let original = engine.apiKey
+            let gate = DispatchSemaphore(value: 0)
+            credentialStorage.replaceGate = gate
+            defer { gate.signal() }
+            engine.regenerateAPIKey()
+            guard pump({ credentialStorage.replaceCount == 1 }),
+                  pump(timeout: 3, { engine.apiMessage.contains("replacement is still pending") }),
+                  engine.apiCredentialBusy, engine.apiKey == original, noCommandSent(), engine.state == "ready" else { return false }
+            engine.retryAPI(); engine.regenerateAPIKey()
+            gate.signal()
+            guard pump({ !engine.apiCredentialBusy }) else { return false }
+            let changed = command()
+            return engine.apiKey != original && changed["api_key"] as? String == engine.apiKey && noCommandSent()
+        case "api-late-credential-result-is-fenced":
+            let gate = DispatchSemaphore(value: 0)
+            credentialStorage.readGate = gate
+            defer { gate.signal() }
+            engine.retryAPI()
+            guard pump({ credentialStorage.readCount == 1 }) else { return false }
+            let replacementPipe = Pipe()
+            engine.input = replacementPipe.fileHandleForWriting
+            gate.signal()
+            guard pump({ !engine.apiCredentialBusy }), engine.apiKey.isEmpty, noCommandSent() else { return false }
+            var descriptor = pollfd(fd: replacementPipe.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+            return Darwin.poll(&descriptor, 1, 0) == 0
+        case "api-credential-result-after-shutdown-is-fenced":
+            let gate = DispatchSemaphore(value: 0)
+            credentialStorage.readGate = gate
+            defer { gate.signal() }
+            engine.retryAPI()
+            guard pump({ credentialStorage.readCount == 1 }) else { return false }
+            engine.shuttingDown = true
+            gate.signal()
+            return pump({ !engine.apiCredentialBusy }) && engine.apiKey.isEmpty && noCommandSent()
         case "gpu-memory-live-and-validation":
             func memory(_ bytes: Any, model: String = "fixture-model", mode: String = "decision") {
                 engine.apply(["event": "gpu_memory", "model_id": model, "mode": mode, "gpu_memory_bytes": bytes])
@@ -1540,6 +1613,18 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_blocked_keychain_read_keeps_main_loop_usable_and_admission_bounded(self):
+        self.exercise("api-blocked-read-keeps-main-loop-usable")
+
+    def test_blocked_keychain_replacement_does_not_report_failure(self):
+        self.exercise("api-blocked-replacement-remains-pending")
+
+    def test_late_keychain_result_cannot_configure_replacement_backend(self):
+        self.exercise("api-late-credential-result-is-fenced")
+
+    def test_late_keychain_result_cannot_activate_after_shutdown(self):
+        self.exercise("api-credential-result-after-shutdown-is-fenced")
+
     def test_api_credential_failure_keeps_model_usable(self):
         self.exercise("api-keychain-failure-isolated")
 

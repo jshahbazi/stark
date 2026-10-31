@@ -47,8 +47,11 @@ struct ConnectionDetailsView: View {
                 Text("Saved port").font(.caption).foregroundStyle(.secondary)
                 TextField("8000", text: $portText).frame(width: 70)
                     .accessibilityLabel("Local API listening port")
+                    .disabled(engine.apiCredentialBusy)
                 Button("Apply Port") { engine.configureAPIPort(portText) }
+                    .disabled(engine.apiCredentialBusy)
                 Button("Retry API") { engine.retryAPI() }
+                    .disabled(engine.apiCredentialBusy)
                 Spacer()
             }
             Text("Stark reuses this port. If it is occupied, close the conflicting app or choose another port. Update connected apps after changing it.")
@@ -91,6 +94,7 @@ struct ConnectionDetailsView: View {
                         .accessibilityLabel("Copy API key")
                 }
                 Button("Regenerate API Key…") { confirmRegeneration = true }
+                    .disabled(engine.apiCredentialBusy)
                     .confirmationDialog("Replace Stark's API key?", isPresented: $confirmRegeneration, titleVisibility: .visible) {
                         Button("Regenerate API Key", role: .destructive) {
                             revealKey = false

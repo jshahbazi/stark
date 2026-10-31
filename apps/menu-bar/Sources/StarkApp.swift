@@ -936,6 +936,7 @@ final class EngineController: ObservableObject {
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
+    @Published private(set) var apiCredentialBusy = false
     @Published private(set) var apiPort: Int
     @Published private(set) var supportsTools = false
     @Published private(set) var toolParser = ""
@@ -997,6 +998,8 @@ final class EngineController: ObservableObject {
     private var removalAction: InstalledModelRemoval.Action?
     private let apiCredentials: APICredentialStore
     private let apiPreferences: APIConnectionPreferences
+    private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
+    private var apiCredentialOperation: UUID?
 
     init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard) {
         self.apiCredentials = apiCredentials
@@ -1462,24 +1465,17 @@ final class EngineController: ObservableObject {
 
     /// Credential bytes travel only over the private app/backend pipe.
     func retryAPI() {
+        guard !apiCredentialBusy else { return }
         guard input != nil else { apiMessage = "Reopen Stark to restart the local API."; return }
         guard (1...65535).contains(apiPort) else {
             apiMessage = "The saved API port is invalid. Enter a port from 1 to 65535 and choose Apply Port."
             return
         }
-        do {
-            let key = try apiCredentials.loadOrCreate()
-            apiKey = key
-            apiMessage = "Connecting the local API on port \(apiPort)…"
-            if !send(["command": "configure_api", "api_key": key, "port": apiPort]) {
-                apiMessage = "Cannot configure the local API. Reopen Stark. Your stored API key has not changed."
-            }
-        } catch {
-            apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
-        }
+        performAPICredentialOperation(regenerate: false)
     }
 
     func configureAPIPort(_ value: String) {
+        guard !apiCredentialBusy else { return }
         guard let port = Int(value), (1...65535).contains(port) else {
             apiMessage = "Enter a port from 1 to 65535."
             return
@@ -1489,21 +1485,59 @@ final class EngineController: ObservableObject {
     }
 
     func regenerateAPIKey() {
+        guard !apiCredentialBusy else { return }
         guard input != nil else { apiMessage = "Reopen Stark before regenerating its API key."; return }
         guard (1...65535).contains(apiPort) else {
             apiMessage = "Choose a valid saved port before regenerating the API key."
             return
         }
-        do {
-            // SecItemUpdate is atomic. Keep the active in-memory key on every storage failure.
-            let key = try apiCredentials.regenerate()
-            apiKey = key
-            apiMessage = "API key replaced. Update connected apps with the replacement key."
-            if !send(["command": "configure_api", "api_key": key, "port": apiPort]) {
-                apiMessage = "API key saved in Keychain. Reopen Stark, then update connected apps with the replacement key."
+        performAPICredentialOperation(regenerate: true)
+    }
+
+    private func performAPICredentialOperation(regenerate: Bool) {
+        guard !apiCredentialBusy, let privateInput = input else { return }
+        let operation = UUID()
+        let port = apiPort
+        let credentials = apiCredentials
+        apiCredentialOperation = operation
+        apiCredentialBusy = true
+        apiMessage = regenerate ? "Saving the replacement API key in Keychain…" : "Reading the API credential from Keychain…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.apiCredentialOperation == operation,
+                  self.input === privateInput, !self.shuttingDown else { return }
+            self.apiMessage = regenerate
+                ? "Waiting for macOS Keychain to finish replacing the API key. Check Keychain Access or an access prompt, including approval after an app upgrade. The replacement is still pending; Stark's other features remain available. If it remains pending, quit and reopen Stark after approving access, then view the stored key before updating connected apps."
+                : "Waiting for macOS Keychain access. Unlock your login Keychain or approve Stark's Local API item in Keychain Access, including access approval after an app upgrade. Stark's other features remain available. If it remains pending, quit and reopen Stark after approving access."
+        }
+        // Never enqueue another operation while one is running. Security IPC can
+        // block even with interaction disabled; a timeout cannot safely cancel
+        // SecItemUpdate or declare that a pending replacement did not commit.
+        apiCredentialQueue.async { [weak self] in
+            let result: Result<String, Error> = Result {
+                if regenerate { return try credentials.regenerate() }
+                return try credentials.loadOrCreate()
             }
-        } catch {
-            apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
+            DispatchQueue.main.async {
+                guard let self, self.apiCredentialOperation == operation else { return }
+                self.apiCredentialOperation = nil
+                self.apiCredentialBusy = false
+                guard self.input === privateInput, !self.shuttingDown else { return }
+                switch result {
+                case .success(let key):
+                    self.apiKey = key
+                    self.apiMessage = regenerate
+                        ? "API key replaced. Update connected apps with the replacement key."
+                        : "Connecting the local API on port \(port)…"
+                    if !self.send(["command": "configure_api", "api_key": key, "port": port]) {
+                        self.apiMessage = regenerate
+                            ? "API key saved in Keychain. Reopen Stark, then update connected apps with the replacement key."
+                            : "Cannot configure the local API. Reopen Stark. Your stored API key has not changed."
+                    }
+                case .failure(let error):
+                    // Preserve the active credential on every completed storage failure.
+                    self.apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
+                }
+            }
         }
     }
 

@@ -8,7 +8,7 @@ enum APICredentialError: Error {
     var message: String {
         switch self {
         case .locked:
-            return "Unlock your login Keychain and allow Stark to access its Local API item in Keychain Access, then choose Retry API. Your API key has not changed."
+            return "Unlock your login Keychain or approve Stark's access to its Local API item in Keychain Access, then choose Retry API. An app upgrade or signing change may require access approval. Your API key has not changed."
         case .denied:
             return "Allow Stark to access its local API credential in Keychain Access, then choose Retry API. Your API key has not changed."
         case .corrupt:
@@ -39,7 +39,8 @@ struct KeychainAPICredentialStorage: APICredentialStorage {
          kSecAttrService as String: service,
          kSecAttrAccount as String: Self.account,
          kSecAttrSynchronizable as String: false,
-         // A background launch must fail visibly rather than opening an unexpected prompt.
+         // Login-Keychain ACL checks can still block in Security IPC despite this
+         // context. The host always performs these calls off the main thread.
          kSecUseAuthenticationContext as String: context]
     }
 
