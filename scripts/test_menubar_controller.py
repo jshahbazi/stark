@@ -60,7 +60,8 @@ extension EngineController {
         let apiDefaults = UserDefaults(suiteName: apiSuite)!
         defer { apiDefaults.removePersistentDomain(forName: apiSuite) }
         let credentials = APICredentialStore(service: apiSuite, storage: credentialStorage) { String(repeating: "b", count: 64) }
-        let engine = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults)
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults,
+                                      gpuMemoryBudgetBytes: 8_589_934_592)
         let pipe = Pipe()
         engine.input = pipe.fileHandleForWriting
         defer {
@@ -267,7 +268,8 @@ extension EngineController {
                 engine.apply(["event": "gpu_memory", "model_id": model, "mode": mode, "gpu_memory_bytes": bytes])
             }
             memory(Int64(2_147_483_648))
-            guard engine.gpuMemoryBytes == 2_147_483_648, engine.gpuMemoryText.contains("2 GB") else { return false }
+            guard engine.gpuMemoryBytes == 2_147_483_648, engine.gpuMemoryText == "GPU memory 25%",
+                  engine.gpuMemoryHelp.contains("2 GB"), engine.gpuMemoryHelp.contains("8 GB") else { return false }
             engine.state = "deciding"
             memory(Int64(1_073_741_824))
             guard engine.gpuMemoryBytes == 1_073_741_824 else { return false }
@@ -281,6 +283,27 @@ extension EngineController {
             }
             memory(0)
             return engine.gpuMemoryBytes == 0
+        case "gpu-memory-budget-indicator":
+            let indicator = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults, gpuMemoryBudgetBytes: 1000)
+            for (bytes, color, percent): (Int64, Color, String) in [
+                (0, .green, "0%"), (740, .green, "74%"), (750, .orange, "75%"),
+                (890, .orange, "89%"), (900, .red, "90%"), (1000, .red, "100%"), (1200, .red, "120%")
+            ] {
+                indicator.gpuMemoryBytes = bytes
+                guard indicator.gpuMemoryColor == color, indicator.gpuMemoryText == "GPU memory " + percent,
+                      indicator.gpuMemoryFraction == Double(bytes) / 1000 else { return false }
+            }
+            for budget: UInt64? in [nil, 0] {
+                let unavailable = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults,
+                                                    gpuMemoryBudgetBytes: budget)
+                unavailable.gpuMemoryBytes = 2_147_483_648
+                guard unavailable.gpuMemoryFraction == nil, unavailable.gpuMemoryColor == .secondary,
+                      unavailable.gpuMemoryText.contains("2 GB"),
+                      unavailable.gpuMemoryHelp.contains("budget is unavailable") else { return false }
+            }
+            indicator.gpuMemoryBytes = nil
+            return indicator.gpuMemoryFraction == nil && indicator.gpuMemoryColor == .secondary &&
+                indicator.gpuMemoryText == "GPU memory —"
         case "gpu-memory-stop-and-mode-fence":
             let sample: [String: Any] = ["event": "gpu_memory", "model_id": "fixture-model",
                                          "mode": "decision", "gpu_memory_bytes": 4096]
@@ -1639,6 +1662,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_gpu_memory_clears_and_fences_stopped_or_replaced_workers(self):
         self.exercise("gpu-memory-stop-and-mode-fence")
+
+    def test_gpu_memory_percentage_thresholds_and_unavailable_budget(self):
+        self.exercise("gpu-memory-budget-indicator")
 
     @classmethod
     def setUpClass(cls):

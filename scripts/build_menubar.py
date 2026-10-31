@@ -747,6 +747,8 @@ def build(options: argparse.Namespace) -> Path:
                 "AppKit",
                 "-framework",
                 "SwiftUI",
+                "-framework",
+                "Metal",
                 *map(str, sources),
                 "-o",
                 str(executable),

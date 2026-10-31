@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import ImageIO
+import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -996,13 +997,17 @@ final class EngineController: ObservableObject {
     private var activeInstallRequestID: String?
     private var removalRequestID: String?
     private var removalAction: InstalledModelRemoval.Action?
+    private let gpuMemoryBudgetBytes: UInt64?
     private let apiCredentials: APICredentialStore
     private let apiPreferences: APIConnectionPreferences
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
 
-    init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard) {
+    init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard,
+         gpuMemoryBudgetBytes: UInt64? = MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize) {
         self.apiCredentials = apiCredentials
+        // The worker samples allocations on this same system-default Metal device.
+        self.gpuMemoryBudgetBytes = gpuMemoryBudgetBytes
         apiPreferences = APIConnectionPreferences(service: apiCredentials.service, defaults: apiDefaults)
         apiPort = apiPreferences.port
     }
@@ -1018,9 +1023,32 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var gpuMemoryFraction: Double? {
+        guard let bytes = gpuMemoryBytes, let budget = gpuMemoryBudgetBytes, budget > 0 else { return nil }
+        return Double(bytes) / Double(budget)
+    }
+    var gpuMemoryColor: Color {
+        guard let fraction = gpuMemoryFraction else { return .secondary }
+        if fraction >= 0.9 { return .red }
+        if fraction >= 0.75 { return .orange }
+        return .green
+    }
     var gpuMemoryText: String {
+        if let fraction = gpuMemoryFraction {
+            return "GPU memory " + fraction.formatted(.percent.precision(.fractionLength(0)))
+        }
         guard let bytes = gpuMemoryBytes else { return "GPU memory —" }
         return "GPU memory " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    }
+    var gpuMemoryHelp: String {
+        guard let bytes = gpuMemoryBytes else { return "GPU memory measurement unavailable." }
+        let allocated = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+        let scope = "Stark’s model worker only; excludes CPU-only allocations and other apps. Refreshes about once a second."
+        guard let budget = gpuMemoryBudgetBytes, budget > 0 else {
+            return "\(allocated) allocated. Metal’s recommended memory budget is unavailable. \(scope)"
+        }
+        let total = ByteCountFormatter.string(fromByteCount: Int64(clamping: budget), countStyle: .memory)
+        return "\(allocated) of Metal’s \(total) recommended memory budget. Apple silicon uses shared memory. \(scope)"
     }
     var activeVersionDetails: String {
         guard let display = activeModel?.display else { return "" }
@@ -2531,6 +2559,28 @@ struct AdvancedOptionsView: View {
     }
 }
 
+struct GPUMemoryView: View {
+    @ObservedObject var engine: EngineController
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(engine.gpuMemoryText)
+                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                if let fraction = engine.gpuMemoryFraction {
+                    Capsule().fill(engine.gpuMemoryColor.gradient)
+                        .frame(width: 120 * min(fraction, 1))
+                }
+            }.frame(width: 120, height: 5)
+        }.fixedSize()
+            .help(engine.gpuMemoryHelp)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(engine.gpuMemoryText)
+            .accessibilityValue(engine.gpuMemoryHelp)
+    }
+}
+
 struct PlaygroundView: View {
     @ObservedObject var engine: EngineController
     let connection: () -> Void
@@ -2549,9 +2599,7 @@ struct PlaygroundView: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
-                Text(engine.gpuMemoryText)
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary).fixedSize()
-                    .help("Current Metal memory allocated by Stark’s model worker. Refreshes about once a second. Apple silicon uses shared memory.")
+                GPUMemoryView(engine: engine)
             }
             HStack {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))

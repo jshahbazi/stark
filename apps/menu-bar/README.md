@@ -2,7 +2,7 @@
 
 A native macOS menu bar application for installing, running and chatting with converted models. Stark starts in the menu bar without opening a window. Click the cat icon and **Manage Models** to run or stop a saved model. **Open Playground** opens a window with a **Chat** mode and a **Decision** mode. Status and the last request's input and output token rates appear in the menu and the playground window.
 
-The playground shows **GPU memory** beside the status in both modes. It refreshes about once a second, including during model loading and requests, and reports the model worker's current Metal resource allocation. Apple silicon uses shared memory; the value excludes CPU-only allocations and other applications. A dash means no measurement is available. Stop clears the readout.
+The playground shows **GPU memory** as a percentage and compact usage bar beside the status in both modes. Green indicates usage below 75% of Metal's recommended memory budget, orange starts at 75%, and red starts at 90%. Hover for the allocated bytes and budget. It refreshes about once a second, including during model loading and requests. Apple silicon uses shared memory; the percentage measures the model worker's Metal resource allocation against the device's recommended working-set size, excluding CPU-only allocations and other applications. This budget is a performance guideline. The bar fills at 100%; percentages above the budget remain visible. If the budget is unavailable, the readout shows allocated bytes with an empty neutral bar. A dash means no measurement is available. Stop clears the readout.
 
 ## Build and install
 
