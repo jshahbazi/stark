@@ -235,10 +235,11 @@ head and its speculative state add memory. See the
 [generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
 aggregate counters and sampling semantics. Scoring keeps MTP disabled.
 The official mixed-affine checkpoint's existing one-layer head is also
-supported, using `serial-decode-exact-v1` verification to preserve its
+supported, using `batched-affine-decode-exact-v1` verification to preserve its
 ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
-Lily weights retain `batched-decode-exact-v1`; official batched verification
-fails closed until kernels preserving its target arithmetic are qualified.
+Lily weights retain `batched-decode-exact-v1`. The official verifier uses
+its own short-row kernels and physical ValueKey rollback captures; both
+policies retain their ordinary target arithmetic.
 This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and does not execute vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).

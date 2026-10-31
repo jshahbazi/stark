@@ -19,7 +19,13 @@ from pathlib import Path
 
 from stark_convert.chat import ChatError, Worker
 
-EXACT_VERIFIERS = frozenset({"serial-decode-exact-v1", "batched-decode-exact-v1"})
+EXACT_VERIFIERS = frozenset(
+    {
+        "serial-decode-exact-v1",
+        "batched-decode-exact-v1",
+        "batched-affine-decode-exact-v1",
+    }
+)
 OFFICIAL_REPOSITORY = "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
 OFFICIAL_REVISION = "788c07a8725642bccf13a0a3b8a21954ab84b4f2"
 OFFICIAL_MANIFEST_SHA256 = (

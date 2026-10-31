@@ -315,3 +315,97 @@ kernel void official_head_qmv_fast_q4_g64_bf16_values_f32(
     official_head_mlx_qmv_fast_impl<bfloat, 64, 4>(
         codes, scales, biases, x, y, K, N, tid, simd_gid, simd_lid);
 }
+
+// Stark's short-verifier adaptation of the stock helper above. The input
+// axis lives in registers; packed codes and affine terms are loaded once
+// across it. Every accumulator has the original stock K and SIMD ordering.
+template <int M>
+inline void official_head_mlx_qmv_exact_rows_impl(
+    const device uint* codes,
+    const device bfloat* scales,
+    const device bfloat* biases,
+    const device bfloat* x,
+    device float* y,
+    constant int& K,
+    constant int& N,
+    uint3 tid,
+    uint simd_gid,
+    uint simd_lid) {
+    constexpr int values_per_thread = 16;
+    constexpr int block_size = values_per_thread * 32;
+    constexpr int results_per_simdgroup = 4;
+    const int out_row = tid.y * 8 + simd_gid * results_per_simdgroup;
+    const int row_bytes = K / 2;
+    const int groups_per_row = K / 64;
+    const device uchar* ws = reinterpret_cast<const device uchar*>(codes)
+        + out_row * row_bytes + simd_lid * 8;
+    scales += out_row * groups_per_row + simd_lid / 4;
+    biases += out_row * groups_per_row + simd_lid / 4;
+    x += simd_lid * values_per_thread;
+    float result[M][results_per_simdgroup] = {};
+    for (int k = 0; k < K; k += block_size) {
+        float x_thread[M][values_per_thread];
+        float sums[M];
+        #pragma clang loop unroll(full)
+        for (int input = 0; input < M; ++input) {
+            sums[input] = official_head_mlx_load_vector<
+                bfloat, float, values_per_thread, 4>(x + input * K, x_thread[input]);
+        }
+        #pragma clang loop unroll(full)
+        for (int row = 0; row < results_per_simdgroup; ++row) {
+            const device ushort* packed = reinterpret_cast<const device ushort*>(
+                ws + row * row_bytes);
+            ushort words[4];
+            #pragma clang loop unroll(full)
+            for (int word = 0; word < 4; ++word) words[word] = packed[word];
+            const float scale = float(scales[row * groups_per_row]);
+            const float bias = float(biases[row * groups_per_row]);
+            #pragma clang loop unroll(full)
+            for (int input = 0; input < M; ++input) {
+                float accum = 0;
+                #pragma clang loop unroll(full)
+                for (int word = 0; word < 4; ++word) {
+                    accum +=
+                        (x_thread[input][4 * word] * (words[word] & 0x000f) +
+                         x_thread[input][4 * word + 1] * (words[word] & 0x00f0) +
+                         x_thread[input][4 * word + 2] * (words[word] & 0x0f00) +
+                         x_thread[input][4 * word + 3] * (words[word] & 0xf000));
+                }
+                result[input][row] += scale * accum + sums[input] * bias;
+            }
+        }
+        ws += block_size / 2;
+        scales += block_size / 64;
+        biases += block_size / 64;
+        x += block_size;
+    }
+    #pragma clang loop unroll(full)
+    for (int input = 0; input < M; ++input) {
+        #pragma clang loop unroll(full)
+        for (int row = 0; row < results_per_simdgroup; ++row) {
+            const float value = simd_sum(result[input][row]);
+            if (simd_lid == 0) {
+                y[input * N + out_row + row] = official_head_bf16_value(value);
+            }
+        }
+    }
+}
+
+#define OFFICIAL_HEAD_EXACT_ROWS(M) \
+kernel void official_head_qmv_exact_rows##M##_q4_g64_bf16_values_f32( \
+    device const uint* codes [[buffer(0)]], \
+    device const bfloat* scales [[buffer(1)]], \
+    device const bfloat* biases [[buffer(2)]], \
+    device const bfloat* x [[buffer(3)]], \
+    device float* y [[buffer(4)]], \
+    constant int& K [[buffer(5)]], \
+    constant int& N [[buffer(6)]], \
+    uint3 tid [[threadgroup_position_in_grid]], \
+    uint simd_gid [[simdgroup_index_in_threadgroup]], \
+    uint simd_lid [[thread_index_in_simdgroup]]) { \
+    official_head_mlx_qmv_exact_rows_impl<M>( \
+        codes, scales, biases, x, y, K, N, tid, simd_gid, simd_lid); \
+}
+OFFICIAL_HEAD_EXACT_ROWS(2)
+OFFICIAL_HEAD_EXACT_ROWS(3)
+OFFICIAL_HEAD_EXACT_ROWS(4)

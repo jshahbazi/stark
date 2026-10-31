@@ -618,6 +618,11 @@ const HEAD_SOURCE: &str = concat!(
     include_str!("metal/quant.metal"),
     include_str!("metal/official_head.metal"),
 );
+const HEAD_Q8_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    include_str!("metal/official_head.metal"),
+    include_str!("metal/official_head_q8_rows.metal"),
+);
 
 pub(crate) fn round_logits_bf16_values(
     ctx: &MetalContext,
@@ -724,6 +729,155 @@ pub fn gemv_quant_logits(
     round_logits_bf16_values(ctx, pass, y)
 }
 
+/// Exact decode vocabulary readouts for a short verifier. The official Q4
+/// and Q8 routes share packed weight loads while retaining each ordinary
+/// vector head's affine expressions, lane reduction and BF16 value store.
+/// Other admitted formats execute the ordinary vector head per row.
+pub fn gemv_quant_logits_rows_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+    bf16_values: bool,
+) -> Result<()> {
+    if !bf16_values {
+        return gemv_quant_rows_decode_exact(ctx, pass, w, x, y);
+    }
+    ensure!(
+        w.codes.shape().len() == 2
+            && matches!(w.bits, 4 | 8 | 16)
+            && x.dtype() == DType::BF16
+            && x.shape().len() == 2,
+        "exact head rows require admitted weights and BF16 [m,K]"
+    );
+    let (m, n, k) = (x.shape()[0], w.out_features(), w.in_features());
+    ensure!(
+        (1..=4).contains(&m)
+            && x.shape()[1] == k
+            && y.dtype() == DType::F32
+            && y.numel() == m * n,
+        "exact head row geometry or output dtype"
+    );
+    if m > 1 && w.bits == 8 {
+        return gemv_quant_logits_q8_rows_candidate(ctx, pass, w, x, y, true);
+    }
+    if m > 1
+        && w.bits == 4
+        && w.group_size == 64
+        && official_head_stock_qmv_fast_supported(n, k)
+    {
+        check_quant(w)?;
+        ensure!(
+            w.scales.dtype() == DType::BF16 && w.biases.dtype() == DType::BF16,
+            "exact head affine metadata must be BF16"
+        );
+        let name = match m {
+            2 => "official_head_qmv_exact_rows2_q4_g64_bf16_values_f32",
+            3 => "official_head_qmv_exact_rows3_q4_g64_bf16_values_f32",
+            4 => "official_head_qmv_exact_rows4_q4_g64_bf16_values_f32",
+            _ => unreachable!(),
+        };
+        let pipeline = ctx.pipeline_with_math_mode(
+            name,
+            HEAD_SOURCE,
+            MslVersion::V4_0,
+            crate::metal::MslMathMode::Safe,
+        )?;
+        if pipeline.thread_execution_width() == 32 {
+            return pass.dispatch_at(
+                &pipeline,
+                &[
+                    w.codes.binding(),
+                    w.scales.binding(),
+                    w.biases.binding(),
+                    x.binding(),
+                    y.binding(),
+                ],
+                &[&u32_bytes(k), &u32_bytes(n)],
+                Grid::Threadgroups { groups: (1, n / 8, 1), threadgroup: (32, 2, 1) },
+            );
+        }
+    }
+    for row in 0..m {
+        gemv_quant_logits(
+            ctx,
+            pass,
+            w,
+            &x.view(row * k, &[k])?,
+            &y.view(row * n, &[n])?,
+            true,
+        )?;
+    }
+    Ok(())
+}
+
+/// Q8 verifier implementation and its row-axis reference control. Both arms
+/// retain the ordinary native Q8
+/// arithmetic and official BF16-valued F32 readout. The fused arm additionally
+/// reuses packed weight loads across rows and folds the value-rounding store.
+/// Production selects fused reuse for multiple verifier rows; the unfused
+/// alternative supports explicit component comparisons.
+fn gemv_quant_logits_q8_rows_candidate(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+    reuse_weights: bool,
+) -> Result<()> {
+    ensure!(w.bits == 8, "Q8 head candidate requires Q8 weights");
+    let (n, k) = check_quant(w)?;
+    ensure!(
+        x.dtype() == DType::BF16 && x.shape().len() == 2,
+        "Q8 head candidate requires BF16 [m,K]"
+    );
+    let rows = x.shape()[0];
+    ensure!(
+        (1..=4).contains(&rows)
+            && n > 0
+            && k > 0
+            && x.shape()[1] == k
+            && y.dtype() == DType::F32
+            && y.numel() == rows * n
+            && w.scales.dtype() == DType::BF16
+            && w.biases.dtype() == DType::BF16,
+        "Q8 head candidate row geometry or precision"
+    );
+    if !reuse_weights {
+        gemv_quant_rows_decode_exact(ctx, pass, w, x, y)?;
+        pass.level_barrier(&[y])?;
+        return round_logits_bf16_values(ctx, pass, y);
+    }
+    let name = match rows {
+        1 => "official_head_q8_generic_exact_rows1_bf16_values_f32",
+        2 => "official_head_q8_generic_exact_rows2_bf16_values_f32",
+        3 => "official_head_q8_generic_exact_rows3_bf16_values_f32",
+        4 => "official_head_q8_generic_exact_rows4_bf16_values_f32",
+        _ => unreachable!(),
+    };
+    // Ordinary Q8 GEMV uses PlatformDefault. Its dot expression must not
+    // inherit the distinct Safe math policy of the stock Q4 head port.
+    let pipeline = ctx.pipeline(name, HEAD_Q8_ROWS_SOURCE, MslVersion::V3_1)?;
+    ensure!(pipeline.thread_execution_width() == 32, "Q8 head candidate needs SIMD32");
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            y.binding(),
+        ],
+        &[&u32_bytes(k), &u32_bytes(w.group_size), &u32_bytes(n)],
+        Grid::Threadgroups { groups: (n, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
 #[cfg(test)]
 #[path = "official_head_precision_tests.rs"]
 mod official_head_precision_tests;
+
+#[cfg(test)]
+#[path = "official_head_q8_rows_tests.rs"]
+mod official_head_q8_rows_tests;

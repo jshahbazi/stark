@@ -2153,3 +2153,137 @@ kernel void gdn_normgate_value_key_mlx(
         out[base + i] = bfloat(official_gdn_k1_round_bf16(normed * sig));
     }
 }
+
+// Stark short-row verification adaptation of the qualified stock K1 above.
+// Each thread keeps the same physical F32 state cells and the same SIMD
+// reductions. Only the outer token loop and rollback captures are added.
+kernel void gdn_verify_raw_value_key_exact(
+    device const bfloat* qkv [[buffer(0)]],
+    device const bfloat* a_in [[buffer(1)]],
+    device const bfloat* b_in [[buffer(2)]],
+    device const float* A_log [[buffer(3)]],
+    device const bfloat* dt_bias [[buffer(4)]],
+    device float* state [[buffer(5)]],
+    device bfloat* y [[buffer(6)]],
+    device float* mid [[buffer(7)]],
+    constant float& k_scale_f32 [[buffer(8)]],
+    constant uint& rows [[buffer(9)]],
+    constant uint& captures [[buffer(10)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    using T = bfloat;
+    constexpr int HK = 16, HV = 48, DK = 128, DV = 128;
+    constexpr int NT = 256, SPLIT = 4, NSG = NT / 32;
+    constexpr int RB = DV / SPLIT, R = RB / NSG, GRP = HV / HK;
+    const T q_scale = T(1.0f / float(DK));
+    const T k_scale = T(k_scale_f32);
+    uint hv = tg / SPLIT;
+    uint part = tg % SPLIT;
+    uint hk = hv / GRP;
+    threadgroup float qs[DK], ks[DK], vs[DV];
+    threadgroup float gb[2];
+    uint row0 = part * RB + sg * R;
+    float st[R][4];
+    for (int j = 0; j < R; ++j) {
+        uint base = (hv * DV + row0 + j) * DK + lane * 4;
+        for (int i = 0; i < 4; ++i) st[j][i] = state[base + i];
+    }
+    for (uint token = 0; token < rows; ++token) {
+        if (sg < 3) {
+            uint cb = token * (2 * HK * DK + HV * DV) +
+                (sg == 0 ? hk * DK : (sg == 1 ? HK * DK + hk * DK : 2 * HK * DK + hv * DV));
+            T act[4];
+            float sumsq = 0.0f;
+            for (int i = 0; i < 4; ++i) {
+                act[i] = qkv[cb + lane * 4 + i];
+                float v = float(act[i]);
+                sumsq += v * v;
+            }
+            if (sg < 2) {
+                sumsq = simd_sum(sumsq);
+                float inv = metal::precise::rsqrt(sumsq / float(DK) + 1e-6f);
+                const T scale = sg == 0 ? q_scale : k_scale;
+                threadgroup float* dst = sg == 0 ? qs : ks;
+                for (int i = 0; i < 4; ++i) dst[lane * 4 + i] = float(official_gdn_scaled_rms(float(act[i]), inv, scale));
+            } else {
+                for (int i = 0; i < 4; ++i) vs[lane * 4 + i] = float(act[i]);
+            }
+        }
+        if (sg == (NSG > 3 ? 3 : 0) && lane == 31) {
+            const T bv = b_in[token * HV + hv];
+            gb[1] = official_gdn_k1_sigmoid_f32<0>(float(bv));
+            const float apd = float(a_in[token * HV + hv]) + float(dt_bias[hv]);
+            float sp = gdn_value_key_stock_log1p(metal::precise::exp(apd));
+            float ea = metal::precise::exp(A_log[hv]);
+            gb[0] = metal::precise::exp(-(ea * sp));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float kk[4], qq[4];
+        for (int i = 0; i < 4; ++i) { kk[i] = ks[lane * 4 + i]; qq[i] = qs[lane * 4 + i]; }
+        const float g = gb[0], beta = gb[1];
+        for (int j = 0; j < R; ++j) {
+            uint dv = row0 + j;
+            float kv_mem = 0.0f;
+            for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] * g; kv_mem += st[j][i] * kk[i]; }
+            kv_mem = simd_sum(kv_mem);
+            float delta = (vs[dv] - kv_mem) * beta;
+            float out = 0.0f;
+            for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] + kk[i] * delta; out += st[j][i] * qq[i]; }
+            out = simd_sum(out);
+            uint base = (hv * DV + dv) * DK + lane * 4;
+            if (token < captures) {
+                for (int i = 0; i < 4; ++i) mid[token * HV * DV * DK + base + i] = st[j][i];
+            }
+            if (token + 1 == rows) {
+                for (int i = 0; i < 4; ++i) state[base + i] = st[j][i];
+            }
+            if (lane == 0) y[token * HV * DV + hv * DV + dv] = static_cast<T>(out);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+}
+
+kernel void conv1d_verify_value_key_exact(
+    device const bfloat* window_in [[buffer(0)]],
+    device bfloat* window_out [[buffer(1)]],
+    device const bfloat* x [[buffer(2)]],
+    device const bfloat* w [[buffer(3)]],
+    device bfloat* out [[buffer(4)]],
+    constant uint& rows [[buffer(5)]],
+    uint c [[thread_position_in_grid]]) {
+    constexpr uint C = 10240;
+    bfloat history[3] = {window_in[c * 3], window_in[c * 3 + 1], window_in[c * 3 + 2]};
+    for (uint token = 0; token < rows; ++token) {
+        float acc = 0.0f;
+        for (uint tap = 0; tap < 3; ++tap) acc += float(history[tap]) * float(w[tap * C + c]);
+        const bfloat current = x[token * C + c];
+        acc += float(current) * float(w[3 * C + c]);
+        out[token * C + c] = bfloat(official_gdn_k1_silu_f32<0>(acc));
+        history[0] = history[1];
+        history[1] = history[2];
+        history[2] = current;
+    }
+    for (uint tap = 0; tap < 3; ++tap) window_out[c * 3 + tap] = history[tap];
+}
+
+kernel void gdn_verify_normgate_value_key_exact(
+    device const bfloat* y [[buffer(0)]],
+    device const bfloat* z [[buffer(1)]],
+    device const float* norm_w [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    const uint base = head * 128 + lane * 4;
+    float xs[4];
+    float sumsq = 0.0f;
+    for (uint i = 0; i < 4; ++i) { xs[i] = float(y[base + i]); sumsq += xs[i] * xs[i]; }
+    sumsq = simd_sum(sumsq);
+    const float inv = metal::precise::rsqrt(sumsq / 128.0f + eps);
+    for (uint i = 0; i < 4; ++i) {
+        const float normed = official_gdn_k1_round_bf16(norm_w[lane * 4 + i] * official_gdn_k1_round_bf16(xs[i] * inv));
+        const float sig = official_gdn_k1_sigmoid_f32<0>(float(z[base + i]));
+        out[base + i] = bfloat(official_gdn_k1_round_bf16(normed * sig));
+    }
+}

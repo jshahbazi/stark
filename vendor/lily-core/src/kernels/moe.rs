@@ -1161,6 +1161,10 @@ mod injection_tests;
 // Official-checkpoint candidates use separate source and entry points.
 // Legacy SOURCE and all its original Metal bodies remain unchanged.
 const OFFICIAL_MOE_SOURCE: &str = include_str!("metal/official_moe.metal");
+const OFFICIAL_MOE_ROWS_SOURCE: &str = concat!(
+    include_str!("metal/official_moe.metal"),
+    include_str!("metal/official_moe_rows.metal"),
+);
 
 /// Exact model geometry audited against the served affine4 arm. The policy
 /// has not been qualified for other Qwen checkpoints or MoE architectures.
@@ -1228,15 +1232,17 @@ pub(crate) fn official_moe_router(
     let (name, gx, gw, glog, gate_k) = match gate {
         Some((x, w, out)) => {
             ensure!(
-                m == 1 && x.dtype() == DType::BF16 && x.numel() == 2560,
-                "official folded shared gate needs one BF16 hidden row"
+                (1..=4).contains(&m)
+                    && x.dtype() == DType::BF16
+                    && x.numel() == m * 2560,
+                "official folded shared gate needs 1..4 BF16 hidden rows"
             );
             ensure!(
                 w.dtype() == DType::BF16 && w.numel() == 2560,
                 "official folded shared gate needs direct BF16 weights"
             );
             ensure!(
-                out.dtype() == DType::BF16 && out.numel() == 1,
+                out.dtype() == DType::BF16 && out.numel() == m,
                 "official folded shared gate output"
             );
             ("official_moe_router_gate_bf16", x, w, out, 2560)
@@ -1402,6 +1408,131 @@ pub(crate) fn official_moe_down(
             &u32_bytes(shared.is_some() as usize),
         ],
         Grid::Threadgroups { groups: (2560 / 2, 1, 1), threadgroup: (64, 1, 1) },
+    )
+}
+
+/// The ordinary official gate/up body over independent verifier rows.
+/// The added grid axis only offsets input, route and output addresses.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_gate_up_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    gate: &QuantWeights,
+    up: &QuantWeights,
+    x: &Tensor,
+    indices: &Tensor,
+    table: &Tensor,
+    out: &Tensor,
+) -> Result<()> {
+    check_official_bank(gate, 512, 640, 2560)?;
+    check_official_bank(up, 512, 640, 2560)?;
+    ensure!(
+        x.dtype() == DType::BF16 && x.shape().len() == 2 && x.shape()[1] == 2560,
+        "official gate/up row input"
+    );
+    let m = x.shape()[0];
+    ensure!((1..=4).contains(&m), "official gate/up row count");
+    ensure!(
+        indices.dtype() == DType::U32 && indices.numel() == m * 10,
+        "official gate/up row indices"
+    );
+    ensure!(
+        out.dtype() == DType::BF16 && out.numel() == m * 10 * 640,
+        "official gate/up row output"
+    );
+    ensure!(
+        table.dtype() == DType::BF16 && table.numel() == 65536,
+        "official gate/up row sigmoid table"
+    );
+    let pipeline = ctx.pipeline(
+        "official_moe_gate_up_a4_rows",
+        OFFICIAL_MOE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            gate.codes.binding(),
+            gate.scales.binding(),
+            gate.biases.binding(),
+            up.codes.binding(),
+            up.scales.binding(),
+            up.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            table.binding(),
+            out.binding(),
+        ],
+        &[&u32_bytes(2560), &u32_bytes(640), &u32_bytes(64)],
+        Grid::Threadgroups { groups: (640 / 2, 10, m), threadgroup: (64, 1, 1) },
+    )
+}
+
+/// The ordinary official expert-down/combine body over independent rows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_down_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: (&Tensor, &Tensor),
+    out: &Tensor,
+) -> Result<()> {
+    check_official_bank(w, 512, 2560, 640)?;
+    ensure!(
+        out.dtype() == DType::BF16 && out.shape().len() == 2 && out.shape()[1] == 2560,
+        "official down row output"
+    );
+    let m = out.shape()[0];
+    ensure!((1..=4).contains(&m), "official down row count");
+    ensure!(
+        x.dtype() == DType::BF16 && x.numel() == m * 10 * 640,
+        "official down row input"
+    );
+    ensure!(
+        indices.dtype() == DType::U32 && indices.numel() == m * 10,
+        "official down row indices"
+    );
+    ensure!(
+        scores.dtype() == DType::F32 && scores.numel() == m * 10,
+        "official down row scores"
+    );
+    let (sdown, glog) = shared;
+    ensure!(
+        sdown.dtype() == DType::BF16
+            && sdown.numel() == m * 2560
+            && glog.dtype() == DType::BF16
+            && glog.numel() == m,
+        "official down row shared operands"
+    );
+    let pipeline = ctx.pipeline(
+        "official_moe_down_a4_rows",
+        OFFICIAL_MOE_ROWS_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            sdown.binding(),
+            glog.binding(),
+            out.binding(),
+        ],
+        &[
+            &u32_bytes(640),
+            &u32_bytes(2560),
+            &u32_bytes(64),
+            &u32_bytes(10),
+            &u32_bytes(1),
+        ],
+        Grid::Threadgroups { groups: (2560 / 2, m, 1), threadgroup: (64, 1, 1) },
     )
 }
 

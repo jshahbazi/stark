@@ -16,11 +16,11 @@ Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary singl
 The official mixed-affine adapter also admits the checkpoint's declared
 single-layer hybrid MTP head. Existing collision-checked aliases expose its
 72 tensor planes without changing storage or quantization; the head shares
-the trunk vocabulary projection. Host verification uses ordinary serial
-decode for this policy, including its F32 ValueKey GDN captures and exact
-prefix rollback. Legacy Lily batched verification is rejected for official
-weights because its target arithmetic and cache layout differ. The adapter
-reports the serial route explicitly; enabling MTP does not establish a speedup.
+the trunk vocabulary projection. Its host verifier batches up to four target
+rows using a separate official policy, including F32 ValueKey GDN captures
+and exact prefix rollback. The adapter reports
+`batched-affine-decode-exact-v1`; the ordinary serial verifier remains a
+reference. Enabling MTP does not itself establish a speedup.
 
 Host verification retains an owned flat F32 readout and lends complete rows
 to the caller, eliminating the second per-row allocation and copy. The
@@ -316,6 +316,48 @@ explicit official rounding policy, Q8/group64 rank-2 weights, BF16 activation,
 output and affine metadata, and `(N,K)=(16480,2560)` or `(2560,6144)`. It also
 requires a 32-wide execution pipeline and is compiled as Safe MSL4.0.
 Non-admitted shapes and widths delegate to the original GEMV; pipeline
-compilation errors remain errors. Prefill and batch callers are unchanged.
+compilation errors remain errors. Prefill callers are unchanged. The exact
+official verifier exposes the helper's existing vector-grid axis for one
+to four rows; each row retains the same stock loop and BF16 boundary.
 Stock hashes and native qualification are recorded separately; this provenance
 is not a model result.
+
+## Official short-row MTP verification
+
+The official verifier adds independent short-row execution to the policies
+above without changing checkpoint tensors. `official_moe_rows.metal` copies
+the qualified MLX-Serve router/expert arithmetic from the pinned local
+`official_moe.metal` port and adds token-row addressing. It retains the
+expert-order down accumulation, BF16 router/activation boundaries and the
+folded shared gate. The original shader bytes remain unchanged. Copyright
+(c) 2026 David Dalcu and the MIT license in `LICENSE.mlx-serve` apply.
+
+`official_hc_stock_rows.metal` adapts the pinned HC U2V body with a compile-time
+row count and shared up-weight loads. The original ND body already has a
+row-grid dimension. Per-row partial storage is bounded to four rows. A
+separate finished-gate write preserves the two BF16 product/add boundaries.
+The original one-row kernels remain selected for ordinary decode. The new
+file retains the MLX-Serve revision, copyright and MIT attribution.
+
+The stock-order Q4 vocabulary-head helper in `official_head.metal` shares
+packed weight loads across two to four rows while preserving each row's
+affine dot and SIMD sum. The existing MLX revision and MIT attribution above
+apply. Non-admitted head formats execute ordinary projection per row.
+
+The mixed-4-8bit checkpoint's actual vocabulary projection is Q8/group64;
+its global Q4 default does not describe the `head` storage group. The new
+`official_head_q8_rows.metal` adapts Lily's `quant.metal` `GEMV_Q8_BODY`,
+retaining `dot_word_q8`, per-lane accumulation, SIMD sum and PlatformDefault
+compiler policy. It shares packed weights across two to four verifier inputs
+and fuses the existing integer round-to-nearest-even BF16 value store into
+the F32 output. Ordinary one-row decode remains unchanged. Lily's Apache-2.0
+notice and the MLX-derived dot attribution in `NOTICE` remain applicable.
+Its complete-readout component controls include actual full-vocabulary
+geometry, aligned nonzero offsets and output guards.
+
+The ValueKey verification additions in `gdn.metal` retain the existing
+MLX-Serve-derived K1 convolution, recurrence and norm/gate expressions. They
+scan at most four positions with F32 physical state captures after each
+rollback prefix, retaining the ordinary BF16 activation boundaries. Each
+path has component comparisons against ordinary decode. Full-model
+readout/rollback and sampled performance records are maintained separately.

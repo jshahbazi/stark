@@ -173,6 +173,43 @@ fn fixture(
 }
 
 #[test]
+#[ignore = "requires physical Metal; short rows versus ordinary stock-order Q8 decode"]
+fn official_gdn_q8_rows_match_ordinary_decode() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    for (k, n) in [(2560, 16480), (6144, 2560)] {
+        let (w, _) = fixture(&ctx, k, n, 64)?;
+        for rows in 1..=4 {
+            let values: Vec<f32> = (0..rows * k)
+                .map(|i| {
+                    bf((((i * 17 + i / k * 13 + SEED) % 71) as i32 - 35) as f32 / 23.0)
+                })
+                .collect();
+            let x = Tensor::from_f32_as_bf16(&ctx, &values, &[rows, k])?;
+            let out = Tensor::zeros(&ctx, &[rows, n], DType::BF16)?;
+            let reference = Tensor::zeros(&ctx, &[rows, n], DType::BF16)?;
+            let pass = ctx.begin_concurrent()?;
+            gemv_gdn_decode_rows(&ctx, &pass, &w, &x, &out, true)?;
+            for row in 0..rows {
+                gemv_gdn_decode(
+                    &ctx,
+                    &pass,
+                    &w,
+                    &x.view(row * k, &[k])?,
+                    &reference.view(row * n, &[n])?,
+                    true,
+                )?;
+            }
+            pass.commit()?.wait()?;
+            ensure!(
+                out.raw_bytes() == reference.raw_bytes(),
+                "VK Q8 row projection mismatch"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires physical Metal and private source-bound stock Q8 receipt plus SHA256"]
 fn official_gdn_q8_decode_matches_exact_stock_joined_and_output() -> Result<()> {
     // Refuse missing/unqualified receipts before creating a Metal context.

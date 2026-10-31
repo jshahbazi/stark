@@ -132,6 +132,122 @@ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
 }
 
 #[test]
+#[ignore = "requires a physical Apple Silicon Metal device; allocates full expert-bank geometry"]
+fn official_decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let mut seed = 0x4d74_5038;
+    let (h, inter, e, top_k) = (2560, 640, 512, 10);
+    // One physical bank with differently shaped views keeps full E512
+    // addressing coverage without allocating three independent banks.
+    let bank = weights(&ctx, &mut seed, 4, e * inter, h)?;
+    let bank_view = |n: usize, k: usize| -> Result<QuantWeights> {
+        Ok(QuantWeights {
+            codes: bank.codes.view(0, &[n, k / 8])?,
+            scales: bank.scales.view(0, &[n, k / 64])?,
+            biases: bank.biases.view(0, &[n, k / 64])?,
+            bits: 4,
+            group_size: 64,
+        })
+    };
+    let mut dense = |n: usize| -> Result<QuantWeights> {
+        let values: Vec<_> = (0..n * h)
+            .map(|_| (word(&mut seed) % 257) as f32 / 8192.0 - 0.015625)
+            .collect();
+        QuantWeights::bf16(Tensor::from_f32_as_bf16(&ctx, &values, &[n, h])?)
+    };
+    let gate = dense(e)?;
+    let shared_gate = dense(1)?;
+    let shared_gu = weights(&ctx, &mut seed, 4, 2 * inter, h)?;
+    let w = MoeWeights {
+        gate,
+        expert_gate: bank_view(e * inter, h)?,
+        expert_up: bank_view(e * inter, h)?,
+        expert_down: bank_view(e * h, inter)?,
+        shared_gate,
+        shared: MlpWeights {
+            gate_proj: shared_gu.view_rows(0, inter)?,
+            up_proj: shared_gu.view_rows(inter, inter)?,
+            gate_up_proj: shared_gu,
+            down_proj: weights(&ctx, &mut seed, 4, h, inter)?,
+        },
+        slot_of: None,
+    };
+    let dims = MoeDims {
+        official_mlx_rounding: true,
+        hidden: h,
+        moe_intermediate: inter,
+        num_experts: e,
+        top_k,
+        norm_topk_prob: true,
+    };
+    let decode = MoeScratch::new(&ctx, &dims)?;
+    let mut compared = 0;
+    for m in 1..=4 {
+        let values: Vec<_> = (0..m * h)
+            .map(|_| (word(&mut seed) % 4097) as f32 / 1024.0 - 2.0)
+            .collect();
+        let input = Tensor::from_f32_as_bf16(&ctx, &values, &[m, h])?;
+        let reference = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
+        let candidate = Tensor::zeros(&ctx, &[m, h], DType::BF16)?;
+        let gu = Tensor::zeros(&ctx, &[m, 2 * inter], DType::BF16)?;
+        let act = Tensor::zeros(&ctx, &[m, inter], DType::BF16)?;
+        let cgu = Tensor::zeros(&ctx, &[m, 2 * inter], DType::BF16)?;
+        let cgate = Tensor::zeros(&ctx, &[m, inter], DType::BF16)?;
+        let cup = Tensor::zeros(&ctx, &[m, inter], DType::BF16)?;
+        let cact = Tensor::zeros(&ctx, &[m, inter], DType::BF16)?;
+        let staging = Tensor::zeros(&ctx, &[1], DType::BF16)?;
+        let rows = PrefillMoeScratch::new(&ctx, &dims, m)?.chunk(m)?;
+        let pass = ctx.begin_concurrent()?;
+        for row in 0..m {
+            decode_moe(
+                &ctx,
+                &pass,
+                &dims,
+                &w,
+                &DecodeMoeIo {
+                    x: &input.view(row * h, &[h])?,
+                    out: &reference.view(row * h, &[h])?,
+                    mlp_gu: &gu.view(row * 2 * inter, &[2 * inter])?,
+                    mlp_gate: &gu.view(row * 2 * inter, &[inter])?,
+                    mlp_up: &gu.view(row * 2 * inter + inter, &[inter])?,
+                    mlp_act: &act.view(row * inter, &[inter])?,
+                    hc_injection: None,
+                },
+                &decode,
+            )?;
+            pass.level_barrier(&[])?;
+        }
+        prefill_moe_decode_exact(
+            &ctx,
+            &pass,
+            &dims,
+            &w,
+            &PrefillMoeIo {
+                x: &input,
+                out: &candidate,
+                stack: &cgu,
+                mlp_gate: &cgate,
+                mlp_up: &cup,
+                mlp_act: &cact,
+                dequant: &staging,
+            },
+            &rows,
+            &decode,
+        )?;
+        pass.end()?.commit()?.wait()?;
+        ensure!(
+            reference.raw_bytes() == candidate.raw_bytes(),
+            "official row-batched MoE differs from ordinary decode"
+        );
+        compared += reference.byte_len();
+    }
+    println!(
+        "{{\"official_moe_verifier_rows\":10,\"compared_bytes\":{compared},\"unequal_bytes\":0}}"
+    );
+    Ok(())
+}
+
+#[test]
 #[ignore = "requires a physical Apple Silicon Metal device"]
 fn batched_moe_injection_matches_ordinary_fused_bytes() -> Result<()> {
     let ctx = MetalContext::new()?;

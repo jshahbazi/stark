@@ -302,7 +302,7 @@ impl LilyModel {
 
     pub fn mtp_verification(&self) -> &'static str {
         if self.model.config.official_mlx_rounding() {
-            "serial-decode-exact-v1"
+            "batched-affine-decode-exact-v1"
         } else {
             "batched-decode-exact-v1"
         }

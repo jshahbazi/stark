@@ -280,16 +280,21 @@ def make_official_args(tmp_path, monkeypatch):
     return args
 
 
-def test_official_receipt_and_serial_verifier_are_bound_to_report(
-    tmp_path, monkeypatch
+@pytest.mark.parametrize(
+    "verification", ["serial-decode-exact-v1", "batched-affine-decode-exact-v1"]
+)
+def test_official_receipt_and_verifier_are_bound_to_report(
+    tmp_path, monkeypatch, verification
 ):
     args = make_official_args(tmp_path, monkeypatch)
 
     class SerialWorker(FakeWorker):
-        verification = "serial-decode-exact-v1"
+        pass
+
+    SerialWorker.verification = verification
 
     report = run(args, worker_factory=SerialWorker)
-    assert report["verification"] == "serial-decode-exact-v1"
+    assert report["verification"] == verification
     assert all(
         item["mtp"]["verification"] == report["verification"]
         for item in report["requests"]

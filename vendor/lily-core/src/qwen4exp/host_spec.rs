@@ -44,12 +44,6 @@ impl Qwen4ExpModel {
         pending: u32,
         drafts: &[u32],
     ) -> Result<HostVerification> {
-        // The affine checkpoint policy changes HC, QSA, GDN state layout
-        // and head rounding. Its target rows must use the ordinary decode
-        // graph until matching batched kernels have independent parity.
-        if self.config.official_mlx_rounding() {
-            return self.verify_host(ctx, state, s, pending, drafts);
-        }
         ensure!(
             state.spec.is_none()
                 && drafts.len() <= MAX_DRAFTS
@@ -89,10 +83,7 @@ impl Qwen4ExpModel {
         let sp =
             s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
         let values = prefix_rows(&sp.logits, m)?.to_f32()?;
-        ensure!(
-            values.len() == m * self.config.vocab_size,
-            "candidate readout shape"
-        );
+        ensure!(values.len() == m * self.config.vocab_size, "candidate readout shape");
         ensure!(crate::finite_guard::all_finite(&values), "candidate readout values");
         Ok(HostVerification {
             flat_logits: values,

@@ -782,6 +782,11 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
 ) -> Result<bool> {
     let m = io.x.shape()[0];
     ensure!((1..=4).contains(&m), "decode-exact MoE supports 1..4 rows");
+    if dims.official_mlx_rounding {
+        ensure!(injection.is_none(), "official exact MoE keeps HC injection separate");
+        prefill_moe_official_decode_exact(ctx, pass, dims, w, io, ms)?;
+        return Ok(false);
+    }
     let h = dims.hidden;
     let top_k = dims.top_k;
     let inter = dims.moe_intermediate;
@@ -866,6 +871,124 @@ pub(crate) fn prefill_moe_decode_exact_with_injection(
         top_k,
     )?;
     Ok(false)
+}
+
+/// Official verifier rows use the decode router, folded shared gate and
+/// affine4 expert dot order. The ordinary prefill combine has different
+/// BF16 reduction boundaries and is deliberately not used here.
+fn prefill_moe_official_decode_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    dims: &MoeDims,
+    w: &MoeWeights,
+    io: &PrefillMoeIo<'_>,
+    ms: &PrefillMoeScratch,
+) -> Result<()> {
+    ensure!(
+        moe::official_moe_shape_supported(
+            dims.num_experts,
+            dims.top_k,
+            dims.hidden,
+            dims.moe_intermediate
+        ),
+        "official exact MoE row geometry"
+    );
+    moe::official_moe_banks_supported(&w.expert_gate, &w.expert_up, &w.expert_down)?;
+    ensure!(
+        w.slot_of.is_none() && w.shared_gate.bits == 16,
+        "official exact MoE resident banks/shared gate"
+    );
+    let m = io.x.shape()[0];
+    let shared_inter = w.shared.gate_proj.out_features();
+    let shared_gu = io.stack.view(0, &[m, 2 * shared_inter])?;
+    let table = ms
+        .sigmoid_table
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing official row sigmoid table"))?;
+    project_official_decode_rows(ctx, pass, io.x, &w.gate, &ms.router_logits)?;
+    project_official_decode_rows(ctx, pass, io.x, &w.shared.gate_up_proj, &shared_gu)?;
+    pass.level_barrier(&[&ms.router_logits, &shared_gu])?;
+    moe::official_moe_router(
+        ctx,
+        pass,
+        &ms.router_logits,
+        &ms.indices,
+        &ms.scores,
+        dims.norm_topk_prob,
+        Some((io.x, &w.shared_gate.codes, &ms.shared_gate)),
+    )?;
+    // The stacked shared projection is interleaved by input row; preserve
+    // ordinary per-row SwiGLU without copying/splitting that projection.
+    for row in 0..m {
+        moe::official_moe_silu_mul(
+            ctx,
+            pass,
+            &shared_gu.view(row * 2 * shared_inter, &[shared_inter])?,
+            &shared_gu.view(row * 2 * shared_inter + shared_inter, &[shared_inter])?,
+            table,
+            &io.mlp_act.view(row * shared_inter, &[shared_inter])?,
+        )?;
+    }
+    pass.level_barrier(&[&ms.indices, &ms.scores, &ms.shared_gate, io.mlp_act])?;
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeGateUp)?;
+    moe::official_moe_gate_up_decode_rows(
+        ctx,
+        pass,
+        &w.expert_gate,
+        &w.expert_up,
+        io.x,
+        &ms.indices,
+        table,
+        &ms.ea,
+    )?;
+    project_official_decode_rows(
+        ctx,
+        pass,
+        io.mlp_act,
+        &w.shared.down_proj,
+        &ms.shared_out,
+    )?;
+    pass.level_barrier(&[&ms.ea, &ms.shared_out])?;
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeDown)?;
+    moe::official_moe_down_decode_rows(
+        ctx,
+        pass,
+        &w.expert_down,
+        &ms.ea,
+        &ms.indices,
+        &ms.scores,
+        (&ms.shared_out, &ms.shared_gate),
+        io.out,
+    )?;
+    Ok(())
+}
+
+fn project_official_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    a: &Tensor,
+    w: &LinearWeights,
+    c: &Tensor,
+) -> Result<()> {
+    if w.bits != 16 {
+        return project_mat_decode_exact(ctx, pass, a, w, c);
+    }
+    let m = a.shape()[0];
+    let (k, n) = (w.in_features(), w.out_features());
+    ensure!(
+        a.shape() == [m, k] && c.numel() == m * n,
+        "official dense verifier row shape"
+    );
+    for row in 0..m {
+        quant::gemv_quant(
+            ctx,
+            pass,
+            w,
+            &a.view(row * k, &[k])?,
+            &c.view(row * n, &[n])?,
+        )?;
+    }
+    Ok(())
 }
 
 /// With a served expert cache: has the routed ids in `indices` (`count`

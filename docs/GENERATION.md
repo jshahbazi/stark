@@ -164,7 +164,8 @@ another engine token for token.
 An admitted native Qwen3.8 checkpoint containing its trained MTP head adds
 `mtp: {"supported": true, "max_drafts": 3, "default_drafts": 0,
 "sampling": "exact-rejection-v1", "verification": "batched-decode-exact-v1"}` to readiness for Lily-format weights.
-Official mixed-affine weights report `verification: "serial-decode-exact-v1"`.
+Official mixed-affine weights report
+`verification: "batched-affine-decode-exact-v1"`.
 Responses retain the same route label. The generation worker loads
 the head with the checkpoint's existing quantization, including its memory
 cost when drafting is disabled. Set `mtp_drafts` to 1,
@@ -188,10 +189,11 @@ calling the sampler during cleanup. MTP adds memory and verification work, so
 its benefit depends on acceptance and the workload. The Lily verifier evaluates
 up to four positions in one graph, reusing weights while retaining each
 position's decode arithmetic and recurrent-state update order.
-The official mixed-affine path executes ordinary target decode separately
-for each row. Its ValueKey GDN state, stock HC arithmetic, affine-64 cache and
-BF16-valued vocabulary head require that serial fallback; the Lily batch
-kernels do not preserve those boundaries. Uzu text conversions omit the head.
+The official mixed-affine path batches up to four positions with separate
+decode-order HC, MoE and vocabulary-head kernels, affine-64 cache writes and
+ValueKey GDN recurrence/captures. Each row retains ordinary decode's
+precision boundaries and reduction order. The serial verifier remains a
+reference control. Uzu text conversions omit the head.
 
 Unbounded nucleus requests can reuse a proved prefix for both draft and
 target distributions. Retained IDs, probability terms, cumulative totals
