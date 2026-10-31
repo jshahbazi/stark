@@ -27,6 +27,7 @@ struct ConnectionDetailsView: View {
             runningModelID: engine.models.first { $0.id == modelID }?.apiID ?? "",
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
             status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
+            contextCapacityKnown: engine.contextCapacityKnown,
             images: engine.supportsImages && engine.loadedMode == .chat,
             imageVerification: engine.imageVerification,
             tools: engine.supportsTools && engine.loadedMode == .chat,
@@ -110,7 +111,9 @@ struct ConnectionDetailsView: View {
             Text(modelID.isEmpty ? "Choose Chat mode and a model in Stark, then select Run before connecting." : "Running model: \(engine.activeName)")
                 .font(.callout)
             if !modelID.isEmpty {
-                Text("Context: \(engine.apiContextTokens) tokens · Reply limit: \(engine.apiMaxNewTokens) tokens")
+                Text(engine.contextCapacityKnown
+                     ? "Context: \(engine.apiContextTokens) tokens · Reply limit: \(engine.apiMaxNewTokens) tokens"
+                     : "Context maximum: not declared · Reply limit: \(engine.apiMaxNewTokens) tokens")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key stays in macOS Keychain across restarts and upgrades. Copying or showing it never changes it.")

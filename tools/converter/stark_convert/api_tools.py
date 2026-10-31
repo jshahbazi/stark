@@ -30,6 +30,11 @@ _PARSER = "qwen3-hermes-v1"
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
 # binds the exact template program, not a model name.
 QWEN3_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
+# Official mlx-community/Qwen3-4B-4bit tokenizer_config.json chat_template at
+# revision 4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25, independently reviewed
+# for the same Qwen3-Hermes tool-call wire markers and history ordering.
+QWEN3_4B_TEMPLATE_SHA256 = "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
+_SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256})
 
 
 def _bad(message: str, code: str = "invalid_request") -> APIError:
@@ -228,6 +233,12 @@ def template_messages(messages: list[dict]) -> list[dict]:
             continue
         copy = dict(message)
         if "tool_calls" in message:
+            # Qwen3-4B's pinned template performs string membership checks on
+            # content. OpenAI clients may omit content or send null for a
+            # tool-call-only assistant turn, so normalize that case before
+            # rendering while preserving any supplied string.
+            if copy.get("content") is None:
+                copy["content"] = ""
             order = {call["id"]: i for i, call in enumerate(message["tool_calls"])}
             copy["tool_calls"] = [
                 {
@@ -243,7 +254,7 @@ def template_messages(messages: list[dict]) -> list[dict]:
 
 def tool_parser_for(codec: dict | None) -> str | None:
     source = (codec or {}).get("prompt_template")
-    if isinstance(source, str) and hashlib.sha256(source.encode("utf-8")).hexdigest() == QWEN3_TEMPLATE_SHA256:
+    if isinstance(source, str) and hashlib.sha256(source.encode("utf-8")).hexdigest() in _SUPPORTED_TEMPLATE_HASHES:
         return _PARSER
     return None
 

@@ -223,6 +223,7 @@ class Desktop:
         self.system_prompt = None
         self.thinking = False
         self.context_limit = 0
+        self.context_capacity_known = False
         self.output_limit = 512
         self.models = []
         self.api = None
@@ -1259,6 +1260,9 @@ class Desktop:
             worker.stop_sequences = ready.get("stop_sequences") is True
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
+            # The worker uses this integer as its wire ceiling when the model
+            # declares no finite maximum. It is not a trained model capacity.
+            self.context_capacity_known = self.context_limit != 0xFFFFFFFF
             self.output_limit = min(4096, ready["max_new_tokens"], self.context_limit - 1)
             self.context = min(self.context_override or self.context_limit, self.context_limit)
             self.maximum = min(self.maximum, self.output_limit, self.context - 1)
@@ -1277,11 +1281,21 @@ class Desktop:
             "context_tokens": self.context,
             "max_new_tokens": self.maximum,
             "max_context_tokens": self.context_limit,
+            "context_capacity_known": self.context_capacity_known,
             "max_output_tokens": self.output_limit,
-            "images": bool(self.attachments is not None and self.worker and getattr(self.worker, "images", False)),
+            "images": bool(
+                self.context_capacity_known
+                and self.attachments is not None
+                and self.worker
+                and getattr(self.worker, "images", False)
+            ),
             "image_attachment_transport": "private-file-v1",
             "max_image_bytes": MAX_IMAGE_BYTES,
-            "image_verification": getattr(self.worker, "image_verification", "unverified"),
+            "image_verification": (
+                getattr(self.worker, "image_verification", "unverified")
+                if self.context_capacity_known
+                else "unverified"
+            ),
             "tools": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
             "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
         }
@@ -1328,6 +1342,8 @@ class Desktop:
                 raise DesktopError("Choose Chat mode and run a model before sending a message.")
             attachments = self.attachments
             previous_image = self.image_identity
+            if reference is not None and not self.context_capacity_known:
+                raise DesktopError("Image requests require a model with a declared finite context capacity.")
             if reference is not None and (
                 attachments is None or self.worker is None or not getattr(self.worker, "images", False)
             ):
@@ -1388,6 +1404,7 @@ class Desktop:
             worker, template, codec = self.worker, self.template, self.codec
             dispatch_epoch, identifier = self.epoch, self.active_model
             context = context or self.context
+            context_capacity_known = self.context_capacity_known
         if worker is None or template is None:
             raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
         if on_delta is not None and not worker.streaming:
@@ -1420,6 +1437,12 @@ class Desktop:
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
         if image is not None:
+            if not context_capacity_known:
+                raise APIError(
+                    400,
+                    "This model must declare a finite context capacity before accepting image requests.",
+                    "context_capacity_unknown",
+                )
             if not getattr(worker, "images", False):
                 raise APIError(400, "Image support has not passed checks for this model.", "images_unsupported")
             options = {
@@ -1449,6 +1472,11 @@ class Desktop:
             or any(type(token) is not int for token in token_ids)
         ):
             raise ValueError
+        if not context_capacity_known:
+            # Size native text state from the actual request. Reserving the
+            # sentinel can overflow attention's suffix capacity even for a tiny
+            # prompt. A custom conversation budget is still enforced above.
+            context = count + maximum
         request = {
             "operation": "generate",
             "input_token_ids": token_ids,
@@ -1528,7 +1556,8 @@ class Desktop:
                     "created": 0,
                     "owned_by": "stark",
                     "name": model["name"],
-                    "context_length": self.api_context,
+                    "context_length": self.api_context if self.context_capacity_known else None,
+                    "context_capacity_known": self.context_capacity_known,
                     "max_output_tokens": self.api_maximum,
                     "tool_calling": bool(tool_parser_for(self.codec)),
                 }
@@ -1546,7 +1575,10 @@ class Desktop:
                 "models": self.api_models(),
                 "image_verification": (
                     getattr(self.worker, "image_verification", "unverified")
-                    if self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                    if self.context_capacity_known
+                    and self.active_mode == "chat"
+                    and self.worker
+                    and getattr(self.worker, "images", False)
                     else "unverified"
                 ),
                 "capabilities": {
@@ -1562,7 +1594,10 @@ class Desktop:
                     else [],
                     "structured_output": False,
                     "images": bool(
-                        self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
+                        self.context_capacity_known
+                        and self.active_mode == "chat"
+                        and self.worker
+                        and getattr(self.worker, "images", False)
                     ),
                     "embeddings": False,
                     "responses": False,
@@ -1589,7 +1624,9 @@ class Desktop:
                 payload,
                 self.api_maximum,
                 self.api_vocab,
-                allow_images=bool(self.worker and getattr(self.worker, "images", False)),
+                allow_images=bool(
+                    self.context_capacity_known and self.worker and getattr(self.worker, "images", False)
+                ),
                 allow_tools=True,
             )
             maximum = request["maximum"]

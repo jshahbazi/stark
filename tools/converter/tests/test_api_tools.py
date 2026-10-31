@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +11,7 @@ from stark_convert.api_request import parse_chat_request
 from stark_convert.api_tools import (
     MAX_ARGUMENT_BYTES,
     MAX_TOOL_RESULT_BYTES,
+    QWEN3_4B_TEMPLATE_SHA256,
     QWEN3_TEMPLATE_SHA256,
     bounded_json,
     parse_tool_output,
@@ -247,13 +249,106 @@ def test_text_output_and_required_or_named_choice():
         output(tool_choice="none")
 
 
-def test_parser_admission_requires_exact_template(monkeypatch):
+def test_parser_admission_requires_exact_template():
     assert tool_parser_for(None) is None
     assert tool_parser_for({"prompt_template": "<tool_call>tool_calls tools"}) is None
-    # Synthetic source stands in for the separately pinned upstream hash.
-    monkeypatch.setattr("stark_convert.api_tools.QWEN3_TEMPLATE_SHA256", hashlib.sha256(b"synthetic").hexdigest())
-    assert tool_parser_for({"prompt_template": "synthetic"}) == "qwen3-hermes-v1"
+    fixture = Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja"
+    template = fixture.read_text()
+    assert hashlib.sha256(template.encode()).hexdigest() == QWEN3_4B_TEMPLATE_SHA256
+    assert tool_parser_for({"prompt_template": template}) == "qwen3-hermes-v1"
+    assert tool_parser_for({"prompt_template": template + " "}) is None
     assert len(QWEN3_TEMPLATE_SHA256) == 64
+    assert len(QWEN3_4B_TEMPLATE_SHA256) == 64
+
+
+def test_pinned_upstream_template_renders_tool_history_and_calls():
+    import re
+
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    source = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    template = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(source)
+    second_tool = copy.deepcopy(TOOL)
+    second_tool["function"]["name"] = "lookup_two"
+    assistant, finish = parse_tool_output(
+        '<tool_call>{"name":"lookup","arguments":{"key":"alpha"}}</tool_call>'
+        '<tool_call>{"name":"lookup_two","arguments":{"key":"beta"}}</tool_call>',
+        [TOOL, second_tool],
+        parser="qwen3-hermes-v1",
+        finish_reason="eos",
+        call_id_prefix="prior",
+    )
+    assert finish == "tool_calls"
+    assistant["content"] = "Synthetic preamble"
+    call_ids = [call["id"] for call in assistant["tool_calls"]]
+    messages = template_messages(
+        [
+            {"role": "user", "content": "Synthetic first turn"},
+            assistant,
+            {"role": "tool", "tool_call_id": call_ids[1], "content": "Synthetic second result"},
+            {"role": "tool", "tool_call_id": call_ids[0], "content": "Synthetic first result"},
+            {"role": "user", "content": "Synthetic follow-up"},
+        ]
+    )
+    assert messages[1]["content"] == "Synthetic preamble"
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] == {"key": "alpha"}
+    rendered = template.render(
+        messages=messages,
+        tools=[TOOL, second_tool],
+        add_generation_prompt=True,
+        enable_thinking=False,
+        bos_token="<|im_start|>",
+        eos_token="<|im_end|>",
+    )
+    assert "Synthetic first turn" in rendered and "Synthetic follow-up" in rendered
+    assert "Synthetic first result" in rendered and "Synthetic second result" in rendered
+    serialized = [
+        body
+        for body in re.findall(r"<tool_call>\n(\{[^\n]*\})\n</tool_call>", rendered)
+        if body.startswith('{"name": "')
+    ]
+    parsed_calls = [json.loads(body) for body in serialized]
+    assert parsed_calls == [
+        {"name": "lookup", "arguments": {"key": "alpha"}},
+        {"name": "lookup_two", "arguments": {"key": "beta"}},
+    ]
+    assert rendered.index("<tool_response>\nSynthetic first result") < rendered.index(
+        "<tool_response>\nSynthetic second result"
+    )
+    assert "Synthetic preamble" in rendered
+
+
+@pytest.mark.parametrize("content", [None, "", "<omitted>"])
+def test_upstream_template_accepts_null_omitted_and_empty_tool_call_content(content):
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    source = (Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja").read_text()
+    template = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True).from_string(source)
+    assistant, _ = output(call_id_prefix="content")
+    history_message = {"role": "assistant", "tool_calls": assistant["tool_calls"]}
+    if content != "<omitted>":
+        history_message["content"] = content
+    parsed = parse_chat_request(
+        {
+            "messages": [
+                {"role": "user", "content": "Synthetic first turn"},
+                history_message,
+                {"role": "tool", "tool_call_id": assistant["tool_calls"][0]["id"], "content": "Synthetic result"},
+            ],
+            "tools": [TOOL],
+        },
+        512,
+        32000,
+        allow_tools=True,
+    )
+    rendered = template.render(
+        messages=template_messages(parsed["messages"]),
+        tools=parsed["tools"],
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    assert "Synthetic result" in rendered
+    assert "None" not in rendered
 
 
 def test_complete_output_replay_can_be_used_in_next_tool_turn():

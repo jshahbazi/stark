@@ -88,6 +88,24 @@ def test_context_help_describes_the_model_default(capsys):
     assert "loaded model's maximum" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize("budget", [None, 2048])
+def test_unknown_context_capacity_reserves_actual_cli_text_request(model, budget):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic turn\nsynthetic follow-up\n/exit\n")):
+        assert run_chat(options(model, context_tokens=budget), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 2
+    assert all(request["context_tokens"] == 20 + 32 for request in generated)
+
+
+def test_unknown_context_capacity_cli_still_enforces_custom_budget(model, capsys):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic overflow\n/exit\n")):
+        assert run_chat(options(model, context_tokens=21), worker) == 0
+    assert all(request["operation"] != "generate" for request in worker.requests)
+    assert "Conversation exceeds the context budget" in capsys.readouterr().out
+
+
 def test_history_reset_and_eof(model):
     worker = FakeWorker()
     with patch("sys.stdin", io.StringIO("first\nsecond\n/reset\nthird\n")):

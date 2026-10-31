@@ -14,12 +14,20 @@ struct ConnectionInfoTests {
         precondition(parsed["api_key"] as? String == "synthetic-key")
         precondition(parsed["running_model"] as? String == info.runningModelID)
         precondition(parsed["selected_model_is_running"] as? Bool == false)
-        let limits = parsed["running_model_limits"] as! [String: Int]
-        precondition(limits["context_tokens"] == 8192 && limits["max_output_tokens"] == 512)
+        let limits = parsed["running_model_limits"] as! [String: Any]
+        precondition(limits["context_tokens"] as? Int == 8192 && limits["max_output_tokens"] as? Int == 512)
+        precondition(limits["context_capacity_known"] as? Bool == true)
         precondition(json.contains("\n") && json.contains("Qwen/Qwen3.8-27B"))
         precondition(!info.curl.contains(info.apiKey))
         precondition(info.curl.contains("curl --config -"))
         precondition(info.curl.contains("read -r -s stark_api_key"))
+        var unknownContext = info
+        unknownContext.contextCapacityKnown = false
+        let unknownContextJSON = try JSONSerialization.jsonObject(with: Data(unknownContext.json!.utf8)) as! [String: Any]
+        let unknownLimits = unknownContextJSON["running_model_limits"] as! [String: Any]
+        precondition(unknownLimits["context_tokens"] is NSNull)
+        precondition(unknownLimits["context_capacity_known"] as? Bool == false)
+        precondition(unknownLimits["max_output_tokens"] as? Int == 512)
 
         let stopped = ConnectionInfo(
             baseURL: info.baseURL, apiKey: info.apiKey, modelID: "JevK5", runningModelID: "",

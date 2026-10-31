@@ -36,6 +36,7 @@ _FIELDS = {
     "tools",
     "tool_choice",
     "parallel_tool_calls",
+    "store",
 }
 
 
@@ -154,6 +155,8 @@ def parse_chat_request(
     unknown = set(payload) - _FIELDS
     if unknown:
         raise _bad("Unsupported request fields.", "unsupported_parameter")
+    if payload.get("store") is not None and payload["store"] is not False:
+        raise _bad("Stark does not store completions. Use store=false or omit it.", "unsupported_parameter")
     model = payload.get("model")
     if model is not None and (not isinstance(model, str) or not model):
         raise _bad("model must be a non-empty string.")

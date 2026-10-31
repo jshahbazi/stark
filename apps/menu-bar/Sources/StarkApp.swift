@@ -985,6 +985,7 @@ final class EngineController: ObservableObject {
     @Published private(set) var removalError: String?
     @Published var options = ChatOptions()
     @Published var contextLimit = 0
+    @Published var contextCapacityKnown = false
     @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
     private var process: Process?
@@ -1372,6 +1373,8 @@ final class EngineController: ObservableObject {
 
     private func applyLimits(_ event: [String: Any]) {
         contextLimit = event["max_context_tokens"] as? Int ?? contextLimit
+        contextCapacityKnown = event["context_capacity_known"] as? Bool
+            ?? (contextLimit > 0 && contextLimit != 0xFFFFFFFF)
         outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
@@ -2502,7 +2505,9 @@ struct AdvancedOptionsView: View {
 
     private var validation: String? {
         guard let count = Int(context), count >= 2, count <= engine.contextLimit else {
-            return "Context size must be between 2 and \(engine.contextLimit) tokens."
+            return engine.contextCapacityKnown
+                ? "Context size must be between 2 and \(engine.contextLimit) tokens."
+                : "Conversation budget must be between 2 and \(engine.contextLimit) tokens (protocol range)."
         }
         guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
             return "Output limit must be between 1 and \(engine.outputLimit) tokens."
@@ -2525,7 +2530,7 @@ struct AdvancedOptionsView: View {
             }
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
                 GridRow {
-                    Text("Context size (tokens)")
+                    Text(engine.contextCapacityKnown ? "Context size (tokens)" : "Conversation budget (tokens)")
                     TextField("Context size", text: $context).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Context size in tokens")
                 }
@@ -2537,12 +2542,18 @@ struct AdvancedOptionsView: View {
             }
             Text("Context includes the conversation and room for the full reply budget.")
                 .font(.caption).foregroundStyle(.secondary)
+            if !engine.contextCapacityKnown {
+                Text("This model does not declare a finite context maximum. The budget uses Stark's protocol range; memory and request byte limits still apply. Text requests allocate only the context they need.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Thinking mode", isOn: $thinking)
             Text("Enables reasoning when the model's chat template supports it.")
                 .font(.caption).foregroundStyle(.secondary)
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
-            Text("Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model.")
+            Text(engine.contextCapacityKnown
+                 ? "Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model."
+                 : "The default budget uses the protocol range without claiming a model context maximum. Custom budgets stay in memory for this app session.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {

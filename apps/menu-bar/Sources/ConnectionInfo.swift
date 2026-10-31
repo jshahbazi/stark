@@ -9,6 +9,7 @@ struct ConnectionInfo {
     let status: String
     let contextTokens: Int
     let maxNewTokens: Int
+    var contextCapacityKnown = true
     var images = false
     var imageVerification = "unverified"
     var tools = false
@@ -34,7 +35,8 @@ struct ConnectionInfo {
             "selected_model_is_running": selectedModelIsRunning,
             "status": status,
             "running_model_limits": runningModelID.isEmpty ? NSNull() : [
-                "context_tokens": contextTokens,
+                "context_tokens": contextCapacityKnown ? contextTokens as Any : NSNull(),
+                "context_capacity_known": contextCapacityKnown,
                 "max_output_tokens": maxNewTokens
             ] as Any,
             "endpoints": [
