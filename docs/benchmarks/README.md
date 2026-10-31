@@ -93,7 +93,8 @@ rejected, inconclusive and deferred outcomes with source and evidence links.
 
 | Study | Outcome |
 | --- | --- |
-| [Qwen3.8 MTP with the optimized Metal branch](QWEN38_MTP_COMBINATION_2026_10_31.md) | Current Lily long run: 82.85 tok/s on versus 72.97 off across 16 pairs, all MTP requests at least 78.61; nucleus gains 1.70%; official serial MTP is slower; original 78.33 implementation preserved |
+| [Qwen3.8 mixed-4-8bit exact batched MTP](QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md) | Same MLX-Serve checkpoint: 65.02 tok/s on versus 56.69 off (+14.69%, 16/16 paired wins); separate original non-MTP worker ABBA +10.88%; quantization and exact sampling preserved; absolute rates drift and 77–80 tok/s remains unmet |
+| [Qwen3.8 MTP with the optimized Metal branch](QWEN38_MTP_COMBINATION_2026_10_31.md) | Current Lily long run: 82.85 tok/s on versus 72.97 off across 16 pairs, all MTP requests at least 78.61; nucleus gains 1.70%; earlier official serial MTP is slower; original 78.33 implementation preserved |
 | [Qwen3.8 matched-checkpoint Metal optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | Same-checkpoint maximum 66.81 vs 61.17 tok/s (+9.21%), no speculation; exact stock component controls and retained Lily parity; 77–80 tok/s and whole-model quality equivalence remain unestablished |
 | [Qwen3.8 converted-format speed](QWEN38_UZU_SPEED_2026_10_30.md) | NEON affine restoration reduces median process-to-ready time from 20.54 to 18.09 seconds; exact nucleus-prefix work and sampled controls retain quantization; consistent 77–80 tok/s remains unqualified |
 | [Qwen3.8 Uzu conversion and generation](QWEN38_UZU_FORMAT_2026_10_29.md) | Full quantization-preserving conversion, self-contained load and exact readout/sample parity; paired timing series has substantial throughput drift |
