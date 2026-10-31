@@ -22,6 +22,18 @@ SOURCE = ROOT / "apps/menu-bar/Sources/StarkApp.swift"
 BOUNDARY = "\nstruct StatusLine: View"
 DRIVER = r"""
 
+final class ControllerCredentialStorage: APICredentialStorage {
+    var status: OSStatus = errSecSuccess
+    var key = Data(String(repeating: "a", count: 64).utf8)
+    var replacementStatus: OSStatus = errSecSuccess
+    func read() -> (OSStatus, Data?) { (status, key) }
+    func add(_ data: Data) -> OSStatus { key = data; return errSecSuccess }
+    func replace(_ data: Data) -> OSStatus {
+        if replacementStatus == errSecSuccess { key = data }
+        return replacementStatus
+    }
+}
+
 extension EngineController {
     static func exercise(_ scenario: String, backendError: String) -> Bool {
         let previousSelectedModel = UserDefaults.standard.object(forKey: "selectedModel")
@@ -30,7 +42,12 @@ extension EngineController {
                 UserDefaults.standard.set(previousSelectedModel, forKey: "selectedModel")
             } else { UserDefaults.standard.removeObject(forKey: "selectedModel") }
         }
-        let engine = EngineController()
+        let credentialStorage = ControllerCredentialStorage()
+        let apiSuite = "stark.controller-api-test." + UUID().uuidString
+        let apiDefaults = UserDefaults(suiteName: apiSuite)!
+        defer { apiDefaults.removePersistentDomain(forName: apiSuite) }
+        let credentials = APICredentialStore(service: apiSuite, storage: credentialStorage) { String(repeating: "b", count: 64) }
+        let engine = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults)
         let pipe = Pipe()
         engine.input = pipe.fileHandleForWriting
         defer {
@@ -139,6 +156,39 @@ extension EngineController {
              "message": action == "trash" ? "Its files will move to Trash." : "Its folder will remain on this Mac."]
         }
         switch scenario {
+        case "api-keychain-failure-isolated":
+            credentialStorage.status = errSecInteractionNotAllowed
+            engine.retryAPI()
+            guard noCommandSent(), engine.apiKey.isEmpty, engine.state == "ready",
+                  engine.loadedID == "fixture-model", engine.apiMessage.contains("Unlock") else { return false }
+            credentialStorage.status = errSecSuccess
+            engine.retryAPI()
+            let configured = command()
+            return configured["command"] as? String == "configure_api" &&
+                configured["port"] as? Int == 8000 && configured["api_key"] as? String == String(repeating: "a", count: 64)
+        case "api-reuse-rotation-and-connection-events":
+            engine.retryAPI(); _ = command()
+            let original = engine.apiKey
+            engine.apply(["event": "connection", "base_url": "http://127.0.0.1:8000/v1", "api_key": "ignored-untrusted-key"])
+            guard engine.apiKey == original else { return false }
+            engine.retryAPI(); _ = command()
+            guard engine.apiKey == original else { return false }
+            credentialStorage.replacementStatus = errSecNotAvailable
+            engine.regenerateAPIKey()
+            guard noCommandSent(), engine.apiKey == original else { return false }
+            credentialStorage.replacementStatus = errSecSuccess
+            engine.regenerateAPIKey()
+            let changed = command()
+            return engine.apiKey != original && changed["api_key"] as? String == engine.apiKey && engine.state == "ready"
+        case "api-port-settings-and-conflict":
+            engine.configureAPIPort("invalid")
+            guard noCommandSent(), engine.apiPort == 8000, engine.state == "ready" else { return false }
+            engine.configureAPIPort("12345")
+            let configured = command()
+            engine.apply(["event": "connection", "base_url": "http://127.0.0.1:8000/v1", "message": "Port 12345 is occupied."])
+            let reopened = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults)
+            return configured["port"] as? Int == 12345 && engine.apiPort == 12345 && reopened.apiPort == 12345 &&
+                engine.apiBaseURL == "http://127.0.0.1:8000/v1" && engine.state == "ready" && engine.loadedID == "fixture-model"
         case "gpu-memory-live-and-validation":
             func memory(_ bytes: Any, model: String = "fixture-model", mode: String = "decision") {
                 engine.apply(["event": "gpu_memory", "model_id": model, "mode": mode, "gpu_memory_bytes": bytes])
@@ -209,7 +259,7 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 13,
+            guard let families = engine.modelFamilies?.families, families.count == 14,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
@@ -266,7 +316,7 @@ extension EngineController {
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
             return rows.map(\.name) == ["Gemma 2", "Gemma 3", "Granite", "LFM2", "Llama", "LLaMBA",
-                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "SmolLM3"] &&
+                "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":
             engine.apply(["event": "models", "models": [
@@ -1490,6 +1540,15 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_api_credential_failure_keeps_model_usable(self):
+        self.exercise("api-keychain-failure-isolated")
+
+    def test_api_credential_reuse_and_failed_rotation(self):
+        self.exercise("api-reuse-rotation-and-connection-events")
+
+    def test_api_port_persistence_and_conflict_keeps_model_usable(self):
+        self.exercise("api-port-settings-and-conflict")
+
     def test_gpu_memory_updates_during_requests_and_validates_measurements(self):
         self.exercise("gpu-memory-live-and-validation")
 
@@ -1515,6 +1574,7 @@ class ControllerLifecycleTests(unittest.TestCase):
                     "-target",
                     "arm64-apple-macosx26.4",
                     str(test_source),
+                    str(ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"),
                     "-o",
                     str(cls.executable),
                 ],

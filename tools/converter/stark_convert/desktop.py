@@ -18,10 +18,12 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
+from .api_tools import parse_tool_output, render_tools, template_messages, tool_parser_for
 from .chat import (
     ChatCancelled,
     ChatError,
@@ -222,6 +224,7 @@ class Desktop:
         self.output_limit = 512
         self.models = []
         self.api = None
+        self.api_port = None
         self.api_closing = False
         self.api_condition = threading.Condition(self.lock)
         self.api_queue = []
@@ -1277,6 +1280,8 @@ class Desktop:
             "image_attachment_transport": "private-file-v1",
             "max_image_bytes": MAX_IMAGE_BYTES,
             "image_verification": getattr(self.worker, "image_verification", "unverified"),
+            "tools": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
+            "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
         }
 
     def configure(self, payload):
@@ -1372,6 +1377,7 @@ class Desktop:
         epoch=None,
         thinking=False,
         image=None,
+        tools=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
@@ -1402,7 +1408,7 @@ class Desktop:
         try:
             prompt = template.render(
                 messages=messages,
-                tools=None,
+                tools=tools,
                 add_generation_prompt=True,
                 enable_thinking=thinking,
                 bos_token=codec.get("bos_token") or "",
@@ -1459,15 +1465,53 @@ class Desktop:
             raise ValueError
         return reply
 
-    def start_api(self):
+    def configure_api(self, payload):
+        key, port = payload.get("api_key"), payload.get("port")
+        if (
+            set(payload) != {"command", "api_key", "port"}
+            or not isinstance(key, str)
+            or re.fullmatch(r"[a-f0-9]{64}", key) is None
+            or type(port) is not int
+            or not 1 <= port <= 65535
+        ):
+            raise DesktopError("Invalid local API settings. Reopen Connection Details and try again.")
+        self.start_api(key, port)
+
+    def start_api(self, key, port=8000):
+        # Swift commits the key to Keychain before sending this private command.
+        # Bind a changed port before releasing the working listener.
+        old = self.api
+        if old is not None:
+            old.update_key(key)
+        if old is not None and self.api_port == port:
+            self.emit("connection", base_url=f"http://127.0.0.1:{port}/v1")
+            return
         try:
-            self.api = LocalAPI(self.api_models, self.api_complete, status=self.api_status, cancellable=True)
-            details = self.api.start()
-            # Credentials travel only through the private app pipe; never persist them.
-            self.emit("connection", **details)
-        except OSError:
-            self.api = None
-            self.emit("connection", message="Cannot start the local API. Quit and reopen Stark to retry.")
+            replacement = LocalAPI(
+                self.api_models,
+                self.api_complete,
+                api_key=key,
+                port=port,
+                status=self.api_status,
+                cancellable=True,
+            )
+            details = replacement.start()
+        except OSError as error:
+            conflict = error.errno in {48, 98, 10048}
+            self.emit(
+                "connection",
+                base_url=f"http://127.0.0.1:{self.api_port}/v1" if old else "",
+                message=(
+                    f"Port {port} is in use. Close the other server or change the port in Connection Details."
+                    if conflict
+                    else "Cannot bind the local API. Change the port in Connection Details and retry."
+                ),
+            )
+            return
+        self.api, self.api_port = replacement, urlsplit(details["base_url"]).port
+        if old is not None:
+            old.close()
+        self.emit("connection", base_url=details["base_url"])
 
     def api_models(self):
         with self.lock:
@@ -1483,6 +1527,7 @@ class Desktop:
                     "name": model["name"],
                     "context_length": self.api_context,
                     "max_output_tokens": self.api_maximum,
+                    "tool_calling": bool(tool_parser_for(self.codec)),
                 }
             ]
 
@@ -1507,7 +1552,11 @@ class Desktop:
                     "sampling": ["temperature", "top_p", "top_k", "min_p", "seed"],
                     "stop_sequences": bool(self.active_mode == "chat" and self.worker and self.worker.stop_sequences),
                     "cancellation": bool(self.active_mode == "chat" and self.worker and self.worker.cancellation),
-                    "tool_calling": False,
+                    "tool_calling": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
+                    "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
+                    "tool_choices": ["auto", "none", "required", "function"]
+                    if self.active_mode == "chat" and tool_parser_for(self.codec)
+                    else [],
                     "structured_output": False,
                     "images": bool(
                         self.active_mode == "chat" and self.worker and getattr(self.worker, "images", False)
@@ -1538,6 +1587,7 @@ class Desktop:
                 self.api_maximum,
                 self.api_vocab,
                 allow_images=bool(self.worker and getattr(self.worker, "images", False)),
+                allow_tools=True,
             )
             maximum = request["maximum"]
             messages = request["messages"]
@@ -1546,6 +1596,14 @@ class Desktop:
             if self.active_model is None or self.worker is None or self.active_mode != "chat":
                 raise APIError(503, "Run a model in Stark first.", "model_not_loaded")
             active = next(m for m in self.models if m["id"] == self.active_model)
+            parser = tool_parser_for(self.codec)
+            tool_request = bool(request["tools"] or request["has_tool_history"])
+            if tool_request and parser is None:
+                raise APIError(
+                    400,
+                    "This model's chat template has no qualified tool parser. Use a supported Qwen3 model.",
+                    "tools_unsupported",
+                )
             public_id = api_model_id(active)
             if request["model"] not in (None, public_id, self.active_model, active["name"]):
                 raise APIError(
@@ -1575,7 +1633,7 @@ class Desktop:
                 self.api_queue.remove(ticket)
                 self.api_condition.notify_all()
             self.job = threading.current_thread()
-            candidate = [dict(m) for m in messages]
+            candidate = template_messages(messages) if tool_request else [dict(m) for m in messages]
             system = (self.codec or {}).get("default_system_prompt")
             if system and not any(m["role"] == "system" for m in candidate):
                 candidate.insert(0, {"role": "system", "content": system})
@@ -1584,7 +1642,7 @@ class Desktop:
             reply = self.infer(
                 candidate,
                 maximum,
-                on_delta=on_delta,
+                on_delta=None if tool_request else on_delta,
                 context=self.api_context,
                 sampling=request["sampling"],
                 seed=request["seed"],
@@ -1592,10 +1650,36 @@ class Desktop:
                 cancelled=cancelled,
                 epoch=epoch,
                 image=request["image"],
+                tools=render_tools(request),
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
                     raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled)
+                message, finish_reason = (
+                    parse_tool_output(
+                        reply["text"],
+                        request["tools"],
+                        parser=parser,
+                        finish_reason=reply.get("finish_reason"),
+                        parallel_tool_calls=request["parallel_tool_calls"],
+                        call_id_prefix=uuid.uuid4().hex,
+                        tool_choice=request["tool_choice"],
+                    )
+                    if tool_request
+                    else (
+                        {"role": "assistant", "content": reply["text"]},
+                        "length" if reply.get("finish_reason") in ("length", "context") else "stop",
+                    )
+                )
+                if tool_request and on_delta is not None and message.get("content"):
+                    try:
+                        on_delta(message["content"])
+                    except OSError:
+                        # The terminal worker frame is already consumed. A
+                        # failed client write must not unload the aligned model.
+                        raise APIError(499, "Request cancelled.", "request_cancelled") from None
                 self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
             completion_tokens = metric(reply, "output_tokens") or 0
@@ -1607,8 +1691,8 @@ class Desktop:
                 "choices": [
                     {
                         "index": 0,
-                        "message": {"role": "assistant", "content": reply["text"]},
-                        "finish_reason": "length" if reply.get("finish_reason") in ("length", "context") else "stop",
+                        "message": message,
+                        "finish_reason": finish_reason,
                     }
                 ],
                 "usage": {
@@ -1683,6 +1767,8 @@ class Desktop:
         command = payload["command"]
         if command == "list":
             self.library()
+        elif command == "configure_api":
+            self.configure_api(payload)
         elif command == "support":
             self.families()
         elif command == "catalog":
@@ -1783,7 +1869,6 @@ def serve(desktop):
     desktop.library()
     desktop.families()
     desktop.status("idle", "Choose a model to run")
-    desktop.start_api()
     pending = b""
     discarding = False
     while True:

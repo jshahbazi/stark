@@ -17,6 +17,9 @@ struct ConnectionInfoTests {
         let limits = parsed["running_model_limits"] as! [String: Int]
         precondition(limits["context_tokens"] == 8192 && limits["max_output_tokens"] == 512)
         precondition(json.contains("\n") && json.contains("Qwen/Qwen3.8-27B"))
+        precondition(!info.curl.contains(info.apiKey))
+        precondition(info.curl.contains("curl --config -"))
+        precondition(info.curl.contains("read -r -s stark_api_key"))
 
         let stopped = ConnectionInfo(
             baseURL: info.baseURL, apiKey: info.apiKey, modelID: "JevK5", runningModelID: "",

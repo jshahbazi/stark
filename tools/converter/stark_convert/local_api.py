@@ -108,6 +108,7 @@ class LocalAPI:
         models: Callable[[], list[dict[str, Any]]],
         complete: Callable[..., dict[str, Any]],
         *,
+        api_key: str,
         port: int = 8000,
         max_connections: int = 16,
         status: Callable[[], dict[str, Any]] | None = None,
@@ -121,7 +122,8 @@ class LocalAPI:
         self._max_connections = max_connections
         self._server: _BoundedHTTPServer | None = None
         self._thread: threading.Thread | None = None
-        self._api_key: str | None = None
+        self._validate_key(api_key)
+        self._api_key = api_key
         self._lock = threading.Lock()
         self._status = status
         self._cancellable = cancellable
@@ -145,14 +147,9 @@ class LocalAPI:
             if self._server is not None:
                 raise RuntimeError("LocalAPI is already running")
             session_closed = threading.Event()
-            session_key = secrets.token_urlsafe(32)
+            session_key = self._api_key
             handler = self._handler_class(session_key, session_closed)
-            try:
-                server = _BoundedHTTPServer(("127.0.0.1", self._port), handler, self._max_connections)
-            except OSError as exc:
-                if self._port != 8000 or exc.errno not in {48, 98, 10048}:
-                    raise
-                server = _BoundedHTTPServer(("127.0.0.1", 0), handler, self._max_connections)
+            server = _BoundedHTTPServer(("127.0.0.1", self._port), handler, self._max_connections)
             self._server = server
             self._api_key = session_key
             self._closing = session_closed
@@ -160,12 +157,22 @@ class LocalAPI:
             self._thread.start()
             return {"base_url": f"http://127.0.0.1:{server.server_port}/v1", "api_key": self._api_key}
 
+    @staticmethod
+    def _validate_key(key):
+        if not isinstance(key, str) or len(key) != 64 or any(c not in "0123456789abcdef" for c in key):
+            raise ValueError("A persisted 256-bit API credential is required.")
+
+    def update_key(self, key):
+        """Activate a credential already committed by the host to Keychain."""
+        self._validate_key(key)
+        with self._lock:
+            self._api_key = key
+
     def close(self) -> None:
         with self._lock:
             self._closing.set()
             server, thread = self._server, self._thread
             self._server = self._thread = None
-            self._api_key = None
         if server is not None:
             server.shutdown()
             server.server_close()
@@ -254,7 +261,8 @@ class LocalAPI:
                 hostname = urlsplit("//" + host).hostname
                 if hostname not in {"127.0.0.1", "localhost", "::1"}:
                     raise APIError(403, "Host is not allowed", "host_not_allowed")
-                expected = session_key
+                with api._lock:
+                    expected = api._api_key
                 actual = self.headers.get("Authorization", "")
                 if not expected or not hmac.compare_digest(
                     actual.encode("utf-8", "replace"), ("Bearer " + expected).encode("utf-8")
@@ -383,6 +391,15 @@ class LocalAPI:
                     if streaming:
                         choices = result.get("choices") or [{}]
                         choice = choices[0] if isinstance(choices[0], dict) else {}
+                        # Tool-enabled generations are buffered until the whole
+                        # call is validated. Emit each call exactly once, in
+                        # model order, using the same IDs as buffered output.
+                        message = choice.get("message", {})
+                        calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+                        for index, call in enumerate(calls):
+                            self._sse_write(
+                                self._sse_item(ident, model, created, {"tool_calls": [{"index": index, **call}]})
+                            )
                         self._sse_write(
                             self._sse_item(
                                 ident,

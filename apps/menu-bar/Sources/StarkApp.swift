@@ -926,6 +926,7 @@ final class EngineController: ObservableObject {
     @Published var state = "idle" {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
+            if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
         }
     }
     @Published var message = "Starting Stark…"
@@ -935,6 +936,9 @@ final class EngineController: ObservableObject {
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
+    @Published private(set) var apiPort: Int
+    @Published private(set) var supportsTools = false
+    @Published private(set) var toolParser = ""
     @Published var apiContextTokens = 0
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
@@ -991,6 +995,14 @@ final class EngineController: ObservableObject {
     private var activeInstallRequestID: String?
     private var removalRequestID: String?
     private var removalAction: InstalledModelRemoval.Action?
+    private let apiCredentials: APICredentialStore
+    private let apiPreferences: APIConnectionPreferences
+
+    init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard) {
+        self.apiCredentials = apiCredentials
+        apiPreferences = APIConnectionPreferences(service: apiCredentials.service, defaults: apiDefaults)
+        apiPort = apiPreferences.port
+    }
 
     var busy: Bool {
         ["loading", "generating", "deciding", "installing", "stopping", "configuring", "removing"].contains(state) ||
@@ -1094,6 +1106,7 @@ final class EngineController: ObservableObject {
             try child.run()
             process = child
             input = incoming.fileHandleForWriting
+            retryAPI()
             send(["command": "list"])
         } catch {
             output?.readabilityHandler = nil
@@ -1122,7 +1135,6 @@ final class EngineController: ObservableObject {
         switch event["event"] as? String {
         case "connection":
             apiBaseURL = event["base_url"] as? String ?? ""
-            apiKey = event["api_key"] as? String ?? ""
             apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
@@ -1328,6 +1340,8 @@ final class EngineController: ObservableObject {
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
+        supportsTools = mode == .chat && event["tools"] as? Bool == true
+        toolParser = supportsTools ? event["tool_parser"] as? String ?? "" : ""
         supportsImages = mode == .chat && event["images"] as? Bool == true &&
             event["image_attachment_transport"] as? String == "private-file-v1" &&
             event["max_image_bytes"] as? Int == ImageAttachment.maximumBytes
@@ -1444,6 +1458,53 @@ final class EngineController: ObservableObject {
         bytes.append(10)
         do { try input.write(contentsOf: bytes); return true }
         catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
+    }
+
+    /// Credential bytes travel only over the private app/backend pipe.
+    func retryAPI() {
+        guard input != nil else { apiMessage = "Reopen Stark to restart the local API."; return }
+        guard (1...65535).contains(apiPort) else {
+            apiMessage = "The saved API port is invalid. Enter a port from 1 to 65535 and choose Apply Port."
+            return
+        }
+        do {
+            let key = try apiCredentials.loadOrCreate()
+            apiKey = key
+            apiMessage = "Connecting the local API on port \(apiPort)…"
+            if !send(["command": "configure_api", "api_key": key, "port": apiPort]) {
+                apiMessage = "Cannot configure the local API. Reopen Stark. Your stored API key has not changed."
+            }
+        } catch {
+            apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
+        }
+    }
+
+    func configureAPIPort(_ value: String) {
+        guard let port = Int(value), (1...65535).contains(port) else {
+            apiMessage = "Enter a port from 1 to 65535."
+            return
+        }
+        do { try apiPreferences.save(port: port); apiPort = port; retryAPI() }
+        catch { apiMessage = "The API port could not be saved. Try again." }
+    }
+
+    func regenerateAPIKey() {
+        guard input != nil else { apiMessage = "Reopen Stark before regenerating its API key."; return }
+        guard (1...65535).contains(apiPort) else {
+            apiMessage = "Choose a valid saved port before regenerating the API key."
+            return
+        }
+        do {
+            // SecItemUpdate is atomic. Keep the active in-memory key on every storage failure.
+            let key = try apiCredentials.regenerate()
+            apiKey = key
+            apiMessage = "API key replaced. Update connected apps with the replacement key."
+            if !send(["command": "configure_api", "api_key": key, "port": apiPort]) {
+                apiMessage = "API key saved in Keychain. Reopen Stark, then update connected apps with the replacement key."
+            }
+        } catch {
+            apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
+        }
     }
 
     @discardableResult

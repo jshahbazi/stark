@@ -34,6 +34,8 @@ The repository policy check is the first thing CI runs and the first thing to ru
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 ```
 
+For API credential or connection-setting changes, also run `uv run --project tools/converter --locked --python 3.13.13 python scripts/test_api_credentials.py` on macOS. These checks use injected storage and a disposable Keychain service, including child-process reuse; they never access the installed app's credential. The menu-bar controller harness checks private-pipe activation, recovery failures and persisted port settings. Packaged relaunch/upgrade checks use a separate test bundle identifier and credential namespace; signed production upgrades need separate evidence.
+
 Then run the checks for the area you changed; the complete list, matching CI, is in [CI local checks](docs/CI.md#local-checks). The two commands most changes need:
 
 ```sh

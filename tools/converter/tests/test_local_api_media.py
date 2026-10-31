@@ -16,6 +16,7 @@ def start_api(complete, *, images=True, cancellable=False):
     api = LocalAPI(
         lambda: [{"id": "test-model"}],
         complete,
+        api_key="a" * 64,
         port=0,
         cancellable=cancellable,
         status=lambda: {"capabilities": {"images": images}},

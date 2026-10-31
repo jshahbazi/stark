@@ -6,8 +6,11 @@ struct ConnectionDetailsView: View {
     @State private var revealKey = false
     @State private var copied = ""
     @State private var inspectedModelID = ""
+    @State private var portText = ""
+    @State private var confirmRegeneration = false
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
+    private var hasKey: Bool { !engine.apiKey.isEmpty }
     private var modelID: String { engine.loadedMode == .chat ? engine.loadedID : "" }
     private var inspectedLibraryID: String {
         if engine.models.contains(where: { $0.id == inspectedModelID }) { return inspectedModelID }
@@ -25,11 +28,14 @@ struct ConnectionDetailsView: View {
             selectedModelIsRunning: !modelID.isEmpty && inspectedLibraryID == modelID,
             status: engine.state, contextTokens: engine.apiContextTokens, maxNewTokens: engine.apiMaxNewTokens,
             images: engine.supportsImages && engine.loadedMode == .chat,
-            imageVerification: engine.imageVerification
+            imageVerification: engine.imageVerification,
+            tools: engine.supportsTools && engine.loadedMode == .chat,
+            toolParser: engine.toolParser
         )
     }
 
     var body: some View {
+        ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect to Stark").font(.title2.weight(.semibold))
             Text("In your application's provider settings, choose OpenAI-compatible or Custom OpenAI, then paste these values.")
@@ -37,6 +43,17 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
+            HStack {
+                Text("Saved port").font(.caption).foregroundStyle(.secondary)
+                TextField("8000", text: $portText).frame(width: 70)
+                    .accessibilityLabel("Local API listening port")
+                Button("Apply Port") { engine.configureAPIPort(portText) }
+                Button("Retry API") { engine.retryAPI() }
+                Spacer()
+            }
+            Text("Stark reuses this port. If it is occupied, close the conflicting app or choose another port. Update connected apps after changing it.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             VStack(alignment: .leading, spacing: 5) {
                 Text("Model ID").font(.caption).foregroundStyle(.secondary)
                 HStack {
@@ -66,13 +83,23 @@ struct ConnectionDetailsView: View {
             VStack(alignment: .leading, spacing: 5) {
                 Text("API key").font(.caption).foregroundStyle(.secondary)
                 HStack {
-                    Text(canConnect ? (revealKey ? engine.apiKey : String(repeating: "•", count: 24)) : "Unavailable")
+                    Text(hasKey ? (revealKey ? engine.apiKey : String(repeating: "•", count: 24)) : "Unavailable")
                         .font(.system(.callout, design: .monospaced)).textSelection(.disabled)
                     Spacer()
-                    Button(revealKey ? "Hide" : "Show") { revealKey.toggle() }.disabled(!canConnect)
-                    Button("Copy") { copy(engine.apiKey, label: "API key", sensitive: true) }.disabled(!canConnect)
+                    Button(revealKey ? "Hide" : "Show") { revealKey.toggle() }.disabled(!hasKey)
+                    Button("Copy") { copy(engine.apiKey, label: "API key", sensitive: true) }.disabled(!hasKey)
                         .accessibilityLabel("Copy API key")
                 }
+                Button("Regenerate API Key…") { confirmRegeneration = true }
+                    .confirmationDialog("Replace Stark's API key?", isPresented: $confirmRegeneration, titleVisibility: .visible) {
+                        Button("Regenerate API Key", role: .destructive) {
+                            revealKey = false
+                            engine.regenerateAPIKey()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("Every connected app will need the replacement key. A Keychain storage failure keeps the existing key working.")
+                    }
             }
             Divider()
             StatusLine(engine: engine)
@@ -82,10 +109,15 @@ struct ConnectionDetailsView: View {
                 Text("Context: \(engine.apiContextTokens) tokens · Reply limit: \(engine.apiMaxNewTokens) tokens")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key changes when Stark reopens.")
+            Text("Keep Stark open. These settings work on this Mac; containers and other devices cannot reach this address. The API key stays in macOS Keychain across restarts and upgrades. Copying or showing it never changes it.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Text("Supports Chat Completions, live streaming, temperature, top-p, seed and stop sequences. Up to 8 requests can wait in order. Cancelled API requests keep the model loaded. Tools and the Responses API are unavailable. Model limits and capabilities are available through the API.")
+            Text("Supports Chat Completions, live streaming, temperature, top-p, seed and stop sequences. Up to 8 requests can wait in order. Cancelled API requests keep the model loaded. The Responses API is unavailable. Model limits and capabilities are available through the API.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(engine.supportsTools && engine.loadedMode == .chat
+                 ? "The running model supports function tool requests. Your client executes tools and controls approvals."
+                 : "Tool use is unavailable for the running model and its chat template. Ordinary chat remains available.")
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.supportsImages && engine.loadedMode == .chat
@@ -103,12 +135,15 @@ struct ConnectionDetailsView: View {
                 }
                 .disabled(!canConnect || displayedModelID.isEmpty)
                 .help("Copy connection settings, API key, model IDs, capabilities and usage notes as JSON.")
-                Button("Copy curl Example") { copy(connectionInfo.curl, label: "curl example (includes API key)", sensitive: true) }
+                Button("Copy curl Example") { copy(connectionInfo.curl, label: "curl example (prompts for API key)") }
                     .disabled(!canConnect || modelID.isEmpty)
                 Spacer()
             }
             Text(copied.isEmpty ? " " : "Copied \(copied)").font(.caption).foregroundStyle(.secondary)
         }.padding(24).frame(width: 570)
+        }.frame(width: 570, height: 790)
+            .onAppear { portText = String(engine.apiPort) }
+            .onChange(of: engine.apiPort) { _, port in portText = String(port) }
     }
 
     private func field(_ title: String, value: String, placeholder: String) -> some View {

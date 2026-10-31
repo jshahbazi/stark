@@ -11,12 +11,16 @@ struct ConnectionInfo {
     let maxNewTokens: Int
     var images = false
     var imageVerification = "unverified"
+    var tools = false
+    var toolParser = ""
 
     static let usageNotes = [
         "Choose OpenAI-compatible or Custom OpenAI in your client.",
         "Choose Chat mode and use Run in Stark to serve the selected model before sending requests.",
         "Keep Stark open. The address is reachable by native applications on this Mac only; containers and other devices cannot connect.",
-        "The API key changes when Stark reopens. Copy these settings again after restarting.",
+        "The API key is saved in macOS Keychain. The configured port is reused across restarts.",
+        "Regenerating the API key requires updating every connected app. Viewing or copying settings never changes the key.",
+        "Tool support depends on the running model, its chat template and Stark's parser. The client executes tools and controls approvals.",
         "Up to 8 requests can wait in order. Cancelled requests keep the model loaded."
     ]
 
@@ -40,8 +44,9 @@ struct ConnectionInfo {
             ],
             "capabilities": [
                 "text_chat_completions": true, "streaming": true,
-                "tools": false, "images": images && !runningModelID.isEmpty, "responses_api": false
+                "tools": tools && !runningModelID.isEmpty, "images": images && !runningModelID.isEmpty, "responses_api": false
             ],
+            "tool_parser": tools && !runningModelID.isEmpty ? toolParser : NSNull(),
             "image_verification": images && !runningModelID.isEmpty && ["locally_tested", "reference_verified"].contains(imageVerification)
                 ? imageVerification : "unverified",
             "sampling_parameters": ["temperature", "top_p", "top_k", "min_p", "seed", "stop"],
@@ -61,7 +66,9 @@ struct ConnectionInfo {
         ]
         let data = (try? JSONSerialization.data(withJSONObject: request, options: [.sortedKeys])) ?? Data()
         let body = String(data: data, encoding: .utf8) ?? "{}"
-        return "curl --no-buffer \(shellQuote(baseURL + "/chat/completions")) \\\n  -H \(shellQuote("Authorization: Bearer " + apiKey)) \\\n  -H 'Content-Type: application/json' \\\n  -d \(shellQuote(body))"
+        // This example never embeds the credential. A shell builtin reads it with echo
+        // disabled and pipes it to curl's config input; it is not exported or an argv value.
+        return "(set +x; unset stark_api_key; printf 'Stark API key: '; IFS= read -r -s stark_api_key; printf '\\n'; \\\n  printf 'header = \"Authorization: Bearer %s\"\\n' \"$stark_api_key\" | \\\n  curl --config - --no-buffer \(shellQuote(baseURL + "/chat/completions")) \\\n  -H 'Content-Type: application/json' \\\n  -d \(shellQuote(body)); unset stark_api_key)"
     }
 
     private func shellQuote(_ value: String) -> String {
