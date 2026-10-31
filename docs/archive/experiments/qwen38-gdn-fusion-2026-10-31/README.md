@@ -5,16 +5,49 @@ Date: 2026-10-31. Frozen model baseline:
 This follows the [prework experiment](../qwen38-gdn-prework-2026-10-31/README.md)
 and preserves its sources and results separately. No production dispatch selects
 these kernels, and this record supersedes no published benchmark.
-Status: strict GPU correctness complete; full-model throughput pending a clean
-window because other sessions are repeatedly compiling.
+Status: GPU correctness and complete-model comparison finished. Neither tested
+layout demonstrated a reliable throughput gain; both remain experimental.
 
-## Measured outcome so far
+## Measured outcome
 
 Both layouts passed all four strict GPU controls (864 whole-array comparisons).
 The component control repeated deployed-path exactness before timing and
 produced identical state/history/gated-output hashes across all arms.
 [Aggregate evidence and source hashes](gpu-results.json) preserve every sample
-and interrupted attempt; [offline checks](cpu-validation.json) are separate.
+and the initial interrupted attempts; [offline checks](cpu-validation.json)
+are separate. The completed model window and all later attempts are retained
+in a [new source-bound model record](model-results-v2.json). The interim
+`gpu-results.json` bytes remain unchanged.
+
+| Complete-model arm | Measured requests | Pooled useful decode tok/s | Median tok/s | Observed change |
+| --- | ---: | ---: | ---: | ---: |
+| Unchanged baseline | 6 | 61.8485 | 61.9783 | — |
+| Fused 256 | 6 | 58.5785 | 59.5337 | −5.29% |
+| Fused 512 | 6 | 61.6187 | 62.4982 | −0.37% |
+
+All 24 final calls, including six excluded warmups, reached 256 outputs and
+matched the historical completion-token hash
+`cf67e22bcf0d71a09bd998471f860b6da8fd4383a75c82b0bc5a3a00a2b7dafb`.
+All six blocks passed their source, worker, checkpoint and tooling seals before
+and after execution. Neither the checkpoint nor model precision changed.
+
+These are descriptive observations under background CPU activity. Baseline
+block throughput fell from 65.9176 to 58.2526 tok/s (−11.63%), exceeding both
+observed candidate differences. Fused 256's two blocks changed by +4.19%;
+fused 512's changed by −2.90%. This single window cannot establish a precise
+causal regression, a sustained rate or a small improvement. It provides no
+evidence for adopting either layout as an optimization.
+
+The final monitor made 203 polls and recorded 203 distinct CPU compiler
+process observations. It also recorded 41 Python observations, including one
+inspected process with an `mlx` mapping below the 512 MiB exclusion threshold.
+That observation is unconfirmed: memory size and library mappings cannot
+establish whether it issued GPU work. There were zero fatal observations under
+the final monitor policy. This is not evidence of GPU exclusivity or CPU
+isolation. No own builds ran during timing; no clock/thermal or per-process
+GPU utilization telemetry was captured.
+
+### Component window
 
 | Component arm | GPU µs per layer, mean | Time change |
 | --- | ---: | ---: |
@@ -29,11 +62,12 @@ all samples are retained. Projections are excluded. Both candidate means are
 slower; this does not establish a complete-model regression or a precise
 causal cost. No component speedup was demonstrated.
 
-Three full-model attempts have been retained separately. The first completed
-only a baseline warmup and was interrupted during its first measured call;
-the other two were blocked before any request. There is no measured full-model
-request or candidate full-model correctness result yet. The requested
-24-request comparison remains pending, with workers already built and sealed.
+Seven earlier model attempts remain separate and excluded from the final
+window's summaries. They contain 46 completed calls (13 warmups and 33 measured
+calls), all with the historical completion hash, and four interrupted calls.
+Three attempts stopped before any request. Every completed request's metrics
+and hash are retained with its original order; failures were not discarded or
+pooled into the final comparison.
 
 ## Experiment
 
@@ -108,8 +142,8 @@ release-worker target. Builds finish before timed model work starts.
 The [model controller](benchmark_model.py) uses blocks in
 baseline/fused256/fused512/fused512/fused256/baseline order. Each block loads
 one worker, excludes one warmup and measures three requests, then closes that
-worker. This yields six measured requests per arm and 24 total completed
-requests when all controls succeed. Every call resets model state; no
+worker. This yielded six measured requests per arm and 24 completed
+requests in the final window. Every call resets model state; no
 speculation or prefix reuse is enabled.
 
 The official `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` checkpoint is
@@ -129,55 +163,58 @@ completion hash; no prompts, responses, token vectors or probabilities are
 published.
 
 Host: Mac17,7, Apple M5 Max with 40 GPU cores, 128 GiB, macOS 26.7.1
-(25G241), AC power. The previously reserved chat was idle/completed before
-GPU use. The process watcher checks metadata every second and stops only our
-worker if it observes model or benchmark competition or a build. A small
-parent-1 Python daemon was reviewed by executable and mapped-library metadata
-and monitored with a memory bound. A later optional
-`--reviewed-auxiliary-manifest` binds two specifically reviewed Python
-processes. The private manifest retains their identities. They had only
-standard-library/compression/OpenSSL/SQLite text mappings and no GPU/model
-mapping markers. Each has a strict 512 MiB RSS ceiling; the manifest binds
-PID, parent, command basename, start time and text-mapping path-set hash/count.
-Its SHA-256 is
-`236fd9ba9187e110aec796a4f9050f69cc874d63a5b76567bdb90dfa01f0b2f2`.
-Every poll rechecks the exact identities, mappings, marker absence, memory
-bounds and manifest bytes. Missing processes or failed inspection stop the run.
-Only the listed PIDs are exempt; children continue to be scanned. An actual
-metadata probe still rejected their cargo/rustc children. Unknown high-memory
-Python and compiler rules remain unchanged. The manifest hash is also checked
-before and after every model block and published with the results.
-Mapping hashes cover paths, not file contents or Python script arguments.
-This cannot establish exclusive GPU use
-or exclude short/system activity. GPU clock and thermal telemetry were not
-captured. Worker readiness does not expose precision metadata; the sealed
-sources establish the precision policy.
+(25G241), AC power. The user released the GPU before the final comparison;
+no other loaded model was observed at launch. The final nominal one-second
+process watcher stops only our worker for named model/benchmark clients or
+Python processes with GPU/model library mappings and RSS at least 512 MiB.
+CPU compiler presence and Python heap size alone are recorded without stopping
+the run. Smaller mapped Python and vanished processes are unconfirmed.
 
-Synthetic byte identity and a fixed seeded continuation do not establish
-full-vocabulary readout identity, broad answer quality or cross-engine parity.
-The baseline's existing qualification boundaries remain. Results from this
-window must be interpreted with sample variation, process order and baseline
-drift; component and whole-model measurements have separate scopes.
+The 512 MiB threshold is a heuristic, not an activity measurement: genuine
+lightweight GPU work can pass it. The controller's “lightweight library imports”
+label describes that heuristic and cannot establish import-only or CPU-only
+behavior. The one below-threshold `mlx` observation in the final window remains
+an ambient confounder. Sampling can miss short activity or system clients;
+the result does not establish exclusive GPU use. No foreign process was
+signalled. The final run used only the previously reviewed small parent-1
+daemon allowance. Its identity, mappings and memory bound were rechecked;
+the earlier optional auxiliary-PID allowance was not used.
 
-The first model attempt completed its baseline warmup with the historical
-output hash, then was stopped during the first measured request by the
-watcher's high-memory Python threshold. That process vanished before mapping
-inspection, so this is unconfirmed competition. No measured request completed;
-the attempt contributes no comparative timing. A subsequent preflight quiet
-interval was also stopped by the same condition before loading a model.
-Those records and the first controller's source bytes are retained separately.
-The controller's summary was then corrected to count completed calls separately
-from interrupted attempts; sampling, process classification and timing policy
-were unchanged in that revision. The second model attempt stopped in preflight
-on Python memory thresholds and an active compiler. A metadata-only observer
-also inspected one separate transient 294 MiB Python process with standard
-library mappings; that does not identify or exonerate the vanished earlier
-processes. Its bounded, incomplete trace remains private and hash-bound.
-After the explicit two-PID allowance was added and independently reviewed,
-96.8 seconds of preflight waiting included a final 45-second clear interval.
-The third model controller
-then correctly stopped on newly resumed cargo/rustc work before a request.
-No failed timing window is pooled or used to claim a speedup.
+The original monitor rejected unknown Python at 64 MiB or any GPU/model mapping
+and stopped on CPU compilers. Those rules caused interruptions on processes
+without established GPU activity. After the user's instruction to run the test
+and explicit GPU release, three separately preserved controller revisions
+removed the RAM-only exclusion, recorded CPU compilation and finally
+introduced the mapped-Python threshold. The native model sources, binaries,
+checkpoint, sampling, precision, strict numerical tests and golden hash did
+not change. The current and previous controller hashes are recorded separately.
+The identified Planetable adapter was reviewed as a generic dispatcher and was
+never whitelisted by name, path or hash.
+
+| Earlier attempt | Complete calls | Warmups | Measured | Interrupted calls | Stop condition |
+| --- | ---: | ---: | ---: | ---: | --- |
+| v1 | 1 | 1 | 0 | 1 | Earlier Python memory threshold |
+| v2 | 0 | 0 | 0 | 0 | Preflight Python/build checks |
+| v3 | 0 | 0 | 0 | 0 | Preflight compiler activity |
+| v4 | 9 | 3 | 6 | 1 | Earlier Python memory threshold |
+| v5 | 0 | 0 | 0 | 0 | Resumed mapped Python and native model worker |
+| v6 | 20 | 5 | 15 | 1 | CPU compiler check in the final baseline warmup |
+| v7 | 16 | 4 | 12 | 1 | Below-threshold MLX mapping; actual GPU activity unknown |
+
+Additional availability checks and a bounded background wait performed no
+inference and are retained separately. The original v1 controller summary
+miscounted its interrupted call as completed; the immutable report is retained,
+and published counts are derived from row statuses. The separately preserved
+v1–v3 report/log hashes and counts still match the interim public record.
+No failed or interrupted attempt is used to qualify a speedup.
+
+In the final JSON, protocol qualification means that the requested call matrix,
+output hashes, declared monitor policy and source seals passed. It does not
+qualify a performance improvement or production dispatch. Worker readiness
+does not expose precision metadata; sealed source and binaries bind that
+policy. Synthetic byte identity and a fixed seeded continuation do not
+establish full-vocabulary readout identity, broad answer quality or
+cross-engine parity. The baseline's existing qualification boundaries remain.
 
 ## Provenance and reproduction
 

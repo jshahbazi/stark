@@ -386,6 +386,7 @@ class QuietWindow:
         self.polls = 0
         self.observations = []
         self.observed_small_python = {}
+        self.observed_cpu_builds = {}
         self.failure_category = None
         self.ancestors = {os.getpid()}
         rows = process_snapshot()
@@ -460,9 +461,6 @@ class QuietWindow:
                     category = competition_category(command)
                     if category == "possible_python_model_or_benchmark":
                         metadata = small_python_metadata(pid)
-                        if metadata.get("rss_kib", 0) >= 65536:
-                            found.append({**metadata, "category": "python_memory_threshold"})
-                            continue
                         if metadata["inspection_status"] != "inspected":
                             self.observed_small_python[pid] = {
                                 "ppid": parent, "comm": command, **metadata,
@@ -470,12 +468,17 @@ class QuietWindow:
                             }
                             continue
                         markers = metadata["gpu_or_model_mapping_markers"]
-                        if markers:
+                        if markers and metadata["rss_kib"] >= 524288:
                             found.append({**metadata, "category": "python_gpu_or_model_mapping"})
                         else:
                             self.observed_small_python[pid] = {
                                 **metadata, "gpu_competition_established": False,
                             }
+                    elif category == "compiler_or_build":
+                        self.observed_cpu_builds[pid] = {
+                            "pid": pid, "ppid": parent, "comm": command,
+                            "category": category, "gpu_competition_established": False,
+                        }
                     elif category:
                         found.append({"pid": pid, "ppid": parent, "comm": command, "category": category})
                 if found:
@@ -510,9 +513,10 @@ class QuietWindow:
             return {
                 "poll_seconds": 1.0, "polls": self.polls,
                 "comm_only_no_arguments": True, "foreign_processes_signalled": False,
-                "monitor_semantics": "python-metadata-explicit-auxiliary-v3",
-                "python_classification": "name triggers metadata inspection; stop at RSS>=65536KiB or GPU/model mappings",
+                "monitor_semantics": "gpu-mapping-guard-v6",
+                "python_classification": "mapped Python at RSS>=512MiB stops; lightweight library imports and vanished Python are recorded as unconfirmed; named model/benchmark processes always stop",
                 "observed_small_or_vanished_python": list(self.observed_small_python.values()),
+                "observed_cpu_builds": list(self.observed_cpu_builds.values()),
                 "limitations": "Sampling can miss short GPU activity; vanished Python does not establish GPU inactivity.",
                 "reviewed_background_allowance": None if self.reviewed_background is None else {
                     **self.reviewed_background,
@@ -634,7 +638,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     check(args.output.parent.is_dir(), "output_parent_missing")
     report = {
-        "schema": "qwen38-gdn-fusion-model-trial-v1", "started_utc": datetime.now(UTC).isoformat(),
+        "schema": "qwen38-gdn-fusion-model-trial-v2", "started_utc": datetime.now(UTC).isoformat(),
         "completed": False, "all_arms_qualified": False, "rows": [], "blocks": [],
         "primary_statistic": "pooled_decode_tokens_per_second", "block_order": list(BLOCKS),
         "calls_per_block": 4, "warmups_per_block": 1, "measured_requests_per_arm": 6,
@@ -649,6 +653,7 @@ def main(argv=None):
         "timing_note": "255 useful post-prefill outputs / native decode_seconds; prefill and transport excluded",
         "uncertainty": "Six measured requests per arm; mirrored blocks expose drift but do not establish confidence.",
         "quiet_window": {"failed": False, "polls": 0},
+        "availability_policy": "mapped Python at RSS>=512MiB or named model/benchmark checks stop; lightweight library imports, other Python and CPU compilation are recorded; no CPU isolation or exclusive GPU proof; no own builds during timing",
         "reviewed_auxiliary_manifest_sha256": None,
     }
     persist(args.output, report, initial=True)
