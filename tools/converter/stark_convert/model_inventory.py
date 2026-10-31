@@ -246,13 +246,22 @@ def model_display(model):
         parsed = _json(config)
         if isinstance(parsed, dict) and parsed.get("type") == "Qwen35VisionLanguageModelConfig":
             result["artifact_mode"] = "vision-language"
-        elif isinstance(parsed, dict) and parsed.get("type") in {"LanguageModelConfig", "ClassifierModelConfig"}:
+        elif isinstance(parsed, dict) and parsed.get("type") in {
+            "LanguageModelConfig",
+            "Qwen38LanguageModelConfig",
+            "ClassifierModelConfig",
+        }:
             result["artifact_mode"] = "text"
         receipt = _json(_small_file(root, "conversion.json"))
         if (
             not isinstance(parsed, dict)
             or parsed.get("type")
-            not in {"LanguageModelConfig", "Qwen35VisionLanguageModelConfig", "ClassifierModelConfig"}
+            not in {
+                "LanguageModelConfig",
+                "Qwen35VisionLanguageModelConfig",
+                "Qwen38LanguageModelConfig",
+                "ClassifierModelConfig",
+            }
             or not isinstance(receipt, dict)
         ):
             return result

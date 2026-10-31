@@ -10,6 +10,7 @@ from .modernbert import build_modernbert_plan
 from .phi import build_phi_plan
 from .qwen2 import build_qwen2_plan
 from .qwen35 import build_qwen35_plan
+from .qwen38 import build_qwen38_plan
 from .smollm3 import build_smollm3_plan
 
 __all__ = [
@@ -23,5 +24,6 @@ __all__ = [
     "build_phi_plan",
     "build_qwen2_plan",
     "build_qwen35_plan",
+    "build_qwen38_plan",
     "build_smollm3_plan",
 ]

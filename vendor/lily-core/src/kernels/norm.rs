@@ -104,3 +104,67 @@ pub fn layernorm_bf16(
         Grid::Threadgroups { groups: (m, 1, 1), threadgroup: (TG, 1, 1) },
     )
 }
+
+const OFFICIAL_SOURCE: &str = include_str!("metal/official_norm.metal");
+
+/// Ordinary BF16 RMS with the admitted external MLX operation policy.
+///
+/// MLX fast RMS with BF16 gains rounds the normalized activation before gain.
+/// Its F32-gain primitive promotes the output to F32; this BF16-only wrapper
+/// rejects that case rather than silently narrowing it. Select this policy from
+/// Qwen4ExpConfig::official_mlx_rounding(), never from folded gains alone.
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    x: &Tensor,
+    w: &Tensor,
+    out: &Tensor,
+    eps: f32,
+    w_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return rmsnorm_bf16(ctx, pass, x, w, out, eps, w_bias);
+    }
+    ensure!(w_bias == 0.0, "official ordinary RMS requires folded gain");
+    for t in [x, w, out] {
+        ensure!(
+            t.dtype() == DType::BF16,
+            "official ordinary RMS requires BF16 activations, gain and output"
+        );
+    }
+    let h = *x
+        .shape()
+        .last()
+        .ok_or_else(|| anyhow::anyhow!("ordinary RMS on 0-d tensor"))?;
+    ensure!(
+        (1..=4096).contains(&h),
+        "official ordinary RMS single-row width outside 1..=4096"
+    );
+    ensure!(
+        x.numel() > 0 && x.numel().is_multiple_of(h),
+        "official ordinary RMS input shape"
+    );
+    ensure!(
+        w.shape() == [h].as_slice(),
+        "official ordinary RMS gain must be one vector"
+    );
+    ensure!(out.numel() == x.numel(), "official ordinary RMS output size");
+    ensure!(eps.is_finite() && eps >= 0.0, "official ordinary RMS epsilon");
+    let rows = x.numel() / h;
+    // Pinned rms_single_row N_READS=4; 32-lane SIMD groups, at most32 groups.
+    let threads = h.div_ceil(4).div_ceil(32) * 32;
+    let pipeline =
+        ctx.pipeline("rmsnorm_bf16_mlx", OFFICIAL_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[x.binding(), w.binding(), out.binding()],
+        &[&u32_bytes(h), &eps.to_ne_bytes()],
+        Grid::Threadgroups { groups: (rows, 1, 1), threadgroup: (threads, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "official_rms_rounding_tests.rs"]
+mod official_rounding_tests;

@@ -24,6 +24,8 @@ Lily reads MLX’s affine 4-bit weight format ({codes, scales, biases}, group-wi
 
 - `src/kernels/metal/attention.metal`: MLX `sdpa_vector.h`, `sdpa_vector_2pass_1`; Copyright © 2024 Apple Inc.
 - `src/kernels/metal/quant.metal`: MLX `quantized.h`; Copyright © 2023–2024 Apple Inc.
+- `src/kernels/metal/official_head.metal`: MLX `quantized.h`, affine QMV fast helper and BF16 output-value conversion; Copyright © 2023–2024 Apple Inc.
+- `src/kernels/metal/official_q8_gdn_decode.metal`: MLX `quantized.h`, affine Q8 QMV helper and loop expressions; Copyright © 2023–2024 Apple Inc.
 - `src/kernels/metal/moe.metal`: MLX `quantized.h` and MLX-LM `qwen3_next.py`, `switch_layers.py`; Copyright © 2023–2024 Apple Inc. and Copyright © 2025 Apple Inc.
 - `src/kernels/metal/gdn.metal`: MLX-LM `gated_delta.py`.
 
@@ -50,3 +52,75 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+Official MLX-Serve MoE operation-rounding path
+=================================================
+
+src/kernels/metal/official_moe.metal adapts the fused softmax router,
+affine4 gate/up and weighted down kernels, and eight-partial BF16 prefill
+reduction from MLX-Serve revision 046b647686419df06c6c7132fb1d15d76185c3e5,
+src/transformer.zig and src/moe_affine4.zig, Copyright (c) 2026 David Dalcu.
+The MIT permission and copyright notice is retained in LICENSE.mlx-serve.
+The stable BF16 sigmoid arithmetic follows MLX revision
+64ea011cb65f14d9ce2737e60db9a4ae91ed7441, unary_ops.h and bf16_math.h,
+Copyright (c) 2023-2024 Apple Inc.; MLX's MIT permission notice appears above.
+New Stark host integration and synthetic component controls are identified
+as local modifications. Numerical and performance qualification is separate.
+
+
+The official affine64 KV encoding path adapts MLX
+64ea011cb65f14d9ce2737e60db9a4ae91ed7441, Copyright (c) 2023-2024 Apple Inc.
+See LICENSE.mlx and UPSTREAM.md for the MIT notice and source provenance.
+
+The official ordinary/fused BF16 RMS normalization also adapts MLX
+64ea011cb65f14d9ce2737e60db9a4ae91ed7441, Copyright (c) 2024 Apple Inc.,
+under the MIT license retained in LICENSE.mlx and the new shader sources.
+
+The official attention output-gate lookup/product adapts MLX-Serve
+046b647686419df06c6c7132fb1d15d76185c3e5, Copyright (c) 2026 David Dalcu,
+under LICENSE.mlx-serve; it reuses the qualified native MoE sigmoid table.
+
+
+Official MLX-Serve two-dispatch HC read and WR1 pair
+===============================================
+
+src/kernels/metal/official_hc_stock.metal ports the ND_SOURCE and U2V_SOURCE
+bodies from MLX-Serve revision 046b647686419df06c6c7132fb1d15d76185c3e5,
+src/hc_decode2.zig, Copyright (c) 2026 David Dalcu.
+The MIT permission/copyright notice is retained in LICENSE.mlx-serve.
+Stark adds fixed-geometry native bindings, model-owned derived buffers,
+explicit finished-gate writes and synthetic source-bound controls. The current
+WR1 pending-write pair also derives from the same licensed ND_SOURCE; its
+bounded model selection is described in UPSTREAM.md.
+
+
+Official stock TB12 GDN prefill path
+=======================================
+
+src/kernels/metal/official_gdn_pipelined.metal adapts the Apache-2.0
+oMLX jundot/omlx gated_delta_pipelined source at 730bd6a, PR #4006,
+via MLX-Serve 046b647686419df06c6c7132fb1d15d76185c3e5,
+src/kernels/gdn_pipelined.metal. Its original attribution and SPDX notice
+remain in the source; the Apache-2.0 text is retained in LICENSE.
+Stark fixes batch/head geometry, supplies native bindings and changes only
+Q/K, V and Y row strides in the copied recurrence body. Scoped compiler
+policy, fixture reconstruction and aggregate/hash controls are local work.
+Source provenance does not establish numerical or performance equivalence.
+
+
+Official contiguous prefill Q/K path
+========================================
+
+src/kernels/metal/official_gdn_prefill_qk.metal adapts the Q/K normalization
+fragment of MLX-Serve 046b647686419df06c6c7132fb1d15d76185c3e5,
+transformer.zig GDN_PREWORK_SOURCE, Copyright (c) 2026 David Dalcu, MIT.
+The source and LICENSE.mlx-serve retain the copyright/permission notices.
+Stark consumes already-activated native QKV and adapts fixed geometry,
+bindings and interleaved output indices. Other GDN stages are unchanged.
+
+Official GDN ValueKey decode activation boundaries adapt MLX-Serve
+046b647686419df06c6c7132fb1d15d76185c3e5, src/gdn_decode.zig K1_SOURCE,
+Copyright (c) 2026 David Dalcu, MIT. See LICENSE.mlx-serve. The production
+implementation is in src/kernels/metal/gdn.metal; the separately named
+official_gdn_k1_helper.metal is test-only.

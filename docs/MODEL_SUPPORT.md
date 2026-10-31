@@ -6,13 +6,17 @@ tab in the menu bar app's **Manage Models** window consume that registry. A fami
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
 metadata before weights are downloaded.
 
-The original-format [native hybrid path](NATIVE_HYBRID_MODELS.md) separately
-loads GLM-5.3-Flash UD-Q2_K_XL and Qwen3.8-Flash-Next mixed MLX 4/8-bit weights.
-Prepare those pinned downloads with its helper, then import the prepared local
-folder. Their original sources are not offered by the ordinary converter's
-family catalogue or source preflight. The native loader validates their tensors;
-generic Decision use still requires a direct-answer template and checkpoint
-checks.
+The [native hybrid path](NATIVE_HYBRID_MODELS.md) loads prepared
+GLM-5.3-Flash UD-Q2_K_XL, Qwen3.8-Flash-Next mixed MLX and Flint checkpoints.
+Its helper pins native-source downloads for local import. The registry also
+includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
+a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
+MLX storage and unchanged mixed quantization, sharing the existing specialized
+Qwen kernels. Vision and MTP tensors are omitted. The
+[Uzu-format study](benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records storage,
+readout and sampled-generation controls for the pinned converted artifact.
+The native loader validates tensors; generic Decision use still requires a
+direct-answer template and checkpoint checks.
 
 Neither result establishes that a complete model has loaded or executed. Exact
 load qualifications, reference comparisons and local image-check receipts retain
@@ -65,8 +69,11 @@ Hugging Face search. Parsed configuration identifies the family; repository
 names alone do not establish compatibility. At most 45 candidates are inspected
 and 30 choices are returned, preserving representative sizes and formats when
 available. Only supported floating Safetensors and implemented MLX 4-bit/8-bit
-paths are offered. Embedding/reranking tasks, known internal test models,
-quantized vision, MoE, adapter-only and unsupported packed formats are excluded.
+paths are offered. Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
+its fixed Q8 control projections. Embedding/reranking tasks, known internal test
+models, quantized vision, unsupported MoE families, adapter-only and unsupported
+packed formats are excluded. The implemented Qwen3.8 text path includes its
+MoE graph.
 An uncatalogued compatible fine-tune can appear. This is
 a representative list, not an exhaustive inventory of Hugging Face.
 

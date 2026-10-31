@@ -1,7 +1,10 @@
 # Native GLM-5.3-Flash, Qwen3.8-Flash-Next and Flint
 
 Stark has a separate native Rust/Metal forward path for `glm5_next`,
-`qwen4_exp` and `flint`. It reads the original quantized GGUF or MLX Safetensors storage.
+`qwen4_exp` and `flint`. It reads their prepared quantized GGUF or MLX
+Safetensors storage. Lily-format Qwen3.8 text models also have a typed Uzu
+artifact conversion and loader, described below; the pinned artifact's
+readout and sampled-generation controls are recorded in the Uzu-format study.
 There is no Sushi, llama.cpp, MLX, Python or Transformers inference process in
 this execution path. Python is used to prepare download metadata and by the
 optional reference validators.
@@ -46,8 +49,9 @@ adjacent `.native-download` directory and can be resumed with the same command.
 `--offline` restricts preparation to existing Hugging Face downloads. Publication
 uses an atomic rename that refuses an existing output directory.
 
-Some Safetensors exports place compressed matrices at unaligned addresses.
-Create a separate aligned artifact to enable the wider Metal loads:
+The original-format F32 mapped-view graph can encounter Safetensors exports
+with compressed matrices at unaligned addresses. Create a separate aligned
+artifact to enable its wider Metal loads:
 
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python scripts/align_native_safetensors.py --model models/qwen38-mixed --output models/qwen38-mixed-aligned
@@ -59,6 +63,8 @@ same. The tool verifies payload hashes, preserves the original source receipt,
 and writes a separate alignment receipt. It needs space for another checkpoint.
 Import the aligned folder or pass it to the worker as the model path. Its
 preparation provenance does not itself qualify native execution or answer quality.
+The Lily and typed Uzu Qwen routes load quantized GPU weights into owned buffers;
+they use the ordinary Safetensors alignment without this helper.
 
 Preparation downloads metadata and weights without repository Python or draft
 assistants. It adds the source chat template and the union of checkpoint EOS
@@ -70,9 +76,55 @@ it is not a weight-content qualification receipt.
 
 The prepared folder can be imported through **Manage Models → Add from Source →
 Local Folder** in an app build containing the new workers. Chat uses the existing
-generation worker. These downloads are prepared with the command above; the family catalog continues to describe
-the ordinary converter paths. An incomplete prepared folder is rejected before
-registration. The native loader remains responsible for tensor admission.
+generation worker. These native-source downloads use the preparation commands
+above. The family registry also includes the typed Uzu Qwen3.8 text converter.
+An incomplete prepared folder is rejected before registration. The native
+loader remains responsible for tensor admission.
+
+## Qwen3.8 Uzu text artifacts
+
+The `qwen4_exp` converter accepts the implemented
+`lily.format=qwen4_exp-affine-v1` text layout, including the pinned Lily q4-xl
+checkpoint above. It emits one canonical `model.safetensors`, `tokenizer.json`,
+`conversion.json` provenance and a typed `Qwen38LanguageModelConfig` in
+`config.json`. The typed decoder contains validated text architecture fields
+and explicit logical tensor bindings. The resulting folder supplies every
+runtime input; loading has no fallback to the original checkpoint folder.
+Vision and MTP tensors are omitted, and speculation remains disabled.
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.cli models/qwen38-lily-q4-xl --metadata-profile hf-generic --architecture qwen4_exp --dtype bfloat16 --offline --chunk-mib 64 --output models/qwen38-lily-q4-xl-uzu
+```
+
+The output directory must be new. Conversion preserves the source's mixed
+quantization. Packed U32 code bytes become canonical U8 matrix storage with
+standard `MLXSpec` metadata. Linear and flattened expert matrices use
+`output_input` group-major BF16 scales and biases, with zero output-row padding
+to a multiple of four. Token and n-gram embeddings use `input_output` row-group
+planes. Bindings retain the original logical expert-bank dimensions. BF16/F32
+control values and exact I64/U64 hash controls retain their source bits. The
+initial adapter accepts `--dtype bfloat16` and performs no requantization.
+Before publication, conversion compares code and direct-control hashes,
+inverse-transposes every group-major parameter plane for bit-exact comparison,
+and verifies zero padding. Optional integer hash tensors must agree with the
+typed PLE configuration.
+
+The typed loader presents those logical tensors to the same specialized Qwen
+Metal kernels used by the Lily native-source route. That graph implements GDN,
+QSA, MoE, hyperconnections and PLE; the generic dense decoder does not gain
+these operations from a storage conversion. GPU weight buffers are owned and
+the large n-gram table retains its paged row layout.
+
+Generation and scoring workers select this architecture through
+`hybrid::Model::load`. Direct library calls to `Engine::load_language_model`
+still use the dense decoder and do not accept this architecture extension.
+
+Conversion and loader implementation are separate from qualification. The
+[Uzu-format study](benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records the pinned
+artifact's complete storage-preservation checks, independent load, full-vocabulary
+readout parity at 32 and 4,096 input tokens, and 4K sampled-generation controls.
+The conversion receipt retains its original runtime qualification fields.
+Component matrix timings do not establish generation throughput.
 
 ## Execution and limits
 
@@ -120,8 +172,13 @@ its own validation record. F32 execution is not required for production.
 
 The Lily-format Qwen checkpoint selects an in-process native Metal 4 backend
 extracted from Lily revision `e22d58fa7cc488493fb1b5d810a198bd29730aeb`.
-Selection requires both `model_type=qwen4_exp` and
-`lily.format=qwen4_exp-affine-v1`; other Qwen exports retain the F32 graph below.
+Native-source selection requires both `model_type=qwen4_exp` and
+`lily.format=qwen4_exp-affine-v1`. The typed `Qwen38LanguageModelConfig` route
+uses the same specialized runtime through its Uzu storage adapter. Other Qwen
+exports retain the F32 graph below.
+Converted group-major affine parameters are restored once at load time with
+an integer NEON transpose on AArch64 and byte-copy fallbacks. The operation
+preserves every BF16 encoding and does not change decode arithmetic.
 This backend uses BF16 activations, F32 reductions, logits and GDN recurrent
 state, and explicitly selected Q8 attention K/V caches. The q4-xl weights use
 Q4 GDN projections and Q8 attention, shared-expert, readout and embedding groups.
@@ -137,9 +194,14 @@ before state reset; cleanup never invokes the sampler or consumes randomness.
 Completion feedback errors fence the request before a successful result can be
 returned. Top-k up to 64 uses a sorted prefix while scanning contiguous logits,
 falling back to partition selection after 1,024 replacements. Larger bounded
-top-k uses partition selection. Full-vocabulary sampling uses three stable
+top-k uses partition selection. Eligible nucleus sampling first proves an exact
+Top64 stopping prefix using an outward-rounded bound on the reference total.
+Larger or uncertain nuclei use the complete ordering and reuse the same rounded
+probabilities. Full-vocabulary ordering uses three stable
 11-bit radix passes over packed F32 keys and IDs. These preserve the existing
 F32 total order, ascending-ID ties, serial F64 filtering and SplitMix64 draws.
+The proof, eligibility and fallback rules are in
+[native hybrid sampling](NUMERICAL_SAMPLING.md).
 For at least 65,536 candidates, a lazily created worker-owned pool computes
 independent F64 exponentials on at most four available CPUs. Probability sums,
 filtering and draws retain their serial order. Small lists and failed pool
@@ -166,8 +228,18 @@ This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and executes neither MTP nor vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
 
-The existing native graph uses F32 forward arithmetic. Deferred Metal commands keep
-dependent device vectors alive through completion and use a sticky failure
+The official mixed-affine MLX checkpoint policy keeps its stored weights and
+quantization unchanged. It selects BF16 operation boundaries, F32 GDN state in
+ValueKey order, and the Q8/group64 affine KV format. Its vocabulary head stores
+BF16-rounded values in F32 buffers. Strict shape and precision checks select
+the stock-order HC, GDN and projection kernels; other descriptors retain their
+existing routes. Component controls and the separate full-model numerical
+limits are recorded in the
+[matched-checkpoint optimization record](benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md).
+
+The native graph uses the selected mixed-precision policies described above;
+it is not an all-F32 forward path. Deferred Metal commands keep dependent
+device vectors alive through completion and use a sticky failure
 status to reject invalid intermediates, including values later hidden by
 clipping. Existing CPU controls remain available in the staged execution path.
 Temporary device vectors share disjoint 256-byte-aligned command arenas, capped

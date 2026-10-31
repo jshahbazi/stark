@@ -26,7 +26,8 @@ use crate::tensor::{DType, Tensor};
 /// always 8-bit; a `--q8-dense` conversion makes the dense projections 8-bit
 /// too).
 pub struct QuantWeights {
-    /// U32 `[out, in * bits / 32]`.
+    /// U32 `[out, in * bits / 32]`, or direct BF16 `[out, in]` for the
+    /// two small official-MLX gate categories (`bits == 16`).
     pub codes: Tensor,
     /// BF16 `[out, in/group_size]`.
     pub scales: Tensor,
@@ -42,13 +43,35 @@ impl QuantWeights {
     }
 
     pub fn in_features(&self) -> usize {
-        self.codes.shape()[1] * (32 / self.bits)
+        self.codes.shape()[1] * if self.bits == 16 { 1 } else { 32 / self.bits }
+    }
+
+    /// A direct BF16 projection: scale/bias handles alias the first element
+    /// solely to keep the descriptor resident; dense dispatch never reads
+    /// them. No affine approximation or weight-value conversion occurs.
+    pub(crate) fn bf16(codes: Tensor) -> Result<Self> {
+        ensure!(
+            codes.dtype() == DType::BF16
+                && codes.shape().len() == 2
+                && codes.numel() > 0,
+            "BF16 projection shape"
+        );
+        Ok(Self {
+            scales: codes.view(0, &[1, 1])?,
+            biases: codes.view(0, &[1, 1])?,
+            codes,
+            group_size: 1,
+            bits: 16,
+        })
     }
 
     /// A row-range view (`[rows, in]` starting at `start_row`) sharing the
     /// underlying buffers — how fused projections hand out their segments.
     pub fn view_rows(&self, start_row: usize, rows: usize) -> Result<Self> {
         let words = self.codes.shape()[1];
+        if self.bits == 16 {
+            return Self::bf16(self.codes.view(start_row * words, &[rows, words])?);
+        }
         let groups = self.scales.shape()[1];
         Ok(Self {
             codes: self.codes.view(start_row * words, &[rows, words])?,
@@ -159,6 +182,10 @@ impl<'a> Loader<'a> {
 }
 
 impl Loader<'_> {
+    pub(crate) fn context(&self) -> &MetalContext {
+        self.ctx
+    }
+
     pub(crate) fn checkpoint(&self) -> &Checkpoint {
         &self.ckpt
     }
@@ -268,6 +295,20 @@ impl Loader<'_> {
     ) -> Result<LinearWeights> {
         let weights: Vec<String> =
             bases.iter().map(|b| format!("{b}.weight")).collect();
+        if (self.expected_bits)(bases) == 16 {
+            ensure!(
+                bases.len() == 1
+                    && self.ckpt.meta(&format!("{}.scales", bases[0])).is_none()
+                    && self.ckpt.meta(&format!("{}.biases", bases[0])).is_none(),
+                "BF16 gate must not carry affine planes"
+            );
+            let tensor = self.tensor(&weights[0])?;
+            ensure!(
+                tensor.shape().len() == 2 && tensor.shape()[1] == k,
+                "BF16 gate feature mismatch"
+            );
+            return QuantWeights::bf16(tensor);
+        }
         ensure!(
             self.ckpt.meta(&format!("{}.scales", bases[0])).is_some(),
             "{} is not an MLX quantized projection",

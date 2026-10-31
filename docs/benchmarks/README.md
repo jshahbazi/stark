@@ -1,8 +1,26 @@
 # Benchmarks
 
-Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Raw protocols, result JSON and patches for the engine comparisons live under [archive/experiments](../archive/experiments/).
+Measured results, each bound to the source revision, build and host named inside it. This index says which result is current and which has been superseded. Earlier archived comparison artifacts are under [archive/experiments](../archive/experiments/). Each report states where its source-bound aggregates are retained.
 
 ## Current result
+
+**Qwen3.8, identical checkpoint, maximum sampled throughput (2026-10-30).**
+Stark peaks at **66.81 tok/s** versus **61.17** for stock MLX-Serve 26.10.3,
+**9.21% higher**, with the same verified files, quantization and no speculation.
+Ten measured 4K/256 requests per engine ran while the user reserved the machine
+and confirmed other apps were closed. Exact component controls and retained
+Lily output parity pass. Nine aligned next-token choices match; longer greedy
+continuations still differ, so whole-model numerical and quality equivalence
+remain unestablished. The [optimization record](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md)
+records the 389-check aggregate audit, timing conventions and machine-readable
+results. The earlier [58.13/60.95 baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md)
+is retained unchanged.
+
+**Earlier Qwen3.8 comparison, different quantization profiles (2026-10-30).**
+The Lily-format Stark checkpoint peaked at 79.52 tok/s against 61.00 for the
+official MLX pack. Its [source-bound report](QWEN38_STARK_MLX_SERVE_2026_10_30.md)
+retains pooled rates and block drift. Its two quantization profiles and
+measurement window are separate from the current fixed-checkpoint comparison.
 
 **Generation throughput, Qwen3.5-2B 4-bit, Apple M5 Max, one request at a time (2026-10-22).** Stark `97f15f38` measured 245.5 tokens/s aggregate against 218.8 for MLX-LM, 174.7 for vLLM Metal, 147.9 for llama.cpp and 125.6 for TensorFold, and led all six workloads. Four independent loads per configuration, three repeats per workload, 432 requests. Rates include input processing, generation, transport and cleanup; loading and warmup are excluded. [Full report](QWEN35_ENGINE_COMPARISON_2026_10_22.md), [machine-readable results](../../website/public/benchmark-results.json).
 
@@ -55,6 +73,9 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Qwen3.8 matched-checkpoint optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 66.81 vs 61.17 tok/s (+9.21%); numerical equivalence unestablished |
+| [Qwen3.8 same-checkpoint maximum throughput baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical baseline before the matched-checkpoint optimization: maximum 58.13 vs 60.95 tok/s; source-bound evidence retained |
+| [Earlier Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical different-pack comparison: maximum 79.52 vs 61.00 tok/s; does not isolate engine efficiency |
 | [Qwen3.5 engine comparison](QWEN35_ENGINE_COMPARISON_2026_10_22.md) | 2026-10-22 | Current: five engines, six workloads, 12.2% over MLX-LM |
 | [TensorFold stock Qwen3.5 comparison](TENSORFOLD_STOCK_QWEN35_COMPARISON.md) | 2026-10-16 | Superseded by the 2026-10-22 comparison, which includes TensorFold |
 | [TensorFold JevK5 scoring comparison](TENSORFOLD_JEVK5_COMPARISON.md) | 2026-10-16 | Scoring-path comparison; not repeated since |
@@ -65,8 +86,17 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 ## Optimization records
 
+The [Qwen3.8 optimization history](QWEN38_OPTIMIZATION_HISTORY.md) catalogs 142
+attempts and controls across the original F32 path, mixed precision, sampling,
+Metal kernels, Uzu execution and matched-checkpoint work. It records retained,
+rejected, inconclusive and deferred outcomes with source and evidence links.
+
 | Study | Outcome |
 | --- | --- |
+| [Qwen3.8 matched-checkpoint Metal optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | Same-checkpoint maximum 66.81 vs 61.17 tok/s (+9.21%), no speculation; exact stock component controls and retained Lily parity; 77–80 tok/s and whole-model quality equivalence remain unestablished |
+| [Qwen3.8 converted-format speed](QWEN38_UZU_SPEED_2026_10_30.md) | NEON affine restoration reduces median process-to-ready time from 20.54 to 18.09 seconds; exact nucleus-prefix work and sampled controls retain quantization; consistent 77–80 tok/s remains unqualified |
+| [Qwen3.8 Uzu conversion and generation](QWEN38_UZU_FORMAT_2026_10_29.md) | Full quantization-preserving conversion, self-contained load and exact readout/sample parity; paired timing series has substantial throughput drift |
+| [Qwen Metal hotpaths and finite readout checks](QWEN38_METAL_HOTPATHS_2026_10_29.md) | Quiet baseline 73.62 top-k / 69.85 nucleus tok/s; MoE, HC and GDN trials rejected or inconclusive; retained exact SIMD finite checks reduce guard elapsed time, with no reliable end-to-end gain or desktop target acceptance |
 | [Qwen residual fusion and exact CPU sampling](QWEN38_FUSION_2026_10_29.md) | MoE down/injection component 5.55% faster; exact probability mapping 58.7% faster; nucleus same-loaded observation +1.3%, with broad overlap and an unmet 77–80 tok/s target |
 | [Qwen iQ-MLX 4.7 bpw investigation](QWEN38_IQ47_INVESTIGATION_2026_10_29.md) | Exact pack unmeasured: storage and loader support pending; publisher's M5 Ultra result uses MTP; fresh existing-checkpoint Stark control is 72.08 greedy / 64.92 sampled warm tok/s |
 | [Qwen AC power-mode control](QWEN38_POWER_MODES_2026_10_29.md) | Same inference build; 60 exact requests; selected High Power does not recover the target in this window; original settings restored |

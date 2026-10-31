@@ -11,6 +11,7 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/ple.metal");
+const OFFICIAL_SOURCE: &str = include_str!("metal/official_ple.metal");
 const TG: usize = 256;
 /// Largest conv context `(kernel - 1) * dilation` the register window holds.
 pub const PLE_MAX_CONTEXT: usize = 16;
@@ -70,6 +71,23 @@ pub fn ple_gate_value_bf16(
     h: usize,
     groups: usize,
 ) -> Result<()> {
+    ple_gate_value_bf16_with_rounding(
+        ctx, pass, key, query, value, gated, h, groups, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn ple_gate_value_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    key: &Tensor,
+    query: &Tensor,
+    value: &Tensor,
+    gated: &Tensor,
+    h: usize,
+    groups: usize,
+    official_mlx: bool,
+) -> Result<()> {
     let wide = groups * h;
     ensure!(
         key.numel().is_multiple_of(wide) && key.numel() > 0,
@@ -88,7 +106,12 @@ pub fn ple_gate_value_bf16(
         );
     }
     let inv_sqrt_h = 1.0 / (h as f32).sqrt();
-    let pipeline = ctx.pipeline("ple_gate_value_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        ("ple_gate_value_bf16_mlx", OFFICIAL_SOURCE)
+    } else {
+        ("ple_gate_value_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[key.binding(), query.binding(), value.binding(), gated.binding()],
@@ -126,6 +149,24 @@ pub fn ple_conv1d_prefill(
     hyper: &Tensor,
     dilation: usize,
 ) -> Result<()> {
+    ple_conv1d_prefill_with_rounding(
+        ctx, pass, window_in, window_out, x, w, base, hyper, dilation, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn ple_conv1d_prefill_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    base: &Tensor,
+    hyper: &Tensor,
+    dilation: usize,
+    official_mlx: bool,
+) -> Result<()> {
     ensure!(x.shape().len() == 2, "x must be [M, C]");
     let (m, c) = (x.shape()[0], x.shape()[1]);
     let s = check_conv(w, c, dilation)?;
@@ -148,7 +189,12 @@ pub fn ple_conv1d_prefill(
             "{name} must be BF16 [M, C]"
         );
     }
-    let pipeline = ctx.pipeline("ple_conv1d_prefill_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        ("ple_conv1d_prefill_bf16_mlx", OFFICIAL_SOURCE)
+    } else {
+        ("ple_conv1d_prefill_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[
@@ -176,6 +222,21 @@ pub fn ple_conv1d_step(
     hyper: &Tensor,
     dilation: usize,
 ) -> Result<()> {
+    ple_conv1d_step_with_rounding(ctx, pass, window, x, w, base, hyper, dilation, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn ple_conv1d_step_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    base: &Tensor,
+    hyper: &Tensor,
+    dilation: usize,
+    official_mlx: bool,
+) -> Result<()> {
     let c = x.numel();
     let s = check_conv(w, c, dilation)?;
     let kd = w.numel() / c;
@@ -186,7 +247,12 @@ pub fn ple_conv1d_step(
     for (name, t) in [("x", x), ("base", base), ("hyper", hyper)] {
         ensure!(t.numel() == c && t.dtype() == DType::BF16, "{name} must be BF16 [C]");
     }
-    let pipeline = ctx.pipeline("ple_conv1d_step_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        ("ple_conv1d_step_bf16_mlx", OFFICIAL_SOURCE)
+    } else {
+        ("ple_conv1d_step_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[window.binding(), x.binding(), w.binding(), base.binding(), hyper.binding()],

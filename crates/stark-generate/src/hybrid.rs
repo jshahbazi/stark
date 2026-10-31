@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, profile};
+use stark_engine::engine::hybrid::{Model, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
@@ -14,11 +14,15 @@ use crate::{
     text_stop::StopFilter,
 };
 
+#[path = "hybrid_nucleus.rs"]
+mod nucleus;
+
 pub(crate) struct HybridBackend {
     model: Model,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     probability_mapper: ProbabilityMapper,
+    nucleus_sampler: nucleus::NucleusSampler,
 }
 
 const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
@@ -54,6 +58,13 @@ impl ProbabilityMapper {
     }
 }
 
+// Reference and nucleus paths share one scalar exp implementation. Preserve
+// F32 subtraction/division before crossing its F32 argument boundary.
+#[inline(never)]
+fn probability_exp_f32(value: f32) -> f64 {
+    (value as f64).exp()
+}
+
 fn probability_values(
     logits: &[f32],
     indices: &[usize],
@@ -67,13 +78,13 @@ fn probability_values(
             probabilities.resize(indices.len(), 0.0);
             pool.install(|| {
                 probabilities.par_iter_mut().zip(indices.par_iter()).for_each(|(p, &i)| {
-                    *p = (((logits[i] - max) / temperature) as f64).exp();
+                    *p = probability_exp_f32((logits[i] - max) / temperature);
                 });
             });
             return probabilities;
         }
     }
-    indices.iter().map(|&i| (((logits[i] - max) / temperature) as f64).exp()).collect()
+    indices.iter().map(|&i| probability_exp_f32((logits[i] - max) / temperature)).collect()
 }
 
 #[derive(serde::Serialize)]
@@ -161,6 +172,7 @@ impl HybridBackend {
             cancellation,
             profile_output,
             probability_mapper: ProbabilityMapper::default(),
+            nucleus_sampler: nucleus::NucleusSampler::default(),
         })
     }
 
@@ -202,6 +214,7 @@ impl HybridBackend {
         }
         let model = &mut self.model;
         let probability_mapper = &mut self.probability_mapper;
+        let nucleus_sampler = &mut self.nucleus_sampler;
         let mut previous = None;
         let mut rng = options.seed;
         let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if gpu_greedy {
@@ -213,11 +226,12 @@ impl HybridBackend {
                 .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
             Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
         } else if sampled_decode {
-            let first = sample_with_mapper(&logits, &options.sampling, &mut rng, Some(&mut *probability_mapper))?;
+            let first = nucleus_sampler.sample(&logits, &options.sampling, &mut rng, probability_mapper)?;
             let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
             let tail = model
                 .sampled_decode(first, budget.saturating_sub(1), |readout| {
-                    sample_with_mapper(readout, &options.sampling, &mut rng, Some(&mut *probability_mapper))
+                    nucleus_sampler
+                        .sample(readout, &options.sampling, &mut rng, probability_mapper)
                         .map_err(|_| stark_engine::engine::hybrid::Error::Invalid("sampled token selection failed"))
                 })
                 .map_err(|_| "native_generation_failed")?
@@ -231,11 +245,10 @@ impl HybridBackend {
                         Err(_) => return Some(Err("native_generation_failed")),
                     }
                 }
-                let token =
-                    match sample_with_mapper(&logits, &options.sampling, &mut rng, Some(&mut *probability_mapper)) {
-                        Ok(token) => token,
-                        Err(error) => return Some(Err(error)),
-                    };
+                let token = match sample_with_mapper(&logits, &options.sampling, &mut rng, Some(probability_mapper)) {
+                    Ok(token) => token,
+                    Err(error) => return Some(Err(error)),
+                };
                 previous = Some(token);
                 Some(Ok(u64::from(token)))
             }))
@@ -318,6 +331,7 @@ impl GenerationBackend for HybridBackend {
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
+        self.nucleus_sampler.clear();
         let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
             .map_err(|_| "inference_activity_unavailable")?;
         if self.profile_output.is_some() {
@@ -329,6 +343,7 @@ impl GenerationBackend for HybridBackend {
         }
         let result = self.generate_inner(input, options, on_text);
         self.model.reset();
+        self.nucleus_sampler.clear();
         if let Some(output) = self.profile_output.as_mut() {
             output.write(&AggregateProfile {
                 schema_version: 1,
@@ -384,7 +399,7 @@ fn sample_with_mapper(
     let _total_scope = profile::Scope::new("sample.total");
     {
         let _scope = profile::Scope::new("sample.finite");
-        if logits.is_empty() || logits.iter().any(|value| !value.is_finite()) {
+        if logits.is_empty() || !finite_guard::all_finite(logits) {
             return Err("native_generation_failed");
         }
     }

@@ -158,6 +158,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         build_phi_plan,
         build_qwen2_plan,
         build_qwen35_plan,
+        build_qwen38_plan,
         build_smollm3_plan,
     )
     from .qwen3 import build_qwen3_plan
@@ -237,6 +238,7 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
         "granite": build_granite_plan,
         "smollm3": build_smollm3_plan,
         "qwen3_5": partial(build_qwen35_plan, include_vision=request.artifact_mode == "vision-language"),
+        "qwen4_exp": build_qwen38_plan,
         "lfm2": build_lfm2_plan,
         "llamba": partial(
             build_llamba_plan,
@@ -274,7 +276,11 @@ def plan_conversion(snapshot: SourceSnapshot, request: ConversionRequest) -> Pla
     # Metadata and final content verification are still pending. Only a
     # successfully published conversion reports complete source validation.
     result = capability(request)
-    layers = tensors.decoder_config["transformer_config"]["layer_configs"] if request.model_kind == "language" else ()
+    layers = (
+        tensors.decoder_config["transformer_config"]["layer_configs"]
+        if request.model_kind == "language" and adapter != "qwen4_exp"
+        else ()
+    )
     for layer in layers:
         mixer = layer["mixer_config"]
         if mixer["type"] == "DeltaNetConfig" and (mixer["head_dim"] != 128 or mixer["value_head_dim"] != 128):
@@ -428,6 +434,8 @@ def convert(
             root_config = {
                 "type": "Qwen35VisionLanguageModelConfig"
                 if artifact_mode == "vision-language"
+                else "Qwen38LanguageModelConfig"
+                if planned.capability.adapter == "qwen4_exp"
                 else "LanguageModelConfig",
                 "decoder_config": planned.tensors.decoder_config,
                 **fragments,
@@ -467,6 +475,13 @@ def convert(
             chunk_bytes=chunk_bytes,
             **({"progress": progress} if progress is not None else {}),
         )
+        storage_validation = None
+        if planned.capability.adapter == "qwen4_exp":
+            from .adapters.qwen38 import validate_qwen38_artifact
+
+            storage_validation = validate_qwen38_artifact(
+                planned.tensors, staging / "model.safetensors", chunk_bytes=chunk_bytes
+            )
         if family:
             planned.artifact_contract["component_hashes"] = {
                 name: file_hash(staging / name) for name in COMPONENT_FILES
@@ -536,6 +551,7 @@ def convert(
             "config_sha256": artifact_hashes["config_sha256"],
             "tokenizer_sha256": artifact_hashes["tokenizer_sha256"],
             "native_qualification": qualification,
+            **({"storage_validation": storage_validation} if storage_validation is not None else {}),
             "architecture": planned.capability.adapter,
             "metadata_profile": planned.request.metadata_profile or entry["metadata_profile"],
             "catalogued": get_model(repo) is not None,
@@ -547,6 +563,9 @@ def convert(
             },
         }
         (staging / "conversion.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        if planned.capability.adapter == "qwen4_exp":
+            for filename in ("config.json", "tokenizer.json", "model.safetensors", "conversion.json"):
+                os.chmod(staging / filename, 0o600)
         snapshot.assert_unchanged()
         if provenance != toolchain_provenance():
             raise ConversionError("Converter tooling changed during qualification")

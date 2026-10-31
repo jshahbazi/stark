@@ -11,6 +11,11 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/quant.metal");
+const OFFICIAL_SOURCE: &str = include_str!("metal/official_gate.metal");
+
+#[cfg(test)]
+#[path = "official_gate_tests.rs"]
+mod official_gate_tests;
 
 /// Rows each thread of the Q4 gather GEMV accumulates.
 const Q4_GEMV_ROWS: usize = 2;
@@ -146,6 +151,9 @@ pub fn gemv_quant(
     x: &Tensor,
     y: &Tensor,
 ) -> Result<()> {
+    if w.bits == 16 {
+        return dense_bf16_project(ctx, pass, x, &w.codes, y);
+    }
     let (n, k) = check_quant(w)?;
     ensure!(x.numel() == k, "x numel {} != K {k}", x.numel());
     ensure!(y.numel() == n, "y numel {} != N {n}", y.numel());
@@ -261,6 +269,9 @@ pub fn gemm_quant_bf16_nt(
     c: &Tensor,
     scratch: &Tensor,
 ) -> Result<()> {
+    if w.bits == 16 {
+        return dense_bf16_project(ctx, pass, a, &w.codes, c);
+    }
     let (n, k) = check_quant(w)?;
     ensure!(
         scratch.numel() >= n * k && scratch.dtype() == DType::BF16,
@@ -277,6 +288,86 @@ pub fn gemm_quant_bf16_nt(
     pass.level_barrier(&[&staged])?;
     gemm_bf16_nt(ctx, pass, a, &staged, c)?;
     pass.level_barrier(&[c])
+}
+
+/// Exact BF16 gate weights from the official MLX pack, with F32 accumulation.
+/// This narrow projection path leaves every affine Q4/Q8 route unchanged.
+pub(crate) fn dense_bf16_project(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    x: &Tensor,
+    w: &Tensor,
+    y: &Tensor,
+) -> Result<()> {
+    ensure!(
+        w.dtype() == DType::BF16 && w.shape().len() == 2 && x.dtype() == DType::BF16,
+        "dense BF16 projection dtypes"
+    );
+    let (n, k) = (w.shape()[0], w.shape()[1]);
+    ensure!(k > 0 && x.numel().is_multiple_of(k), "dense BF16 projection input");
+    let m = x.numel() / k;
+    ensure!(m > 0 && y.numel() == m * n, "dense BF16 projection output");
+    let name = match y.dtype() {
+        DType::BF16 => "official_gate_bf16",
+        DType::F32 => "official_gate_f32",
+        _ => anyhow::bail!("dense gate output dtype"),
+    };
+    let pipeline = ctx.pipeline(name, OFFICIAL_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[x.binding(), w.binding(), y.binding()],
+        &[&u32_bytes(k), &u32_bytes(n)],
+        Grid::Threadgroups { groups: (n, m, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn hc_dense_bf16_inject(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    hyper: &Tensor,
+    norm: &Tensor,
+    w: &QuantWeights,
+    out: &Tensor,
+    h: usize,
+    groups: usize,
+    eps: f32,
+    bias: f32,
+) -> Result<()> {
+    let k = h * groups;
+    ensure!(
+        groups > 0
+            && groups <= 8
+            && h > 0
+            && w.bits == 16
+            && w.in_features() == k
+            && w.codes.dtype() == DType::BF16
+            && hyper.dtype() == DType::BF16
+            && norm.dtype() == DType::BF16
+            && norm.numel() == k
+            && hyper.numel().is_multiple_of(k),
+        "HC BF16 gate geometry"
+    );
+    let rows = hyper.numel() / k;
+    let n = w.out_features();
+    ensure!(
+        rows > 0 && out.dtype() == DType::BF16 && out.numel() == rows * n,
+        "HC BF16 gate output"
+    );
+    let pipeline =
+        ctx.pipeline("official_hc_inject", OFFICIAL_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[hyper.binding(), norm.binding(), w.codes.binding(), out.binding()],
+        &[
+            &u32_bytes(h),
+            &u32_bytes(groups),
+            &u32_bytes(n),
+            &eps.to_ne_bytes(),
+            &bias.to_ne_bytes(),
+        ],
+        Grid::Threadgroups { groups: (n, rows, 1), threadgroup: (32 * groups, 1, 1) },
+    )
 }
 
 /// Block-mapped grouped GEMM with Q4 dequantization fused into B-tile staging.
@@ -356,3 +447,121 @@ pub fn gather_rows_quant(
         Grid::Threads { grid: (k / (32 / w.bits), m, 1), threadgroup: (32, 1, 1) },
     )
 }
+
+/// The physical sampler/scorer buffer stays F32. Official external-MLX head
+/// values are BF16-rounded after accumulation; Lily/reference values remain F32.
+pub const OFFICIAL_HEAD_VALUE_POLICY: &str = "f32_accumulation_bf16_values_f32_buffer";
+
+const HEAD_SOURCE: &str = concat!(
+    include_str!("metal/quant.metal"),
+    include_str!("metal/official_head.metal"),
+);
+
+pub(crate) fn round_logits_bf16_values(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    logits: &Tensor,
+) -> Result<()> {
+    ensure!(
+        logits.dtype() == DType::F32
+            && logits.numel() > 0
+            && logits.numel() <= u32::MAX as usize,
+        "head readout must be a nonempty bounded F32 buffer"
+    );
+    let pipeline = ctx.pipeline_with_math_mode(
+        "official_head_round_bf16_values_f32",
+        HEAD_SOURCE,
+        MslVersion::V3_1,
+        crate::metal::MslMathMode::Safe,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[logits.binding()],
+        &[&u32_bytes(logits.numel())],
+        Grid::Threads { grid: (logits.numel(), 1, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+/// Stock QMV uses signed-int byte row offsets. Bound the complete Q4 code
+/// span before selecting its unchecked fast loop; larger valid heads retain
+/// the original GEMV fallback. K2560 also makes its 512-value loop exact.
+fn official_head_stock_qmv_fast_supported(n: usize, k: usize) -> bool {
+    k == 2560
+        && n > 0
+        && n.is_multiple_of(8)
+        && n.checked_mul(k / 2)
+            .is_some_and(|code_bytes| code_bytes <= i32::MAX as usize)
+}
+
+/// Explicit LM-head policy. Ordinary aligned Q4/group64/H2560 decode uses stock
+/// QMV affine expressions/reduction geometry with a fused BF16-value store;
+/// valid other quantization/storage geometries retain their projection and add
+/// a separate in-place output rounding pass. No weight bytes are changed.
+pub fn gemv_quant_logits(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+    bf16_values: bool,
+) -> Result<()> {
+    if !bf16_values {
+        return gemv_quant(ctx, pass, w, x, y);
+    }
+    ensure!(
+        w.codes.shape().len() == 2 && matches!(w.bits, 4 | 8 | 16),
+        "head storage shape/quantization"
+    );
+    let (n, k) = (w.out_features(), w.in_features());
+    ensure!(
+        n > 0
+            && k > 0
+            && x.dtype() == DType::BF16
+            && x.numel() == k
+            && y.dtype() == DType::F32
+            && y.numel() == n,
+        "head activation/output dtype or geometry"
+    );
+    if w.bits != 16 {
+        ensure!(
+            w.group_size > 0
+                && w.scales.dtype() == DType::BF16
+                && w.biases.dtype() == DType::BF16,
+            "head affine metadata must be BF16 with a positive group size"
+        );
+        check_quant(w)?;
+    }
+    if w.bits == 4 && w.group_size == 64 && official_head_stock_qmv_fast_supported(n, k)
+    {
+        let pipeline = ctx.pipeline_with_math_mode(
+            "official_head_qmv_fast_q4_g64_bf16_values_f32",
+            HEAD_SOURCE,
+            MslVersion::V4_0,
+            crate::metal::MslMathMode::Safe,
+        )?;
+        if pipeline.thread_execution_width() != 32 {
+            gemv_quant(ctx, pass, w, x, y)?;
+            pass.level_barrier(&[y])?;
+            return round_logits_bf16_values(ctx, pass, y);
+        }
+        return pass.dispatch_at(
+            &pipeline,
+            &[
+                w.codes.binding(),
+                w.scales.binding(),
+                w.biases.binding(),
+                x.binding(),
+                y.binding(),
+            ],
+            &[&u32_bytes(k), &u32_bytes(n)],
+            Grid::Threadgroups { groups: (1, n / 8, 1), threadgroup: (32, 2, 1) },
+        );
+    }
+    gemv_quant(ctx, pass, w, x, y)?;
+    pass.level_barrier(&[y])?;
+    round_logits_bf16_values(ctx, pass, y)
+}
+
+#[cfg(test)]
+#[path = "official_head_precision_tests.rs"]
+mod official_head_precision_tests;

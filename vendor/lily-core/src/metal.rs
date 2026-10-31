@@ -46,7 +46,8 @@ use block2::RcBlock;
 use core::ffi::c_void;
 use core::ptr::NonNull;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::sel;
 use objc2_foundation::{NSError, NSString};
 use objc2_metal::{
     MTL4ArgumentTable, MTL4ArgumentTableDescriptor, MTL4CommandAllocator,
@@ -54,8 +55,8 @@ use objc2_metal::{
     MTL4CommitOptions, MTL4ComputeCommandEncoder, MTL4VisibilityOptions, MTLAllocation,
     MTLBuffer, MTLCompileOptions, MTLComputePipelineState,
     MTLCreateSystemDefaultDevice, MTLDevice, MTLEvent, MTLLanguageVersion, MTLLibrary,
-    MTLResidencySet, MTLResidencySetDescriptor, MTLResourceOptions, MTLSharedEvent,
-    MTLSize, MTLStages,
+    MTLMathMode, MTLResidencySet, MTLResidencySetDescriptor, MTLResourceOptions,
+    MTLSharedEvent, MTLSize, MTLStages,
 };
 
 use crate::tensor::Tensor;
@@ -108,6 +109,14 @@ pub enum MslVersion {
     /// but MTLLanguageVersion is an open integer wrapper and the SDK value is
     /// `(4 << 16) + 1`.
     V4_1,
+}
+
+/// Per-library floating-point policy. Existing callers keep the platform's
+/// original defaults; source-qualified compatibility kernels may opt into Safe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MslMathMode {
+    PlatformDefault,
+    Safe,
 }
 
 impl MslVersion {
@@ -385,8 +394,8 @@ pub struct MetalContext {
     /// First GPU error the commit feedback reported, surfaced by the next
     /// wait or commit.
     fault: Arc<Fault>,
-    /// Keyed by function name and MSL version.
-    pipelines: Mutex<HashMap<(&'static str, MslVersion), Pipeline>>,
+    /// Keyed by function name, language version and explicit math policy.
+    pipelines: Mutex<HashMap<(&'static str, MslVersion, MslMathMode), Pipeline>>,
     /// Pipelines built so far and the nanoseconds it took (library compile
     /// plus pipeline creation), for the warm-up log line.
     built: AtomicU64,
@@ -479,8 +488,33 @@ impl MetalContext {
         source: &str,
         version: MslVersion,
     ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>> {
+        self.compile_library_with_math_mode(
+            source,
+            version,
+            MslMathMode::PlatformDefault,
+        )
+    }
+
+    /// Compiles with an explicit per-library math mode. The default variant
+    /// intentionally leaves the platform option untouched.
+    pub fn compile_library_with_math_mode(
+        &self,
+        source: &str,
+        version: MslVersion,
+        math_mode: MslMathMode,
+    ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>> {
         let options = MTLCompileOptions::new();
         options.setLanguageVersion(version.language_version());
+        if math_mode == MslMathMode::Safe {
+            // Match pinned MLX CompileOptions::Safe. macOS 15+ has mathMode;
+            // older supported systems use the legacy equivalent, as MLX does.
+            if options.respondsToSelector(sel!(setMathMode:)) {
+                options.setMathMode(MTLMathMode::Safe);
+            } else {
+                #[allow(deprecated)]
+                options.setFastMathEnabled(false);
+            }
+        }
         self.device
             .newLibraryWithSource_options_error(
                 &NSString::from_str(source),
@@ -513,23 +547,40 @@ impl MetalContext {
         source: &str,
         version: MslVersion,
     ) -> Result<Kernel> {
+        self.pipeline_with_math_mode(
+            fn_name,
+            source,
+            version,
+            MslMathMode::PlatformDefault,
+        )
+    }
+
+    /// Cache distinct math policies separately, even for the same function
+    /// name and language version. Library creation receives the same policy.
+    pub fn pipeline_with_math_mode(
+        &self,
+        fn_name: &'static str,
+        source: &str,
+        version: MslVersion,
+        math_mode: MslMathMode,
+    ) -> Result<Kernel> {
         let mut cache = self
             .pipelines
             .lock()
             .map_err(|e| anyhow!("pipeline cache lock poisoned: {e}"))?;
-        if let Some(p) = cache.get(&(fn_name, version)) {
+        if let Some(p) = cache.get(&(fn_name, version, math_mode)) {
             return Ok(Kernel { pipeline: p.clone(), name: fn_name });
         }
 
         let started = Instant::now();
         let library = self
-            .compile_library(source, version)
+            .compile_library_with_math_mode(source, version, math_mode)
             .with_context(|| format!("for {fn_name}"))?;
         let pipeline = self.pipeline_from_library(&library, fn_name)?;
         self.built.fetch_add(1, Ordering::Relaxed);
         self.build_nanos
             .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
-        cache.insert((fn_name, version), pipeline.clone());
+        cache.insert((fn_name, version, math_mode), pipeline.clone());
         Ok(Kernel { pipeline, name: fn_name })
     }
 
@@ -2670,3 +2721,7 @@ mod stark_cleanup_tests {
         assert!(success.accept_outputs(&Fault::default()).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "metal_math_tests.rs"]
+mod math_mode_tests;

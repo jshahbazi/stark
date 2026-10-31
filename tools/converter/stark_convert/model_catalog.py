@@ -296,6 +296,16 @@ def _weight_bytes(selected, sizes):
 
 
 def _quantization(config, info, entry):
+    if (
+        config.get("model_type") == "qwen4_exp"
+        and isinstance(config.get("lily"), dict)
+        and config["lily"].get("format") == "qwen4_exp-affine-v1"
+    ):
+        # Pinned preflight validates this format before catalog display. Its
+        # routed experts are Q4 and its fixed small projections are Q8 even
+        # when the optional Q8 group list is empty. The generic top-level
+        # quantization block describes only the default width.
+        return "4-bit / 8-bit"
     text = config.get("text_config", config)
     if not isinstance(text, dict):
         return None
@@ -362,7 +372,11 @@ def _generation_architecture(config, family):
         return False
     return all(
         isinstance(name, str)
-        and (name.endswith("ForCausalLM") or (family == "qwen3_5" and name == "Qwen3_5ForConditionalGeneration"))
+        and (
+            name.endswith("ForCausalLM")
+            or (family == "qwen3_5" and name == "Qwen3_5ForConditionalGeneration")
+            or (family == "qwen4_exp" and name == "Qwen4ExpForConditionalGeneration")
+        )
         for name in declared
     )
 

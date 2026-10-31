@@ -206,10 +206,11 @@ impl NativeBackend {
         if path.join("speculator").exists() {
             return Err("speculator_not_supported");
         }
-        let config: Value =
-            serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
-                .map_err(|_| "invalid_model_config")?;
-        if matches!(config.get("model_type").and_then(Value::as_str), Some("glm5_next" | "qwen4_exp" | "flint")) {
+        let hybrid = stark_engine::engine::hybrid::recognizes(path).map_err(|error| match error {
+            stark_engine::engine::hybrid::Error::Io(_) => "model_config_unavailable",
+            _ => "invalid_model_config",
+        })?;
+        if hybrid {
             let model = stark_engine::engine::hybrid::Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
             let vocab_size = model.vocab_size();
             return Ok(Self {
@@ -218,6 +219,9 @@ impl NativeBackend {
                 vocab_size,
             });
         }
+        let config: Value =
+            serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
+                .map_err(|_| "invalid_model_config")?;
         let vocab_size = config
             .get("decoder_config")
             .and_then(|decoder| decoder.get("vocab_size"))
@@ -544,6 +548,40 @@ pub(super) fn run_lines(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converted_qwen_and_native_hybrid_types_dispatch_before_dense_loading() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "stark-score-dispatch-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&path).unwrap();
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let directory = Directory(path);
+        // Deliberately incomplete configurations fail before any Metal
+        // allocation. The error identifies which real loader was selected.
+        for config in [
+            json!({"type":"Qwen38LanguageModelConfig"}),
+            json!({"model_type":"glm5_next"}),
+            json!({"model_type":"qwen4_exp"}),
+            json!({"model_type":"flint"}),
+        ] {
+            std::fs::write(directory.0.join("config.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(matches!(NativeBackend::load(&directory.0), Err("hybrid_model_load_failed")));
+        }
+        std::fs::write(directory.0.join("config.json"), br#"{"type":"LanguageModelConfig"}"#).unwrap();
+        assert!(matches!(NativeBackend::load(&directory.0), Err("invalid_model_config")));
+        std::fs::write(directory.0.join("config.json"), b"{").unwrap();
+        assert!(matches!(NativeBackend::load(&directory.0), Err("invalid_model_config")));
+    }
 
     struct FakeBackend {
         calls: usize,

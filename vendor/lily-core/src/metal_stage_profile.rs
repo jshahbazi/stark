@@ -17,7 +17,9 @@ use serde::Serialize;
 
 use super::PassTiming;
 
-const CAPACITY: usize = 512;
+// 582 entries bound the graph; selected WR1 pairs remove one entry each.
+// Fixed diagnostic storage remains bounded; unsupported traces fail closed.
+const CAPACITY: usize = 1024;
 const MAX_RECORDED_PASSES: usize = 512;
 
 /// Fixed categories only: no tensor names, token IDs or request data.
@@ -28,10 +30,41 @@ pub enum Phase {
     Ple,
     Hc,
     Gdn,
+    GdnInputProjections,
+    GdnInputProjectionConv,
+    GdnConv,
+    GdnRecurrence,
+    GdnRecurrenceNorm,
+    GdnNorm,
+    GdnOutProjection,
     Qsa,
     Moe,
+    MoeInputProjections,
+    MoeRouteSharedActivation,
+    MoeExpertGateUpSharedDown,
+    MoeExpertDownCombine,
     Head,
     Draw,
+}
+
+impl Phase {
+    /// Coarse totals remain inclusive sums of the detailed dependency groups.
+    pub const fn coarse(self) -> Self {
+        match self {
+            Self::GdnInputProjections
+            | Self::GdnInputProjectionConv
+            | Self::GdnConv
+            | Self::GdnRecurrence
+            | Self::GdnRecurrenceNorm
+            | Self::GdnNorm
+            | Self::GdnOutProjection => Self::Gdn,
+            Self::MoeInputProjections
+            | Self::MoeRouteSharedActivation
+            | Self::MoeExpertGateUpSharedDown
+            | Self::MoeExpertDownCombine => Self::Moe,
+            other => other,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -238,6 +271,61 @@ mod tests {
         assert_eq!(result.samples[0].intervals, 2);
         assert!((result.samples[0].gpu_seconds - 0.2).abs() < 1e-12);
         assert!((result.measured_seconds - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn detailed_checkpoint_trace_fits_and_preserves_coarse_totals() {
+        // Unpaired official upper bound: 48 layers,36 GDN,12 attention,one PLE.
+        // Six coarse intervals/layer, four more/GDN and three more/MoE;
+        // embedding, final HC, head, draw, PLE and terminal add six entries.
+        let (layers, gdn, attention) = (48, 36, 12);
+        assert_eq!(gdn + attention, layers);
+        let budget = |inject: bool,
+                      head: bool,
+                      ple: bool,
+                      split_norm: bool,
+                      fused_conv: bool| {
+            // Two HC reads + four MoE groups per layer. QSA remains coarse.
+            let gdn_groups = 4 + usize::from(split_norm) - usize::from(fused_conv);
+            4 + usize::from(head)
+                + usize::from(ple)
+                + layers * (6 + 2 * usize::from(inject))
+                + gdn * gdn_groups
+                + attention
+        };
+        for inject in [false, true] {
+            for head in [false, true] {
+                for ple in [false, true] {
+                    for split_norm in [false, true] {
+                        for fused_conv in [false, true] {
+                            assert!(
+                                budget(inject, head, ple, split_norm, fused_conv)
+                                    <= CAPACITY
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let count = budget(true, true, true, true, false);
+        assert_eq!(count, 582);
+        let mut phases = vec![Some(Phase::GdnRecurrence); count - 1];
+        phases.push(None);
+        let ticks = (0..count).map(|i| 1000 + i as u64).collect::<Vec<_>>();
+        let result = profile_from_ticks(
+            &phases,
+            &ticks,
+            PassTiming { gpu_start_secs: 1.0, gpu_end_secs: 1.6 },
+            0.001,
+            1,
+        )
+        .unwrap();
+        assert_eq!(result.timestamp_count, count);
+        assert_eq!(result.samples.len(), 1);
+        assert_eq!(result.samples[0].phase.coarse(), Phase::Gdn);
+        assert_eq!(result.samples[0].intervals, count - 1);
+        assert_eq!(Phase::MoeExpertGateUpSharedDown.coarse(), Phase::Moe);
+        assert_eq!(Phase::Hc.coarse(), Phase::Hc);
     }
 
     #[test]

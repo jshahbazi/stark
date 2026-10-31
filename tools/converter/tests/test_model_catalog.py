@@ -183,6 +183,7 @@ def test_non_chat_and_internal_test_sources_do_not_displace_application_models(t
         ("lfm2", "Lfm2ForCausalLM"),
         ("qwen3_5", "Qwen3_5ForCausalLM"),
         ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
+        ("qwen4_exp", "Qwen4ExpForConditionalGeneration"),
     ],
 )
 def test_supported_generation_class_hints_remain_available(tmp_path, family, architecture):
@@ -210,6 +211,23 @@ def test_mlx_quantization_uses_metadata_and_does_not_call_packed_slots_parameter
     item = catalog.family_catalog("qwen3", hub=hub)["items"][0]
     assert item["quantization"] == f"{bits}-bit"
     assert item["parameter_count"] is None and item["size_label"] is None
+
+
+@pytest.mark.parametrize("groups", [[], ["attn", "shared", "head", "embed"]])
+def test_lily_qwen38_badge_includes_fixed_q8_projections_beyond_default_q4(groups):
+    config = {
+        "model_type": "qwen4_exp",
+        "quantization": {"bits": 4, "group_size": 64, "mode": "affine"},
+        "lily": {
+            "format": "qwen4_exp-affine-v1",
+            "quantization": {
+                "default": {"bits": 4, "group_size": 64, "mode": "affine"},
+                "ngram_embedding": {"bits": 4, "group_size": 32, "mode": "affine"},
+                "q8_groups": groups,
+            },
+        },
+    }
+    assert catalog._quantization(config, {}, None) == "4-bit / 8-bit"
 
 
 def test_seed_declared_size_is_preserved_without_parsing_the_repository_name(tmp_path, monkeypatch):

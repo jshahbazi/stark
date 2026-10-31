@@ -115,3 +115,39 @@ for (const button of viewButtons) {
   });
 }
 renderBenchmark();
+
+const benchmarkTabs = [...document.querySelectorAll('[data-benchmark-panel]')];
+function selectBenchmarkModel(tab, updateHash = false) {
+  for (const item of benchmarkTabs) {
+    const selected = item === tab;
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.getElementById(item.dataset.benchmarkPanel).hidden = !selected;
+  }
+  if (updateHash) history.replaceState(null, '', '#' + tab.dataset.benchmarkPanel);
+}
+for (const tab of benchmarkTabs) {
+  tab.addEventListener('click', () => selectBenchmarkModel(tab, true));
+  tab.addEventListener('keydown', (event) => {
+    const index = benchmarkTabs.indexOf(tab);
+    const next = event.key === 'ArrowRight' ? (index + 1) % benchmarkTabs.length
+      : event.key === 'ArrowLeft' ? (index + benchmarkTabs.length - 1) % benchmarkTabs.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? benchmarkTabs.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectBenchmarkModel(benchmarkTabs[next], true);
+    benchmarkTabs[next].focus();
+  });
+}
+function selectLinkedBenchmark(initial = false) {
+  const target = document.getElementById(location.hash.slice(1));
+  const panelId = target?.closest('.benchmark-panel')?.id;
+  const linked = benchmarkTabs.find(tab => tab.dataset.benchmarkPanel === panelId);
+  if (linked || initial || location.hash === '#benchmarks') {
+    selectBenchmarkModel(linked || benchmarkTabs[0]);
+  }
+}
+if (benchmarkTabs.length) {
+  selectLinkedBenchmark(true);
+  window.addEventListener('hashchange', () => selectLinkedBenchmark());
+}

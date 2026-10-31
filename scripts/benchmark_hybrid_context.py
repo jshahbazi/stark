@@ -24,6 +24,42 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def model_provenance(model: Path) -> dict:
+    """Bind the report to the receipt format shipped with this model artifact."""
+    native_receipt = model / "native-source.json"
+    if native_receipt.is_file():
+        receipt_hash = sha256_file(native_receipt)
+        return {
+            "model_artifact_kind": "native_source",
+            "model_artifact_receipt_file": native_receipt.name,
+            "model_artifact_receipt_sha256": receipt_hash,
+            # Keep this field unchanged for existing native-source benchmarks.
+            "source_receipt_sha256": receipt_hash,
+        }
+
+    conversion_receipt = model / "conversion.json"
+    if conversion_receipt.is_file():
+        try:
+            receipt = json.loads(conversion_receipt.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("conversion_receipt_invalid") from None
+        source_manifest_hash = receipt.get("source_manifest_sha256") if isinstance(receipt, dict) else None
+        if (
+            not isinstance(source_manifest_hash, str)
+            or len(source_manifest_hash) != 64
+            or any(character not in "0123456789abcdef" for character in source_manifest_hash)
+        ):
+            raise ValueError("conversion_source_manifest_hash_invalid")
+        return {
+            "model_artifact_kind": "stark_conversion",
+            "model_artifact_receipt_file": conversion_receipt.name,
+            "model_artifact_receipt_sha256": sha256_file(conversion_receipt),
+            "source_manifest_sha256": source_manifest_hash,
+        }
+
+    raise FileNotFoundError("model_provenance_receipt_missing")
+
+
 def token_ids_sha256(ids: list[int]) -> str:
     return hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
 
@@ -87,7 +123,7 @@ def run(args: argparse.Namespace, worker_factory=Worker, host_metrics_factory=No
         "sampling": sampling_options(args),
         "worker_sha256": sha256_file(args.worker),
         "configuration_sha256": sha256_file(args.model / "config.json"),
-        "source_receipt_sha256": sha256_file(args.model / "native-source.json"),
+        **model_provenance(args.model),
         "corpus_sha256": hashlib.sha256(corpus_bytes).hexdigest(),
         "requested_input_tokens": args.input_tokens,
         "requested_output_tokens": args.tokens,

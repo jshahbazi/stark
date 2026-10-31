@@ -10,7 +10,8 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connection Details, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
-| [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF and Qwen3.8-Flash-Next mixed MLX preparation, native execution and validation |
+| [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
+| [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
 | [Local API](LOCAL_API.md) | The loopback OpenAI-style chat API: authentication, endpoints, parameters, limits, error codes, tested clients |

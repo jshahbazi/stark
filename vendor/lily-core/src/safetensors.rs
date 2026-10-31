@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result, bail, ensure};
 use serde::Deserialize;
 
+pub mod uzu;
+
 /// The index file name a checkpoint directory is expected to contain.
 const INDEX_NAME: &str = "model.safetensors.index.json";
 /// The single-file checkpoint name used when no index is present.
@@ -39,6 +41,7 @@ impl SafetensorsDType {
         match self {
             Self::BF16 => Some(2),
             Self::F32 | Self::U32 => Some(4),
+            Self::Other(name) if name == "I64" || name == "U64" => Some(8),
             Self::Other(_) => None,
         }
     }
@@ -52,11 +55,17 @@ pub struct TensorMeta {
     shard: PathBuf,
     start: u64,
     end: u64,
+    // Converted group-major affine parameters are restored bit-for-bit at
+    // load. Native checkpoint tensors and paged embeddings remain direct.
+    group_output: Option<(usize, usize, usize)>,
 }
 
 impl TensorMeta {
     pub fn byte_len(&self) -> usize {
-        (self.end - self.start) as usize
+        self.group_output
+            .map_or((self.end - self.start) as usize, |(rows, groups, _)| {
+                rows * groups * 2
+            })
     }
 
     /// The shard file holding this tensor.
@@ -90,6 +99,50 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
+    /// Direct views of the official MLX-Serve Qwen pack. Name aliases only:
+    /// every dtype, shape, file and byte interval remains unchanged. The
+    /// external PLE table is exposed as one logical shard without copying.
+    pub fn open_qwen_external_mlx(dir: impl AsRef<Path>) -> Result<Self> {
+        let dir = dir.as_ref();
+        let original = Self::open(dir)?;
+        let mut tensors = HashMap::new();
+        for (name, meta) in original.tensors {
+            let alias = if let Some(tail) = name.strip_prefix("language_model.model.") {
+                format!("model.language_model.{tail}")
+            } else if let Some(tail) = name.strip_prefix("language_model.lm_head.") {
+                format!("lm_head.{tail}")
+            } else if let Some(tail) = name.strip_prefix("language_model.mtp.") {
+                format!("mtp.{tail}")
+            } else {
+                name
+            };
+            let alias = alias.replace(".mlp.switch_mlp.", ".mlp.experts.");
+            ensure!(
+                tensors.insert(alias, meta).is_none(),
+                "official MLX alias collision"
+            );
+        }
+        let table = parse_shard_header(&dir.join("ngram_table.bin"))?;
+        ensure!(
+            table.len() == 3,
+            "official MLX PLE table must contain exactly three planes"
+        );
+        for (name, meta) in table {
+            ensure!(
+                matches!(name.as_str(), "weight" | "scales" | "biases"),
+                "unexpected official MLX PLE plane"
+            );
+            let alias = format!(
+                "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.{name}"
+            );
+            ensure!(
+                tensors.insert(alias, meta).is_none(),
+                "official MLX PLE alias collision"
+            );
+        }
+        Ok(Self { tensors })
+    }
+
     /// Opens the checkpoint under `dir`, via `model.safetensors.index.json`
     /// when present or a single `model.safetensors` otherwise.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
@@ -173,10 +226,198 @@ impl Checkpoint {
         set_nocache(&file);
         file.seek(SeekFrom::Start(meta.start))
             .with_context(|| format!("seeking to {name}"))?;
-        file.read_exact(buf).with_context(|| format!("reading {name}"))?;
+        if let Some((rows, groups, stride)) = meta.group_output {
+            let mut physical = vec![0u8; (meta.end - meta.start) as usize];
+            file.read_exact(&mut physical)
+                .with_context(|| format!("reading {name}"))?;
+            restore_group_output(&physical, buf, rows, groups, stride)?;
+        } else {
+            file.read_exact(buf).with_context(|| format!("reading {name}"))?;
+        }
         Ok(())
     }
 }
+
+/// Restore canonical group-major affine parameters without interpreting their
+/// BF16 bits. NEON transposes 8x8 word tiles; byte tails/fallback retain all bits.
+fn restore_group_output(
+    physical: &[u8],
+    output: &mut [u8],
+    rows: usize,
+    groups: usize,
+    stride: usize,
+) -> Result<()> {
+    for group in 0..groups {
+        let padding =
+            &physical[2 * (group * stride + rows)..2 * ((group + 1) * stride)];
+        if padding.iter().any(|&byte| byte != 0) {
+            // Preserve original failure-side writes: only complete earlier
+            // groups were copied before this invalid padding was inspected.
+            for previous in 0..group {
+                for row in 0..rows {
+                    let from = 2 * (previous * stride + row);
+                    let to = 2 * (row * groups + previous);
+                    output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                }
+            }
+            anyhow::bail!("nonzero Uzu affine padding");
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    if physical.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0
+        && output.as_ptr().align_offset(std::mem::align_of::<u16>()) == 0
+        && std::arch::is_aarch64_feature_detected!("neon")
+    {
+        let row_blocks = rows / 8 * 8;
+        let group_blocks = groups / 8 * 8;
+        for start in (0..rows).step_by(64) {
+            let end = rows.min(start + 64);
+            let vector_end = end.min(row_blocks);
+            for group in (0..group_blocks).step_by(8) {
+                for row in (start..vector_end).step_by(8) {
+                    // Both strided 8x8 spans are checked before any vector
+                    // access; each load/store is exactly eight u16 values.
+                    ensure!(
+                        transpose_u16_tile_bounds(
+                            physical.len(),
+                            output.len(),
+                            row,
+                            group,
+                            groups,
+                            stride
+                        ),
+                        "invalid NEON transpose tile bounds"
+                    );
+                    let source = 2 * (group * stride + row);
+                    let destination = 2 * (row * groups + group);
+                    // SAFETY: alignment/CPU feature checked above; the helper
+                    // bounds include the final row/group and all eight lanes.
+                    unsafe {
+                        transpose_u16_8x8_neon(
+                            physical.as_ptr().add(source).cast(),
+                            output.as_mut_ptr().add(destination).cast(),
+                            stride,
+                            groups,
+                        );
+                    }
+                }
+                for g in group..group + 8 {
+                    for row in vector_end.max(start)..end {
+                        let from = 2 * (g * stride + row);
+                        let to = 2 * (row * groups + g);
+                        output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                    }
+                }
+            }
+            for group in group_blocks..groups {
+                for row in start..end {
+                    let from = 2 * (group * stride + row);
+                    let to = 2 * (row * groups + group);
+                    output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+                }
+            }
+        }
+        return Ok(());
+    }
+    restore_group_output_blocked(physical, output, rows, groups, stride);
+    Ok(())
+}
+
+fn restore_group_output_blocked(
+    physical: &[u8],
+    output: &mut [u8],
+    rows: usize,
+    groups: usize,
+    stride: usize,
+) {
+    for start in (0..rows).step_by(64) {
+        let end = rows.min(start + 64);
+        for group in 0..groups {
+            for row in start..end {
+                let from = 2 * (group * stride + row);
+                let to = 2 * (row * groups + group);
+                output[to..to + 2].copy_from_slice(&physical[from..from + 2]);
+            }
+        }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+fn transpose_u16_tile_bounds(
+    source_bytes: usize,
+    dest_bytes: usize,
+    row: usize,
+    group: usize,
+    groups: usize,
+    stride: usize,
+) -> bool {
+    let Some(last_row) = row.checked_add(7) else { return false };
+    let Some(last_group) = group.checked_add(7) else { return false };
+    if last_row >= stride || last_group >= groups {
+        return false;
+    }
+    let end = |major: usize, pitch: usize, minor: usize| {
+        major
+            .checked_mul(pitch)
+            .and_then(|n| n.checked_add(minor))
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_mul(2))
+    };
+    end(last_group, stride, last_row).is_some_and(|end| end <= source_bytes)
+        && end(last_row, groups, last_group).is_some_and(|end| end <= dest_bytes)
+}
+
+/// Transpose eight contiguous source rows with independent source/dest
+/// strides. Caller must validate both 8x8 spans and u16 pointer alignment.
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn transpose_u16_8x8_neon(
+    source: *const u16,
+    dest: *mut u16,
+    source_stride: usize,
+    dest_stride: usize,
+) {
+    use std::arch::aarch64::*;
+    // SAFETY: caller proved each of the eight loads/stores is in bounds and
+    // both bases have u16 alignment. NEON permits unaligned 16-byte vectors.
+    unsafe {
+        let a0 = vld1q_u16(source);
+        let a1 = vld1q_u16(source.add(source_stride));
+        let a2 = vld1q_u16(source.add(2 * source_stride));
+        let a3 = vld1q_u16(source.add(3 * source_stride));
+        let a4 = vld1q_u16(source.add(4 * source_stride));
+        let a5 = vld1q_u16(source.add(5 * source_stride));
+        let a6 = vld1q_u16(source.add(6 * source_stride));
+        let a7 = vld1q_u16(source.add(7 * source_stride));
+        let t0 = vreinterpretq_u32_u16(vtrn1q_u16(a0, a1));
+        let t1 = vreinterpretq_u32_u16(vtrn2q_u16(a0, a1));
+        let t2 = vreinterpretq_u32_u16(vtrn1q_u16(a2, a3));
+        let t3 = vreinterpretq_u32_u16(vtrn2q_u16(a2, a3));
+        let t4 = vreinterpretq_u32_u16(vtrn1q_u16(a4, a5));
+        let t5 = vreinterpretq_u32_u16(vtrn2q_u16(a4, a5));
+        let t6 = vreinterpretq_u32_u16(vtrn1q_u16(a6, a7));
+        let t7 = vreinterpretq_u32_u16(vtrn2q_u16(a6, a7));
+        let b0 = vreinterpretq_u64_u32(vtrn1q_u32(t0, t2));
+        let b1 = vreinterpretq_u64_u32(vtrn1q_u32(t1, t3));
+        let b2 = vreinterpretq_u64_u32(vtrn2q_u32(t0, t2));
+        let b3 = vreinterpretq_u64_u32(vtrn2q_u32(t1, t3));
+        let b4 = vreinterpretq_u64_u32(vtrn1q_u32(t4, t6));
+        let b5 = vreinterpretq_u64_u32(vtrn1q_u32(t5, t7));
+        let b6 = vreinterpretq_u64_u32(vtrn2q_u32(t4, t6));
+        let b7 = vreinterpretq_u64_u32(vtrn2q_u32(t5, t7));
+        vst1q_u16(dest, vreinterpretq_u16_u64(vtrn1q_u64(b0, b4)));
+        vst1q_u16(dest.add(dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b1, b5)));
+        vst1q_u16(dest.add(2 * dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b2, b6)));
+        vst1q_u16(dest.add(3 * dest_stride), vreinterpretq_u16_u64(vtrn1q_u64(b3, b7)));
+        vst1q_u16(dest.add(4 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b0, b4)));
+        vst1q_u16(dest.add(5 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b1, b5)));
+        vst1q_u16(dest.add(6 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b2, b6)));
+        vst1q_u16(dest.add(7 * dest_stride), vreinterpretq_u16_u64(vtrn2q_u64(b3, b7)));
+    }
+}
+
+#[cfg(test)]
+mod transpose_tests;
 
 /// Asks the kernel not to keep this file's pages in the unified buffer cache
 /// (`F_NOCACHE`). Best effort; reads still work if it fails.
@@ -230,8 +471,70 @@ fn parse_shard_header(path: &Path) -> Result<HashMap<String, TensorMeta>> {
                 shard: path.to_path_buf(),
                 start: data_section + start,
                 end: data_section + end,
+                group_output: None,
             },
         );
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod official_mlx_alias_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+
+    #[test]
+    fn aliases_preserve_dtype_shape_intervals_and_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "stark-official-mlx-alias-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let write = |name: &str, header: serde_json::Value, bytes: &[u8]| {
+            let header = serde_json::to_vec(&header).unwrap();
+            let mut f = File::create(dir.join(name)).unwrap();
+            f.write_all(&(header.len() as u64).to_le_bytes()).unwrap();
+            f.write_all(&header).unwrap();
+            f.write_all(bytes).unwrap();
+        };
+        write(
+            "model.safetensors",
+            json!({
+                "language_model.model.embed_tokens.weight":{"dtype":"U32","shape":[1,1],"data_offsets":[0,4]},
+                "language_model.model.layers.0.attn_hyper_connection.block_inject_weight.weight":{"dtype":"BF16","shape":[1,2],"data_offsets":[4,8]},
+                "language_model.model.layers.0.mlp.switch_mlp.gate_proj.weight":{"dtype":"U32","shape":[1,1,1],"data_offsets":[8,12]}
+            }),
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+        );
+        write(
+            "ngram_table.bin",
+            json!({
+                "weight":{"dtype":"U32","shape":[1,4],"data_offsets":[0,16]},
+                "scales":{"dtype":"BF16","shape":[1,1],"data_offsets":[16,18]},
+                "biases":{"dtype":"BF16","shape":[1,1],"data_offsets":[18,20]}
+            }),
+            &[42; 20],
+        );
+        let ckpt = Checkpoint::open_qwen_external_mlx(&dir).unwrap();
+        assert_eq!(
+            ckpt.read("model.language_model.embed_tokens.weight").unwrap(),
+            [1, 2, 3, 4]
+        );
+        let gate = "model.language_model.layers.0.attn_hyper_connection.block_inject_weight.weight";
+        assert_eq!(ckpt.meta(gate).unwrap().dtype, SafetensorsDType::BF16);
+        assert_eq!(ckpt.meta(gate).unwrap().shape, [1, 2]);
+        assert_eq!(ckpt.read(gate).unwrap(), [5, 6, 7, 8]);
+        assert_eq!(
+            ckpt.read("model.language_model.layers.0.mlp.experts.gate_proj.weight")
+                .unwrap(),
+            [9, 10, 11, 12]
+        );
+        assert_eq!(ckpt.read("model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.scales").unwrap(),[42,42]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

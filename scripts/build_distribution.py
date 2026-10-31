@@ -518,6 +518,8 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
         "vendor/cxx/LICENSE-MIT",
         "vendor/cxx/LICENSE-APACHE",
         "vendor/lily-core/LICENSE",
+        "vendor/lily-core/LICENSE.mlx-serve",
+        "vendor/lily-core/LICENSE.mlx",
         "vendor/lily-core/NOTICE",
         "vendor/lily-core/UPSTREAM.md",
     ):

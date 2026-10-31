@@ -22,6 +22,8 @@ pub(crate) struct MoeDims {
     pub moe_intermediate: usize,
     pub hidden: usize,
     pub norm_topk_prob: bool,
+    /// Strictly admitted external MLX checkpoint operation-rounding policy.
+    pub official_mlx_rounding: bool,
 }
 
 /// Projects `a` `[m, K]` through an already-stacked weight group as one
@@ -142,6 +144,8 @@ pub(crate) struct MoeScratch {
     pub act: Tensor,
     pub shared_out: Tensor,
     pub shared_gate: Tensor,
+    /// Startup-only BF16 activation table; absent on legacy paths.
+    pub sigmoid_table: Option<Tensor>,
 }
 
 impl MoeScratch {
@@ -149,13 +153,26 @@ impl MoeScratch {
         let (e, k, i, h) =
             (dims.num_experts, dims.top_k, dims.moe_intermediate, dims.hidden);
         Ok(Self {
-            router_logits: Tensor::zeros(ctx, &[e], DType::F32)?,
+            router_logits: Tensor::zeros(
+                ctx,
+                &[e],
+                if dims.official_mlx_rounding { DType::BF16 } else { DType::F32 },
+            )?,
             indices: Tensor::zeros(ctx, &[k], DType::U32)?,
             slots: Tensor::zeros(ctx, &[k], DType::U32)?,
             scores: Tensor::zeros(ctx, &[k], DType::F32)?,
             act: Tensor::zeros(ctx, &[k, i], DType::BF16)?,
             shared_out: Tensor::zeros(ctx, &[h], DType::BF16)?,
-            shared_gate: Tensor::zeros(ctx, &[1], DType::F32)?,
+            shared_gate: Tensor::zeros(
+                ctx,
+                &[1],
+                if dims.official_mlx_rounding { DType::BF16 } else { DType::F32 },
+            )?,
+            sigmoid_table: if dims.official_mlx_rounding {
+                Some(moe::official_moe_sigmoid_table(ctx)?)
+            } else {
+                None
+            },
         })
     }
 }
@@ -167,6 +184,8 @@ pub(crate) struct PrefillMoeScratch {
     pub router_logits: Tensor,
     pub shared_out: Tensor,
     pub shared_gate: Tensor,
+    /// Startup-only BF16 activation table; absent on legacy paths.
+    pub sigmoid_table: Option<Tensor>,
     pub indices: Tensor,
     /// The routed ids as expert-cache slots for the small-m kernels
     /// (`MoeWeights::slot_of`; the grouped route remaps in its block map).
@@ -203,6 +222,8 @@ pub(crate) struct PrefillMoeScratch {
     /// `tile`/`tile_capacity` in [`Self::chunk`]; `prefill_moe` re-checks it
     /// against the fixed shipped policy (the desync guard).
     pub route: quant::MoeRoute,
+    /// Keeps chunk views on a qualified grouped reference route.
+    pub official_mlx_rounding: bool,
 }
 
 /// A row-prefix view of `t` (same buffer, leading dimension shrunk to `m`).
@@ -232,6 +253,11 @@ impl PrefillMoeScratch {
             router_logits: Tensor::zeros(ctx, &[m, e], bf)?,
             shared_out: Tensor::zeros(ctx, &[m, h], bf)?,
             shared_gate: Tensor::zeros(ctx, &[m], bf)?,
+            sigmoid_table: if dims.official_mlx_rounding {
+                Some(moe::official_moe_sigmoid_table(ctx)?)
+            } else {
+                None
+            },
             indices: Tensor::zeros(ctx, &[m, k], u32t)?,
             slots: Tensor::zeros(ctx, &[m, k], u32t)?,
             scores: Tensor::zeros(ctx, &[m, k], DType::F32)?,
@@ -251,6 +277,7 @@ impl PrefillMoeScratch {
             tile_capacity: cap,
             tile: alloc_tile,
             route: quant::MoeRoute::Grouped(alloc_tile),
+            official_mlx_rounding: dims.official_mlx_rounding,
         })
     }
 
@@ -266,7 +293,11 @@ impl PrefillMoeScratch {
         // Set route, tile, and capacity together. The GEMV route retains
         // bounded unused block-map views.
         let policy = quant::moe_tile_mroute_table();
-        let route = policy.route_for(m);
+        let route = if self.official_mlx_rounding {
+            quant::MoeRoute::Grouped(policy.alloc_tile())
+        } else {
+            policy.route_for(m)
+        };
         let tile = match route {
             quant::MoeRoute::Grouped(tile) => tile,
             quant::MoeRoute::SmallmGemv => policy.alloc_tile(),
@@ -281,6 +312,7 @@ impl PrefillMoeScratch {
             router_logits: prefix_rows(&self.router_logits, m)?,
             shared_out: prefix_rows(&self.shared_out, m)?,
             shared_gate: prefix_rows(&self.shared_gate, m)?,
+            sigmoid_table: self.sigmoid_table.clone(),
             indices: prefix_rows(&self.indices, m)?,
             slots: prefix_rows(&self.slots, m)?,
             scores: prefix_rows(&self.scores, m)?,
@@ -300,6 +332,7 @@ impl PrefillMoeScratch {
             tile_capacity: cap,
             tile,
             route,
+            official_mlx_rounding: self.official_mlx_rounding,
         })
     }
 }
@@ -331,6 +364,17 @@ pub(crate) fn router_select_rows(
     indices: &Tensor,
     scores: &Tensor,
 ) -> Result<()> {
+    if dims.official_mlx_rounding {
+        return moe::official_moe_router(
+            ctx,
+            pass,
+            logits,
+            indices,
+            scores,
+            dims.norm_topk_prob,
+            None,
+        );
+    }
     moe::moe_router_topk_rows(ctx, pass, logits, indices, scores, dims.norm_topk_prob)
 }
 
@@ -357,6 +401,17 @@ pub(crate) fn router_select_decode(
     indices: &Tensor,
     scores: &Tensor,
 ) -> Result<()> {
+    if dims.official_mlx_rounding {
+        return moe::official_moe_router(
+            ctx,
+            pass,
+            logits,
+            indices,
+            scores,
+            dims.norm_topk_prob,
+            None,
+        );
+    }
     moe::moe_router_topk(ctx, pass, logits, indices, scores, dims.norm_topk_prob)
 }
 
@@ -396,16 +451,35 @@ pub(crate) fn prefill_moe(
     let (e, top_k, inter) = (dims.num_experts, dims.top_k, dims.moe_intermediate);
     let h = dims.hidden;
     let policy = quant::moe_tile_mroute_table();
+    let expected_route = if dims.official_mlx_rounding {
+        ensure!(
+            moe::official_moe_shape_supported(e, top_k, h, inter),
+            "official MoE prefill geometry is unqualified"
+        );
+        moe::official_moe_banks_supported(
+            &moe_w.expert_gate,
+            &moe_w.expert_up,
+            &moe_w.expert_down,
+        )?;
+        ensure!(
+            moe_w.slot_of.is_none(),
+            "official MoE policy requires resident expert banks"
+        );
+        quant::MoeRoute::Grouped(policy.alloc_tile())
+    } else {
+        policy.route_for(m)
+    };
     // Desync guard, extended to the route: the chunk view and this function
     // must agree on the policy's answer — a mismatch would consume block maps
     // scanned at another tile (dropping rows SILENTLY) or run the GEMV path
     // over unsorted state the grouped kernels needed.
     let s_slots = m * top_k;
     ensure!(
-        ms.route == policy.route_for(m),
+        ms.route == expected_route
+            && ms.official_mlx_rounding == dims.official_mlx_rounding,
         "prefill MoE route desync: chunk m={m} carries route={} but the policy routes {}",
         ms.route.label(),
-        policy.route_for(m).label(),
+        expected_route.label(),
     );
     if let quant::MoeRoute::Grouped(tile) = ms.route {
         ensure!(
@@ -427,14 +501,18 @@ pub(crate) fn prefill_moe(
     // The shared expert's gate|up as one stacked GEMM when eligible: its
     // SwiGLU then reads the two halves in place (no split copy).
     let inter_s = io.mlp_gate.numel() / m;
-    let stacked_gu = project_stack_fused(
-        ctx,
-        pass,
-        io.x,
-        &shared.gate_up_proj,
-        io.stack,
-        &[inter_s, inter_s],
-    )?;
+    let stacked_gu = if dims.official_mlx_rounding {
+        None
+    } else {
+        project_stack_fused(
+            ctx,
+            pass,
+            io.x,
+            &shared.gate_up_proj,
+            io.stack,
+            &[inter_s, inter_s],
+        )?
+    };
     if stacked_gu.is_none() {
         project_mat(ctx, pass, io.x, &shared.gate_proj, io.mlp_gate, io.dequant)?;
         project_mat(ctx, pass, io.x, &shared.up_proj, io.mlp_up, io.dequant)?;
@@ -448,9 +526,22 @@ pub(crate) fn prefill_moe(
         &ms.shared_gate,
     ])?;
     router_select_rows(ctx, pass, dims, &ms.router_logits, &ms.indices, &ms.scores)?;
-    match &stacked_gu {
-        Some(gu) => silu_mul_rows_bf16(ctx, pass, gu, io.mlp_act)?,
-        None => silu_mul_bf16(ctx, pass, io.mlp_gate, io.mlp_up, io.mlp_act)?,
+    if dims.official_mlx_rounding {
+        moe::official_moe_silu_mul(
+            ctx,
+            pass,
+            io.mlp_gate,
+            io.mlp_up,
+            ms.sigmoid_table
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+            io.mlp_act,
+        )?;
+    } else {
+        match &stacked_gu {
+            Some(gu) => silu_mul_rows_bf16(ctx, pass, gu, io.mlp_act)?,
+            None => silu_mul_bf16(ctx, pass, io.mlp_gate, io.mlp_up, io.mlp_act)?,
+        }
     }
     pass.level_barrier(&[&ms.indices, &ms.scores, io.mlp_act])?;
     let slots = match &moe_w.slot_of {
@@ -573,7 +664,20 @@ pub(crate) fn prefill_moe(
         tile,
     )?;
     pass.level_barrier(&[&ms.eg, &ms.eu])?;
-    silu_mul_bf16(ctx, pass, &ms.eg, &ms.eu, &ms.ea)?;
+    if dims.official_mlx_rounding {
+        moe::official_moe_silu_mul(
+            ctx,
+            pass,
+            &ms.eg,
+            &ms.eu,
+            ms.sigmoid_table
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+            &ms.ea,
+        )?;
+    } else {
+        silu_mul_bf16(ctx, pass, &ms.eg, &ms.eu, &ms.ea)?;
+    }
     pass.level_barrier(&[&ms.ea])?;
     quant::gemm_q4_grouped_nt(
         ctx,
@@ -588,6 +692,18 @@ pub(crate) fn prefill_moe(
     // Both chains are complete: the routed rows are in `ed`, the shared
     // expert in `shared_out`; one pass combines and adds them.
     pass.level_barrier(&[&ms.ed, &ms.shared_out])?;
+    if dims.official_mlx_rounding {
+        return moe::official_moe_prefill_combine(
+            ctx,
+            pass,
+            &ms.ed,
+            &ms.slot_of,
+            &ms.scores,
+            &ms.shared_out,
+            &ms.shared_gate,
+            io.out,
+        );
+    }
     moe::moe_combine_rows_gate_add(
         ctx,
         pass,
@@ -647,6 +763,34 @@ pub(crate) fn decode_moe(
     ms: &MoeScratch,
 ) -> Result<bool> {
     let inter = dims.moe_intermediate;
+    if dims.official_mlx_rounding {
+        ensure!(
+            moe::official_moe_shape_supported(
+                dims.num_experts,
+                dims.top_k,
+                dims.hidden,
+                inter
+            ),
+            "official MoE decode geometry is unqualified"
+        );
+        moe::official_moe_banks_supported(
+            &moe_w.expert_gate,
+            &moe_w.expert_up,
+            &moe_w.expert_down,
+        )?;
+        ensure!(
+            moe_w.slot_of.is_none(),
+            "official MoE policy requires resident expert banks"
+        );
+        ensure!(
+            io.hc_injection.is_none(),
+            "official HC write must remain a separate qualified operation"
+        );
+        ensure!(
+            moe_w.shared_gate.bits == 16,
+            "official folded shared gate needs direct BF16 weights"
+        );
+    }
     // The shared expert reads only `x` and writes only its own scratch, so
     // its whole chain is independent of the router and of the expert gathers;
     // encoding it interleaved puts the two on the same dependency levels.
@@ -655,28 +799,63 @@ pub(crate) fn decode_moe(
     if crate::ablate::on(crate::ablate::Group::Moe) {
         return Ok(false);
     }
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeInputProjections)?;
     // Level 0 — everything whose only input is `x`.
     if !crate::ablate::on(crate::ablate::Group::Router) {
         router_project_decode(ctx, pass, &moe_w.gate, io.x, &ms.router_logits)?;
     }
     if !crate::ablate::on(crate::ablate::Group::Shared) {
         quant::gemv_quant(ctx, pass, &shared.gate_up_proj, io.x, io.mlp_gu)?;
-        quant::gemv_quant(ctx, pass, &moe_w.shared_gate, io.x, &ms.shared_gate)?;
+        if !dims.official_mlx_rounding {
+            quant::gemv_quant(ctx, pass, &moe_w.shared_gate, io.x, &ms.shared_gate)?;
+        }
     }
     pass.level_barrier(&[&ms.router_logits, io.mlp_gu, &ms.shared_gate])?;
 
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeRouteSharedActivation)?;
     // Level 1 — the routing decision, and the shared expert's activation.
     if !crate::ablate::on(crate::ablate::Group::Topk) {
-        router_select_decode(
-            ctx,
-            pass,
-            dims,
-            &ms.router_logits,
-            &ms.indices,
-            &ms.scores,
-        )?;
-        silu_mul_bf16(ctx, pass, io.mlp_gate, io.mlp_up, io.mlp_act)?;
-        pass.level_barrier(&[&ms.indices, &ms.scores, io.mlp_act])?;
+        if dims.official_mlx_rounding {
+            moe::official_moe_router(
+                ctx,
+                pass,
+                &ms.router_logits,
+                &ms.indices,
+                &ms.scores,
+                dims.norm_topk_prob,
+                Some((io.x, &moe_w.shared_gate.codes, &ms.shared_gate)),
+            )?;
+            moe::official_moe_silu_mul(
+                ctx,
+                pass,
+                io.mlp_gate,
+                io.mlp_up,
+                ms.sigmoid_table
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+                io.mlp_act,
+            )?;
+        } else {
+            router_select_decode(
+                ctx,
+                pass,
+                dims,
+                &ms.router_logits,
+                &ms.indices,
+                &ms.scores,
+            )?;
+            silu_mul_bf16(ctx, pass, io.mlp_gate, io.mlp_up, io.mlp_act)?;
+        }
+        if dims.official_mlx_rounding {
+            pass.level_barrier(&[
+                &ms.indices,
+                &ms.scores,
+                io.mlp_act,
+                &ms.shared_gate,
+            ])?;
+        } else {
+            pass.level_barrier(&[&ms.indices, &ms.scores, io.mlp_act])?;
+        }
     }
     let slots = match &moe_w.slot_of {
         Some(table) => {
@@ -691,22 +870,53 @@ pub(crate) fn decode_moe(
     if crate::ablate::on(crate::ablate::Group::Gather) {
         return Ok(false);
     }
-    moe::moe_gather_gemv_gate_up(
-        ctx,
-        pass,
-        &moe_w.expert_gate,
-        &moe_w.expert_up,
-        inter,
-        io.x,
-        slots,
-        &ms.act,
-    )?;
+    // Expert gate/up and the independent shared down projection overlap.
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertGateUpSharedDown)?;
+    if dims.official_mlx_rounding {
+        moe::official_moe_gate_up(
+            ctx,
+            pass,
+            &moe_w.expert_gate,
+            &moe_w.expert_up,
+            io.x,
+            slots,
+            ms.sigmoid_table
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("missing official sigmoid table"))?,
+            &ms.act,
+        )?;
+    } else {
+        moe::moe_gather_gemv_gate_up(
+            ctx,
+            pass,
+            &moe_w.expert_gate,
+            &moe_w.expert_up,
+            inter,
+            io.x,
+            slots,
+            &ms.act,
+        )?;
+    }
     if !crate::ablate::on(crate::ablate::Group::Shared) {
         quant::gemv_quant(ctx, pass, &shared.down_proj, io.mlp_act, &ms.shared_out)?;
     }
     pass.level_barrier(&[&ms.act, &ms.shared_out])?;
 
     if crate::ablate::on(crate::ablate::Group::Down) {
+        return Ok(false);
+    }
+    pass.profile_stage(crate::metal::stage_profile::Phase::MoeExpertDownCombine)?;
+    if dims.official_mlx_rounding {
+        moe::official_moe_down(
+            ctx,
+            pass,
+            &moe_w.expert_down,
+            &ms.act,
+            slots,
+            &ms.scores,
+            Some((&ms.shared_out, &ms.shared_gate)),
+            io.out,
+        )?;
         return Ok(false);
     }
     if let Some(injection) = io.hc_injection {
@@ -736,4 +946,82 @@ pub(crate) fn decode_moe(
         io.out,
     )?;
     Ok(false)
+}
+
+/// LM-head-only output policy. F32 is the buffer/accumulation type; official
+/// external-MLX values are BF16-rounded before sampling/scoring. Other model
+/// projections and the legacy head route remain unchanged.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn project_lm_logits(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    a: &Tensor,
+    w: &LinearWeights,
+    out: &Tensor,
+    scratch: &Tensor,
+    bf16_values: bool,
+) -> Result<()> {
+    if !bf16_values {
+        return project_mat(ctx, pass, a, w, out, scratch);
+    }
+    anyhow::ensure!(
+        a.shape().len() == 2
+            && w.codes.shape().len() == 2
+            && matches!(w.bits, 4 | 8 | 16),
+        "head matrix shape/storage"
+    );
+    let (m, k, n) = (a.shape()[0], w.in_features(), w.out_features());
+    anyhow::ensure!(
+        m > 0
+            && k > 0
+            && n > 0
+            && a.shape()[1] == k
+            && a.dtype() == DType::BF16
+            && out.dtype() == DType::F32
+            && out.numel() == m * n,
+        "head matrix activation/output geometry"
+    );
+    if w.bits != 16 {
+        anyhow::ensure!(
+            w.group_size > 0
+                && w.scales.dtype() == DType::BF16
+                && w.biases.dtype() == DType::BF16,
+            "head matrix affine metadata must be BF16"
+        );
+        quant::check_quant(w)?;
+    }
+    if m == 1 {
+        // A one-row scoring/batch readout has exactly the vector-head policy,
+        // including the scoped compiler mode and fused store when admitted.
+        return quant::gemv_quant_logits(
+            ctx,
+            pass,
+            w,
+            &a.view(0, &[k])?,
+            &out.view(0, &[n])?,
+            true,
+        );
+    }
+    let fast_matrix = skinny::dense_smallm_routes(m)
+        && n.is_multiple_of(64)
+        && ((w.bits == 4 && w.group_size == 64 && k.is_multiple_of(64))
+            || (w.bits == 8 && w.group_size.is_multiple_of(8) && k.is_multiple_of(8)));
+    if fast_matrix {
+        project_mat(ctx, pass, a, w, out, scratch)?;
+    } else {
+        // The trunk scratch does not contain a full dequantized vocabulary
+        // matrix. Use per-row F32 projection for other valid formats/widths;
+        // never allocate/convert a second head or reinterpret BF16 as F32.
+        for row in 0..m {
+            quant::gemv_quant(
+                ctx,
+                pass,
+                w,
+                &a.view(row * k, &[k])?,
+                &out.view(row * n, &[n])?,
+            )?;
+        }
+    }
+    pass.level_barrier(&[out])?;
+    quant::round_logits_bf16_values(ctx, pass, out)
 }

@@ -21,24 +21,38 @@ use crate::engine::{
     RowsInFlight, RowsStepTiming, ScratchApi, SnapshotApi, VisionMode, VisionTower,
 };
 use crate::kernels::attention::{
-    KvCache, KvFormat, MAX_SEQ, k_norm_rope_scatter_decode, kv_dequant_q8,
-    q_norm_rope_split_decode, rope_neox, scatter_kv, sdpa_decode, sdpa_prefill,
-    sdpa_split_scratch_splits, split_q_gate,
+    KvCache, KvFormat, MAX_SEQ,
+    k_norm_rope_scatter_decode_with_rounding as k_norm_rope_scatter_decode_with_bias,
+    kv_dequant_q8,
+    q_norm_rope_split_decode_with_rounding as q_norm_rope_split_decode_with_bias,
+    rope_neox, scatter_kv, sdpa_decode, sdpa_prefill, sdpa_split_scratch_splits,
+    split_q_gate,
 };
 use crate::kernels::elementwise::{
-    add_bf16, copy_words, gather_row_bf16, sigmoid_mul_bf16,
+    add_bf16, copy_words, gather_row_bf16,
+    sigmoid_mul_bf16_with_rounding as sigmoid_mul_bf16,
 };
 use crate::kernels::gdn::{
     GDN_HEAD_DIM, GDN_STATE_DTYPE, GdnChunkStaging, GdnGate, GdnRegscanStaging,
-    conv1d_prefill, conv1d_step, gated_rmsnorm, gdn_chunk_staging_shapes,
-    gdn_prefill_mid, gdn_step_gated_fused,
+    GdnStateLayout, conv1d_prefill_with_rounding as conv1d_prefill,
+    conv1d_step_with_layout as conv1d_step,
+    gated_rmsnorm_with_rounding as gated_rmsnorm, gdn_chunk_staging_shapes,
+    gdn_prefill_mid_with_layout as gdn_prefill_mid,
+    gdn_step_gated_fused_with_layout as gdn_step_gated_fused,
+};
+use crate::kernels::hc::stock::{
+    InjectionInputKind, PendingHcWrite, inject_after_read as hc_inject_bf16,
+    write_gate_to as hc_write_gate_to, write_pair_selected,
 };
 use crate::kernels::hc::{
-    HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16, hc_inject_bf16,
-    hc_mix_bf16, hc_read_down_q8_rows, hc_read_up_mix_q8_cached,
-    hc_read_up_mix_q8_rows, rmsnorm_grouped_bf16, silu_scaled_bf16,
+    HC_FUSED_MAX_ROWS, fused_read_supported, hc_broadcast_bf16,
+    hc_mix_bf16_with_rounding as hc_mix_bf16, hc_read_down_q8_rows,
+    hc_read_up_mix_q8_cached, hc_read_up_mix_q8_rows, official_hc_down_act_q8,
+    official_hc_up_mix_q8, official_narrow_sigmoid_supported,
+    rmsnorm_grouped_bf16_with_rounding as rmsnorm_grouped_bf16,
+    silu_scaled_bf16_with_rounding as silu_scaled_bf16,
 };
-use crate::kernels::norm::rmsnorm_bf16;
+use crate::kernels::norm::rmsnorm_bf16_with_rounding as rmsnorm_bf16;
 use crate::kernels::ple;
 use crate::kernels::qsa::{self, INDEXER_D, SparseAttnRoute, SparseSplitScratch};
 use crate::kernels::sample::{
@@ -69,7 +83,6 @@ use super::weights::{
 
 /// Every RMSNorm in this model is zero-centered: gain = 1 + weight. (The GDN
 /// GatedNorm is the exception and uses a plain gain.)
-pub(super) const NORM_WEIGHT_BIAS: f32 = 1.0;
 
 /// Prompt tokens processed by one prefill command buffer.
 const PREFILL_CHUNK: usize = 4096;
@@ -307,6 +320,7 @@ fn moe_dims(cfg: &Qwen4ExpConfig) -> MoeDims {
         moe_intermediate: cfg.moe_intermediate_size,
         hidden: cfg.hidden_size,
         norm_topk_prob: cfg.norm_topk_prob,
+        official_mlx_rounding: cfg.official_mlx_rounding(),
     }
 }
 
@@ -335,8 +349,10 @@ pub struct Qwen4ExpModel {
 
 pub(super) enum LayerState {
     Gdn {
-        /// Recurrent state, fp32 `[H, 128, 128]`.
+        /// F32 recurrent state. Equal D128 axes are interpreted by `layout`.
         state: Tensor,
+        /// Persistent physical order, retained across reset/snapshot/restore.
+        layout: GdnStateLayout,
         /// Double-buffered conv window, bf16 `[C, KD-1]` each (see the
         /// Qwen3.5 graph for the buffering contract).
         conv_windows: [Tensor; 2],
@@ -424,8 +440,8 @@ pub struct DecodeState {
 /// last hidden.
 pub struct Snapshot {
     pos: usize,
-    /// Per GDN layer, in layer order: `(state, conv_window)`.
-    gdn: Vec<(Tensor, Tensor)>,
+    /// Per GDN layer, in layer order: `(state, conv_window, physical_layout)`.
+    gdn: Vec<(Tensor, Tensor, GdnStateLayout)>,
     ple: Option<([u32; 2], Tensor)>,
     mtp_hidden: Option<Tensor>,
 }
@@ -436,7 +452,7 @@ impl SnapshotApi for Snapshot {
     }
 
     fn bytes(&self) -> usize {
-        self.gdn.iter().map(|(a, b)| a.byte_len() + b.byte_len()).sum::<usize>()
+        self.gdn.iter().map(|(a, b, _)| a.byte_len() + b.byte_len()).sum::<usize>()
             + self.ple.as_ref().map_or(0, |(_, w)| w.byte_len())
             + self.mtp_hidden.as_ref().map_or(0, Tensor::byte_len)
     }
@@ -556,7 +572,7 @@ impl DecodeState {
     /// must be idle on this state's buffers.
     pub fn reset(&mut self) -> Result<()> {
         for lstate in &self.layers {
-            if let LayerState::Gdn { state, conv_windows } = lstate {
+            if let LayerState::Gdn { state, conv_windows, .. } = lstate {
                 state.zero_fill();
                 conv_windows[0].zero_fill();
                 conv_windows[1].zero_fill();
@@ -824,11 +840,16 @@ pub(super) struct HcScratch {
     pub(super) up: Tensor,
     /// `[rows, H]` the block input.
     pub(super) mixed: Tensor,
-    /// `[rows, G]` write-gate logits.
+    /// `[rows, G]` raw logits, or finished gates after a selected stock read.
+    /// The subsequent write must use the matching hc_injection_kind.
     inj: Tensor,
     /// `[rows, G]` F32 stream RMS reciprocals handed from the fused down
     /// kernel to the fused up kernel.
     inv_rms: Tensor,
+    /// Fixed one-row stock partials; never scaled with large prefill capacity.
+    stock_parts: Option<Tensor>,
+    /// One distinct WR1 residual stream; pairs finish back in canonical hyper.
+    stock_write_hyper: Option<Tensor>,
 }
 
 impl HcScratch {
@@ -843,6 +864,29 @@ impl HcScratch {
             mixed: Tensor::zeros(ctx, &[rows, h], bf)?,
             inj: Tensor::zeros(ctx, &[rows, g], bf)?,
             inv_rms: Tensor::zeros(ctx, &[rows, g], DType::F32)?,
+            stock_write_hyper: if rows == 1
+                && cfg.official_mlx_rounding()
+                && h == 2560
+                && g == 4
+                && cfg.hc_lowrank == 320
+            {
+                Some(Tensor::zeros(ctx, &[1, wide], bf)?)
+            } else {
+                None
+            },
+            stock_parts: if cfg.official_mlx_rounding()
+                && h == 2560
+                && g == 4
+                && cfg.hc_lowrank == 320
+            {
+                Some(Tensor::zeros(
+                    ctx,
+                    &[1, crate::kernels::hc::stock::PARTS],
+                    DType::F32,
+                )?)
+            } else {
+                None
+            },
         })
     }
 
@@ -855,6 +899,8 @@ impl HcScratch {
             mixed: prefix_rows(&self.mixed, m)?,
             inj: prefix_rows(&self.inj, m)?,
             inv_rms: prefix_rows(&self.inv_rms, m)?,
+            stock_parts: self.stock_parts.clone(),
+            stock_write_hyper: self.stock_write_hyper.clone(),
         })
     }
 }
@@ -880,6 +926,7 @@ pub struct Scratch {
     a: Tensor,
     b: Tensor,
     gdn_gated: Tensor,
+    gdn_raw: Tensor,
     qg: Tensor,
     q: Tensor,
     gate: Tensor,
@@ -1198,7 +1245,7 @@ impl PrefillScratch {
             )?,
             kv_staging: match kv_format {
                 KvFormat::Bf16 => None,
-                KvFormat::Q8 => {
+                KvFormat::Q8 | KvFormat::Q8Affine64 => {
                     let shape = [nkv, cfg.indexer.dense_limit(), hd];
                     Some([
                         Tensor::zeros(ctx, &shape, bf)?,
@@ -1357,6 +1404,42 @@ impl Qwen4ExpModel {
             expert_usage_out,
             session_context,
         )?;
+        Self::from_weights(config, weights)
+    }
+
+    /// Executes a self-contained Uzu converted text artifact through the same
+    /// validated BF16 architecture kernels. No native folder is consulted.
+    pub fn load_uzu(
+        ctx: &MetalContext,
+        config: Qwen4ExpConfig,
+        checkpoint: crate::safetensors::Checkpoint,
+    ) -> Result<Self> {
+        ensure!(
+            config.linear_key_head_dim == GDN_HEAD_DIM
+                && config.linear_value_head_dim == GDN_HEAD_DIM,
+            "unsupported Uzu GDN head dimension"
+        );
+        ensure!(
+            config.indexer.head_dim == INDEXER_D,
+            "unsupported Uzu indexer head dimension"
+        );
+        ensure!(
+            config.mtp.is_none() && config.vision.is_none(),
+            "Uzu Qwen execution is text-only and non-speculative"
+        );
+        let weights = weights::load_checkpoint(
+            ctx,
+            checkpoint,
+            &config,
+            NgramStorage::Paged,
+            false,
+            false,
+            None,
+        )?;
+        Self::from_weights(config, weights)
+    }
+
+    fn from_weights(config: Qwen4ExpConfig, weights: ModelWeights) -> Result<Self> {
         let hasher = match &config.ple {
             Some(p) => Some(NgramHasher::new(
                 &p.layer_multipliers,
@@ -1510,6 +1593,14 @@ impl Qwen4ExpModel {
             .iter()
             .map(|layer| match &layer.mixer {
                 Mixer::Gdn(_) => Ok(LayerState::Gdn {
+                    layout: GdnStateLayout::for_model(
+                        cfg.official_mlx_rounding()
+                            && self.gdn_gate == GdnGate::Sigmoid,
+                        cfg.linear_num_key_heads,
+                        cfg.linear_num_value_heads,
+                        cfg.linear_key_head_dim,
+                        cfg.linear_value_head_dim,
+                    ),
                     state: Tensor::zeros(
                         ctx,
                         &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
@@ -1604,6 +1695,15 @@ impl Qwen4ExpModel {
         let _ = pos;
     }
 
+    /// Logical head-value precision; the sampler/scorer transport remains F32.
+    pub fn head_value_precision_policy(&self) -> &'static str {
+        if self.config.official_mlx_rounding() {
+            quant::OFFICIAL_HEAD_VALUE_POLICY
+        } else {
+            "f32_accumulation_f32_values_f32_buffer"
+        }
+    }
+
     /// Experts and top-k of the routed FFN (for reading the log).
     pub fn moe_shape(&self) -> (usize, usize, usize) {
         (
@@ -1677,6 +1777,7 @@ impl Qwen4ExpModel {
             a: gdn_in.view(conv_c + dim_v, &[heads])?,
             b: gdn_in.view(conv_c + dim_v + heads, &[heads])?,
             gdn_gated: Tensor::zeros(ctx, &[dim_v], bf)?,
+            gdn_raw: Tensor::zeros(ctx, &[dim_v], bf)?,
             qg: attn_qkv.view(0, &[nq, 2 * hd])?,
             q: Tensor::zeros(ctx, &[nq, hd], bf)?,
             gate: Tensor::zeros(ctx, &[nq, hd], bf)?,
@@ -2175,12 +2276,13 @@ impl Qwen4ExpModel {
                     gather_row_bf16(ctx, &pass, &ps.hyper, &s.hyper, m - 1)?;
                     pass.level_barrier(&[&s.hyper])?;
                     self.hc_read_decode(ctx, &pass, &self.weights.final_mixer, s)?;
-                    quant::gemv_quant(
+                    quant::gemv_quant_logits(
                         ctx,
                         &pass,
                         &self.weights.lm_head,
                         &s.hc.mixed,
                         &s.logits,
+                        self.config.official_mlx_rounding(),
                     )?;
                     pass.level_barrier(&[&s.logits])?;
                     // Slot 0 by convention: the pipelined loop's first decode step
@@ -2215,13 +2317,14 @@ impl Qwen4ExpModel {
                     ps,
                 )?;
                 let logits = prefix_rows(&sp.logits, m)?;
-                project_mat(
+                crate::moe_ffn::project_lm_logits(
                     ctx,
                     &pass,
                     &ps.hc.mixed,
                     &self.weights.lm_head,
                     &logits,
                     &s.dequant,
+                    self.config.official_mlx_rounding(),
                 )?;
                 pass.level_barrier(&[&logits])?;
                 // One draw per row; the rows share the sampler scratch (and
@@ -2303,7 +2406,7 @@ impl Qwen4ExpModel {
 
         self.hc_read_batched(ctx, pass, &layer.attn_hc, hyper, s, ps)?;
         match (&layer.mixer, lstate) {
-            (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
+            (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows, layout }) => {
                 self.gdn_batched(
                     ctx,
                     pass,
@@ -2311,6 +2414,7 @@ impl Qwen4ExpModel {
                     s,
                     ps,
                     state,
+                    *layout,
                     conv_windows,
                     conv_slot,
                     capture,
@@ -2328,7 +2432,18 @@ impl Qwen4ExpModel {
             _ => anyhow::bail!("layer/state kind mismatch"),
         }
         pass.level_barrier(&[&ps.branch_out])?;
-        hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+        hc_inject_bf16(
+            ctx,
+            pass,
+            hyper,
+            &ps.branch_out,
+            &ps.hc.inj,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
+            self.hc_primitive_sigmoid(&layer.attn_hc, ps.m),
+            self.hc_injection_kind(&layer.attn_hc, ps.m),
+        )?;
         pass.level_barrier(&[hyper])?;
 
         self.hc_read_batched(ctx, pass, &layer.mlp_hc, hyper, s, ps)?;
@@ -2349,12 +2464,24 @@ impl Qwen4ExpModel {
             &ps.moe,
         )?;
         pass.level_barrier(&[&ps.branch_out])?;
-        hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+        hc_inject_bf16(
+            ctx,
+            pass,
+            hyper,
+            &ps.branch_out,
+            &ps.hc.inj,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
+            self.hc_primitive_sigmoid(&layer.mlp_hc, ps.m),
+            self.hc_injection_kind(&layer.mlp_hc, ps.m),
+        )?;
         pass.level_barrier(&[hyper])
     }
 
-    /// `hyper` `[m, G*H]` → `ps.hc.mixed` `[m, H]` (and the write-gate logits
-    /// when the block has an inject weight). Up to `HC_FUSED_MAX_ROWS` rows
+    /// `hyper` `[m, G*H]` → `ps.hc.mixed` `[m, H]` and the write-gate input
+    /// when the block has an inject weight; hc_injection_kind identifies
+    /// raw logits versus a finished gate. Up to `HC_FUSED_MAX_ROWS` rows
     /// (the verify pass, the draft head) take the two fused kernels of the
     /// decode read, so those rows compute the read exactly as decode does;
     /// larger chunks (prefill) take the six-kernel skinny/GEMM chain. Leaves
@@ -2369,6 +2496,59 @@ impl Qwen4ExpModel {
         ps: &PrefillScratch,
     ) -> Result<()> {
         self.hc_read_rows(ctx, pass, hc, hyper, &ps.hc, ps.m, &s.dequant)
+    }
+
+    /// One descriptor/row predicate governs both the read and its subsequent
+    /// injection interpretation. A skipped read never returns a finished gate.
+    pub(super) fn hc_full_read_selected(&self, hc: &HcWeights, rows: usize) -> bool {
+        hc.official_read.as_ref().is_some_and(|read| {
+            read.selected_for(
+                self.config.official_mlx_rounding(),
+                rows,
+                !crate::ablate::on(crate::ablate::Group::Hc),
+            )
+        })
+    }
+
+    /// Defer only one attention write into its immediately following MLP read.
+    /// Both reads must have produced/return the finished stock gate contract.
+    fn hc_write_pair_selected(
+        &self,
+        first: &HcWeights,
+        next: &HcWeights,
+        scratch: &HcScratch,
+    ) -> bool {
+        write_pair_selected(
+            self.hc_full_read_selected(first, 1),
+            self.hc_full_read_selected(next, 1),
+            first.official_read.as_ref().is_some_and(|read| read.has_inject()),
+            next.official_read.as_ref().is_some_and(|read| read.has_inject()),
+            !crate::ablate::on(crate::ablate::Group::Inject),
+            scratch.stock_write_hyper.is_some(),
+        )
+    }
+
+    pub(super) fn hc_injection_kind(
+        &self,
+        hc: &HcWeights,
+        rows: usize,
+    ) -> InjectionInputKind {
+        InjectionInputKind::from_full_read(self.hc_full_read_selected(hc, rows))
+    }
+
+    /// Follow the sigmoid used by the pinned MLX serving branch, rather than
+    /// inferring its narrow fused eligibility solely from the number of rows.
+    pub(super) fn hc_primitive_sigmoid(&self, hc: &HcWeights, rows: usize) -> bool {
+        self.config.official_mlx_rounding()
+            && !official_narrow_sigmoid_supported(
+                &hc.norm,
+                &hc.down,
+                &hc.up,
+                hc.inject.as_ref(),
+                self.config.hidden_size,
+                self.config.hc_count,
+                rows,
+            )
     }
 
     /// [`Self::hc_read_batched`] into any `m`-row hyper-connection scratch
@@ -2386,7 +2566,21 @@ impl Qwen4ExpModel {
     ) -> Result<()> {
         let cfg = &self.config;
         let (h, g) = (cfg.hidden_size, cfg.hc_count);
-        if m <= HC_FUSED_MAX_ROWS
+        if self.hc_full_read_selected(hc, m) {
+            let prepared = hc.official_read.as_ref().expect("selected descriptor");
+            let parts = out.stock_parts.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("stock HC read selected without its parts scratch")
+            })?;
+            prepared.read(
+                ctx, pass, hyper, &hc.norm, &out.hn, parts, &out.mixed, &out.inj,
+            )?;
+            return pass.level_barrier(&[&out.mixed, &out.inj]);
+        }
+        // The external checkpoint's reference rounds normalized streams
+        // before either projection. The original fused path retains them
+        // in F32; keep it for Lily until a compatible fusion is qualified.
+        if !cfg.official_mlx_rounding()
+            && m <= HC_FUSED_MAX_ROWS
             && fused_read_supported(&hc.down, &hc.up, hc.inject.as_ref(), h, g)
         {
             hc_read_down_q8_rows(
@@ -2403,7 +2597,7 @@ impl Qwen4ExpModel {
                 h,
                 g,
                 cfg.rms_norm_eps,
-                NORM_WEIGHT_BIAS,
+                self.config.norm_weight_bias(),
             )?;
             pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
             hc_read_up_mix_q8_rows(
@@ -2417,11 +2611,12 @@ impl Qwen4ExpModel {
                 &out.mixed,
                 h,
                 g,
-                NORM_WEIGHT_BIAS,
+                self.config.norm_weight_bias(),
             )?;
             return pass.level_barrier(&[&out.mixed]);
         }
         let inv_g = 1.0 / g as f32;
+        let primitive_sigmoid = self.hc_primitive_sigmoid(hc, m);
         rmsnorm_grouped_bf16(
             ctx,
             pass,
@@ -2431,19 +2626,74 @@ impl Qwen4ExpModel {
             h,
             g,
             cfg.rms_norm_eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&out.hn])?;
+        // Keep the exact two-stage normalized BF16 stream materialized.
+        // Only the admitted one-row custom-narrow geometry fuses the tails.
+        if cfg.official_mlx_rounding()
+            && m == 1
+            && official_narrow_sigmoid_supported(
+                &hc.norm,
+                &hc.down,
+                &hc.up,
+                hc.inject.as_ref(),
+                h,
+                g,
+                m,
+            )
+        {
+            official_hc_down_act_q8(ctx, pass, &hc.down, &out.hn, &out.down, &out.act)?;
+            if let Some(inject) = &hc.inject {
+                project_mat(ctx, pass, &out.hn, inject, &out.inj, dequant)?;
+            }
+            pass.level_barrier(&[&out.down, &out.act, &out.inj])?;
+            official_hc_up_mix_q8(ctx, pass, &hc.up, &out.act, &out.hn, &out.mixed)?;
+            return pass.level_barrier(&[&out.mixed]);
+        }
         project_mat(ctx, pass, &out.hn, &hc.down, &out.down, dequant)?;
         if let Some(inject) = &hc.inject {
             project_mat(ctx, pass, &out.hn, inject, &out.inj, dequant)?;
         }
         pass.level_barrier(&[&out.down, &out.inj])?;
-        silu_scaled_bf16(ctx, pass, &out.down, &out.act, inv_g)?;
+        silu_scaled_bf16(
+            ctx,
+            pass,
+            &out.down,
+            &out.act,
+            inv_g,
+            self.config.official_mlx_rounding(),
+            primitive_sigmoid,
+        )?;
         pass.level_barrier(&[&out.act])?;
         project_mat(ctx, pass, &out.act, &hc.up, &out.up, dequant)?;
         pass.level_barrier(&[&out.up])?;
-        hc_mix_bf16(ctx, pass, &out.up, &out.hn, &out.mixed, h, g)?;
+        hc_mix_bf16(
+            ctx,
+            pass,
+            &out.up,
+            &out.hn,
+            &out.mixed,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
+            primitive_sigmoid,
+            // Pinned hc_prefill.zig supports one-sequence chunks through
+            // 8192 + TAIL_MERGE_MAX(512) - 1, and requires dense inject.
+            self.config.official_mlx_rounding()
+                && (17..=8703).contains(&m)
+                && hc.inject.is_some()
+                && official_narrow_sigmoid_supported(
+                    &hc.norm,
+                    &hc.down,
+                    &hc.up,
+                    hc.inject.as_ref(),
+                    h,
+                    g,
+                    1,
+                ),
+        )?;
         pass.level_barrier(&[&out.mixed])
     }
 
@@ -2474,7 +2724,8 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
@@ -2489,11 +2740,20 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
-        ple::ple_gate_value_bf16(
-            ctx, pass, &p.key_n, &p.query_n, &p.value, &p.gated, h, g,
+        ple::ple_gate_value_bf16_with_rounding(
+            ctx,
+            pass,
+            &p.key_n,
+            &p.query_n,
+            &p.value,
+            &p.gated,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated])?;
         rmsnorm_grouped_bf16(
@@ -2505,13 +2765,14 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
         if let Some(keep) = conv_capture {
             copy_words(ctx, pass, &p.gated_n, keep)?;
         }
-        ple::ple_conv1d_prefill(
+        ple::ple_conv1d_prefill_with_rounding(
             ctx,
             pass,
             &pst.conv_windows[conv_slot],
@@ -2521,6 +2782,7 @@ impl Qwen4ExpModel {
             &p.gated,
             hyper,
             ple.ngram_size,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[hyper, &pst.conv_windows[1 - conv_slot]])
     }
@@ -2534,6 +2796,7 @@ impl Qwen4ExpModel {
         s: &Scratch,
         ps: &PrefillScratch,
         gdn_state: &Tensor,
+        gdn_layout: GdnStateLayout,
         conv_windows: &[Tensor; 2],
         conv_slot: usize,
         capture: Option<&Capture>,
@@ -2565,6 +2828,7 @@ impl Qwen4ExpModel {
             &ps.qkv,
             &w.conv_w,
             &ps.qkv_conv,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&ps.qkv_conv, &conv_windows[1 - conv_slot]])?;
         let staging = ps.gdn_stage.staging();
@@ -2582,6 +2846,8 @@ impl Qwen4ExpModel {
             self.gdn_scale,
             cfg.linear_num_key_heads,
             capture.and_then(|c| c.mid.as_ref()),
+            self.config.official_mlx_rounding(),
+            gdn_layout,
         )?;
         pass.level_barrier(&[&ps.gdn_out, gdn_state])?;
         gated_rmsnorm(
@@ -2593,6 +2859,7 @@ impl Qwen4ExpModel {
             &ps.gdn_gated,
             cfg.rms_norm_eps,
             self.gdn_gate,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&ps.gdn_gated])?;
         project_mat(ctx, pass, &ps.gdn_gated, &w.out_proj, &ps.branch_out, &s.dequant)
@@ -2684,10 +2951,11 @@ impl Qwen4ExpModel {
             &w.k_norm,
             &ps.k_new,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         // Indexer: queries for this chunk, raw keys into the cache.
-        qsa::qsa_prep_q(
+        qsa::qsa_prep_q_with_rounding(
             ctx,
             pass,
             &ps.idx_qk,
@@ -2699,10 +2967,21 @@ impl Qwen4ExpModel {
             theta,
             eps,
             rope,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &ps.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[&ps.q, &ps.gate, &ps.k_new, &ps.idx_q, idx_keys])?;
-        rmsnorm_bf16(ctx, pass, &ps.q, &w.q_norm, &ps.q, eps, NORM_WEIGHT_BIAS)?;
+        rmsnorm_bf16(
+            ctx,
+            pass,
+            &ps.q,
+            &w.q_norm,
+            &ps.q,
+            eps,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
+        )?;
         rope_neox(
             ctx,
             pass,
@@ -2720,7 +2999,7 @@ impl Qwen4ExpModel {
                 let first_block = p / ratio;
                 let complete = (p + m) / ratio;
                 if complete > first_block {
-                    qsa::qsa_block_keys(
+                    qsa::qsa_block_keys_with_rounding(
                         ctx,
                         pass,
                         idx_keys,
@@ -2733,6 +3012,8 @@ impl Qwen4ExpModel {
                         theta,
                         eps,
                         rope,
+                        self.config.norm_weight_bias(),
+                        self.config.official_mlx_rounding(),
                     )?;
                 }
             }
@@ -2745,7 +3026,7 @@ impl Qwen4ExpModel {
                 );
                 let first_min = pos.min / ratio;
                 if (pos.max + 1) / ratio > first_min {
-                    qsa::qsa_block_keys(
+                    qsa::qsa_block_keys_with_rounding(
                         ctx,
                         pass,
                         idx_keys,
@@ -2758,6 +3039,8 @@ impl Qwen4ExpModel {
                         theta,
                         eps,
                         rope,
+                        self.config.norm_weight_bias(),
+                        self.config.official_mlx_rounding(),
                     )?;
                 }
             }
@@ -2894,7 +3177,15 @@ impl Qwen4ExpModel {
             }
         }
         pass.level_barrier(&[&ps.attn_o])?;
-        sigmoid_mul_bf16(ctx, pass, &ps.gate, &ps.attn_o, &ps.attn_gated)?;
+        sigmoid_mul_bf16(
+            ctx,
+            pass,
+            &ps.gate,
+            &ps.attn_o,
+            &ps.attn_gated,
+            ps.moe.sigmoid_table.as_ref(),
+            self.config.official_mlx_rounding(),
+        )?;
         pass.level_barrier(&[&ps.attn_gated])?;
         project_mat(ctx, pass, &ps.attn_gated, &w.o_proj, &ps.branch_out, &s.dequant)
     }
@@ -3016,7 +3307,18 @@ impl Qwen4ExpModel {
             rope,
         )?;
         pass.level_barrier(&[&ps.branch_out])?;
-        hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+        hc_inject_bf16(
+            ctx,
+            pass,
+            hyper,
+            &ps.branch_out,
+            &ps.hc.inj,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
+            self.hc_primitive_sigmoid(&mtp.layer.attn_hc, ps.m),
+            self.hc_injection_kind(&mtp.layer.attn_hc, ps.m),
+        )?;
         pass.level_barrier(&[hyper])?;
         self.hc_read_batched(ctx, pass, &mtp.layer.mlp_hc, hyper, s, ps)?;
         prefill_moe(
@@ -3036,7 +3338,18 @@ impl Qwen4ExpModel {
             &ps.moe,
         )?;
         pass.level_barrier(&[&ps.branch_out])?;
-        hc_inject_bf16(ctx, pass, hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+        hc_inject_bf16(
+            ctx,
+            pass,
+            hyper,
+            &ps.branch_out,
+            &ps.hc.inj,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
+            self.hc_primitive_sigmoid(&mtp.layer.mlp_hc, ps.m),
+            self.hc_injection_kind(&mtp.layer.mlp_hc, ps.m),
+        )?;
         pass.level_barrier(&[hyper])
     }
 
@@ -3085,7 +3398,8 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         quant::gather_rows_quant(ctx, pass, &self.weights.embed_tokens, ids, &ps.x)?;
         if !overrides.is_empty() {
@@ -3110,7 +3424,8 @@ impl Qwen4ExpModel {
             &mtp.norm_embedding,
             &ps.x,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[hyper, &ps.x])?;
         project_mat(ctx, pass, &ps.x, &mtp.fc_embedding, &ps.branch_out, &s.dequant)?;
@@ -3202,7 +3517,8 @@ impl Qwen4ExpModel {
             &w.k_norm,
             &ps.k_new,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &ps.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[&ps.k_new, idx_keys])?;
@@ -3221,7 +3537,7 @@ impl Qwen4ExpModel {
         let first_block = pos / ratio;
         let complete = (pos + m) / ratio;
         if complete > first_block {
-            qsa::qsa_block_keys(
+            qsa::qsa_block_keys_with_rounding(
                 ctx,
                 pass,
                 idx_keys,
@@ -3234,6 +3550,8 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 rope,
+                self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
         }
         pass.level_barrier(&[&ps.k_new, blk_keys])?;
@@ -3293,14 +3611,14 @@ impl Qwen4ExpModel {
             pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
             self.hc_read_decode(ctx, pass, &layer.attn_hc, s)?;
             match (&layer.mixer, lstate) {
-                (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows }) => {
-                    pass.profile_stage(crate::metal::stage_profile::Phase::Gdn)?;
+                (Mixer::Gdn(w), LayerState::Gdn { state, conv_windows, layout }) => {
                     self.gdn_decode_branch(
                         ctx,
                         pass,
                         w,
                         s,
                         state,
+                        *layout,
                         &conv_windows[conv_slot],
                     )?;
                 }
@@ -3325,16 +3643,63 @@ impl Qwen4ExpModel {
                 _ => anyhow::bail!("layer/state kind mismatch"),
             }
             pass.level_barrier(&[&s.branch_out])?;
-            if !crate::ablate::on(crate::ablate::Group::Inject) {
+            let pair_write =
+                self.hc_write_pair_selected(&layer.attn_hc, &layer.mlp_hc, &s.hc);
+            if !crate::ablate::on(crate::ablate::Group::Inject) && !pair_write {
                 pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
-                hc_inject_bf16(ctx, pass, &s.hyper, &s.branch_out, &s.hc.inj, h, g)?;
+                hc_inject_bf16(
+                    ctx,
+                    pass,
+                    &s.hyper,
+                    &s.branch_out,
+                    &s.hc.inj,
+                    h,
+                    g,
+                    self.config.official_mlx_rounding(),
+                    self.hc_primitive_sigmoid(&layer.attn_hc, 1),
+                    self.hc_injection_kind(&layer.attn_hc, 1),
+                )?;
                 pass.level_barrier(&[&s.hyper])?;
             }
 
             pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
-            self.hc_read_decode(ctx, pass, &layer.mlp_hc, s)?;
-            pass.profile_stage(crate::metal::stage_profile::Phase::Moe)?;
-            let fuse_injection = !crate::ablate::on(crate::ablate::Group::Inject);
+            if pair_write {
+                let prepared = layer
+                    .mlp_hc
+                    .official_read
+                    .as_ref()
+                    .expect("selected pair descriptor");
+                let parts = s.hc.stock_parts.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "stock HC write pair selected without parts scratch"
+                    )
+                })?;
+                let written =
+                    s.hc.stock_write_hyper.as_ref().expect("selected pair scratch");
+                prepared.read_after_write(
+                    ctx,
+                    pass,
+                    &s.hyper,
+                    &layer.mlp_hc.norm,
+                    &s.hc.hn,
+                    parts,
+                    &s.hc.mixed,
+                    &s.hc.inj,
+                    written,
+                    PendingHcWrite {
+                        branch: &s.branch_out,
+                        gate: &s.hc.inj,
+                        kind: self.hc_injection_kind(&layer.attn_hc, 1),
+                    },
+                )?;
+                pass.level_barrier(&[&s.hc.mixed, &s.hc.inj, written])?;
+            } else {
+                self.hc_read_decode(ctx, pass, &layer.mlp_hc, s)?;
+            }
+            // The official write rounds its branch product before adding
+            // the residual; the existing fused MoE write keeps it in F32.
+            let fuse_injection = !crate::ablate::on(crate::ablate::Group::Inject)
+                && !cfg.official_mlx_rounding();
             let injected = decode_moe(
                 ctx,
                 pass,
@@ -3357,21 +3722,47 @@ impl Qwen4ExpModel {
                 },
                 &s.moe,
             )?;
+            ensure!(
+                !pair_write || !injected,
+                "stock HC write pair requires the separate official MoE write"
+            );
             if injected {
                 pass.level_barrier(&[&s.branch_out, &s.hyper])?;
             } else {
                 pass.level_barrier(&[&s.branch_out])?;
                 if !crate::ablate::on(crate::ablate::Group::Inject) {
                     pass.profile_stage(crate::metal::stage_profile::Phase::Hc)?;
-                    hc_inject_bf16(
-                        ctx,
-                        pass,
-                        &s.hyper,
-                        &s.branch_out,
-                        &s.hc.inj,
-                        h,
-                        g,
-                    )?;
+                    if pair_write {
+                        // Complete this pair in canonical hyper storage. No
+                        // pending branch/gate survives into PLE, MTP or a layer.
+                        hc_write_gate_to(
+                            ctx,
+                            pass,
+                            s.hc.stock_write_hyper
+                                .as_ref()
+                                .expect("selected pair scratch"),
+                            &s.hyper,
+                            self.config.official_mlx_rounding(),
+                            PendingHcWrite {
+                                branch: &s.branch_out,
+                                gate: &s.hc.inj,
+                                kind: self.hc_injection_kind(&layer.mlp_hc, 1),
+                            },
+                        )?;
+                    } else {
+                        hc_inject_bf16(
+                            ctx,
+                            pass,
+                            &s.hyper,
+                            &s.branch_out,
+                            &s.hc.inj,
+                            h,
+                            g,
+                            self.config.official_mlx_rounding(),
+                            self.hc_primitive_sigmoid(&layer.mlp_hc, 1),
+                            self.hc_injection_kind(&layer.mlp_hc, 1),
+                        )?;
+                    }
                     pass.level_barrier(&[&s.hyper])?;
                 }
             }
@@ -3381,12 +3772,13 @@ impl Qwen4ExpModel {
         self.hc_read_decode(ctx, pass, &self.weights.final_mixer, s)?;
         if !crate::ablate::on(crate::ablate::Group::Head) {
             pass.profile_stage(crate::metal::stage_profile::Phase::Head)?;
-            quant::gemv_quant(
+            quant::gemv_quant_logits(
                 ctx,
                 pass,
                 &self.weights.lm_head,
                 &s.hc.mixed,
                 &s.logits,
+                self.config.official_mlx_rounding(),
             )?;
             pass.level_barrier(&[&s.logits])?;
         }
@@ -3414,6 +3806,12 @@ impl Qwen4ExpModel {
     ) -> Result<()> {
         if crate::ablate::on(crate::ablate::Group::Hc) {
             return Ok(());
+        }
+        if self.config.official_mlx_rounding() {
+            // Materialize the reference's two BF16 normalization stages;
+            // do not enter the unrounded cached HC projection path.
+            let hyper = s.hyper.view(0, &[1, self.config.hc_width()])?;
+            return self.hc_read_rows(ctx, pass, hc, &hyper, &s.hc, 1, &s.dequant);
         }
         self.hc_read_one(ctx, pass, hc, &s.hyper, &s.hc)
     }
@@ -3445,7 +3843,7 @@ impl Qwen4ExpModel {
             h,
             g,
             cfg.rms_norm_eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&out.down, &out.inj, &out.inv_rms, &out.act])?;
         hc_read_up_mix_q8_cached(
@@ -3459,7 +3857,7 @@ impl Qwen4ExpModel {
             &out.mixed,
             h,
             g,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
         )?;
         pass.level_barrier(&[&out.mixed])
     }
@@ -3488,7 +3886,8 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         quant::gemv_quant(ctx, pass, &w.key_proj, &p.emb, &p.key)?;
@@ -3503,11 +3902,20 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
-        ple::ple_gate_value_bf16(
-            ctx, pass, &p.key_n, &p.query_n, &p.value, &p.gated, h, g,
+        ple::ple_gate_value_bf16_with_rounding(
+            ctx,
+            pass,
+            &p.key_n,
+            &p.query_n,
+            &p.value,
+            &p.gated,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated])?;
         rmsnorm_grouped_bf16(
@@ -3519,10 +3927,11 @@ impl Qwen4ExpModel {
             h,
             g,
             eps,
-            NORM_WEIGHT_BIAS,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
-        ple::ple_conv1d_step(
+        ple::ple_conv1d_step_with_rounding(
             ctx,
             pass,
             &pst.conv_windows[conv_slot],
@@ -3531,6 +3940,7 @@ impl Qwen4ExpModel {
             &p.gated,
             &s.hyper,
             ple.ngram_size,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&s.hyper, &pst.conv_windows[conv_slot]])
     }
@@ -3542,13 +3952,21 @@ impl Qwen4ExpModel {
         w: &GdnWeights,
         s: &Scratch,
         gdn_state: &Tensor,
+        gdn_layout: GdnStateLayout,
         conv_window: &Tensor,
     ) -> Result<()> {
-        let fused_conv = !crate::ablate::on(crate::ablate::Group::GdnProj)
+        let fused_conv = !self.config.official_mlx_rounding()
+            && !crate::ablate::on(crate::ablate::Group::GdnProj)
             && !crate::ablate::on(crate::ablate::Group::GdnStep)
             && w.in_proj.bits == 4
             && self.config.linear_conv_kernel_dim == 4
             && w.in_proj.out_features().is_multiple_of(2);
+        // The stacked qkv/z/a/b projection is one dependency group.
+        pass.profile_stage(if fused_conv {
+            crate::metal::stage_profile::Phase::GdnInputProjectionConv
+        } else {
+            crate::metal::stage_profile::Phase::GdnInputProjections
+        })?;
         if !crate::ablate::on(crate::ablate::Group::GdnProj) {
             if fused_conv {
                 quant::gemv_q4_gdn_conv_step(
@@ -3563,7 +3981,14 @@ impl Qwen4ExpModel {
                 )?;
                 pass.level_barrier(&[&s.gdn_in, &s.qkv_conv, conv_window])?;
             } else {
-                quant::gemv_quant(ctx, pass, &w.in_proj, &s.hc.mixed, &s.gdn_in)?;
+                crate::kernels::official_q8_projection::gemv_gdn_decode(
+                    ctx,
+                    pass,
+                    &w.in_proj,
+                    &s.hc.mixed,
+                    &s.gdn_in,
+                    self.config.official_mlx_rounding(),
+                )?;
                 pass.level_barrier(&[&s.gdn_in])?;
             }
         }
@@ -3571,9 +3996,24 @@ impl Qwen4ExpModel {
             return Ok(());
         }
         if !fused_conv {
-            conv1d_step(ctx, pass, conv_window, &s.qkv, &w.conv_w, &s.qkv_conv)?;
+            pass.profile_stage(crate::metal::stage_profile::Phase::GdnConv)?;
+            conv1d_step(
+                ctx,
+                pass,
+                conv_window,
+                &s.qkv,
+                &w.conv_w,
+                &s.qkv_conv,
+                self.config.official_mlx_rounding(),
+                gdn_layout,
+            )?;
             pass.level_barrier(&[&s.qkv_conv, conv_window])?;
         }
+        pass.profile_stage(if gdn_layout == GdnStateLayout::ValueKey {
+            crate::metal::stage_profile::Phase::GdnRecurrence
+        } else {
+            crate::metal::stage_profile::Phase::GdnRecurrenceNorm
+        })?;
         gdn_step_gated_fused(
             ctx,
             pass,
@@ -3590,12 +4030,23 @@ impl Qwen4ExpModel {
             self.config.linear_num_key_heads,
             self.config.rms_norm_eps,
             self.gdn_gate,
+            self.config.official_mlx_rounding(),
+            gdn_layout,
+            &s.gdn_raw,
         )?;
         pass.level_barrier(&[&s.gdn_gated, gdn_state])?;
         if crate::ablate::on(crate::ablate::Group::GdnProj) {
             return Ok(());
         }
-        quant::gemv_quant(ctx, pass, &w.out_proj, &s.gdn_gated, &s.branch_out)
+        pass.profile_stage(crate::metal::stage_profile::Phase::GdnOutProjection)?;
+        crate::kernels::official_q8_projection::gemv_gdn_decode(
+            ctx,
+            pass,
+            &w.out_proj,
+            &s.gdn_gated,
+            &s.branch_out,
+            self.config.official_mlx_rounding(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3632,15 +4083,37 @@ impl Qwen4ExpModel {
         quant::gemv_quant(ctx, pass, &w.qkv_proj, &s.hc.mixed, &s.attn_qkv)?;
         quant::gemv_quant(ctx, pass, &w.indexer.qk_proj, &s.hc.mixed, &s.idx_qk)?;
         pass.level_barrier(&[&s.attn_qkv, &s.idx_qk])?;
-        q_norm_rope_split_decode(
-            ctx, pass, &s.qg, &w.q_norm, &s.q, &s.gate, rot, pos, theta, eps,
+        q_norm_rope_split_decode_with_bias(
+            ctx,
+            pass,
+            &s.qg,
+            &w.q_norm,
+            &s.q,
+            &s.gate,
+            rot,
+            pos,
+            theta,
+            eps,
             rope_delta,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
-        k_norm_rope_scatter_decode(
-            ctx, pass, &s.k_new, &w.k_norm, k_cache, rot, pos, theta, eps, rope_delta,
+        k_norm_rope_scatter_decode_with_bias(
+            ctx,
+            pass,
+            &s.k_new,
+            &w.k_norm,
+            k_cache,
+            rot,
+            pos,
+            theta,
+            eps,
+            rope_delta,
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         scatter_kv(ctx, pass, v_cache, &s.v_new, pos)?;
-        qsa::qsa_prep_q(
+        qsa::qsa_prep_q_with_rounding(
             ctx,
             pass,
             &s.idx_qk,
@@ -3652,6 +4125,8 @@ impl Qwen4ExpModel {
             theta,
             eps,
             Rope::Delta(rope_delta),
+            self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         qsa::qsa_scatter_keys(ctx, pass, &s.idx_qk, idx_keys, idx.n_heads, pos)?;
         pass.level_barrier(&[
@@ -3666,7 +4141,7 @@ impl Qwen4ExpModel {
             // This token completes a block: its key becomes selectable from
             // the next position on (and this one, beyond the dense limit).
             let block = len / idx.compress_ratio - 1;
-            qsa::qsa_block_keys(
+            qsa::qsa_block_keys_with_rounding(
                 ctx,
                 pass,
                 idx_keys,
@@ -3679,6 +4154,8 @@ impl Qwen4ExpModel {
                 theta,
                 eps,
                 Rope::Delta(rope_delta),
+                self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
             pass.level_barrier(&[blk_keys])?;
         }
@@ -3740,7 +4217,15 @@ impl Qwen4ExpModel {
             )?;
         }
         pass.level_barrier(&[&s.attn_o])?;
-        sigmoid_mul_bf16(ctx, pass, &s.gate, &s.attn_o, &s.attn_gated)?;
+        sigmoid_mul_bf16(
+            ctx,
+            pass,
+            &s.gate,
+            &s.attn_o,
+            &s.attn_gated,
+            s.moe.sigmoid_table.as_ref(),
+            self.config.official_mlx_rounding(),
+        )?;
         pass.level_barrier(&[&s.attn_gated])?;
         quant::gemv_quant(ctx, pass, &w.o_proj, &s.attn_gated, &s.branch_out)
     }
@@ -3850,7 +4335,7 @@ impl DecodeStateApi for DecodeState {
             .layers
             .iter()
             .map(|l| match l {
-                LayerState::Gdn { state, conv_windows } => {
+                LayerState::Gdn { state, conv_windows, .. } => {
                     state.byte_len()
                         + conv_windows[0].byte_len()
                         + conv_windows[1].byte_len()
@@ -3870,7 +4355,7 @@ impl DecodeStateApi for DecodeState {
         let slot = self.conv_slot;
         let mut sources = Vec::new();
         for lstate in &self.layers {
-            if let LayerState::Gdn { state, conv_windows } = lstate {
+            if let LayerState::Gdn { state, conv_windows, .. } = lstate {
                 sources.push(state);
                 sources.push(&conv_windows[slot]);
             }
@@ -3881,8 +4366,8 @@ impl DecodeStateApi for DecodeState {
         let mut next = || copies.next().expect("one copy per source");
         let mut gdn = Vec::new();
         for lstate in &self.layers {
-            if matches!(lstate, LayerState::Gdn { .. }) {
-                gdn.push((next(), next()));
+            if let LayerState::Gdn { layout, .. } = lstate {
+                gdn.push((next(), next(), *layout));
             }
         }
         let ple = self.ple.as_ref().map(|p| (p.hist, next()));
@@ -3900,10 +4385,14 @@ impl DecodeStateApi for DecodeState {
         let mut copies = Vec::new();
         let mut saved = snapshot.gdn.iter();
         for lstate in &self.layers {
-            if let LayerState::Gdn { state, conv_windows } = lstate {
-                let (s, w) = saved.next().ok_or_else(|| {
+            if let LayerState::Gdn { state, conv_windows, layout } = lstate {
+                let (s, w, saved_layout) = saved.next().ok_or_else(|| {
                     anyhow::anyhow!("snapshot has too few GDN layers")
                 })?;
+                ensure!(
+                    layout == saved_layout,
+                    "snapshot GDN physical state layout mismatch"
+                );
                 copies.push(BlitCopy {
                     src: s,
                     src_offset: 0,
@@ -4395,3 +4884,7 @@ impl LanguageModel for Qwen4ExpModel {
 // helpers and scratch.
 #[path = "batch.rs"]
 mod batch;
+
+#[cfg(test)]
+#[path = "official_gdn_state_lifecycle_tests.rs"]
+mod official_gdn_state_lifecycle_tests;

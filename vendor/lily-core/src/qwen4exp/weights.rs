@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 
+use crate::kernels::hc::stock::OfficialHcReadWeights;
 use crate::metal::{Buffer, MetalContext};
 use crate::safetensors::Checkpoint;
 use crate::tensor::Tensor;
@@ -43,6 +44,8 @@ pub struct HcWeights {
     pub up: LinearWeights,
     /// `[hc_count, hc_count * h]`.
     pub inject: Option<LinearWeights>,
+    /// Optional model-owned folded metadata for the admitted stock HC read.
+    pub(crate) official_read: Option<OfficialHcReadWeights>,
 }
 
 /// Per-layer n-gram embedding module.
@@ -193,6 +196,13 @@ pub struct SessionContext {
 /// every base must be in the same group, and the loader's row concatenation
 /// rejects slices of different packed widths anyway.
 fn expected_bits(storage: StoragePolicy, bases: &[&str]) -> usize {
+    if storage.external_mlx()
+        && bases.len() == 1
+        && (bases[0].ends_with(".block_inject_weight")
+            || bases[0].ends_with(".mlp.shared_expert_gate"))
+    {
+        return 16;
+    }
     let fixed_q8 = bases.len() == 1 && {
         let b = bases[0];
         b.ends_with(".mlp.gate")
@@ -311,7 +321,18 @@ fn load_hc(
     } else {
         None
     };
-    Ok(HcWeights { norm, down, up, inject })
+    let official_read = OfficialHcReadWeights::prepare(
+        loader.context(),
+        &norm,
+        &down,
+        &up,
+        inject.as_ref(),
+        config.hidden_size,
+        config.hc_count,
+        config.rms_norm_eps,
+        config.official_mlx_rounding(),
+    )?;
+    Ok(HcWeights { norm, down, up, inject, official_read })
 }
 
 fn load_mlp(
@@ -579,10 +600,33 @@ pub fn load(
             && session_context.is_none(),
         "vendored Lily core requires resident experts and has no session persistence"
     );
+    let ckpt = if config.storage.external_mlx() {
+        Checkpoint::open_qwen_external_mlx(&dir)?
+    } else {
+        Checkpoint::open(&dir)?
+    };
+    load_checkpoint(ctx, ckpt, config, storage, with_mtp, with_vision, machine_memory)
+}
+
+/// Shared architecture loader for native and converted Uzu storage. A Uzu
+/// caller supplies a checkpoint already admitted against canonical MLXSpec
+/// planes; this function never discovers or opens a source checkpoint.
+pub fn load_checkpoint(
+    ctx: &MetalContext,
+    ckpt: Checkpoint,
+    config: &Qwen4ExpConfig,
+    storage: NgramStorage,
+    with_mtp: bool,
+    with_vision: bool,
+    machine_memory: Option<u64>,
+) -> Result<ModelWeights> {
+    ensure!(
+        !with_mtp && !with_vision,
+        "vendored Lily core supports text-only non-speculative loading"
+    );
     // Every buffer allocated from here on that is still alive at the end is
     // a weight, or the expert cache's (filtered out below).
     let recording = ctx.record_buffers()?;
-    let ckpt = Checkpoint::open(&dir)?;
     ensure!(
         ckpt.meta(&format!("{PREFIX}embed_tokens.weight")).is_some(),
         "unsupported checkpoint layout; expected lily's qwen4_exp-affine-v1"
@@ -590,7 +634,7 @@ pub fn load(
     // The config must match the weights in both directions: a tower in the
     // files that config.json does not declare would otherwise be skipped
     // silently; a declared tower whose tensors are missing fails below.
-    if config.vision.is_none() {
+    if config.vision.is_none() && !config.storage.external_mlx() {
         let stray = ckpt.names().filter(|n| n.starts_with(VISION_PREFIX)).count();
         ensure!(
             stray == 0,
@@ -609,6 +653,34 @@ pub fn load(
         skip,
         Box::new(move |bases| expected_bits(policy, bases)),
     );
+    // Older exports can store copies of the PLE hashing controls. They must
+    // agree exactly with the typed architecture; kernels use the validated
+    // integer configuration and never cast these controls through floats.
+    if let Some(ple) = &config.ple {
+        let prefix = format!("{PREFIX}layers.{}.ple.ple_embedding.", ple.layer);
+        for (suffix, expected) in [
+            ("layer_multipliers", ple.layer_multipliers.as_slice()),
+            ("ngram_heads_vocab_sizes", ple.head_vocab_sizes.as_slice()),
+            ("ngram_heads_offsets", ple.head_offsets.as_slice()),
+        ] {
+            let name = format!("{prefix}{suffix}");
+            if let Some(meta) = loader.checkpoint().meta(&name) {
+                ensure!(
+                    meta.shape == [expected.len()]
+                        && matches!(&meta.dtype, crate::safetensors::SafetensorsDType::Other(dtype) if dtype == "I64" || dtype == "U64"),
+                    "invalid PLE integer control"
+                );
+                let bytes = loader.checkpoint().read(&name)?;
+                ensure!(
+                    bytes.chunks_exact(8).zip(expected).all(|(raw, value)| {
+                        u64::from_le_bytes(raw.try_into().unwrap()) == *value
+                    }),
+                    "PLE integer control mismatch"
+                );
+                loader.mark_consumed(&name);
+            }
+        }
+    }
     let h = config.hidden_size;
 
     let embed_tokens = loader.linear(&[&format!("{PREFIX}embed_tokens")], h)?;

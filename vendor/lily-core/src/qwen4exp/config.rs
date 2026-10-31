@@ -315,11 +315,14 @@ impl Q8Group {
 pub struct StoragePolicy {
     q8: u8,
     draft_q4: bool,
+    // The official MLX-Serve pack has an external affine PLE table,
+    // pre-folded norm gains and two small BF16 projection categories.
+    external_mlx: bool,
 }
 
 impl StoragePolicy {
     /// The policy of every checkpoint written before the choice existed.
-    pub const Q4: Self = Self { q8: 0, draft_q4: false };
+    pub const Q4: Self = Self { q8: 0, draft_q4: false, external_mlx: false };
 
     /// The groups whose 8-bit width the draft head would read: its own
     /// attention and shared expert, and the LM head it shares with the
@@ -329,7 +332,15 @@ impl StoragePolicy {
 
     /// The policy with exactly `groups` at 8 bits.
     pub fn q8(groups: &[Q8Group]) -> Self {
-        Self { q8: groups.iter().fold(0, |m, g| m | g.bit()), draft_q4: false }
+        Self {
+            q8: groups.iter().fold(0, |m, g| m | g.bit()),
+            draft_q4: false,
+            external_mlx: false,
+        }
+    }
+
+    pub fn external_mlx(self) -> bool {
+        self.external_mlx
     }
 
     /// The same trunk widths with the draft head's path kept 4-bit.
@@ -584,6 +595,171 @@ pub struct Qwen4ExpConfig {
     pub vision: Option<VisionConfig>,
 }
 
+/// Normalize only the supported official external-table storage dialect in
+/// memory. Source files and tensor values are never rewritten. Hash controls
+/// follow MLX-Serve v26.10.3 qwen4_exp.zig NgramHash.init (MIT upstream).
+fn official_mlx_config(mut value: serde_json::Value) -> Result<serde_json::Value> {
+    use serde_json::{Value, json};
+    ensure!(
+        value.get("model_type").and_then(Value::as_str) == Some("qwen4_exp"),
+        "unsupported official MLX architecture"
+    );
+    ensure!(
+        value.pointer("/ngram_table/file").and_then(Value::as_str)
+            == Some("ngram_table.bin")
+            && value.pointer("/ngram_table/bits").and_then(Value::as_u64) == Some(4)
+            && value.pointer("/ngram_table/group_size").and_then(Value::as_u64)
+                == Some(32),
+        "unsupported official MLX PLE table"
+    );
+    ensure!(
+        value.pointer("/quantization/mode").and_then(Value::as_str) == Some("affine")
+            && value.pointer("/quantization/bits").and_then(Value::as_u64) == Some(4)
+            && value.pointer("/quantization/group_size").and_then(Value::as_u64)
+                == Some(64),
+        "unsupported official MLX default quantization"
+    );
+    ensure!(
+        value.get("qwen4_norm_convention").is_none_or(|v| v.as_str() == Some("folded")),
+        "official MLX norms must use folded gains"
+    );
+    let t = value.get("text_config").context("official MLX text config")?;
+    let integer = |name: &str, default: Option<u64>| -> Result<u64> {
+        match t.get(name) {
+            Some(value) => value.as_u64(),
+            None => default,
+        }
+        .filter(|n| *n > 0)
+        .with_context(|| format!("invalid official MLX {name}"))
+    };
+    ensure!(
+        t.get("model_type").and_then(Value::as_str) == Some("qwen4_exp_text"),
+        "official MLX text architecture"
+    );
+    ensure!(
+        integer("ngram_size", Some(3))? == 3,
+        "official MLX loader supports three-token PLE hashing"
+    );
+    ensure!(
+        t.get("ple_layer_ids") == Some(&json!([2])),
+        "unsupported official MLX PLE injection layers"
+    );
+    let vocab = integer("vocab_size", None)?;
+    let heads = integer("heads_per_ngram", Some(8))?;
+    let base = integer("ngram_vocab_size_base", Some(20_000_000))?;
+    let divisor = integer("make_ngram_vocab_size_divisible_by", Some(128))?;
+    let seed = integer("ngram_seed", Some(1234))?;
+    ensure!(
+        vocab <= 1_000_000 && heads <= 16 && base <= 1_000_000_000 && divisor <= 65_536,
+        "official MLX PLE bounds"
+    );
+    const GAMMA: u64 = 0x9E3779B97F4A7C15;
+    let half_bound = ((i64::MAX as u64 / vocab) / 2).max(1);
+    let multipliers: Vec<u64> = (0..3)
+        .map(|i| {
+            let mut z =
+                seed.wrapping_add(GAMMA.wrapping_mul(i + 1)).wrapping_add(GAMMA);
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+            2 * ((z ^ (z >> 31)) % half_bound) + 1
+        })
+        .collect();
+    let prime = |n: u64| -> bool {
+        if n < 2 {
+            return false;
+        }
+        if n % 2 == 0 {
+            return n == 2;
+        }
+        let mut d = 3;
+        while d * d <= n {
+            if n % d == 0 {
+                return false;
+            }
+            d += 2;
+        }
+        true
+    };
+    let mut sizes = Vec::new();
+    let mut offsets = Vec::new();
+    let (mut next, mut total) = (base - 1, 0u64);
+    for _ in 0..2 * heads {
+        next += 1;
+        while !prime(next) {
+            next += 1;
+        }
+        sizes.push(next);
+        offsets.push(total);
+        total = total.checked_add(next).context("official MLX PLE capacity")?;
+    }
+    let padded = total.div_ceil(divisor) * divisor;
+    ensure!(padded <= u32::MAX as u64, "official MLX PLE exceeds row-ID capacity");
+    value["text_config"]["split_ngram_parts"] = json!(1);
+    value["lily"] = json!({
+        "format": FORMAT,
+        "quantization": {"default":{"bits":4,"group_size":64}, "ngram_embedding":{"bits":4,"group_size":32}, "q8_groups":["attn","gdn","shared","head"]},
+        "ple": {"layer_multipliers":multipliers,"ngram_heads_vocab_sizes":sizes,"ngram_heads_offsets":offsets,"padded_vocab_size":padded},
+        "dropped": [VISION_PREFIX]
+    });
+    Ok(value)
+}
+
+#[cfg(test)]
+mod official_mlx_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn metadata() -> serde_json::Value {
+        json!({"model_type":"qwen4_exp", "text_config":{"model_type":"qwen4_exp_text",
+            "vocab_size":248320,"ngram_size":3,"heads_per_ngram":8,"ple_layer_ids":[2],
+            "ngram_vocab_size_base":20000000,"make_ngram_vocab_size_divisible_by":128},
+            "quantization":{"mode":"affine","bits":4,"group_size":64},
+            "ngram_table":{"file":"ngram_table.bin","bits":4,"group_size":32}})
+    }
+
+    #[test]
+    fn official_hash_controls_match_mlx_serve_reference() {
+        let original = metadata();
+        let normalized = official_mlx_config(original.clone()).unwrap();
+        assert_eq!(original["ngram_table"]["file"], "ngram_table.bin");
+        assert_eq!(
+            normalized["lily"]["ple"]["layer_multipliers"],
+            json!([23703573157769u64, 20109073645365u64, 8052911324071u64])
+        );
+        assert_eq!(
+            normalized["lily"]["ple"]["ngram_heads_vocab_sizes"][0],
+            20000003u64
+        );
+        assert_eq!(
+            normalized["lily"]["ple"]["ngram_heads_vocab_sizes"][15],
+            20000171u64
+        );
+        assert_eq!(normalized["lily"]["ple"]["ngram_heads_offsets"][15], 300001275u64);
+        assert_eq!(normalized["lily"]["ple"]["padded_vocab_size"], 320001536u64);
+        assert_eq!(normalized["text_config"]["split_ngram_parts"], 1);
+    }
+
+    #[test]
+    fn official_admission_rejects_other_norm_quant_and_file_contracts() {
+        for (pointer, bad) in [
+            ("/ngram_table/file", json!("../table.bin")),
+            ("/ngram_table/bits", json!(8)),
+            ("/quantization/group_size", json!(32)),
+            ("/quantization/mode", json!("nvfp4")),
+            ("/text_config/ngram_size", json!(4)),
+        ] {
+            let mut value = metadata();
+            *value.pointer_mut(pointer).unwrap() = bad;
+            assert!(official_mlx_config(value).is_err());
+        }
+        let mut value = metadata();
+        value["qwen4_norm_convention"] = json!("delta");
+        assert!(official_mlx_config(value).is_err());
+        assert!(!StoragePolicy::Q4.external_mlx());
+        assert_eq!(StoragePolicy::q8(&[Q8Group::Gdn]).bits(Q8Group::Gdn), 8);
+    }
+}
+
 impl Qwen4ExpConfig {
     pub fn from_model_dir(dir: impl AsRef<Path>) -> Result<Self> {
         let path = dir.as_ref().join("config.json");
@@ -594,6 +770,13 @@ impl Qwen4ExpConfig {
 
     /// Parses and validates the contents of a converted `config.json`.
     pub fn from_json(bytes: &[u8]) -> Result<Self> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)?;
+        if value.get("lily").is_none() {
+            let normalized = official_mlx_config(value)?;
+            let mut config = Self::from_json(&serde_json::to_vec(&normalized)?)?;
+            config.storage.external_mlx = true;
+            return Ok(config);
+        }
         let wrapper: WrapperJson =
             serde_json::from_slice(bytes).context("parsing config.json")?;
         ensure!(
@@ -792,6 +975,18 @@ impl Qwen4ExpConfig {
         config.validate_flash_next()?;
         config.validate_vision()?;
         Ok(config)
+    }
+
+    /// Operation-rounding compatibility for the strictly admitted external
+    /// MLX-Serve contract. Folded norm gains alone do not select this policy.
+    pub fn official_mlx_rounding(&self) -> bool {
+        self.storage.external_mlx()
+    }
+
+    /// Lily stores zero-centered deltas; the official external-table pack
+    /// stores already-folded gains (MLX-Serve v26.10.3 model.zig).
+    pub fn norm_weight_bias(&self) -> f32 {
+        if self.storage.external_mlx() { 0.0 } else { 1.0 }
     }
 
     /// What lily's vision path (plan items 3 to 5) is written for: tanh-GELU

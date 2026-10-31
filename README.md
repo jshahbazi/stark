@@ -70,7 +70,7 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 
 | Family / adapter | Named models and checkpoint coverage |
 | --- | --- |
-| **Qwen3.8-Flash-Next** | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl` |
+| **Qwen3.8-Flash-Next** | Prepared native-source `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` and `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`; typed Uzu text conversion is checked against the pinned Lily checkpoint for readout and sampled-generation parity |
 | **GLM-5.3-Flash** | `unsloth/GLM-5.3-Flash-GGUF` (`UD-Q2_K_XL`) |
 | **Recursive Flint** | `RecursiveSI/flint-int4` |
 | Qwen3 dense | `Qwen/Qwen3-{0.6B,1.7B,4B,8B,14B,32B}`, `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-4B-Thinking-2507`, **Polaris-4B-Preview** (`POLARIS-Project/Polaris-4B-Preview`) |
@@ -86,9 +86,9 @@ The tables below include named checkpoints and fine-tunes as well as their imple
 | LFM2 | `LiquidAI/LFM2-{350M,700M,1.2B,2.6B}` |
 | LLaMBA / Mamba2 | `cartesia-ai/Llamba-1B`, `cartesia-ai/Llamba-1B-4bit-mlx` |
 
-For models using the converter, supported floating Safetensors layouts produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
+For models using the converter, supported floating Safetensors layouts produce native BF16 artifacts. Existing MLX affine 4/8-bit exports are also supported for Qwen3, Qwen3.5, Lily-format Qwen3.8 text, Llama, Gemma 3 text, SmolLM3, LFM2 and LLaMBA, subject to each adapter's layout and group-size constraints. The [converter coverage table](tools/converter/README.md#catalog-coverage-and-qualification) lists the registered export names. Compatible complete checkpoints and merged fine-tunes can use generic conversion even when absent from the catalog.
 
-Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Their current Stark paths accept text input.
+Qwen3.8-Flash-Next, GLM-5.3-Flash and Flint use native Rust/Metal paths for prepared quantized checkpoints. Use the [pinned preparation commands](docs/NATIVE_HYBRID_MODELS.md); see [Flint setup and limits](docs/FLINT.md). Lily-format Qwen3.8 also converts to a self-contained typed Uzu text artifact with canonical MLX storage and the same specialized Qwen kernels. It preserves quantization and omits vision and MTP. The [Uzu-format study](docs/benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records exact readout and sampled-generation controls for the pinned artifact. Their current Stark paths accept text input.
 
 #### Images
 
