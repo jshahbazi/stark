@@ -61,6 +61,7 @@ fn decode_exact_moe_rows_match_ordinary_bytes() -> Result<()> {
     };
     for renorm in [true, false] {
         let dims = MoeDims {
+            official_mlx_rounding: false,
             hidden: h,
             moe_intermediate: inter,
             num_experts: e,
