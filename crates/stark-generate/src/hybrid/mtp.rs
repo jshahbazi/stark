@@ -10,7 +10,9 @@ use std::collections::VecDeque;
 
 use stark_engine::engine::hybrid::{Error, MtpSampler, Result};
 
-use super::{Distribution, ProbabilityMapper, Sampling, sample_with_mapper, sampling_distribution, uniform};
+#[cfg(test)]
+use super::sampling_distribution;
+use super::{Distribution, ProbabilityMapper, Sampling, nucleus::NucleusSampler, sample_with_mapper, uniform};
 
 const SPARSE_LOOKUP_LIMIT: usize = 256;
 const DRAFT_SEED_DOMAIN: u64 = 0x4d54_505f_4452_4146;
@@ -71,6 +73,9 @@ pub(super) struct ExactMtpSampler<'a> {
     rng: &'a mut u64,
     draft_rng: u64,
     mapper: &'a mut ProbabilityMapper,
+    nucleus: NucleusSampler,
+    #[cfg(test)]
+    reference_distribution: bool,
     proposals: VecDeque<Proposal>,
     phase: Phase,
     vocabulary: Option<usize>,
@@ -89,6 +94,9 @@ impl<'a> ExactMtpSampler<'a> {
             rng,
             draft_rng,
             mapper,
+            nucleus: NucleusSampler::default(),
+            #[cfg(test)]
+            reference_distribution: false,
             proposals: VecDeque::new(),
             phase: Phase::Drafting,
             vocabulary: None,
@@ -121,8 +129,17 @@ impl<'a> ExactMtpSampler<'a> {
         if self.failed || self.vocabulary.is_some_and(|size| size != logits.len()) {
             return Err(Error::Invalid("MTP sampler vocabulary or state"));
         }
-        let distribution = sampling_distribution(logits, self.sampling, Some(&mut *self.mapper))
-            .map_err(|_| Error::Invalid("MTP sampling distribution"))?;
+        #[cfg(test)]
+        let distribution = if self.reference_distribution {
+            // The reference switch exists only in tests, with the production
+            // sampler's acceptance, residual, lifecycle and RNG code shared.
+            sampling_distribution(logits, self.sampling, Some(&mut *self.mapper))
+        } else {
+            self.nucleus.distribution(logits, self.sampling, &mut *self.mapper)
+        };
+        #[cfg(not(test))]
+        let distribution = self.nucleus.distribution(logits, self.sampling, &mut *self.mapper);
+        let distribution = distribution.map_err(|_| Error::Invalid("MTP sampling distribution"))?;
         self.vocabulary = Some(logits.len());
         Ok(distribution)
     }
@@ -185,6 +202,7 @@ impl<'a> ExactMtpSampler<'a> {
 
 impl MtpSampler for ExactMtpSampler<'_> {
     fn begin_round(&mut self) {
+        self.nucleus.clear();
         self.proposals.clear();
         self.phase = Phase::Drafting;
     }
@@ -281,6 +299,95 @@ fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nucleus_mtp_matches_reference_accept_reject_bonus_and_both_rng_streams() {
+        let nucleus = Sampling::Stochastic {
+            temperature: 0.7,
+            top_k: None,
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let top_k = Sampling::Stochastic {
+            temperature: 1.0,
+            top_k: Some(20),
+            top_p: Some(0.95),
+            min_p: None,
+        };
+        let broad = vec![0.0; 257];
+        let peaked: Vec<_> = (0..257)
+            .map(|id| {
+                if id < 7 {
+                    -(id as f32) * 0.2
+                } else {
+                    -100.0
+                }
+            })
+            .collect();
+        let mut accepted = 0;
+        let mut rejected = 0;
+        let mut bonuses = 0;
+        for sampling in [&nucleus, &top_k, &Sampling::Greedy {}] {
+            for seed in 0..64 {
+                let mut rng = seed;
+                let mut reference_rng = seed;
+                let mut mapper = ProbabilityMapper::default();
+                let mut reference_mapper = ProbabilityMapper::default();
+                let mut actual = ExactMtpSampler::new(sampling, &mut rng, &mut mapper);
+                let mut reference = ExactMtpSampler::new(sampling, &mut reference_rng, &mut reference_mapper);
+                reference.reference_distribution = true;
+                assert!(actual.sample_initial(&peaked).unwrap() == reference.sample_initial(&peaked).unwrap());
+                for round in 0..6 {
+                    actual.begin_round();
+                    reference.begin_round();
+                    let draft = if round % 2 == 0 {
+                        &peaked
+                    } else {
+                        &broad
+                    };
+                    let mut proposals = Vec::new();
+                    for _ in 0..3 {
+                        let token = actual.draft(draft).unwrap();
+                        assert!(token == reference.draft(draft).unwrap());
+                        assert!(actual.draft_rng == reference.draft_rng && *actual.rng == *reference.rng);
+                        proposals.push(token);
+                    }
+                    let mut finished = false;
+                    for token in proposals {
+                        // Matching support guarantees acceptance; disjoint
+                        // support guarantees rejection and clears successors.
+                        // A broad/peaked mismatch also exercises finite p/q.
+                        let mut disjoint = vec![-1000.0; draft.len()];
+                        disjoint[(token as usize + 1) % draft.len()] = 1000.0;
+                        let target = match round % 3 {
+                            0 => draft,
+                            1 => &disjoint,
+                            _ => &peaked,
+                        };
+                        let output = actual.target(target, Some(token)).unwrap();
+                        assert!(output == reference.target(target, Some(token)).unwrap());
+                        assert!(actual.phase == reference.phase);
+                        assert!(actual.proposals.len() == reference.proposals.len());
+                        assert!(actual.failed == reference.failed && actual.vocabulary == reference.vocabulary);
+                        assert!(actual.draft_rng == reference.draft_rng && *actual.rng == *reference.rng);
+                        if actual.phase == Phase::Finished {
+                            rejected += 1;
+                            finished = true;
+                            break;
+                        }
+                        accepted += 1;
+                    }
+                    if !finished {
+                        assert!(actual.target(&peaked, None).unwrap() == reference.target(&peaked, None).unwrap());
+                        bonuses += 1;
+                    }
+                    assert!(actual.draft_rng == reference.draft_rng && *actual.rng == *reference.rng);
+                    assert!(actual.phase == reference.phase && actual.proposals.is_empty());
+                }
+            }
+        }
+        assert!(accepted > 0 && rejected > 0 && bonuses > 0);
+    }
 
     fn options() -> Sampling {
         Sampling::Stochastic {
