@@ -756,7 +756,7 @@ impl MtpDecode<'_> {
         let mut accepted = 0;
         {
             let _scope = profile::Scope::new("qwen.mtp.target_sampling");
-            for (i, readout) in verified.logits.iter().enumerate() {
+            for (i, readout) in verified.logits().enumerate() {
                 let proposal = proposals.get(i).copied();
                 let token = self.sampler.target(readout, proposal)?;
                 if token as usize >= self.model.config.vocab_size {
@@ -1382,7 +1382,7 @@ mod tests {
                 .model
                 .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, token, &[])
                 .unwrap();
-            host_serial.push(verified.logits[0].clone());
+            host_serial.push(verified.logits().next().unwrap().to_vec());
             model.model.finish_host_verify(&model.context, &mut model.state, &model.scratch, &verified, 0).unwrap();
         }
         let mut comparisons = 0usize;
@@ -1456,10 +1456,10 @@ mod tests {
                         &tokens[1..width],
                     )
                     .unwrap();
-                for (actual, expected) in verified.logits.iter().zip(&serial) {
+                for (actual, expected) in verified.logits().zip(&serial) {
                     compare(actual, expected, 0);
                 }
-                for (actual, expected) in verified.logits.iter().zip(&host_serial) {
+                for (actual, expected) in verified.logits().zip(&host_serial) {
                     compare(actual, expected, 3);
                 }
                 model
@@ -1580,7 +1580,7 @@ mod tests {
                     .model
                     .verify_host_batched(&model.context, &mut model.state, &mut model.scratch, fixed, &[fixed; 3])
                     .unwrap();
-                for (actual, reference) in verified.logits.iter().zip(&expected) {
+                for (actual, reference) in verified.logits().zip(&expected) {
                     compare(actual, reference, 0);
                 }
                 model

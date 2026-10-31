@@ -3,6 +3,7 @@
 //! Modified by Stark: the crate exposes no server, CLI, persistence or probes.
 //! See UPSTREAM.md for source revision, scope and patch provenance.
 pub mod config;
+pub mod finite_guard;
 #[cfg(target_os = "macos")]
 pub mod engine;
 #[cfg(target_os = "macos")]

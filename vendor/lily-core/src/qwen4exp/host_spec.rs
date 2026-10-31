@@ -3,6 +3,7 @@
 //! the caller owns draft distributions, acceptance and all random draws.
 
 use anyhow::{Result, ensure};
+use std::slice::ChunksExact;
 
 use super::model::{
     AttnPos, BatchMode, DecodeState, LayerState, MAX_DRAFTS, Qwen4ExpModel, Scratch,
@@ -16,10 +17,19 @@ use crate::moe_ffn::{prefix_rows, project_mat};
 /// Readouts for a pending token and its proposed successors. Consumed by
 /// `finish_host_verify` before the state can run another forward pass.
 pub struct HostVerification {
-    pub logits: Vec<Vec<f32>>,
+    flat_logits: Vec<f32>,
+    vocab_size: usize,
     pos_before: usize,
     hist_before: Option<[u32; 2]>,
     tokens: Vec<u32>,
+}
+
+impl HostVerification {
+    /// Borrows complete vocabulary rows from the owned flat readout buffer.
+    /// The verifier validates divisibility before constructing this value.
+    pub fn logits(&self) -> ChunksExact<'_, f32> {
+        self.flat_logits.chunks_exact(self.vocab_size)
+    }
 }
 
 impl Qwen4ExpModel {
@@ -79,10 +89,18 @@ impl Qwen4ExpModel {
         let sp =
             s.spec.as_ref().ok_or_else(|| anyhow::anyhow!("candidate captures"))?;
         let values = prefix_rows(&sp.logits, m)?.to_f32()?;
-        ensure!(values.iter().all(|x| x.is_finite()), "candidate readout values");
-        let logits =
-            values.chunks_exact(self.config.vocab_size).map(<[f32]>::to_vec).collect();
-        Ok(HostVerification { logits, pos_before, hist_before, tokens })
+        ensure!(
+            values.len() == m * self.config.vocab_size,
+            "candidate readout shape"
+        );
+        ensure!(crate::finite_guard::all_finite(&values), "candidate readout values");
+        Ok(HostVerification {
+            flat_logits: values,
+            vocab_size: self.config.vocab_size,
+            pos_before,
+            hist_before,
+            tokens,
+        })
     }
 
     /// Builds a short draft chain using the same complete-logit sampler as
@@ -159,7 +177,7 @@ impl Qwen4ExpModel {
             let values = logits.to_f32()?;
             ensure!(
                 values.len() == self.config.vocab_size
-                    && values.iter().all(|x| x.is_finite()),
+                    && crate::finite_guard::all_finite(&values),
                 "invalid host draft readout"
             );
             input = sample(&values)?;
@@ -236,12 +254,16 @@ impl Qwen4ExpModel {
         let values = prefix_rows(&sp.logits, m)?.to_f32()?;
         ensure!(
             values.len() == m * self.config.vocab_size
-                && values.iter().all(|x| x.is_finite()),
+                && crate::finite_guard::all_finite(&values),
             "invalid host verify readout"
         );
-        let logits =
-            values.chunks_exact(self.config.vocab_size).map(<[f32]>::to_vec).collect();
-        Ok(HostVerification { logits, pos_before, hist_before, tokens })
+        Ok(HostVerification {
+            flat_logits: values,
+            vocab_size: self.config.vocab_size,
+            pos_before,
+            hist_before,
+            tokens,
+        })
     }
 
     /// Keeps `accepted` proposals plus the pending input, restores recurrent
