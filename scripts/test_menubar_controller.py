@@ -286,8 +286,9 @@ extension EngineController {
         case "gpu-memory-budget-indicator":
             let indicator = EngineController(apiCredentials: credentials, apiDefaults: apiDefaults, gpuMemoryBudgetBytes: 1000)
             for (bytes, color, percent): (Int64, Color, String) in [
-                (0, .green, "0%"), (740, .green, "74%"), (750, .orange, "75%"),
-                (890, .orange, "89%"), (900, .red, "90%"), (1000, .red, "100%"), (1200, .red, "120%")
+                (0, .green, "0%"), (740, .green, "74%"), (749, .green, "74%"), (750, .orange, "75%"),
+                (890, .orange, "89%"), (899, .orange, "89%"), (900, .red, "90%"),
+                (999, .red, "99%"), (1000, .red, "100%"), (1200, .red, "120%")
             ] {
                 indicator.gpuMemoryBytes = bytes
                 guard indicator.gpuMemoryColor == color, indicator.gpuMemoryText == "GPU memory " + percent,

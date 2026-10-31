@@ -1035,7 +1035,7 @@ final class EngineController: ObservableObject {
     }
     var gpuMemoryText: String {
         if let fraction = gpuMemoryFraction {
-            return "GPU memory " + fraction.formatted(.percent.precision(.fractionLength(0)))
+            return "GPU memory " + fraction.formatted(.percent.precision(.fractionLength(0)).rounded(rule: .down))
         }
         guard let bytes = gpuMemoryBytes else { return "GPU memory —" }
         return "GPU memory " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
