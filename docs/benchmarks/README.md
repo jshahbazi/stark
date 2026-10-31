@@ -86,6 +86,11 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 ## Optimization records
 
+The [Qwen3.8 optimization history](QWEN38_OPTIMIZATION_HISTORY.md) catalogs 142
+attempts and controls across the original F32 path, mixed precision, sampling,
+Metal kernels, Uzu execution and matched-checkpoint work. It records retained,
+rejected, inconclusive and deferred outcomes with source and evidence links.
+
 | Study | Outcome |
 | --- | --- |
 | [Qwen3.8 matched-checkpoint Metal optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | Same-checkpoint maximum 66.81 vs 61.17 tok/s (+9.21%), no speculation; exact stock component controls and retained Lily parity; 77–80 tok/s and whole-model quality equivalence remain unestablished |
