@@ -1,0 +1,48 @@
+{
+  "check_script_sha256": "cb3650a09186e533b0637f1e2653016074cfba900d64fdc79654c7797ace517c",
+  "compiler": "Apple metal version 32023.883 (metalfe-32023.883)",
+  "compiles": [
+    {
+      "capture_raw": false,
+      "ir_sha256": "0b2241efe522ba33a95a07c31b7959b16006087f6d411c8ba1c07e27e62e71c5"
+    },
+    {
+      "capture_raw": true,
+      "ir_sha256": "87bac31df91ce222fc8d72027d2e06c68abc95357834538a8e55e6424c2d4f1b"
+    }
+  ],
+  "flags": [
+    "-std=metal3.1",
+    "-fmetal-math-mode=safe",
+    "-fmetal-math-fp32-functions=fast",
+    "-Wno-c++17-extensions",
+    "-Werror"
+  ],
+  "harness_sha256": "c37745fcd283550d679d160158bf2c770d1bafabab68bf36d2685a531f9f0294",
+  "ownership": {
+    "256": {
+      "gated_unique_writes": 6144,
+      "raw_unique_writes": 6144,
+      "rows_per_simdgroup": 16,
+      "state_scalars_per_thread": 64,
+      "state_unique_writes": 786432,
+      "threadgroup_scratch_bytes": 1800,
+      "threadgroups": 48,
+      "threads_per_group": 256
+    },
+    "512": {
+      "gated_unique_writes": 6144,
+      "raw_unique_writes": 6144,
+      "rows_per_simdgroup": 8,
+      "state_scalars_per_thread": 32,
+      "state_unique_writes": 786432,
+      "threadgroup_scratch_bytes": 1800,
+      "threadgroups": 48,
+      "threads_per_group": 512
+    }
+  },
+  "reference_helper_sha256": "6cfe8926c91f02bf14dbca0c4e68a36f8b27cc381bcb9b23e9ff2185e226b78e",
+  "reference_source_sha256": "78ca01774e89e1fea05190234171704cc6a2bca4b24415cee2aa45cdd5ac6844",
+  "scope": "CPU ownership and offline compilation only",
+  "shader_sha256": "eb8a82517d9e3689838d52240ff968da3d282def3004f24be44ddf421ec2cb17"
+}

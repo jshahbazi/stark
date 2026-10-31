@@ -1,0 +1,346 @@
+{
+  "auxiliary_probe_sha256": "a90022c0de68e4e002e235b7bc83af6a3910637b7b15bc05347a68eeeeaae561",
+  "component": {
+    "arms": {
+      "fused256": {
+        "mean_gpu_microseconds_per_layer": 76.97241512182195,
+        "sample_count": 6,
+        "samples_gpu_seconds_per_layer": [
+          8.559027780089916e-05,
+          6.410300920833834e-05,
+          7.807291664600295e-05,
+          6.642361111314838e-05,
+          0.0001035439815192755,
+          6.410069444326736e-05
+        ],
+        "time_change_percent": 16.51385521471944
+      },
+      "fused512": {
+        "mean_gpu_microseconds_per_layer": 76.78530091989496,
+        "sample_count": 6,
+        "samples_gpu_seconds_per_layer": [
+          7.528472219241344e-05,
+          8.127546294013478e-05,
+          7.356597224214865e-05,
+          0.00011470486111243695,
+          5.788888888168408e-05,
+          5.799189815055191e-05
+        ],
+        "time_change_percent": 16.23061872022418
+      },
+      "production_conv_recurrence_normgate": {
+        "mean_gpu_microseconds_per_layer": 66.0628858087067,
+        "sample_count": 6,
+        "samples_gpu_seconds_per_layer": [
+          5.82465277653278e-05,
+          9.459722221233985e-05,
+          6.33842592934444e-05,
+          8.044097224531772e-05,
+          6.03472222388114e-05,
+          3.936111109699899e-05
+        ],
+        "time_change_percent": 0.0
+      }
+    },
+    "block_order": [
+      "baseline",
+      "fused256",
+      "fused512",
+      "fused512",
+      "fused256",
+      "baseline"
+    ],
+    "conclusion": "Both candidates slower in noisy single synthetic component window; no reliable full-model conclusion.",
+    "cycles": 4,
+    "exit_code": 0,
+    "log_sha256": "a75f756bf8a0f921a479f09eb0ba2d86aa4398f86ba9ef8283d36a5f65182ab0",
+    "process_monitor": {
+      "failed": false,
+      "observed_competition_count": 0,
+      "polls": 7,
+      "reviewed_small_daemons": 1,
+      "sampling_seconds": 1.0
+    },
+    "receipt_sha256": "0dd406de6d5748351f27eeead6e01e21512517d25b879011981fb43e941918f1",
+    "repeat_deployed_correctness_comparisons": 384,
+    "samples_per_arm": 6,
+    "scope": "36 serialized production conv+recurrence+norm versus production conv+fused recurrence/norm; excludes projections",
+    "test_binary_sha256": "e1359cf13ab203bb4dd6a0e143e7cb3fc3471a8a5978f57985a2eaa75226429b",
+    "timed_digest": "f63be4446ffef2c5c6b782f5f6e19eb7d3305aac0e2a246e71726b1cb5410890",
+    "warmup_cycles_excluded": 1
+  },
+  "controller_revisions": {
+    "current": "8a685b8abddf15b300c6fc7fe44058d8bb932f624871db36df7e3eeb23905822",
+    "v1": "f0713255102e8b6bd4f61835901a96304debb05b94a178b7af211863ea56a0d7",
+    "v2": "89cfbf7295fdb83ab3eda7d2861f0fabf5c0d227eeae25ee2af8302df6c02810"
+  },
+  "correctness": {
+    "all_passed": true,
+    "comparisons_per_test": [
+      192,
+      240,
+      192,
+      240
+    ],
+    "fixtures_per_test": 3,
+    "independent_tests": 4,
+    "process_monitor": {
+      "failed": false,
+      "observed_competition_count": 0,
+      "polls": 2,
+      "reviewed_small_daemons": 1,
+      "sampling_seconds": 1.0
+    },
+    "receipt_sha256": "f861ebf69975d80ef3b65cd75eab19dfce7405c81b7352234b5ae1427d061e4f",
+    "recurrent_advances": 192,
+    "steps_per_chain": 16,
+    "test_binary_sha256": "e1359cf13ab203bb4dd6a0e143e7cb3fc3471a8a5978f57985a2eaa75226429b",
+    "test_outcomes": [
+      {
+        "exit_code": 0,
+        "log_sha256": "216b6787fda35c4b075ef18a075c749eb7c1a722617c1e5ba21507d817389e0f",
+        "test": "fused256_deployed_matches_production"
+      },
+      {
+        "exit_code": 0,
+        "log_sha256": "9cc44bccbf2a0290e064b3ce718804bb0bc4792130165a5e6963ec6719e165bd",
+        "test": "fused256_capture_matches_production"
+      },
+      {
+        "exit_code": 0,
+        "log_sha256": "3a71bf39b24bc0df67f1fde3fe32eb2a867c799bad19f6cacd32defbfe6618d2",
+        "test": "fused512_deployed_matches_production"
+      },
+      {
+        "exit_code": 0,
+        "log_sha256": "df7f7edfded7aabf842c2f1926708eff29bfae098cf2d82ff6004a2eb2831238",
+        "test": "fused512_capture_matches_production"
+      }
+    ],
+    "whole_array_comparisons": 864
+  },
+  "cpu_validation": {
+    "check_script_sha256": "cb3650a09186e533b0637f1e2653016074cfba900d64fdc79654c7797ace517c",
+    "compiler": "Apple metal version 32023.883 (metalfe-32023.883)",
+    "compiles": [
+      {
+        "capture_raw": false,
+        "ir_sha256": "0b2241efe522ba33a95a07c31b7959b16006087f6d411c8ba1c07e27e62e71c5"
+      },
+      {
+        "capture_raw": true,
+        "ir_sha256": "87bac31df91ce222fc8d72027d2e06c68abc95357834538a8e55e6424c2d4f1b"
+      }
+    ],
+    "flags": [
+      "-std=metal3.1",
+      "-fmetal-math-mode=safe",
+      "-fmetal-math-fp32-functions=fast",
+      "-Wno-c++17-extensions",
+      "-Werror"
+    ],
+    "harness_sha256": "c37745fcd283550d679d160158bf2c770d1bafabab68bf36d2685a531f9f0294",
+    "ownership": {
+      "256": {
+        "gated_unique_writes": 6144,
+        "raw_unique_writes": 6144,
+        "rows_per_simdgroup": 16,
+        "state_scalars_per_thread": 64,
+        "state_unique_writes": 786432,
+        "threadgroup_scratch_bytes": 1800,
+        "threadgroups": 48,
+        "threads_per_group": 256
+      },
+      "512": {
+        "gated_unique_writes": 6144,
+        "raw_unique_writes": 6144,
+        "rows_per_simdgroup": 8,
+        "state_scalars_per_thread": 32,
+        "state_unique_writes": 786432,
+        "threadgroup_scratch_bytes": 1800,
+        "threadgroups": 48,
+        "threads_per_group": 512
+      }
+    },
+    "reference_helper_sha256": "6cfe8926c91f02bf14dbca0c4e68a36f8b27cc381bcb9b23e9ff2185e226b78e",
+    "reference_source_sha256": "78ca01774e89e1fea05190234171704cc6a2bca4b24415cee2aa45cdd5ac6844",
+    "scope": "CPU ownership and offline compilation only",
+    "shader_sha256": "eb8a82517d9e3689838d52240ff968da3d282def3004f24be44ddf421ec2cb17"
+  },
+  "harness_sha256": "c37745fcd283550d679d160158bf2c770d1bafabab68bf36d2685a531f9f0294",
+  "interrupted_preflight_v4": {
+    "disposition": "Root stopped only own uv/Python waiting loop after approximately223seconds to adopt reviewed exact-PID manifest; no clean-window receipt completed.",
+    "gpu_work_performed": false,
+    "model_attempt_created": false
+  },
+  "limits": [
+    "All model attempts interrupted or blocked; one baseline warmup only, no measured request or candidate full-model result.",
+    "No relaxed golden or tolerance; no production dispatch adopted.",
+    "Process sampling cannot prove exclusiveGPU or detect every short/system activity; CPUbackground allowed as explicitly reviewed.",
+    "No clocks/thermal telemetry or allocated-register/spill measurements."
+  ],
+  "metadata_observer_receipt_sha256": "da04e644ca19e50f74cdcec417d149e6ea66a679528a84974f4fc514e3065cab",
+  "model_attempts": [
+    {
+      "attempt": "v1",
+      "attempted_requests": 2,
+      "completed": false,
+      "completed_measured_requests": 0,
+      "completed_request_metrics": [
+        {
+          "arm": "baseline",
+          "block": 0,
+          "decode_seconds": 3.8175740830000002,
+          "decode_tokens_per_second": 66.79634617584446,
+          "output_token_sha256": "cf67e22bcf0d71a09bd998471f860b6da8fd4383a75c82b0bc5a3a00a2b7dafb",
+          "prefill_seconds": 3.410106042,
+          "replay": 0,
+          "warmup": true
+        }
+      ],
+      "completed_warmups": 1,
+      "driver_sha256": "f0713255102e8b6bd4f61835901a96304debb05b94a178b7af211863ea56a0d7",
+      "failure_category": "competing_process_detected",
+      "historical_completion_hash_matches": 1,
+      "interrupted_requests": 1,
+      "log_sha256": "e3753b6991d08ab178b874e62dd6499d6a2c013050c358cd14287683959b190a",
+      "process_monitor": {
+        "failed": true,
+        "observed_categories": [
+          "python_memory_threshold"
+        ],
+        "polls": 18
+      },
+      "report_sha256": "a72d9c89f151182fb7b0620c8981053a9453eb2877015c686d9bc5d49a7124fc",
+      "timing_scope": "No measured request completed; no full-model comparison or candidate model qualification."
+    },
+    {
+      "attempt": "v2",
+      "attempted_requests": 0,
+      "completed": false,
+      "completed_measured_requests": 0,
+      "completed_request_metrics": [],
+      "completed_warmups": 0,
+      "driver_sha256": "89cfbf7295fdb83ab3eda7d2861f0fabf5c0d227eeae25ee2af8302df6c02810",
+      "failure_category": "competing_process_detected",
+      "historical_completion_hash_matches": 0,
+      "interrupted_requests": 0,
+      "log_sha256": "3b9cfb8fcdb04aae49f71317ce3eb79bce98cbd342a1b0b44fc35726b63bdaf3",
+      "process_monitor": {
+        "failed": true,
+        "observed_categories": [
+          "compiler_or_build",
+          "python_memory_threshold"
+        ],
+        "polls": 1
+      },
+      "report_sha256": "ca81462286c7a7aea0746b9ecd630179d9f95df119cd4cfdcfc3bb83e5f48442",
+      "timing_scope": "No measured request completed; no full-model comparison or candidate model qualification."
+    },
+    {
+      "attempt": "v3",
+      "attempted_requests": 0,
+      "completed": false,
+      "completed_measured_requests": 0,
+      "completed_request_metrics": [],
+      "completed_warmups": 0,
+      "driver_sha256": "8a685b8abddf15b300c6fc7fe44058d8bb932f624871db36df7e3eeb23905822",
+      "failure_category": "competing_process_detected",
+      "historical_completion_hash_matches": 0,
+      "interrupted_requests": 0,
+      "log_sha256": "3b9cfb8fcdb04aae49f71317ce3eb79bce98cbd342a1b0b44fc35726b63bdaf3",
+      "process_monitor": {
+        "failed": true,
+        "observed_categories": [
+          "compiler_or_build"
+        ],
+        "polls": 6
+      },
+      "report_sha256": "a1d9aa146946d3d9c90071c94d888ce72ec876887fe17054104954db1a1ff22b",
+      "timing_scope": "No measured request completed; no full-model comparison or candidate model qualification."
+    }
+  ],
+  "old_summary_note": "First immutable controller report miscounted its interrupted call as completed. Public counts here are derived from row statuses; controller now separates completed and attempted calls.",
+  "preflight_receipts": {
+    "quiet-retry-v2.json": {
+      "completed": false,
+      "elapsed_seconds": null,
+      "failed": true,
+      "polls": 2,
+      "scope": "Availability metadata only; no inference in this preflight.",
+      "sha256": "e95d6fe7f7e4da3edccd88c6493e140267c0e0df75dec12faf89b18901d51ed5"
+    },
+    "quiet-retry-v3.json": {
+      "completed": false,
+      "elapsed_seconds": null,
+      "failed": true,
+      "polls": 1,
+      "scope": "Availability metadata only; no inference in this preflight.",
+      "sha256": "9c182e15b91d51fba0c9b9cb655fb9556bc5a3df8688af1c1a0fbeb49d2762cd"
+    },
+    "quiet-retry-v5.json": {
+      "clean_seconds_required": 45,
+      "completed": true,
+      "elapsed_seconds": 96.78302437499951,
+      "failed": null,
+      "final_clear_interval_seconds": 45.08302437499951,
+      "polls": 65,
+      "scope": "Availability metadata only; no inference in this preflight.",
+      "sha256": "df7861159493f1fa02a018b701474646e4a28e32adc0a11d7521e437b5ab6397"
+    }
+  },
+  "preparation_sha256": "908c9eb8a2c4c13094d499bccdff010624c757e89f10e93e5f5e2ab506168468",
+  "production_dispatch_changed": false,
+  "reviewed_auxiliary_manifest": {
+    "children_exempted": false,
+    "file_rechecked_before_after_blocks": true,
+    "identity_fields": [
+      "pid",
+      "ppid",
+      "comm",
+      "start_time",
+      "txt_mapping_sha256",
+      "txt_mapping_count"
+    ],
+    "process_count": 2,
+    "rechecked_every_poll": true,
+    "rss_upper_bound_kib_exclusive": 524288,
+    "scope": "Exact reviewed processes only; private manifest retains identities; mapped path sets rather than mapped file bytes or script arguments.",
+    "sha256": "236fd9ba9187e110aec796a4f9050f69cc874d63a5b76567bdb90dfa01f0b2f2"
+  },
+  "schema": "qwen38-gdn-fusion-gpu-results-interim-v1",
+  "scripts_sha256": {
+    "benchmark_model.py": "8a685b8abddf15b300c6fc7fe44058d8bb932f624871db36df7e3eeb23905822",
+    "check_cpu.py": "cb3650a09186e533b0637f1e2653016074cfba900d64fdc79654c7797ace517c",
+    "prepare_model_trial.py": "261f047bf8233dd32718b815c7db94c0c04d999f31201deb427e54e0e201b10e"
+  },
+  "shader_sha256": "eb8a82517d9e3689838d52240ff968da3d282def3004f24be44ddf421ec2cb17",
+  "source_base_commit": "645ad5562f44926341b3a74001ed4243e40db3e9",
+  "status": "correctness_complete_full_model_pending_clean_window",
+  "workers": {
+    "baseline": {
+      "build_log_sha256": "ec57e37e6285df00b66e3132b2b1bebc148be3fdc45c547d9d61e9e3e3c50f0f",
+      "build_receipt_sha256": "7e6e1b7b2a116ec42a58ccc51f41799171099dd4cb2c6c2093dd0757a2c7f71b",
+      "source_file_count": 1603,
+      "source_manifest_sha256": "cda4096c7ba788feac4f5901301376bdf2aeeabc6d42ddfc3f42d96218e32173",
+      "source_tree_manifest_sha256": "28a67fa651e90cfe380ab51025267397b158635fb47f4c53b54846c5c0ac6b24",
+      "worker_sha256": "1e983abcd747a697e1835085f1eb4892b3dd0adfc7adf28bc75e99445d53c17c"
+    },
+    "fused256": {
+      "build_log_sha256": "fce00f7ec43600787c28e362131bd3e0c5af2d851a49be6da4dfd40026381365",
+      "build_receipt_sha256": "52ba397ef619cf2fe18044410fb3cbb720406883544d0c338ec737cd938b8c07",
+      "source_file_count": 1605,
+      "source_manifest_sha256": "25894a4f008193b6916b91f0fe7f8e4d3afa16a0ff750229f6d010c2e602b922",
+      "source_tree_manifest_sha256": "81768fe2e1920f8b465750fc228fe9857c820ce7a2bbbe9857f326cc5ee11932",
+      "worker_sha256": "9bb5e4df66ce4d280467702e59bc4b77950edf9b129447028ca47309ffe7f94c"
+    },
+    "fused512": {
+      "build_log_sha256": "29fd0e4737f21eddc2657f5a65cfe515e455065bceb8843a6dfe8896e384f343",
+      "build_receipt_sha256": "5c5854c72d71ea52192e20dada43608de397e8fd46d3333c50ddb86786edf118",
+      "source_file_count": 1605,
+      "source_manifest_sha256": "35628c56ae0978d23ea802c963c74e7f2b84ec006bb4b74ea06884c338d071f6",
+      "source_tree_manifest_sha256": "c015b62c049f694c5270c20d59a1d6b3f6274b442e758305a56f347f64c42545",
+      "worker_sha256": "b5d3e448a4f8e10bc13dac346b1af3d0d4a26cc5f2d6db6b90b6c2c724b8cb55"
+    }
+  }
+}
