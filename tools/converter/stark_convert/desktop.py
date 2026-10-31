@@ -1515,7 +1515,7 @@ class Desktop:
         if old is not None:
             old.update_key(key)
         if old is not None and self.api_port == port:
-            self.emit("connection", base_url=f"http://127.0.0.1:{port}/v1")
+            self.emit("connection", base_url=f"http://127.0.0.1:{port}/v1", api_session=old.api_session)
             return
         try:
             replacement = LocalAPI(
@@ -1532,6 +1532,7 @@ class Desktop:
             self.emit(
                 "connection",
                 base_url=f"http://127.0.0.1:{self.api_port}/v1" if old else "",
+                api_session=old.api_session if old else "",
                 message=(
                     f"Port {port} is in use. Close the other server or change the port in Connection Details."
                     if conflict
@@ -1542,7 +1543,50 @@ class Desktop:
         self.api, self.api_port = replacement, urlsplit(details["base_url"]).port
         if old is not None:
             old.close()
-        self.emit("connection", base_url=details["base_url"])
+        self.emit("connection", base_url=details["base_url"], api_session=details["api_session"])
+
+    def api_client_command(self, payload):
+        """Acknowledge a host-vetted client grant without echoing credentials."""
+        request_id = payload.get("request_id")
+        try:
+            valid_id = (
+                isinstance(request_id, str)
+                and len(request_id) == 36
+                and str(uuid.UUID(request_id)) == request_id.lower()
+            )
+        except ValueError:
+            valid_id = False
+        command = payload["command"]
+        fields = {"command", "request_id", "api_session", "client_id"}
+        grant = command == "grant_api_client"
+        valid_fields = (
+            set(payload) == fields | {"api_key", "ttl_seconds"}
+            if grant
+            else set(payload) in (fields, fields - {"client_id"})
+        )
+        result = {"request_id": request_id if valid_id else "", "ok": False}
+        api = self.api
+        try:
+            if (
+                not valid_id
+                or not valid_fields
+                or not isinstance(payload.get("api_session"), str)
+                or re.fullmatch(r"[a-f0-9]{32}", payload["api_session"]) is None
+                or ("client_id" in payload and payload["client_id"] is None)
+            ):
+                raise APIError(400, "Invalid API client command.", "invalid_api_client_command")
+            if api is None:
+                raise APIError(503, "The local API is unavailable.", "api_not_running")
+            if grant:
+                api.grant_client(
+                    payload["client_id"], payload["api_key"], payload["ttl_seconds"], payload["api_session"]
+                )
+            else:
+                api.revoke_clients(payload["api_session"], payload.get("client_id"))
+            result["ok"] = True
+        except APIError as error:
+            result["error_code"] = error.code
+        self.emit("api_client", **result, api_session=api.api_session if api is not None else "")
 
     def api_models(self):
         with self.lock:
@@ -1809,6 +1853,8 @@ class Desktop:
             self.library()
         elif command == "configure_api":
             self.configure_api(payload)
+        elif command in {"grant_api_client", "revoke_api_clients"}:
+            self.api_client_command(payload)
         elif command == "support":
             self.families()
         elif command == "catalog":

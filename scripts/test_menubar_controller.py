@@ -1710,6 +1710,16 @@ class ControllerLifecycleTests(unittest.TestCase):
                     "arm64-apple-macosx26.4",
                     str(test_source),
                     str(ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopClientPeer.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopConnectionApproval.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopConnectionBroker.swift"),
+                    str(
+                        ROOT / "apps/menu-bar/Sources/OpenWorkConnectorInstaller.swift"
+                    ),
+                    str(
+                        ROOT
+                        / "apps/menu-bar/Sources/OpenWorkConnectionController.swift"
+                    ),
                     "-o",
                     str(cls.executable),
                 ],

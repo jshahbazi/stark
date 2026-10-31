@@ -1011,6 +1011,20 @@ final class EngineController: ObservableObject {
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
 
+    lazy var openWorkConnection = OpenWorkConnectionController(service: apiCredentials.service,
+        send: { [weak self] value in self?.send(value) ?? false },
+        snapshot: { [weak self] in
+            guard let self else { return ["api_base_url": "", "models": []] }
+            var served: [[String: Any]] = []
+            if let model = self.activeModel, self.loadedMode == .chat, !self.apiBaseURL.isEmpty {
+                served = [["id": model.apiID, "name": model.name,
+                           "context_length": self.contextCapacityKnown ? self.apiContextTokens as Any : NSNull(),
+                           "context_capacity_known": self.contextCapacityKnown,
+                           "max_output_tokens": self.apiMaxNewTokens, "tool_calling": self.supportsTools]]
+            }
+            return ["api_base_url": self.apiBaseURL, "models": served]
+        })
+
     init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard,
          gpuMemoryBudgetBytes: UInt64? = MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize) {
         self.apiCredentials = apiCredentials
@@ -1175,6 +1189,9 @@ final class EngineController: ObservableObject {
         case "connection":
             apiBaseURL = event["base_url"] as? String ?? ""
             apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
+            openWorkConnection.receiveConnection(event)
+        case "api_client":
+            openWorkConnection.receiveAcknowledgement(event)
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
@@ -1562,6 +1579,9 @@ final class EngineController: ObservableObject {
                 guard self.input === privateInput, !self.shuttingDown else { return }
                 switch result {
                 case .success(let key):
+#if STARK_CONNECTION_VALIDATION
+                    ConnectionPrivacyAudit.remember(key)
+#endif
                     self.apiKey = key
                     self.apiMessage = regenerate
                         ? "API key replaced. Update connected apps with the replacement key."
@@ -1840,6 +1860,10 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
+        openWorkConnection.shutdown()
+#if STARK_CONNECTION_VALIDATION
+        ConnectionPrivacyAudit.finish()
+#endif
         gpuMemoryBytes = nil
         clearInstallSupport()
         clearBrowserRequests()

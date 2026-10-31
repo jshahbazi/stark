@@ -5,9 +5,11 @@ Streaming requests are written as inference produces text deltas.
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import math
+import re
 import secrets
 import select
 import socket
@@ -15,6 +17,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -22,6 +25,16 @@ from urllib.parse import unquote, urlsplit
 MAX_TEXT_BODY_BYTES = 1024 * 1024
 MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
+MAX_API_CLIENTS = 16
+MAX_API_CLIENT_TTL_SECONDS = 120
+_CLIENT_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
+_API_SESSION = re.compile(r"[a-f0-9]{32}\Z")
+
+
+@dataclass(frozen=True, repr=False)
+class _ClientGrant:
+    digest: bytes
+    expires: float
 
 
 class APIError(Exception):
@@ -132,6 +145,12 @@ class LocalAPI:
         self._closing = threading.Event()
         self._body_lock = threading.Lock()
         self._pending_body_bytes = 0
+        self._api_session = ""
+        self._clients: dict[str, _ClientGrant] = {}
+        # Kept separately from current admission grants: refreshing a token or
+        # letting it expire must not interrupt an already admitted stream.
+        self._client_requests: dict[str, set[threading.Event]] = {}
+        self._clock = time.monotonic
 
     def _body_limit(self) -> int:
         status = self._status() if self._status is not None else {}
@@ -151,11 +170,22 @@ class LocalAPI:
             handler = self._handler_class(session_key, session_closed)
             server = _BoundedHTTPServer(("127.0.0.1", self._port), handler, self._max_connections)
             self._server = server
+            self._api_session = uuid.uuid4().hex
             self._api_key = session_key
             self._closing = session_closed
             self._thread = threading.Thread(target=server.serve_forever, name="stark-local-api", daemon=True)
             self._thread.start()
-            return {"base_url": f"http://127.0.0.1:{server.server_port}/v1", "api_key": self._api_key}
+            return {
+                "base_url": f"http://127.0.0.1:{server.server_port}/v1",
+                "api_key": self._api_key,
+                "api_session": self._api_session,
+            }
+
+    @property
+    def api_session(self) -> str:
+        """Private control-channel generation; never included in HTTP status."""
+        with self._lock:
+            return self._api_session
 
     @staticmethod
     def _validate_key(key):
@@ -166,11 +196,100 @@ class LocalAPI:
         """Activate a credential already committed by the host to Keychain."""
         self._validate_key(key)
         with self._lock:
+            if not hmac.compare_digest(self._api_key, key):
+                self._revoke_clients_locked()
+                if self._server is not None:
+                    self._api_session = uuid.uuid4().hex
             self._api_key = key
+
+    def _require_session_locked(self, api_session):
+        if self._server is None or self._closing.is_set() or not self._cancellable:
+            raise APIError(503, "The local API is unavailable.", "api_not_running")
+        if (
+            not isinstance(api_session, str)
+            or _API_SESSION.fullmatch(api_session) is None
+            or not hmac.compare_digest(api_session, self._api_session)
+        ):
+            raise APIError(409, "The local API connection changed.", "stale_api_session")
+
+    def _prune_clients_locked(self, now):
+        for client_id, grant in list(self._clients.items()):
+            if grant.expires <= now and not self._client_requests.get(client_id):
+                del self._clients[client_id]
+
+    def grant_client(self, client_id: str, api_key: str, ttl_seconds: int, api_session: str) -> None:
+        """Install a private, in-memory admission capability already vetted by Swift."""
+        if (
+            not isinstance(client_id, str)
+            or _CLIENT_ID.fullmatch(client_id) is None
+            or type(ttl_seconds) is not int
+            or not 1 <= ttl_seconds <= MAX_API_CLIENT_TTL_SECONDS
+        ):
+            raise APIError(400, "Invalid API client grant.", "invalid_api_client_command")
+        try:
+            self._validate_key(api_key)
+        except ValueError:
+            raise APIError(400, "Invalid API client grant.", "invalid_api_client_command") from None
+        digest = hashlib.sha256(("Bearer " + api_key).encode("ascii")).digest()
+        with self._lock:
+            self._require_session_locked(api_session)
+            if hmac.compare_digest(api_key, self._api_key) or any(
+                other != client_id and hmac.compare_digest(digest, grant.digest)
+                for other, grant in self._clients.items()
+            ):
+                raise APIError(400, "Invalid API client grant.", "invalid_api_client_command")
+            now = self._clock()
+            self._prune_clients_locked(now)
+            clients = self._clients.keys() | self._client_requests.keys()
+            if client_id not in clients and len(clients) >= MAX_API_CLIENTS:
+                raise APIError(429, "API client capacity reached.", "api_client_limit")
+            # Refreshes retire prior admission credentials, preserving admitted
+            # work. Explicit revoke still reaches requests from retired tokens.
+            self._clients[client_id] = _ClientGrant(digest, now + ttl_seconds)
+
+    def _revoke_clients_locked(self, client_id=None):
+        clients = set(self._clients) | set(self._client_requests) if client_id is None else {client_id}
+        for identifier in clients:
+            self._clients.pop(identifier, None)
+            for cancelled in self._client_requests.pop(identifier, ()):
+                cancelled.set()
+
+    def revoke_clients(self, api_session: str, client_id: str | None = None) -> None:
+        if client_id is not None and (not isinstance(client_id, str) or _CLIENT_ID.fullmatch(client_id) is None):
+            raise APIError(400, "Invalid API client revocation.", "invalid_api_client_command")
+        with self._lock:
+            self._require_session_locked(api_session)
+            self._revoke_clients_locked(client_id)
+
+    def _release_client(self, client_id, cancelled):
+        if client_id is None:
+            return
+        with self._lock:
+            active = self._client_requests.get(client_id)
+            if active is not None:
+                active.discard(cancelled)
+                if not active:
+                    del self._client_requests[client_id]
+
+    @staticmethod
+    def _client_route(method, path):
+        if method == "POST":
+            return path == "/v1/chat/completions"
+        return method == "GET" and (
+            path in {"/health", "/v1/health", "/v1/capabilities", "/v1/models"}
+            or (
+                path.startswith("/v1/models/")
+                and len(path) > len("/v1/models/")
+                and "?" not in path
+                and "#" not in path
+            )
+        )
 
     def close(self) -> None:
         with self._lock:
             self._closing.set()
+            self._revoke_clients_locked()
+            self._api_session = ""
             server, thread = self._server, self._thread
             self._server = self._thread = None
         if server is not None:
@@ -250,7 +369,7 @@ class LocalAPI:
             def _sse_error(self, error):
                 self._sse_write(error.payload())
 
-            def _guard(self):
+            def _guard(self, cancelled):
                 if session_closed.is_set():
                     raise APIError(503, "Server is shutting down", "server_shutdown")
                 if len(self.headers.get_all("Host", [])) > 1 or len(self.headers.get_all("Authorization", [])) > 1:
@@ -261,22 +380,43 @@ class LocalAPI:
                 hostname = urlsplit("//" + host).hostname
                 if hostname not in {"127.0.0.1", "localhost", "::1"}:
                     raise APIError(403, "Host is not allowed", "host_not_allowed")
+                actual = self.headers.get("Authorization", "")
+                encoded = actual.encode("utf-8", "replace")
                 with api._lock:
                     expected = api._api_key
-                actual = self.headers.get("Authorization", "")
-                if not expected or not hmac.compare_digest(
-                    actual.encode("utf-8", "replace"), ("Bearer " + expected).encode("utf-8")
-                ):
-                    raise APIError(401, "Invalid API key", "invalid_api_key")
+                    if expected and hmac.compare_digest(encoded, ("Bearer " + expected).encode("ascii")):
+                        return None
+                    digest = hashlib.sha256(encoded).digest()
+                    now = api._clock()
+                    for client_id, grant in api._clients.items():
+                        if hmac.compare_digest(digest, grant.digest) and now < grant.expires:
+                            if not api._client_route(self.command, self.path):
+                                raise APIError(403, "API client access is limited to chat routes.", "api_client_scope")
+                            # Register while holding the same lock as revoke.
+                            # Body readers and queued requests cannot escape it.
+                            api._client_requests.setdefault(client_id, set()).add(cancelled)
+                            return client_id
+                raise APIError(401, "Invalid API key", "invalid_api_key")
+
+            @staticmethod
+            def _check_client_cancelled(client_id, cancelled):
+                if client_id is not None and cancelled.is_set():
+                    raise APIError(499, "Request cancelled.", "request_cancelled")
 
             def do_GET(self):
+                cancelled = threading.Event()
+                client_id = None
                 try:
-                    self._guard()
+                    client_id = self._guard(cancelled)
                     if self.path in {"/health", "/v1/health"}:
-                        self._send_json(200, api._status() if api._status else {"status": "ok"})
+                        status = api._status() if api._status else {"status": "ok"}
+                        self._check_client_cancelled(client_id, cancelled)
+                        self._send_json(200, status)
                         return
                     if self.path == "/v1/capabilities":
-                        self._send_json(200, api._status() if api._status else {})
+                        status = api._status() if api._status else {}
+                        self._check_client_cancelled(client_id, cancelled)
+                        self._send_json(200, status)
                         return
                     if self.path.startswith("/v1/models/"):
                         model_id = unquote(self.path[len("/v1/models/") :])
@@ -284,22 +424,28 @@ class LocalAPI:
                         model = next((item for item in models if item.get("id") == model_id), None)
                         if model is None:
                             raise APIError(404, "Not found", "not_found")
+                        self._check_client_cancelled(client_id, cancelled)
                         self._send_json(200, model)
                         return
                     if self.path != "/v1/models":
                         raise APIError(404, "Not found", "not_found")
-                    self._send_json(200, {"object": "list", "data": api._models()})
+                    models = api._models()
+                    self._check_client_cancelled(client_id, cancelled)
+                    self._send_json(200, {"object": "list", "data": models})
                 except APIError as exc:
                     self._error(exc)
                 except Exception:
                     self._error(APIError(500, "Internal server error", "internal_error"))
+                finally:
+                    api._release_client(client_id, cancelled)
 
             def do_POST(self):
                 cancelled = threading.Event()
+                client_id = None
                 monitor = None
                 reserved_body = 0
                 try:
-                    self._guard()
+                    client_id = self._guard(cancelled)
                     if self.path != "/v1/chat/completions":
                         raise APIError(404, "Not found", "not_found")
                     if "Transfer-Encoding" in self.headers:
@@ -342,6 +488,7 @@ class LocalAPI:
                     if "stream" in payload and not isinstance(payload["stream"], bool):
                         raise APIError(400, "stream must be a boolean", "invalid_request")
                     streaming = payload.get("stream", False)
+                    self._check_client_cancelled(client_id, cancelled)
                     self.request.settimeout(api._write_timeout)
                     if api._cancellable:
                         monitor = threading.Thread(target=self._monitor_peer, args=(cancelled,), daemon=True)
@@ -362,6 +509,10 @@ class LocalAPI:
 
                         def on_delta(text):
                             nonlocal started
+                            if client_id is not None and cancelled.is_set():
+                                # Worker catches OSError, requests native
+                                # cancellation and drains the terminal frame.
+                                raise OSError("Request cancelled.")
                             if not isinstance(text, str):
                                 raise APIError(500, "Internal server error", "internal_error")
                             if not started:
@@ -388,6 +539,7 @@ class LocalAPI:
                             self._start_sse(ident, model, created)
                     if not isinstance(result, dict):
                         raise APIError(500, "Internal server error", "internal_error")
+                    self._check_client_cancelled(client_id, cancelled)
                     if streaming:
                         choices = result.get("choices") or [{}]
                         choice = choices[0] if isinstance(choices[0], dict) else {}
@@ -440,6 +592,7 @@ class LocalAPI:
                     cancelled.set()
                     if monitor is not None:
                         monitor.join(timeout=0.2)
+                    api._release_client(client_id, cancelled)
 
             @staticmethod
             def _contains_image(payload):
