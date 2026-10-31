@@ -25,11 +25,13 @@ cargo build --release --locked -p stark-generate
 
 The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
 
+When a backend has no declared finite context maximum, the CLI treats its unsigned 32-bit ceiling as a protocol range. It allocates native text context only for the rendered input plus requested output, while enforcing an explicit `--context-tokens` budget. Image chat requires a declared finite model context.
+
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--system TEXT` | model metadata | System message; the template decides how it is rendered |
 | `--image PATH` | none | Attach one local PNG or JPEG image; requires passing host image evidence |
-| `--context-tokens N` | smaller of 8192 and the worker limit | Context budget for prompt plus reply |
+| `--context-tokens N` | loaded model's maximum context | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
@@ -57,7 +59,7 @@ Start the worker with `--model-path PATH`, where `PATH` is a converted model dir
 On success the first line is:
 
 ```json
-{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":16384,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1"}
+{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":262144,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1"}
 ```
 
 | Field | Meaning |
@@ -66,10 +68,12 @@ On success the first line is:
 | `operations` | Accepted `operation` values |
 | `state_policy` | `fresh-per-request`: no state survives between requests |
 | `vocab_size` | Upper bound for every token ID |
-| `max_context_tokens` | Smaller of 16,384 and the model's maximum context |
+| `max_context_tokens` | Loaded model's configured maximum context; no global 16,384-token cap. A backend with no finite maximum reports the protocol's unsigned 32-bit maximum. |
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
+
+The configured context is a token admission boundary. Available memory and the 1 MiB request-line limit still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
 An image-capable model adds an `image_input` object without changing `mode: "text-generation-v1"` or the 1 MiB line framing. Its `version` is `mediaref-v1`, its `transport` is `owner-private-file-v1`, and it lists the `prepare_image`, `generate_image` and `discard_image` operations. The object identifies artifact schema 2 or 3, family profile/version, source/revision, SHA-256 hashes for the weights, config, tokenizer, processor and template, and the actual Metal runtime identity. The host applies its [evidence checks](#image-qualification) before exposing image input. See the [readiness implementation](../crates/stark-generate/src/generation.rs).
 

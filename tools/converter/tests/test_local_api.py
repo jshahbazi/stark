@@ -39,7 +39,7 @@ class LocalAPITest(unittest.TestCase):
                 completion_cancelled.set()
             raise APIError(499, "Cancelled", "cancelled")
 
-        api = DelayedMonitorAPI(lambda: [], complete, port=0, cancellable=True)
+        api = DelayedMonitorAPI(lambda: [], complete, api_key="a" * 64, port=0, cancellable=True)
         info = api.start()
         port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
         connection = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
@@ -74,7 +74,7 @@ class LocalAPITest(unittest.TestCase):
 
     def test_truncated_body_is_rejected_before_completion(self):
         called = []
-        api = LocalAPI(lambda: [], lambda payload: called.append(True) or {"choices": []}, port=0)
+        api = LocalAPI(lambda: [], lambda payload: called.append(True) or {"choices": []}, api_key="a" * 64, port=0)
         info = api.start()
         sock = None
         try:
@@ -105,7 +105,7 @@ class LocalAPITest(unittest.TestCase):
 
     def setUp(self):
         self.calls = []
-        self.api = LocalAPI(lambda: [{"id": "stark", "object": "model"}], self.complete)
+        self.api = LocalAPI(lambda: [{"id": "stark", "object": "model"}], self.complete, api_key="a" * 64, port=0)
         self.info = self.api.start()
 
     def tearDown(self):
@@ -143,10 +143,21 @@ class LocalAPITest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["data"][0]["id"], "stark")
 
+    def test_committed_key_rotation_rejects_old_key_without_rebinding(self):
+        address = self.info["base_url"]
+        self.api.update_key("b" * 64)
+        self.assertEqual(self.request("GET", "/models", key="a" * 64)[0], 401)
+        self.assertEqual(self.request("GET", "/models", key="b" * 64)[0], 200)
+        with self.assertRaises(ValueError):
+            self.api.update_key("invalid")
+        self.assertEqual(self.request("GET", "/models", key="b" * 64)[0], 200)
+        self.assertEqual(self.info["base_url"], address)
+
     def test_health_capabilities_and_model_metadata(self):
         api = LocalAPI(
             lambda: [{"id": "stark", "object": "model", "owned_by": "test"}],
             self.complete,
+            api_key="a" * 64,
             status=lambda: {"status": "ready", "streaming": True},
             port=0,
         )
@@ -171,7 +182,12 @@ class LocalAPITest(unittest.TestCase):
             ("Local model's name", ["Local%20model%27s%20name"]),
             ("literal%2Fname", ["literal%252Fname"]),
         ):
-            api = LocalAPI(lambda model_id=model_id: [{"id": model_id, "object": "model"}], self.complete, port=0)
+            api = LocalAPI(
+                lambda model_id=model_id: [{"id": model_id, "object": "model"}],
+                self.complete,
+                api_key="a" * 64,
+                port=0,
+            )
             info = api.start()
             try:
                 for path in paths:
@@ -233,7 +249,7 @@ class LocalAPITest(unittest.TestCase):
                 "choices": [{"message": {"content": "first"}, "finish_reason": "stop"}],
             }
 
-        api = LocalAPI(lambda: [], complete, port=0)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0)
         info = api.start()
         try:
             port = int(info["base_url"].rsplit(":", 1)[1].split("/")[0])
@@ -269,7 +285,7 @@ class LocalAPITest(unittest.TestCase):
             on_delta("fixture")
             return {"model": public_id, "choices": [{"message": {"content": "fixture"}, "finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [{"id": public_id}], complete, port=0)
+        api = LocalAPI(lambda: [{"id": public_id}], complete, api_key="a" * 64, port=0)
         info = api.start()
         try:
             status, _, body = self.request_to(info, {"model": "legacy-private-id", "stream": True})
@@ -291,7 +307,7 @@ class LocalAPITest(unittest.TestCase):
                 "choices": [{"message": {"content": ""}, "finish_reason": "stop"}],
             }
 
-        api = LocalAPI(lambda: [], complete, port=0)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0)
         info = api.start()
         try:
             status, headers, body = self.request_to(info, {"stream": True, "stream_options": {"include_usage": True}})
@@ -325,7 +341,7 @@ class LocalAPITest(unittest.TestCase):
                 on_delta("before-error")
                 raise failure
 
-            api = LocalAPI(lambda: [], complete, port=0)
+            api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0)
             info = api.start()
             try:
                 status, _, body = self.request_to(info, {"stream": True})
@@ -354,7 +370,7 @@ class LocalAPITest(unittest.TestCase):
                 raise
             return {"choices": [{"message": {"content": "ignored"}, "finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [], complete, port=0)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0)
         info = api.start()
         sock = None
         try:
@@ -397,7 +413,7 @@ class LocalAPITest(unittest.TestCase):
             cancelled.set()
             return {"choices": [{"finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [], complete, port=0, cancellable=True)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0, cancellable=True)
         info = api.start()
         try:
             self.disconnect_request(info, {"stream": True})
@@ -417,7 +433,7 @@ class LocalAPITest(unittest.TestCase):
             cancelled.set()
             return {"choices": [{"finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [], complete, port=0, cancellable=True)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0, cancellable=True)
         info = api.start()
         try:
             self.disconnect_request(info, {})
@@ -448,7 +464,7 @@ class LocalAPITest(unittest.TestCase):
             cancelled.set()
             return {"choices": [{"finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [], complete, port=0, cancellable=True, request_timeout=0.1)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0, cancellable=True, request_timeout=0.1)
         info = api.start()
         try:
             status, _, _ = self.request_to(info, {})
@@ -479,7 +495,7 @@ class LocalAPITest(unittest.TestCase):
             release.wait(2)
             return {"choices": [{"finish_reason": "stop"}]}
 
-        api = LocalAPI(lambda: [], complete, port=0, max_connections=1)
+        api = LocalAPI(lambda: [], complete, api_key="a" * 64, port=0, max_connections=1)
         info = api.start()
         try:
             first = threading.Thread(target=lambda: self.request_to(info, {}), daemon=True)
@@ -531,7 +547,7 @@ class LocalAPITest(unittest.TestCase):
         def fail(_):
             raise APIError(422, "bad request", "bad")
 
-        api = LocalAPI(lambda: [], fail, port=0)
+        api = LocalAPI(lambda: [], fail, api_key="a" * 64, port=0)
         info = api.start()
         try:
             req = urllib.request.Request(
@@ -551,7 +567,7 @@ class LocalAPITest(unittest.TestCase):
         finally:
             api.close()
 
-    def test_deterministic_port_conflict_falls_back(self):
+    def test_deterministic_port_conflict_does_not_fall_back(self):
         import stark_convert.local_api as module
 
         real = module._BoundedHTTPServer
@@ -565,14 +581,10 @@ class LocalAPITest(unittest.TestCase):
                 super().__init__(address, handler, limit)
 
         with mock.patch.object(module, "_BoundedHTTPServer", ConflictOnce):
-            api = LocalAPI(lambda: [], lambda _: {}, port=8000)
-            info = api.start()
-            try:
-                self.assertEqual(calls[0], 8000)
-                self.assertEqual(calls[1], 0)
-                self.assertNotIn(":8000/", info["base_url"])
-            finally:
-                api.close()
+            api = LocalAPI(lambda: [], lambda _: {}, api_key="a" * 64, port=8000)
+            with self.assertRaises(OSError):
+                api.start()
+            self.assertEqual(calls, [8000])
 
     def test_invalid_headers_and_method_are_fixed_json(self):
         base = self.info["base_url"] + "/chat/completions"
@@ -595,8 +607,13 @@ class LocalAPITest(unittest.TestCase):
             urllib.request.urlopen(req)
         self.assertEqual(context.exception.headers.get_content_type(), "application/json")
 
-    def test_callback_failure_is_generic_and_key_changes_after_restart(self):
-        api = LocalAPI(lambda: [], lambda _: (_ for _ in ()).throw(RuntimeError("secret callback details")), port=0)
+    def test_callback_failure_is_generic_and_key_is_reused_after_restart(self):
+        api = LocalAPI(
+            lambda: [],
+            lambda _: (_ for _ in ()).throw(RuntimeError("secret callback details")),
+            api_key="a" * 64,
+            port=0,
+        )
         first = api.start()
         output = io.StringIO()
         try:
@@ -618,7 +635,7 @@ class LocalAPITest(unittest.TestCase):
             api.close()
         second = api.start()
         try:
-            self.assertNotEqual(first["api_key"], second["api_key"])
+            self.assertEqual(first["api_key"], second["api_key"])
         finally:
             api.close()
 

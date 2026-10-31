@@ -1,6 +1,6 @@
 # Stark local API
 
-The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires a per-launch bearer key, and rejects browser-origin requests.
+The menu bar application's bridge serves a loopback-only, OpenAI-style HTTP API so that other applications on the same Mac can chat with the loaded model. It supports buffered or streamed text completions and one-image requests through one loaded model. Images require passing host evidence for the [supported Qwen3.5 family](VISION_FAMILY_CONTRACT.md). The API binds to `127.0.0.1`, requires a persistent bearer key, and rejects browser-origin requests.
 
 ## Connection and authentication
 
@@ -10,7 +10,15 @@ Open **Connection Details** in Stark to see the base URL (for example `http://12
 Authorization: Bearer <key>
 ```
 
-The key is a random 256-bit value generated when Stark launches, held in memory only, and never written to disk by Stark. **Copy** places it on the system pasteboard. Stark prefers port 8000 and falls back to a free loopback port, so always use the URL shown. After reopening Stark, copy the new key and check the URL again.
+The Swift host loads a random 256-bit key from macOS Keychain and sends it to the backend through its private control pipe. It generates a key only when Keychain reports that the item is missing, and activates it only after storage succeeds. Concurrent first launches use the winning stored value. Relaunches, worker restarts, model changes and app upgrades reuse this credential. Secrets are absent from process arguments, environment, UserDefaults, configuration files and logs.
+
+**Show** and **Copy** retrieve the existing key without rotating it. Key and connection-JSON copies retain the sensitive clipboard markers. **Regenerate API Key** explicitly replaces the stored credential after confirmation; every connected client then needs the replacement. A storage failure preserves the working key. Locked, denied, corrupt or unavailable Keychain access produces recovery instructions in Connection Details; authentication is never disabled. Unlock or allow access in Keychain Access and choose **Retry API**. A corrupt entry can be replaced using the explicit regeneration action. Do not save copied connection JSON in ordinary configuration files.
+
+The installed, Team-ID-signed app uses service `com.starkengine.menubar.local-api`, account `bearer-key-v1`. Canonical unsigned/ad-hoc development builds use the separate `.development` service. Other bundle identifiers receive a separate development service suffix; native tests use disposable services. A signing identity or Keychain access-policy change can require access recovery. [Developer ID package upgrades](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) reused a credential under an isolated bundle identifier; production-identifier upgrades and notarized distribution require their own validation.
+
+Keychain operations run on a dedicated background queue, with at most one outstanding operation. If macOS waits for legacy Keychain access approval, Connection Details reports the pending operation while model management and chat remain usable. Retry, port changes and regeneration wait for that operation to finish. A pending regeneration is not reported as failed because macOS may still commit it. Approve access in Keychain Access; if it remains pending, quit and reopen Stark afterward. Rebuilt ad-hoc development apps can require renewed access approval; a stable service name does not bypass Keychain's signing checks.
+
+The non-secret listening port is saved separately in UserDefaults, initially 8000, and reused. Stark never silently chooses another port. If it is occupied, Connection Details explains the conflict; close the other server or enter a port from 1 through 65535 and choose **Apply Port**. Update clients after an intentional port change. A failed port change keeps any previous listener active and displays its actual Base URL. Model management and the playground remain usable when the API cannot start. The curl example prompts without echo and passes authentication through stdin, without embedding a key in arguments or exporting it.
 
 Request rules enforced before any endpoint runs:
 
@@ -29,9 +37,9 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | `GET /v1/capabilities` | The same status document |
 | `GET /v1/models` | The running model as a one-item list, or an empty list when no model is running in Chat mode |
 | `GET /v1/models/{id}` | The matching running model, or 404 |
-| `POST /v1/chat/completions` | One text completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
+| `POST /v1/chat/completions` | One completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
 
-Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length` and `max_output_tokens`. Embeddings, the Responses API, structured output, tool and function calls, and batching are not available.
+Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens` and `tool_calling`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
 
 Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
 
@@ -51,11 +59,15 @@ The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualific
 
 ## Chat completions
 
-Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user` and `metadata`. Unknown fields are rejected.
+Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
 
-**Model and messages.** `model` may be omitted, or may be the running model's public ID, installed name or previous private library ID; any other value returns 404 `model_not_found`. `messages` must be non-empty. Roles `system`, `developer` (normalised to `system`), `user` and `assistant` are accepted. Content is a string or an array of ordered parts. Text parts use `{"type":"text","text":"..."}`. When `capabilities.images` is true, one user message may also include `{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`; `detail` may be omitted or set to `auto`. The URL must be an inline canonical Base64 PNG or JPEG data URL; remote URLs and image parts on non-user roles are rejected. Only one image is accepted per request. Image bytes are passed to the worker separately from the rendered prompt, which receives only an image placeholder. An optional `name` of up to 64 ASCII characters is validated and ignored. Assistant messages may carry `reasoning_content` as a string, which is passed to the chat template; Stark 0.4.0 and earlier reject that field. Tool and function-call fields are rejected. The model's chat template renders the conversation; a template that rejects the messages returns 400 `invalid_messages`.
+**Storage.** Omit `store` or use `false`/`null`. Stark does not store completions. `store: true` and non-boolean values return `unsupported_parameter`; they do not enable retention.
+
+**Model and messages.** `model` may be omitted, or may be the running model's public ID, installed name or previous private library ID; any other value returns 404 `model_not_found`. `messages` must be non-empty. Roles `system`, `developer` (normalised to `system`), `user`, `assistant` and `tool` are accepted (tool-result history requires a supported template/parser). Content is a string or an array of ordered parts. Text parts use `{"type":"text","text":"..."}`. When `capabilities.images` is true, one user message may also include `{"type":"image_url","image_url":{"url":"data:image/png;base64,...","detail":"auto"}}`; `detail` may be omitted or set to `auto`. The URL must be an inline canonical Base64 PNG or JPEG data URL; remote URLs and image parts on non-user roles are rejected. Only one image is accepted per request. Image bytes are passed to the worker separately from the rendered prompt, which receives only an image placeholder. An optional `name` of up to 64 ASCII characters is validated and ignored. Assistant messages may carry `reasoning_content` as a string, which is passed to the chat template; Stark 0.4.0 and earlier reject that field. Function calls use the contract below. Legacy `functions` and `function_call` fields are rejected. The model's chat template renders the conversation; a template that rejects the messages returns 400 `invalid_messages`.
 
 The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. The engine transport has a wider 20 MiB file limit, but the HTTP service applies its 4 MiB cap before staging. The parser does not decode pixels in Python; the native processor applies its source dimension, source pixel, processed pixel, patch and image-token limits. See the [request parser](../tools/converter/stark_convert/api_request.py), [image validator](../tools/converter/stark_convert/media.py) and [worker qualification gate](../tools/converter/stark_convert/vision_runtime.py).
+
+**Context limit.** `/v1/models` reports a declared finite model maximum as `context_length`, with `context_capacity_known: true`. The combined rendered input and requested output must fit that context. A backend without a declared finite maximum reports `context_length: null` and `context_capacity_known: false`; its unsigned 32-bit protocol ceiling is not advertised as a model capacity. For these models, text requests reserve only the rendered input plus requested output, while any custom playground conversation budget still applies. Image requests require a declared finite context. There is no global 16,384-token context cap. Request byte limits and available memory still apply; a published context capacity does not establish full-length performance or memory qualification on this Mac.
 
 **Output limit.** `max_tokens` and `max_completion_tokens` are aliases; supply at most one. The default is the smaller of 512 and the model's limit. Requests may go up to the model's limit, which is capped at 4,096 and shown as `max_output_tokens` in `/v1/models`; a larger value returns 400 rather than being clamped. `n` must be 1. A completion that reaches the output or context limit reports `finish_reason: "length"`.
 
@@ -64,6 +76,23 @@ The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. 
 **Stop sequences.** `stop` is one string or up to four non-empty strings of at most 1,024 characters. The worker matches them against decoded text, including across chunks, and withholds the match and everything after it. Usage counts still include the token that completed the match.
 
 **Streaming.** With `stream: true` the response is Server-Sent Events of `chat.completion.chunk` objects followed by `data: [DONE]`. The first chunk carries the assistant role. `stream_options: {"include_usage": true}` adds a final usage-only chunk. Validation errors keep their HTTP status because they occur before streaming starts; a failure during streaming emits an error object in the stream and closes without `[DONE]`.
+
+## Function tools
+
+`/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. The parser is `qwen3-hermes-v1`, admitted only for the exact official Qwen3-0.6B template SHA-256 `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` or the official `mlx-community/Qwen3-4B-4bit` template SHA-256 `87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5` from revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25`. The 4B template is preserved as an upstream fixture with source and license provenance under `tools/converter/tests/fixtures/`. Other templates keep ordinary chat and reject tool definitions/history with `tools_unsupported`. A model name alone does not qualify a template.
+
+- `tools` accepts up to 64 function definitions with unique ASCII names, optional descriptions, and object parameter schemas. Schemas are model hints; schema-constrained generation is unavailable and `strict: true` is rejected. The client must validate execution arguments against its schema.
+- `tool_choice` accepts `auto`, `none`, `required`, or `{"type":"function","function":{"name":"supplied_name"}}`. Named choice renders only that definition. Required/named output is checked after generation; failure returns `tool_choice_not_satisfied`, without synthesizing a call. `none` omits definitions from rendering and rejects generated tool markers.
+- `parallel_tool_calls` is a boolean, default true. False permits at most one generated call; a violation fails the completion. At most 16 calls are returned, in generation order, with distinct stable IDs within the response and JSON-object argument strings.
+- Assistant history may contain null or omitted text alongside `tool_calls`. Each call requires `id`, `type: function`, and a function name/argument string. Tool-result messages require string/text-part content and the matching `tool_call_id`. All outstanding results must be returned before another assistant/user turn. Duplicate, orphaned and incomplete transactions are rejected. The pinned template receives complete history, argument objects, definitions, and results ordered by their call IDs.
+- Only complete `<tool_call>` JSON objects from a normally terminated generation become executable requests. Duplicate JSON keys, nonfinite numbers, unknown names, invalid argument JSON, truncated markers, extra trailing text and limit violations fail. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
+- Definitions together are limited to 256 KiB; each argument object to 64 KiB; each tool result to 256 KiB; parsed tool output to 512 KiB. JSON depth is limited to 32 and item count to 16,384. The ordinary 1 MiB body/worker-line limits and model context limits also apply. Tool use and image input cannot be combined.
+
+Buffered completions return `message.tool_calls`, optional text (null when absent), and `finish_reason: "tool_calls"`. Tool-enabled streaming buffers generation through the terminal worker frame and strict parsing, then emits text and indexed `delta.tool_calls` exactly once, followed by the terminal reason, optional usage and `[DONE]`. It does not expose partial executable calls. Ordinary text-only requests retain live text deltas. Usage includes all generated framing/argument tokens and tokens completing a stop sequence. Cancellation/deadline checks remain active while tool generation is buffered.
+
+Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-tool result-use task locally. Looser variants failed through an unwanted parallel call or premature stopping; this checkpoint is not a general-purpose agent recommendation. Protocol fixtures and task-competence evidence are recorded separately.
+
+The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read task in OpenWork, including client-side execution, result return and a correct final calculation. A looser variant repeated a read until cancelled. Use explicit task limits and client approvals; this is a narrow workflow qualification. The [desktop validation record](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) separates protocol, model behavior and signed-package evidence.
 
 ## Limits, queueing and cancellation
 
@@ -92,7 +121,10 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 400 | `invalid_messages` | The chat template rejected the messages |
 | 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |
+| 400 | `context_capacity_unknown` | Image inference requires a model with a declared finite context capacity |
 | 400 | `request_too_large` | Rendered worker request exceeds the 1 MiB encoded line limit |
+| 400 | `tools_unsupported` | Running model/template has no supported parser |
+| 502 | `invalid_tool_call`, `tool_choice_not_satisfied` | Invalid, truncated, unknown or disallowed generated call, or unsatisfied required/named choice; no executable call returned |
 | 401 | `invalid_api_key` | Missing or wrong bearer key |
 | 403 | `origin_not_allowed`, `host_not_allowed` | `Origin` header present, or non-loopback `Host` |
 | 404 | `not_found`, `model_not_found` | Unknown path, or `model` is not the running model |
@@ -118,6 +150,10 @@ Clients must send authenticated requests from native or backend code on the same
 
 A client appearing here does not mean its agents, tools or other workflows are supported.
 
+OpenWork's compatible Chat Completions adapter also completed chat, follow-up, tool-result history and reconnection with the pinned Qwen3-4B artifact. That check used an external supported HTTP credential hook and a signed read-only Keychain helper, keeping the key out of regular client configuration. It does not qualify the stock Connect UI as a secure custom-provider setup or ship that validation helper as a Stark integration. See the [exact versions, settings and limits](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md).
+
+Goose's native CLI independently completed chat and a client-side read-only tool task with the same artifact, using its supported `auth.command` route and an isolated Keychain reader. Its desktop GUI remains untested. The validation record includes credential-flow review and disposable-profile cleanup; client logging/session options alone do not guarantee that a client writes no local request data.
+
 ## Compatibility boundary
 
-The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, tools, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported.
+The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported. Tool requests require the pinned supported template/parser; clients own execution, schema validation and approvals.

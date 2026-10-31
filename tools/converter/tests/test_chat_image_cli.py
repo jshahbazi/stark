@@ -106,6 +106,33 @@ def test_image_cli_attaches_placeholder_once_and_reuses_owned_image_after_reset(
     assert worker.requests == []
 
 
+def test_image_cli_default_context_uses_the_loaded_model_maximum(model, tmp_path):
+    image_path = tmp_path / "synthetic.png"
+    image_path.write_bytes(PNG)
+    worker = FakeWorker()
+    ready = worker.read()
+    ready["max_context_tokens"] = 262144
+    worker.read = lambda: ready
+    with patch("builtins.input", side_effect=["synthetic turn", "/exit"]):
+        assert run_chat(options(model, image=image_path, context_tokens=None), worker) == 0
+    assert len(worker.image_requests) == 1
+    assert worker.image_requests[0][2]["context_tokens"] == 262144
+    assert worker.requests == []
+
+
+@pytest.mark.parametrize("context", [None, 2048])
+def test_unknown_context_image_cli_rejects_before_reading_or_native_dispatch(model, tmp_path, context):
+    worker = FakeWorker()
+    ready = worker.read()
+    ready["max_context_tokens"] = 0xFFFFFFFF
+    worker.read = lambda: ready
+    with patch("stark_convert.chat._read_image_file") as read_image:
+        with pytest.raises(ChatError, match="declared finite context capacity"):
+            run_chat(options(model, image=tmp_path / "not-read.png", context_tokens=context), worker)
+        read_image.assert_not_called()
+    assert worker.requests == [] and worker.image_requests == []
+
+
 def test_image_option_requires_enabled_images_before_reading_path(model, tmp_path):
     worker = FakeWorker(images=False)
     with pytest.raises(ChatError, match="unavailable"):

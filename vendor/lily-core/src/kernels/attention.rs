@@ -9,8 +9,18 @@ use crate::{
     tensor::{DType, Tensor},
 };
 
-/// Hard kernel limit; checkpoint and CLI limits may be lower.
-pub const MAX_SEQ: usize = 262144;
+/// Largest aligned capacity representable by the shaders' signed sequence
+/// indices and tensor extents. Dispatch-specific products are checked separately.
+/// Checkpoint context limits and available device memory are separate bounds.
+pub const MAX_SEQ: usize = (i32::MAX as usize) & !8191;
+
+fn checked_u32_grid_elements(heads: usize, rows: usize, d: usize) -> Result<usize> {
+    heads
+        .checked_mul(rows)
+        .and_then(|count| count.checked_mul(d))
+        .filter(|count| *count <= u32::MAX as usize)
+        .ok_or_else(|| anyhow::anyhow!("attention grid exceeds U32 shader indexing"))
+}
 
 /// Attention Metal source shared with compile tests.
 pub const SOURCE: &str = include_str!("metal/attention.metal");
@@ -703,6 +713,7 @@ pub fn kv_dequant_q8<'c>(
     if len == 0 {
         return Ok(());
     }
+    let elements = checked_u32_grid_elements(kvh, len, d)?;
     let (name, source) = if format == KvFormat::Q8Affine64 {
         ("kv_dequant_affine64", AFFINE64_SOURCE)
     } else {
@@ -713,7 +724,7 @@ pub fn kv_dequant_q8<'c>(
         &pipeline,
         &[cache.values.binding(), cache.scales()?.binding(), out.binding()],
         &[&u32_bytes(d), &u32_bytes(max_seq), &u32_bytes(len), &u32_bytes(out_cap)],
-        Grid::Threads { grid: (kvh * len * d, 1, 1), threadgroup: (256, 1, 1) },
+        Grid::Threads { grid: (elements, 1, 1), threadgroup: (256, 1, 1) },
     )
 }
 
@@ -744,7 +755,8 @@ pub fn sdpa_prefill<'t>(
     ensure!(nq.is_multiple_of(kvh), "NQ {nq} not a multiple of KVH {kvh}");
     ensure!(d <= 256, "head dim {d} > 256 unsupported");
     ensure!(
-        base_len.max + m <= max_seq && max_seq <= MAX_SEQ,
+        base_len.max.checked_add(m).is_some_and(|end| end <= max_seq)
+            && max_seq <= MAX_SEQ,
         "chunk exceeds kernel MAX_SEQ"
     );
     ensure!(v_cache.shape() == k_cache.shape(), "k/v cache shape mismatch");
@@ -1251,3 +1263,88 @@ pub fn k_norm_rope_scatter_decode_with_rounding<'c>(
 #[cfg(test)]
 #[path = "official_fused_rms_cache_tests.rs"]
 mod official_fused_rms_cache_tests;
+
+#[cfg(test)]
+mod context_capacity_tests {
+    use super::*;
+    use crate::kernels::qsa::{self, SparseSplitScratch};
+
+    #[test]
+    fn attention_grid_rejects_shader_index_overflow() -> Result<()> {
+        ensure!(checked_u32_grid_elements(1, 1_048_576, 256)? == 268_435_456);
+        ensure!(checked_u32_grid_elements(16, 1_048_576, 256).is_err());
+        ensure!(checked_u32_grid_elements(usize::MAX, 2, 256).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a physical Apple Silicon Metal device"]
+    fn decode_attention_executes_beyond_the_previous_context_ceiling() -> Result<()> {
+        let ctx = MetalContext::new()?;
+        for rows in [262_145usize, 1_048_576] {
+            for format in [KvFormat::Bf16, KvFormat::Q8, KvFormat::Q8Affine64] {
+                let d = if format == KvFormat::Bf16 { 32 } else { 256 };
+                // Zero K/V has an exact zero readout for every query length.
+                // Start output at one so an omitted dispatch cannot pass.
+                let cache = KvCache::zeros(&ctx, format, 1, rows, d)?;
+                let q = Tensor::from_f32_as_bf16(&ctx, &vec![1.0; d], &[1, d])?;
+                let out = Tensor::from_f32_as_bf16(&ctx, &vec![1.0; d], &[1, d])?;
+                let splits = rows.div_ceil(SDPA_SPLIT);
+                let partials = Tensor::zeros(&ctx, &[1, splits, d], DType::F32)?;
+                let stats = Tensor::zeros(&ctx, &[1, splits, 2], DType::F32)?;
+                let pass = ctx.begin_concurrent()?;
+                if format == KvFormat::Bf16 {
+                    sdpa_decode(
+                        &ctx,
+                        &pass,
+                        &q,
+                        &cache,
+                        &cache,
+                        &out,
+                        rows,
+                        1.0,
+                        Some((&partials, &stats)),
+                    )?;
+                } else {
+                    // The production Q8 route uses sparse attention beyond
+                    // its dense budget. Select the final complete block.
+                    let block = (qsa::visible_blocks(rows - 1, 4) - 1) as u32;
+                    let selected = Tensor::from_bytes(
+                        &ctx,
+                        &block.to_le_bytes(),
+                        &[1, 1],
+                        DType::U32,
+                    )?;
+                    let count = Tensor::from_bytes(
+                        &ctx,
+                        &1u32.to_le_bytes(),
+                        &[1],
+                        DType::U32,
+                    )?;
+                    qsa::qsa_attention(
+                        &ctx,
+                        &pass,
+                        &q,
+                        &cache,
+                        &cache,
+                        &selected,
+                        &count,
+                        &out,
+                        &SparseSplitScratch { partials: &partials, stats: &stats },
+                        1,
+                        1,
+                        4,
+                        rows - 1,
+                        1.0,
+                    )?;
+                }
+                pass.commit_wait()?;
+                ensure!(
+                    out.to_f32()?.iter().all(|value| *value == 0.0),
+                    "long-context zero attention readout mismatch"
+                );
+            }
+        }
+        Ok(())
+    }
+}

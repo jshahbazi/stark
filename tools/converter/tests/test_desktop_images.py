@@ -126,6 +126,7 @@ def make_desktop(worker):
     desktop.api_queue_limit = 8
     desktop.api_queue_timeout = 3
     desktop.api_context = 64
+    desktop.context_capacity_known = True
     desktop.api_maximum = 16
     desktop.api_vocab = 256
     desktop.thinking = False

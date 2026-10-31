@@ -730,12 +730,15 @@ def run_chat(args, worker):
     if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
         raise ChatError("Generation worker could not load this model.")
     codec, template = load_template(args.model_path, expected_hashes=getattr(worker, "image_input", None))
-    context = args.context_tokens or min(8192, ready["max_context_tokens"])
+    context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
+    context = args.context_tokens if args.context_tokens is not None else ready["max_context_tokens"]
     if context > ready["max_context_tokens"] or args.max_new_tokens > ready["max_new_tokens"]:
         raise ChatError("Requested token limits exceed this worker's limits.")
     image_path = getattr(args, "image", None)
     image = None
     if image_path is not None:
+        if not context_capacity_known:
+            raise ChatError("Image requests require a model with a declared finite context capacity.")
         if getattr(worker, "images", False) is not True:
             raise ChatError("Image support is unavailable for this model and worker.")
         image = _read_image_file(image_path)
@@ -797,7 +800,7 @@ def run_chat(args, worker):
                     {
                         "operation": "generate",
                         "rendered_prompt": prompt,
-                        "context_tokens": context,
+                        "context_tokens": context if context_capacity_known else count + args.max_new_tokens,
                         "max_new_tokens": args.max_new_tokens,
                         "sampling": {"mode": "greedy"},
                     }
@@ -821,7 +824,7 @@ def main(argv=None):
     parser.add_argument("--image", type=Path, help="Attach one local PNG or JPEG image to terminal chat")
     parser.add_argument("--worker", type=Path, default=Path("stark-generate"), help=argparse.SUPPRESS)
     parser.add_argument("--system", help="System message (default: model metadata)")
-    parser.add_argument("--context-tokens", type=int, help="Context budget (default: up to 8192)")
+    parser.add_argument("--context-tokens", type=int, help="Context budget (default: loaded model's maximum)")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Reply budget (default: 512)")
     parser.add_argument("--thinking", action="store_true", help="Enable reasoning for templates that support it")
     parser.add_argument("--timeout", type=float, default=300, help="Worker reply timeout in seconds (default: 300)")

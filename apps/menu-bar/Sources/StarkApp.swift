@@ -1,6 +1,7 @@
 import AppKit
 import Darwin
 import ImageIO
+import Metal
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -260,9 +261,16 @@ struct DecisionResult {
 struct ChatOptions {
     var useModelSystemPrompt = true
     var systemPrompt = ""
-    var contextTokens = 8192
+    var contextTokens = 0
     var maxNewTokens = 512
     var thinking = false
+
+    static func defaults(contextLimit: Int, outputLimit: Int) -> ChatOptions {
+        var options = ChatOptions()
+        options.contextTokens = contextLimit
+        options.maxNewTokens = min(512, outputLimit, max(0, contextLimit - 1))
+        return options
+    }
 }
 
 struct InstallProgress {
@@ -926,6 +934,7 @@ final class EngineController: ObservableObject {
     @Published var state = "idle" {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
+            if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
         }
     }
     @Published var message = "Starting Stark…"
@@ -935,6 +944,10 @@ final class EngineController: ObservableObject {
     @Published var apiBaseURL = ""
     @Published var apiKey = ""
     @Published var apiMessage = "Starting the local API…"
+    @Published private(set) var apiCredentialBusy = false
+    @Published private(set) var apiPort: Int
+    @Published private(set) var supportsTools = false
+    @Published private(set) var toolParser = ""
     @Published var apiContextTokens = 0
     @Published var apiMaxNewTokens = 0
     @Published var messages: [ChatMessage] = []
@@ -971,7 +984,8 @@ final class EngineController: ObservableObject {
     @Published private(set) var removingModelID: String?
     @Published private(set) var removalError: String?
     @Published var options = ChatOptions()
-    @Published var contextLimit = 8192
+    @Published var contextLimit = 0
+    @Published var contextCapacityKnown = false
     @Published var outputLimit = 512
     var onInstalled: (() -> Void)?
     private var process: Process?
@@ -991,6 +1005,20 @@ final class EngineController: ObservableObject {
     private var activeInstallRequestID: String?
     private var removalRequestID: String?
     private var removalAction: InstalledModelRemoval.Action?
+    private let gpuMemoryBudgetBytes: UInt64?
+    private let apiCredentials: APICredentialStore
+    private let apiPreferences: APIConnectionPreferences
+    private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
+    private var apiCredentialOperation: UUID?
+
+    init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard,
+         gpuMemoryBudgetBytes: UInt64? = MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize) {
+        self.apiCredentials = apiCredentials
+        // The worker samples allocations on this same system-default Metal device.
+        self.gpuMemoryBudgetBytes = gpuMemoryBudgetBytes
+        apiPreferences = APIConnectionPreferences(service: apiCredentials.service, defaults: apiDefaults)
+        apiPort = apiPreferences.port
+    }
 
     var busy: Bool {
         ["loading", "generating", "deciding", "installing", "stopping", "configuring", "removing"].contains(state) ||
@@ -1003,9 +1031,32 @@ final class EngineController: ObservableObject {
     }
     var activeModel: InstalledModel? { models.first { $0.id == loadedID } }
     var activeName: String { activeModel?.name ?? "No model running" }
+    var gpuMemoryFraction: Double? {
+        guard let bytes = gpuMemoryBytes, let budget = gpuMemoryBudgetBytes, budget > 0 else { return nil }
+        return Double(bytes) / Double(budget)
+    }
+    var gpuMemoryColor: Color {
+        guard let fraction = gpuMemoryFraction else { return .secondary }
+        if fraction >= 0.9 { return .red }
+        if fraction >= 0.75 { return .orange }
+        return .green
+    }
     var gpuMemoryText: String {
+        if let fraction = gpuMemoryFraction {
+            return "GPU memory " + fraction.formatted(.percent.precision(.fractionLength(0)).rounded(rule: .down))
+        }
         guard let bytes = gpuMemoryBytes else { return "GPU memory —" }
         return "GPU memory " + ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+    }
+    var gpuMemoryHelp: String {
+        guard let bytes = gpuMemoryBytes else { return "GPU memory measurement unavailable." }
+        let allocated = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .memory)
+        let scope = "Stark’s model worker only; excludes CPU-only allocations and other apps. Refreshes about once a second."
+        guard let budget = gpuMemoryBudgetBytes, budget > 0 else {
+            return "\(allocated) allocated. Metal’s recommended memory budget is unavailable. \(scope)"
+        }
+        let total = ByteCountFormatter.string(fromByteCount: Int64(clamping: budget), countStyle: .memory)
+        return "\(allocated) of Metal’s \(total) recommended memory budget. Apple silicon uses shared memory. \(scope)"
     }
     var activeVersionDetails: String {
         guard let display = activeModel?.display else { return "" }
@@ -1094,6 +1145,7 @@ final class EngineController: ObservableObject {
             try child.run()
             process = child
             input = incoming.fileHandleForWriting
+            retryAPI()
             send(["command": "list"])
         } catch {
             output?.readabilityHandler = nil
@@ -1122,7 +1174,6 @@ final class EngineController: ObservableObject {
         switch event["event"] as? String {
         case "connection":
             apiBaseURL = event["base_url"] as? String ?? ""
-            apiKey = event["api_key"] as? String ?? ""
             apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
@@ -1322,12 +1373,16 @@ final class EngineController: ObservableObject {
 
     private func applyLimits(_ event: [String: Any]) {
         contextLimit = event["max_context_tokens"] as? Int ?? contextLimit
+        contextCapacityKnown = event["context_capacity_known"] as? Bool
+            ?? (contextLimit > 0 && contextLimit != 0xFFFFFFFF)
         outputLimit = event["max_output_tokens"] as? Int ?? outputLimit
         options.contextTokens = event["context_tokens"] as? Int ?? options.contextTokens
         options.maxNewTokens = event["max_new_tokens"] as? Int ?? options.maxNewTokens
     }
 
     private func applyImageCapabilities(_ event: [String: Any]) {
+        supportsTools = mode == .chat && event["tools"] as? Bool == true
+        toolParser = supportsTools ? event["tool_parser"] as? String ?? "" : ""
         supportsImages = mode == .chat && event["images"] as? Bool == true &&
             event["image_attachment_transport"] as? String == "private-file-v1" &&
             event["max_image_bytes"] as? Int == ImageAttachment.maximumBytes
@@ -1444,6 +1499,84 @@ final class EngineController: ObservableObject {
         bytes.append(10)
         do { try input.write(contentsOf: bytes); return true }
         catch { state = "error"; message = "Cannot reach the runtime. Quit and reopen Stark."; return false }
+    }
+
+    /// Credential bytes travel only over the private app/backend pipe.
+    func retryAPI() {
+        guard !apiCredentialBusy else { return }
+        guard input != nil else { apiMessage = "Reopen Stark to restart the local API."; return }
+        guard (1...65535).contains(apiPort) else {
+            apiMessage = "The saved API port is invalid. Enter a port from 1 to 65535 and choose Apply Port."
+            return
+        }
+        performAPICredentialOperation(regenerate: false)
+    }
+
+    func configureAPIPort(_ value: String) {
+        guard !apiCredentialBusy else { return }
+        guard let port = Int(value), (1...65535).contains(port) else {
+            apiMessage = "Enter a port from 1 to 65535."
+            return
+        }
+        do { try apiPreferences.save(port: port); apiPort = port; retryAPI() }
+        catch { apiMessage = "The API port could not be saved. Try again." }
+    }
+
+    func regenerateAPIKey() {
+        guard !apiCredentialBusy else { return }
+        guard input != nil else { apiMessage = "Reopen Stark before regenerating its API key."; return }
+        guard (1...65535).contains(apiPort) else {
+            apiMessage = "Choose a valid saved port before regenerating the API key."
+            return
+        }
+        performAPICredentialOperation(regenerate: true)
+    }
+
+    private func performAPICredentialOperation(regenerate: Bool) {
+        guard !apiCredentialBusy, let privateInput = input else { return }
+        let operation = UUID()
+        let port = apiPort
+        let credentials = apiCredentials
+        apiCredentialOperation = operation
+        apiCredentialBusy = true
+        apiMessage = regenerate ? "Saving the replacement API key in Keychain…" : "Reading the API credential from Keychain…"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self, self.apiCredentialOperation == operation,
+                  self.input === privateInput, !self.shuttingDown else { return }
+            self.apiMessage = regenerate
+                ? "Waiting for macOS Keychain to finish replacing the API key. Check Keychain Access or an access prompt, including approval after an app upgrade. The replacement is still pending; Stark's other features remain available. If it remains pending, quit and reopen Stark after approving access, then view the stored key before updating connected apps."
+                : "Waiting for macOS Keychain access. Unlock your login Keychain or approve Stark's Local API item in Keychain Access, including access approval after an app upgrade. Stark's other features remain available. If it remains pending, quit and reopen Stark after approving access."
+        }
+        // Never enqueue another operation while one is running. Security IPC can
+        // block even with interaction disabled; a timeout cannot safely cancel
+        // SecItemUpdate or declare that a pending replacement did not commit.
+        apiCredentialQueue.async { [weak self] in
+            let result: Result<String, Error> = Result {
+                if regenerate { return try credentials.regenerate() }
+                return try credentials.loadOrCreate()
+            }
+            DispatchQueue.main.async {
+                guard let self, self.apiCredentialOperation == operation else { return }
+                self.apiCredentialOperation = nil
+                self.apiCredentialBusy = false
+                guard self.input === privateInput, !self.shuttingDown else { return }
+                switch result {
+                case .success(let key):
+                    self.apiKey = key
+                    self.apiMessage = regenerate
+                        ? "API key replaced. Update connected apps with the replacement key."
+                        : "Connecting the local API on port \(port)…"
+                    if !self.send(["command": "configure_api", "api_key": key, "port": port]) {
+                        self.apiMessage = regenerate
+                            ? "API key saved in Keychain. Reopen Stark, then update connected apps with the replacement key."
+                            : "Cannot configure the local API. Reopen Stark. Your stored API key has not changed."
+                    }
+                case .failure(let error):
+                    // Preserve the active credential on every completed storage failure.
+                    self.apiMessage = (error as? APICredentialError)?.message ?? APICredentialError.storage.message
+                }
+            }
+        }
     }
 
     @discardableResult
@@ -2371,8 +2504,10 @@ struct AdvancedOptionsView: View {
     }
 
     private var validation: String? {
-        guard let count = Int(context), (2...engine.contextLimit).contains(count) else {
-            return "Context size must be between 2 and \(engine.contextLimit) tokens."
+        guard let count = Int(context), count >= 2, count <= engine.contextLimit else {
+            return engine.contextCapacityKnown
+                ? "Context size must be between 2 and \(engine.contextLimit) tokens."
+                : "Conversation budget must be between 2 and \(engine.contextLimit) tokens (protocol range)."
         }
         guard let maximum = Int(output), (1...engine.outputLimit).contains(maximum) else {
             return "Output limit must be between 1 and \(engine.outputLimit) tokens."
@@ -2395,7 +2530,7 @@ struct AdvancedOptionsView: View {
             }
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 12) {
                 GridRow {
-                    Text("Context size (tokens)")
+                    Text(engine.contextCapacityKnown ? "Context size (tokens)" : "Conversation budget (tokens)")
                     TextField("Context size", text: $context).textFieldStyle(.roundedBorder)
                         .accessibilityLabel("Context size in tokens")
                 }
@@ -2407,19 +2542,26 @@ struct AdvancedOptionsView: View {
             }
             Text("Context includes the conversation and room for the full reply budget.")
                 .font(.caption).foregroundStyle(.secondary)
+            if !engine.contextCapacityKnown {
+                Text("This model does not declare a finite context maximum. The budget uses Stark's protocol range; memory and request byte limits still apply. Text requests allocate only the context they need.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             Toggle("Thinking mode", isOn: $thinking)
             Text("Enables reasoning when the model's chat template supports it.")
                 .font(.caption).foregroundStyle(.secondary)
             if let validation = validation { Text(validation).font(.caption).foregroundStyle(.red) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red) }
-            Text("Settings stay in memory for this app session. Switching models may reduce token limits.")
+            Text(engine.contextCapacityKnown
+                 ? "Context defaults to the model's maximum. Custom limits stay in memory for this app session and are bounded by the running model."
+                 : "The default budget uses the protocol range without claiming a model context maximum. Custom budgets stay in memory for this app session.")
                 .font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button("Restore Defaults") {
-                    useModelSystemPrompt = true; systemPrompt = ""; thinking = false
-                    let count = min(8192, engine.contextLimit)
-                    context = String(count)
-                    output = String(min(512, engine.outputLimit, count - 1))
+                    let defaults = ChatOptions.defaults(contextLimit: engine.contextLimit, outputLimit: engine.outputLimit)
+                    useModelSystemPrompt = defaults.useModelSystemPrompt
+                    systemPrompt = defaults.systemPrompt; thinking = defaults.thinking
+                    context = String(defaults.contextTokens)
+                    output = String(defaults.maxNewTokens)
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
@@ -2433,6 +2575,28 @@ struct AdvancedOptionsView: View {
                 }.buttonStyle(.borderedProminent).disabled(validation != nil || engine.busy || engine.state != "ready")
             }
         }.padding(24).frame(width: 510)
+    }
+}
+
+struct GPUMemoryView: View {
+    @ObservedObject var engine: EngineController
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(engine.gpuMemoryText)
+                .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            ZStack(alignment: .leading) {
+                Capsule().fill(.quaternary)
+                if let fraction = engine.gpuMemoryFraction {
+                    Capsule().fill(engine.gpuMemoryColor.gradient)
+                        .frame(width: 120 * min(fraction, 1))
+                }
+            }.frame(width: 120, height: 5)
+        }.fixedSize()
+            .help(engine.gpuMemoryHelp)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(engine.gpuMemoryText)
+            .accessibilityValue(engine.gpuMemoryHelp)
     }
 }
 
@@ -2454,9 +2618,7 @@ struct PlaygroundView: View {
             }
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 StatusLine(engine: engine)
-                Text(engine.gpuMemoryText)
-                    .font(.caption).monospacedDigit().foregroundStyle(.secondary).fixedSize()
-                    .help("Current Metal memory allocated by Stark’s model worker. Refreshes about once a second. Apple silicon uses shared memory.")
+                GPUMemoryView(engine: engine)
             }
             HStack {
                 RunningModelLabel(engine: engine).font(.callout.weight(.medium))

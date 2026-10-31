@@ -80,7 +80,7 @@ Use the [scoring protocol](SCORING.md) to tokenize a rendered input and score ca
 
 The caller renders the exact training chat template and passes the result through the [generation protocol](GENERATION.md#private-json-lines-protocol). Preserve the checkpoint's thinking behavior; generic conversion supplies no reasoning control or output parser. Keep prompt/response text, token vectors and decision probabilities inside private pipes. The generation worker preserves reasoning text in its reply, so the caller owns its interpretation.
 
-Current workers cap context at 16,384 tokens, even though both public configs advertise 262,144. Generation is additionally capped at 4,096 new tokens. The readiness reply reports the effective limits and EOS IDs.
+Workers use the loaded model's configured context maximum: both public configs advertise 262,144 tokens. Generation remains capped at 4,096 new tokens. The readiness reply reports the effective limits and EOS IDs. Available memory and the private protocol's request byte limit still bound individual requests; accepting the configured maximum does not qualify full-length execution.
 
 ## Validation boundaries
 
