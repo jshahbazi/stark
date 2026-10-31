@@ -542,7 +542,18 @@ impl Qwen4ExpModel {
                 }
             }
             pass.level_barrier(&[&ps.branch_out])?;
-            hc_inject_bf16(ctx, pass, &ps.hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+            hc_inject_bf16(
+                ctx,
+                pass,
+                &ps.hyper,
+                &ps.branch_out,
+                &ps.hc.inj,
+                h,
+                g,
+                self.config.official_mlx_rounding(),
+                self.hc_primitive_sigmoid(&layer.attn_hc, ps.m),
+                self.hc_injection_kind(&layer.attn_hc, ps.m),
+            )?;
             pass.level_barrier(&[&ps.hyper])?;
 
             self.hc_read_batched(ctx, pass, &layer.mlp_hc, &ps.hyper, s, ps)?;
@@ -563,7 +574,18 @@ impl Qwen4ExpModel {
                 &ps.moe,
             )?;
             pass.level_barrier(&[&ps.branch_out])?;
-            hc_inject_bf16(ctx, pass, &ps.hyper, &ps.branch_out, &ps.hc.inj, h, g)?;
+            hc_inject_bf16(
+                ctx,
+                pass,
+                &ps.hyper,
+                &ps.branch_out,
+                &ps.hc.inj,
+                h,
+                g,
+                self.config.official_mlx_rounding(),
+                self.hc_primitive_sigmoid(&layer.mlp_hc, ps.m),
+                self.hc_injection_kind(&layer.mlp_hc, ps.m),
+            )?;
             pass.level_barrier(&[&ps.hyper])?;
         }
 
@@ -572,13 +594,14 @@ impl Qwen4ExpModel {
         // the draws run in one level).
         self.hc_read_batched(ctx, pass, &self.weights.final_mixer, &ps.hyper, s, ps)?;
         let logits = bs.logits.view(0, &[m, vocab])?;
-        project_mat(
+        crate::moe_ffn::project_lm_logits(
             ctx,
             pass,
             &ps.hc.mixed,
             &self.weights.lm_head,
             &logits,
             &s.dequant,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&logits])?;
         for (r, row) in rows.iter().enumerate() {
@@ -629,6 +652,7 @@ impl Qwen4ExpModel {
             g,
             eps,
             self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.emb, &p.query_n])?;
         project_mat(ctx, pass, &p.emb, &w.key_proj, &p.key, &s.dequant)?;
@@ -644,10 +668,19 @@ impl Qwen4ExpModel {
             g,
             eps,
             self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.key_n])?;
-        ple::ple_gate_value_bf16(
-            ctx, pass, &p.key_n, &p.query_n, &p.value, &p.gated, h, g,
+        ple::ple_gate_value_bf16_with_rounding(
+            ctx,
+            pass,
+            &p.key_n,
+            &p.query_n,
+            &p.value,
+            &p.gated,
+            h,
+            g,
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated])?;
         rmsnorm_grouped_bf16(
@@ -660,13 +693,14 @@ impl Qwen4ExpModel {
             g,
             eps,
             self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[&p.gated_n])?;
         for (r, row) in rows.iter().enumerate() {
             let pst = row.state.ple.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("row {r}: PLE weights without PLE state")
             })?;
-            ple::ple_conv1d_step(
+            ple::ple_conv1d_step_with_rounding(
                 ctx,
                 pass,
                 &pst.conv_windows[row.state.conv_slot],
@@ -675,6 +709,7 @@ impl Qwen4ExpModel {
                 &p.gated.view(r * wide, &[wide])?,
                 &hyper.view(r * wide, &[wide])?,
                 ple.ngram_size,
+                self.config.official_mlx_rounding(),
             )?;
         }
         pass.level_barrier(&[hyper])
@@ -717,15 +752,15 @@ impl Qwen4ExpModel {
             .iter()
             .enumerate()
             .map(|(r, row)| match &row.state.layers[layer] {
-                LayerState::Gdn { state, conv_windows } => {
-                    Ok((state, &conv_windows[row.state.conv_slot]))
+                LayerState::Gdn { state, conv_windows, layout } => {
+                    Ok((state, &conv_windows[row.state.conv_slot], *layout))
                 }
                 LayerState::Attn { .. } => {
                     anyhow::bail!("row {r}: layer {layer} state is not recurrent")
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        for (r, (_, window)) in states.iter().enumerate() {
+        for (r, (_, window, layout)) in states.iter().enumerate() {
             conv1d_step(
                 ctx,
                 pass,
@@ -733,10 +768,12 @@ impl Qwen4ExpModel {
                 &ps.qkv.view(r * c, &[c])?,
                 &w.conv_w,
                 &ps.qkv_conv.view(r * c, &[c])?,
+                cfg.official_mlx_rounding(),
+                *layout,
             )?;
         }
         pass.level_barrier(&[&ps.qkv_conv])?;
-        for (r, (state, _)) in states.iter().enumerate() {
+        for (r, (state, _, layout)) in states.iter().enumerate() {
             gdn_step_gated_fused(
                 ctx,
                 pass,
@@ -753,6 +790,9 @@ impl Qwen4ExpModel {
                 cfg.linear_num_key_heads,
                 cfg.rms_norm_eps,
                 self.gdn_gate,
+                cfg.official_mlx_rounding(),
+                *layout,
+                &ps.gdn_out.view(r * dim_v, &[dim_v])?,
             )?;
         }
         pass.level_barrier(&[&ps.gdn_gated])?;
@@ -834,6 +874,7 @@ impl Qwen4ExpModel {
                 eps,
                 a.rope_delta,
                 self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
             k_norm_rope_scatter_decode_with_bias(
                 ctx,
@@ -847,6 +888,7 @@ impl Qwen4ExpModel {
                 eps,
                 a.rope_delta,
                 self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
             scatter_kv(
                 ctx,
@@ -855,7 +897,7 @@ impl Qwen4ExpModel {
                 &ps.v_new.view(r * nkv * hd, &[nkv, hd])?,
                 a.pos,
             )?;
-            qsa::qsa_prep_q_with_bias(
+            qsa::qsa_prep_q_with_rounding(
                 ctx,
                 pass,
                 &idx_qk(r)?,
@@ -868,6 +910,7 @@ impl Qwen4ExpModel {
                 eps,
                 Rope::Delta(a.rope_delta),
                 self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
             qsa::qsa_scatter_keys(ctx, pass, &idx_qk(r)?, a.idx_keys, nh, a.pos)?;
         }
@@ -879,7 +922,7 @@ impl Qwen4ExpModel {
         for a in rows {
             let len = a.pos + 1;
             if len.is_multiple_of(ratio) {
-                qsa::qsa_block_keys_with_bias(
+                qsa::qsa_block_keys_with_rounding(
                     ctx,
                     pass,
                     a.idx_keys,
@@ -893,6 +936,7 @@ impl Qwen4ExpModel {
                     eps,
                     Rope::Delta(a.rope_delta),
                     self.config.norm_weight_bias(),
+                    self.config.official_mlx_rounding(),
                 )?;
                 completes = true;
             }
@@ -972,7 +1016,15 @@ impl Qwen4ExpModel {
             }
         }
         pass.level_barrier(&[&ps.attn_o])?;
-        sigmoid_mul_bf16(ctx, pass, &ps.gate, &ps.attn_o, &ps.attn_gated)?;
+        sigmoid_mul_bf16(
+            ctx,
+            pass,
+            &ps.gate,
+            &ps.attn_o,
+            &ps.attn_gated,
+            ps.moe.sigmoid_table.as_ref(),
+            self.config.official_mlx_rounding(),
+        )?;
         pass.level_barrier(&[&ps.attn_gated])?;
         project_mat(ctx, pass, &ps.attn_gated, &w.o_proj, &ps.branch_out, &s.dequant)
     }
@@ -1035,6 +1087,7 @@ impl Qwen4ExpModel {
                 eps,
                 a.rope_delta,
                 self.config.norm_weight_bias(),
+                self.config.official_mlx_rounding(),
             )?;
             scatter_kv(
                 ctx,
@@ -1051,7 +1104,7 @@ impl Qwen4ExpModel {
         for a in rows {
             let len = a.pos + 1;
             if len.is_multiple_of(ratio) {
-                qsa::qsa_block_keys_with_bias(
+                qsa::qsa_block_keys_with_rounding(
                     ctx,
                     pass,
                     a.idx_keys,
@@ -1065,6 +1118,7 @@ impl Qwen4ExpModel {
                     eps,
                     Rope::Delta(a.rope_delta),
                     self.config.norm_weight_bias(),
+                    self.config.official_mlx_rounding(),
                 )?;
                 completes = true;
             }
@@ -1132,6 +1186,7 @@ impl Qwen4ExpModel {
             g,
             eps,
             self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         quant::gather_rows_quant(ctx, pass, &self.weights.embed_tokens, ids, &ps.x)?;
         pass.level_barrier(&[&ps.hc.hn, &ps.x])?;
@@ -1153,6 +1208,7 @@ impl Qwen4ExpModel {
             &ps.x,
             eps,
             self.config.norm_weight_bias(),
+            self.config.official_mlx_rounding(),
         )?;
         pass.level_barrier(&[hyper, &ps.x])?;
         project_mat(ctx, pass, &ps.x, &mtp.fc_embedding, &ps.branch_out, &s.dequant)?;

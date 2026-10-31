@@ -228,8 +228,18 @@ This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
 and executes neither MTP nor vision. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
 
-The existing native graph uses F32 forward arithmetic. Deferred Metal commands keep
-dependent device vectors alive through completion and use a sticky failure
+The official mixed-affine MLX checkpoint policy keeps its stored weights and
+quantization unchanged. It selects BF16 operation boundaries, F32 GDN state in
+ValueKey order, and the Q8/group64 affine KV format. Its vocabulary head stores
+BF16-rounded values in F32 buffers. Strict shape and precision checks select
+the stock-order HC, GDN and projection kernels; other descriptors retain their
+existing routes. Component controls and the separate full-model numerical
+limits are recorded in the
+[matched-checkpoint optimization record](benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md).
+
+The native graph uses the selected mixed-precision policies described above;
+it is not an all-F32 forward path. Deferred Metal commands keep dependent
+device vectors alive through completion and use a sticky failure
 status to reject invalid intermediates, including values later hidden by
 clipping. Existing CPU controls remain available in the staged execution path.
 Temporary device vectors share disjoint 256-byte-aligned command arenas, capped

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! In-process Qwen execution through Stark's pinned Lily core. Activations use
-//! BF16, attention K/V uses Q8, and logits, reductions and GDN state use F32.
+//! BF16. Attention K/V uses Q8; reductions and GDN state use F32. Official
+//! external-MLX head values are BF16-rounded in F32 buffers. Lily/reference
+//! head values retain unrounded F32 accumulation outputs.
 //! Every request has fresh logical state. Pending prompt tokens exist only
 //! until its next readout; no prefix/session persistence or speculative head.
 
@@ -26,18 +28,46 @@ fn record_gpu_profile() {
         profile::record("qwen.mixed.gpu.command", pass.command_gpu_seconds, 0);
         profile::record("qwen.mixed.gpu.measured", pass.measured_seconds, 0);
         profile::record("qwen.mixed.profile_resolve", pass.resolve_seconds, 0);
+        let (mut gdn_seconds, mut moe_seconds) = (None, None);
         for sample in pass.samples {
             let name = match sample.phase {
                 stage_profile::Phase::Embedding => "qwen.mixed.gpu.embedding",
                 stage_profile::Phase::Ple => "qwen.mixed.gpu.ple",
                 stage_profile::Phase::Hc => "qwen.mixed.gpu.hc",
                 stage_profile::Phase::Gdn => "qwen.mixed.gpu.gdn",
+                stage_profile::Phase::GdnInputProjections => "qwen.mixed.gpu.gdn.input_projections",
+                stage_profile::Phase::GdnInputProjectionConv => "qwen.mixed.gpu.gdn.input_projection_conv",
+                stage_profile::Phase::GdnConv => "qwen.mixed.gpu.gdn.conv",
+                stage_profile::Phase::GdnRecurrence => "qwen.mixed.gpu.gdn.recurrence",
+                stage_profile::Phase::GdnRecurrenceNorm => "qwen.mixed.gpu.gdn.recurrence_norm",
+                stage_profile::Phase::GdnNorm => "qwen.mixed.gpu.gdn.norm",
+                stage_profile::Phase::GdnOutProjection => "qwen.mixed.gpu.gdn.out_projection",
                 stage_profile::Phase::Qsa => "qwen.mixed.gpu.qsa",
                 stage_profile::Phase::Moe => "qwen.mixed.gpu.moe",
+                stage_profile::Phase::MoeInputProjections => "qwen.mixed.gpu.moe.input_projections",
+                stage_profile::Phase::MoeRouteSharedActivation => "qwen.mixed.gpu.moe.route_shared_activation",
+                stage_profile::Phase::MoeExpertGateUpSharedDown => "qwen.mixed.gpu.moe.expert_gate_up_shared_down",
+                stage_profile::Phase::MoeExpertDownCombine => "qwen.mixed.gpu.moe.expert_down_combine",
                 stage_profile::Phase::Head => "qwen.mixed.gpu.head",
                 stage_profile::Phase::Draw => "qwen.mixed.gpu.draw",
             };
             profile::record(name, sample.gpu_seconds, 0);
+            // Parent GDN/MoE counters are inclusive totals. Preserve their
+            // one-record-per-pass call count; do not add parent and children.
+            if sample.phase.coarse() != sample.phase {
+                let parent = match sample.phase.coarse() {
+                    stage_profile::Phase::Gdn => &mut gdn_seconds,
+                    stage_profile::Phase::Moe => &mut moe_seconds,
+                    _ => unreachable!("detailed phase has no parent"),
+                };
+                *parent.get_or_insert(0.0) += sample.gpu_seconds;
+            }
+        }
+        if let Some(seconds) = gdn_seconds {
+            profile::record("qwen.mixed.gpu.gdn", seconds, 0);
+        }
+        if let Some(seconds) = moe_seconds {
+            profile::record("qwen.mixed.gpu.moe", seconds, 0);
         }
     }
 }
@@ -57,6 +87,17 @@ fn admitted_position(
         .and_then(|position| position.checked_add(1))
         .filter(|&position| position <= limit)
         .ok_or(Error::Invalid("mixed precision context boundary"))
+}
+
+fn official_holdout_prefix_len(
+    official: bool,
+    span_len: usize,
+) -> Option<usize> {
+    if official && span_len >= 2 {
+        Some(span_len - 1)
+    } else {
+        None
+    }
 }
 
 fn admitted_decode_end(
@@ -148,7 +189,11 @@ impl LilyModel {
         }
         // Match the pinned upstream fast path explicitly; do not depend on
         // an upstream default when qualifying this mixed-precision policy.
-        model.set_kv_format(KvFormat::Q8);
+        model.set_kv_format(if model.config.official_mlx_rounding() {
+            KvFormat::Q8Affine64
+        } else {
+            KvFormat::Q8
+        });
         let state = model
             .new_state(&context, max_context)
             .map_err(|_| Error::Invalid("mixed precision state allocation failed"))?;
@@ -407,60 +452,101 @@ impl LilyModel {
             let _scope = profile::Scope::new("qwen.mixed.prefill");
             self.pending.push(token);
             self.usable = false;
-            self.model
-                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending, Some(draw))
-                .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
-            self.usable = true;
-            self.pending.clear();
-            if self.state.pos != expected_position {
-                return Err(Error::Invalid("mixed precision prefill position"));
+            if let Some(prefix_len) =
+                official_holdout_prefix_len(self.model.config.official_mlx_rounding(), self.pending.len())
+            {
+                // Match the official server's N-1 prompt forward followed by
+                // one initialized S1 logits forward. The prefix cannot draw.
+                self.model
+                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..prefix_len], None)
+                    .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+                if self.state.pos.checked_add(1) != Some(expected_position) {
+                    return Err(Error::Invalid("mixed precision prefill position"));
+                }
+                let held_draw = Draw {
+                    params: &greedy,
+                    step: self.state.pos,
+                };
+                self.forward_decode_admitted(token, expected_position, held_draw)?;
+                if self.state.pos != expected_position {
+                    return Err(Error::Invalid("mixed precision prefill position"));
+                }
+                // Keep the compound request fenced until both phases and the
+                // final position check succeeded. Pending still names the full
+                // admitted span if either phase fails and reset must drain it.
+                self.pending.clear();
+                self.usable = true;
+                Ok(1)
+            } else {
+                // Preserve legacy/reference execution and cold N1 prefill.
+                self.model
+                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending, Some(draw))
+                    .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+                self.usable = true;
+                self.pending.clear();
+                if self.state.pos != expected_position {
+                    return Err(Error::Invalid("mixed precision prefill position"));
+                }
+                // Prefill itself advances state/history and writes slot zero.
+                Ok(0)
             }
-            // Prefill itself advances state/history and writes slot zero.
-            Ok(0)
         } else {
             let _scope = profile::Scope::new("qwen.mixed.decode");
             self.usable = false;
-            self.state
-                .ensure_capacity(&self.context, expected_position)
-                .map_err(|_| Error::Invalid("mixed precision context growth failed"))?;
-            // The caller may have sampled a different token from our last
-            // greedy draw. Always overwrite the input before staging/encoding.
-            {
-                let _scope = profile::Scope::new("qwen.mixed.input_stage");
-                self.scratch
-                    .next_token
-                    .view(0, &[1])
-                    .and_then(|slot| slot.write_bytes(&token.to_le_bytes()))
-                    .map_err(|_| Error::Invalid("mixed precision input staging failed"))?;
-            }
-            {
-                let _scope = profile::Scope::new("qwen.mixed.ngram_stage");
-                self.model
-                    .prepare_step_inputs(&mut self.state, &self.scratch, token)
-                    .map_err(|_| Error::Invalid("mixed precision ngram staging failed"))?;
-            }
-            let encoded = {
-                let _scope = profile::Scope::new("qwen.mixed.encode");
-                self.model
-                    .encode_decode_step(&self.context, &self.state, &self.scratch, 0, 1, draw, None)
-                    .map_err(|_| Error::Invalid("mixed precision decode failed"))?
-            };
-            let pending = {
-                let _scope = profile::Scope::new("qwen.mixed.submit");
-                encoded.commit().map_err(|_| Error::Invalid("mixed precision decode failed"))?
-            };
-            {
-                let _scope = profile::Scope::new("qwen.mixed.wait");
-                pending.wait().map_err(|_| Error::Invalid("mixed precision decode failed"))?;
-            }
-            record_gpu_profile();
-            self.state.advance(1);
+            self.forward_decode_admitted(token, expected_position, draw)?;
             self.usable = true;
             if self.state.pos != expected_position {
                 return Err(Error::Invalid("mixed precision decode position"));
             }
             Ok(1)
         }
+    }
+
+    /// Runs one already-admitted synchronous token. The caller owns the
+    /// request fence, pending span and final position check. This function
+    /// must not re-admit a compound prompt or publish intermediate success.
+    fn forward_decode_admitted(
+        &mut self,
+        token: u32,
+        expected_position: usize,
+        draw: Draw<'_>,
+    ) -> Result<()> {
+        self.state
+            .ensure_capacity(&self.context, expected_position)
+            .map_err(|_| Error::Invalid("mixed precision context growth failed"))?;
+        // The caller may have sampled a different token from our last
+        // greedy draw. Always overwrite the input before staging/encoding.
+        {
+            let _scope = profile::Scope::new("qwen.mixed.input_stage");
+            self.scratch
+                .next_token
+                .view(0, &[1])
+                .and_then(|slot| slot.write_bytes(&token.to_le_bytes()))
+                .map_err(|_| Error::Invalid("mixed precision input staging failed"))?;
+        }
+        {
+            let _scope = profile::Scope::new("qwen.mixed.ngram_stage");
+            self.model
+                .prepare_step_inputs(&mut self.state, &self.scratch, token)
+                .map_err(|_| Error::Invalid("mixed precision ngram staging failed"))?;
+        }
+        let encoded = {
+            let _scope = profile::Scope::new("qwen.mixed.encode");
+            self.model
+                .encode_decode_step(&self.context, &self.state, &self.scratch, 0, 1, draw, None)
+                .map_err(|_| Error::Invalid("mixed precision decode failed"))?
+        };
+        let pending = {
+            let _scope = profile::Scope::new("qwen.mixed.submit");
+            encoded.commit().map_err(|_| Error::Invalid("mixed precision decode failed"))?
+        };
+        {
+            let _scope = profile::Scope::new("qwen.mixed.wait");
+            pending.wait().map_err(|_| Error::Invalid("mixed precision decode failed"))?;
+        }
+        record_gpu_profile();
+        self.state.advance(1);
+        Ok(())
     }
 }
 
@@ -1148,5 +1234,160 @@ mod tests {
                 previous = Some(next);
             }
         }
+    }
+
+    #[stark_test]
+    fn official_holdout_partition_preserves_legacy_and_cold_single_token() {
+        for total in [0, 1, 2, 16, 17, 63, 64, 65, 4095, 4096, 4097, usize::MAX] {
+            assert!(official_holdout_prefix_len(false, total).is_none());
+            if total < 2 {
+                assert!(official_holdout_prefix_len(true, total).is_none());
+            } else {
+                let prefix = official_holdout_prefix_len(true, total).unwrap();
+                assert!(prefix >= 1 && prefix.checked_add(1) == Some(total));
+            }
+        }
+    }
+
+    #[stark_test]
+    fn official_holdout_admission_counts_pending_and_held_token_once() {
+        for committed in [0, 7] {
+            for pending in [1, 15, 16, 63, 64, 4094, 4095, 4096] {
+                let total = pending + 1;
+                let prefix = official_holdout_prefix_len(true, total).unwrap();
+                let expected = admitted_position(committed, pending, 7, 8, MAX_CONTEXT).unwrap();
+                assert!(committed + prefix + 1 == expected);
+                assert!(admitted_position(committed, pending, 7, 8, expected - 1).is_err());
+            }
+        }
+        assert!(admitted_position(usize::MAX, 1, 0, 8, usize::MAX).is_err());
+    }
+
+    #[stark_test]
+    fn official_holdout_partition_preserves_every_input_in_order() {
+        for total in [2, 16, 17, 63, 64, 65, 4095, 4096, 4097] {
+            let input: Vec<_> = (0..total).collect();
+            let prefix = official_holdout_prefix_len(true, total).unwrap();
+            let mut seen = input[..prefix].to_vec();
+            seen.push(input[prefix]);
+            assert!(seen == input && seen.len() == total);
+        }
+    }
+
+    /// Uses one supplied official model. Only aggregates/hashes are compared;
+    /// no prompt, token vector or vocabulary values leave this private test.
+    #[stark_test]
+    #[ignore]
+    fn private_official_holdout_matches_manual_partition_and_fences_staging_failure() {
+        use sha2::{Digest, Sha256};
+
+        fn digest_logits(logits: &[f32]) -> [u8; 32] {
+            let mut digest = Sha256::new();
+            for value in logits {
+                digest.update(value.to_bits().to_le_bytes());
+            }
+            digest.finalize().into()
+        }
+
+        let path = std::env::var_os("STARK_LILY_TEST_MODEL_PATH").expect("private model fixture path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json"))
+            .unwrap_or_else(|_| panic!("private model tokenizer failed"));
+        let seed = tokenizer
+            .encode("Hello.", false)
+            .unwrap_or_else(|_| panic!("private model tokenization failed"))
+            .get_ids()
+            .to_vec();
+        assert!(!seed.is_empty(), "private seed tokenization empty");
+        let mut model = LilyModel::load(path).unwrap();
+        assert!(model.model.config.official_mlx_rounding(), "official model fixture required");
+        let span = |n: usize| (0..n).map(|i| seed[i % seed.len()]).collect::<Vec<_>>();
+
+        for count in [1, 2, 16, 17, 63, 64, 65, 4095, 4096, 4097] {
+            let input = span(count);
+            model.reset();
+            for &token in &input[..count - 1] {
+                model.ingest(token).unwrap();
+            }
+            let automatic = digest_logits(&model.step(input[count - 1]).unwrap());
+            assert!(model.position() == count && model.pending.is_empty());
+            assert!(model.last_full_readout == Some(count) && !model.is_fenced());
+
+            model.reset();
+            let manual = if count == 1 {
+                let greedy = SamplingParams::greedy();
+                let draw = Draw {
+                    params: &greedy,
+                    step: 0,
+                };
+                model.model.prefill(&model.context, &mut model.state, &mut model.scratch, &input, Some(draw)).unwrap();
+                digest_logits(&model.scratch.logits().to_f32().unwrap())
+            } else {
+                model
+                    .model
+                    .prefill(&model.context, &mut model.state, &mut model.scratch, &input[..count - 1], None)
+                    .unwrap();
+                assert!(model.state.pos == count - 1, "manual prefix position");
+                digest_logits(&model.step(input[count - 1]).unwrap())
+            };
+            assert!(automatic == manual, "official holdout differs from manual partition");
+            assert!(model.position() == count, "manual partition position");
+        }
+
+        // A queued suffix must partition relative to the existing state,
+        // rather than reset or count the committed prefix again.
+        for suffix_count in [2, 17] {
+            let prefix = span(3);
+            let suffix = span(suffix_count);
+            model.reset();
+            for &token in &prefix[..2] {
+                model.ingest(token).unwrap();
+            }
+            model.step(prefix[2]).unwrap();
+            for &token in &suffix[..suffix_count - 1] {
+                model.ingest(token).unwrap();
+            }
+            let automatic = digest_logits(&model.step(suffix[suffix_count - 1]).unwrap());
+            assert!(model.position() == 3 + suffix_count);
+            model.reset();
+            for &token in &prefix[..2] {
+                model.ingest(token).unwrap();
+            }
+            model.step(prefix[2]).unwrap();
+            model
+                .model
+                .prefill(&model.context, &mut model.state, &mut model.scratch, &suffix[..suffix_count - 1], None)
+                .unwrap();
+            let manual = digest_logits(&model.step(suffix[suffix_count - 1]).unwrap());
+            assert!(automatic == manual, "initialized suffix holdout differs");
+        }
+
+        model.reset();
+        let input = span(2);
+        model.ingest(input[0]).unwrap();
+        model.step_greedy(input[1]).unwrap();
+        let readout = model.last_greedy.expect("private greedy readout");
+        assert!(readout.slot == 1 && readout.position == 2, "held draw slot or position");
+        assert!(model.pending.is_empty() && !model.is_fenced());
+
+        // A bounds-checked empty view makes only the held-token input staging
+        // fail. The no-draw prefix may commit, but cannot publish usable state.
+        model.reset();
+        let input = span(3);
+        for &token in &input[..2] {
+            model.ingest(token).unwrap();
+        }
+        let next = model.scratch.next_token.view(0, &[2]).unwrap();
+        model.scratch.next_token = next.view(0, &[0]).unwrap();
+        let failure = model.forward(input[2]);
+        assert!(
+            matches!(failure, Err(Error::Invalid("mixed precision input staging failed"))),
+            "held-token staging failure boundary"
+        );
+        assert!(model.state.pos == 2, "no-draw prefix did not commit before staging failure");
+        assert!(model.pending.len() == 3 && !model.usable, "compound failure published or cleared pending");
+        model.scratch.next_token = next;
+        model.reset();
+        assert!(model.is_fenced() && model.pending.is_empty() && model.position() == 0);
     }
 }

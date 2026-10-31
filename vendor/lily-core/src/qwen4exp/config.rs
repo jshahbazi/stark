@@ -977,6 +977,12 @@ impl Qwen4ExpConfig {
         Ok(config)
     }
 
+    /// Operation-rounding compatibility for the strictly admitted external
+    /// MLX-Serve contract. Folded norm gains alone do not select this policy.
+    pub fn official_mlx_rounding(&self) -> bool {
+        self.storage.external_mlx()
+    }
+
     /// Lily stores zero-centered deltas; the official external-table pack
     /// stores already-folded gains (MLX-Serve v26.10.3 model.zig).
     pub fn norm_weight_bias(&self) -> f32 {

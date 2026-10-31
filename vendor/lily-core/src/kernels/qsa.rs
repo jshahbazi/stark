@@ -5,12 +5,22 @@
 
 use anyhow::{Result, ensure};
 
-use crate::kernels::attention::{self, Kv, KvFormat};
-use crate::kernels::{MROPE_SECTION, Pos, Rope, u32_bytes};
-use crate::metal::{ComputePass, Grid, MetalContext, MslVersion, Param};
-use crate::tensor::{DType, Tensor};
+use crate::{
+    kernels::{
+        MROPE_SECTION, Pos, Rope,
+        attention::{self, Kv, KvFormat},
+        u32_bytes,
+    },
+    metal::{ComputePass, Grid, MetalContext, MslVersion, Param},
+    tensor::{DType, Tensor},
+};
 
 const SOURCE: &str = include_str!("metal/qsa.metal");
+const AFFINE64_SOURCE: &str = concat!(
+    include_str!("metal/qsa.metal"),
+    include_str!("metal/kv_affine64_common.metal"),
+    include_str!("metal/qsa_affine64.metal"),
+);
 
 fn norm_shader(name: &'static str, bias: f32) -> Result<(&'static str, &'static str)> {
     if bias == 1.0 {
@@ -651,12 +661,19 @@ pub fn qsa_attention_named<'t, 'c>(
     let (split_name, combine_name) = names.unwrap_or(match format {
         KvFormat::Bf16 => ("qsa_attn_split_bf16", "sdpa_decode_combine"),
         KvFormat::Q8 => ("qsa_attn_split_q8", "sdpa_decode_combine"),
+        KvFormat::Q8Affine64 => ("qsa_attn_split_affine64", "sdpa_decode_combine"),
     });
-    let stage1 = ctx.pipeline(split_name, SOURCE, MslVersion::V3_1)?;
+    let source = if format == KvFormat::Q8Affine64 {
+        attention::require_affine64_dequant()?;
+        AFFINE64_SOURCE
+    } else {
+        SOURCE
+    };
+    let stage1 = ctx.pipeline(split_name, source, MslVersion::V3_1)?;
     let scales;
     let mut buffers =
         vec![q.binding(), k_cache.values.binding(), v_cache.values.binding()];
-    if format == KvFormat::Q8 {
+    if format != KvFormat::Bf16 {
         scales = [k_cache.scales()?, v_cache.scales()?];
         buffers.extend(scales.iter().map(|t| t.binding()));
     }
@@ -785,12 +802,19 @@ pub fn qsa_attention_query<'t, 'c>(
     let name = match format {
         KvFormat::Bf16 => "qsa_attn_gqa_nax",
         KvFormat::Q8 => "qsa_attn_gqa_nax_q8",
+        KvFormat::Q8Affine64 => "qsa_attn_gqa_nax_affine64",
     };
-    let pipeline = ctx.pipeline(name, SOURCE, MslVersion::V4_0)?;
+    let source = if format == KvFormat::Q8Affine64 {
+        attention::require_affine64_dequant()?;
+        AFFINE64_SOURCE
+    } else {
+        SOURCE
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V4_0)?;
     let scales;
     let mut buffers =
         vec![q.binding(), k_cache.values.binding(), v_cache.values.binding()];
-    if format == KvFormat::Q8 {
+    if format != KvFormat::Bf16 {
         scales = [k_cache.scales()?, v_cache.scales()?];
         buffers.extend(scales.iter().map(|t| t.binding()));
     }
@@ -817,3 +841,244 @@ pub fn qsa_attention_query<'t, 'c>(
 #[cfg(test)]
 #[path = "official_qsa_norm_tests.rs"]
 mod official_qsa_norm_tests;
+
+const OFFICIAL_NORM_SOURCE: &str = concat!(
+    include_str!("metal/qsa.metal"),
+    include_str!("metal/official_norm_common.metal"),
+    include_str!("metal/official_qsa_norm.metal"),
+);
+fn official_norm_shader(
+    name: &'static str,
+    bias: f32,
+) -> Result<(&'static str, &'static str)> {
+    ensure!(bias == 0.0, "official QSA RMS requires raw folded BF16 gains");
+    match name {
+        "qsa_prep_q_bf16" => Ok(("qsa_prep_q_bf16_mlx", OFFICIAL_NORM_SOURCE)),
+        "qsa_prep_q_mrope_bf16" => {
+            Ok(("qsa_prep_q_mrope_bf16_mlx", OFFICIAL_NORM_SOURCE))
+        }
+        "qsa_block_keys_bf16" => Ok(("qsa_block_keys_bf16_mlx", OFFICIAL_NORM_SOURCE)),
+        "qsa_block_keys_mrope_bf16" => {
+            Ok(("qsa_block_keys_mrope_bf16_mlx", OFFICIAL_NORM_SOURCE))
+        }
+        _ => anyhow::bail!("unknown official QSA RMS kernel"),
+    }
+}
+/// Explicit BF16 official RMS contract. False preserves the original wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn qsa_prep_q_with_rounding<'t>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qk: &Tensor,
+    w: &Tensor,
+    q: &Tensor,
+    n_heads: usize,
+    rot: usize,
+    base_pos: impl Into<Pos<'t>>,
+    theta: f32,
+    eps: f32,
+    rope: Rope<'_>,
+    norm_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return qsa_prep_q_with_bias(
+            ctx, pass, qk, w, q, n_heads, rot, base_pos, theta, eps, rope, norm_bias,
+        );
+    }
+    ensure!(
+        norm_bias == 0.0 && eps.is_finite() && eps >= 0.0,
+        "official QSA RMS policy"
+    );
+    ensure!(rot <= INDEXER_D && rot.is_multiple_of(2), "official QSA rotary dimension");
+
+    let base_pos = base_pos.into();
+    let d = INDEXER_D;
+    ensure!(
+        qk.dtype() == DType::BF16 && qk.numel().is_multiple_of((n_heads + 1) * d),
+        "qk must be BF16 [M, (NH+1)*D]"
+    );
+    let m = qk.numel() / ((n_heads + 1) * d);
+    ensure!(
+        w.shape() == [d] && w.dtype() == DType::BF16,
+        "q norm weight must be BF16 [D]"
+    );
+    ensure!(
+        q.numel() == m * n_heads * d && q.dtype() == DType::BF16,
+        "q must be BF16 [M, NH, D]"
+    );
+    ensure!(rot.is_multiple_of(2) && rot <= d, "bad rotary dim {rot}");
+    let grid =
+        Grid::Threadgroups { groups: (m * n_heads, 1, 1), threadgroup: (d, 1, 1) };
+    match rope {
+        Rope::Delta(delta) => {
+            let delta = Rope::delta_i32(delta)?.to_ne_bytes();
+            let (name, source) = official_norm_shader("qsa_prep_q_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_with(
+                &pipeline,
+                &[qk.binding(), w.binding(), q.binding()],
+                &[
+                    Param::U32(d as u32),
+                    Param::U32(n_heads as u32),
+                    Param::U32(rot as u32),
+                    base_pos.param(),
+                    Param::F32(theta),
+                    Param::F32(eps),
+                    Param::Bytes(&delta),
+                ],
+                grid,
+            )
+        }
+        Rope::Rows { positions, base } => {
+            let pos_base =
+                Rope::check_rows(positions, base, base_pos.min, base_pos.max, m)?;
+            let (name, source) =
+                official_norm_shader("qsa_prep_q_mrope_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_with(
+                &pipeline,
+                &[qk.binding(), w.binding(), q.binding(), positions.binding()],
+                &[
+                    Param::U32(d as u32),
+                    Param::U32(n_heads as u32),
+                    Param::U32(rot as u32),
+                    base_pos.param(),
+                    Param::F32(theta),
+                    Param::F32(eps),
+                    Param::U32(pos_base as u32),
+                    Param::U32((3 * MROPE_SECTION[1]) as u32),
+                    Param::U32((3 * MROPE_SECTION[2]) as u32),
+                ],
+                grid,
+            )
+        }
+    }
+}
+
+/// Explicit BF16 official RMS contract. False preserves the original wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn qsa_block_keys_with_rounding<'t>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    cache: &Tensor,
+    w: &Tensor,
+    blocks: &Tensor,
+    ratio: usize,
+    first_block: impl Into<Pos<'t>>,
+    count: impl Into<Pos<'t>>,
+    rot: usize,
+    theta: f32,
+    eps: f32,
+    rope: Rope<'_>,
+    norm_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return qsa_block_keys_with_bias(
+            ctx,
+            pass,
+            cache,
+            w,
+            blocks,
+            ratio,
+            first_block,
+            count,
+            rot,
+            theta,
+            eps,
+            rope,
+            norm_bias,
+        );
+    }
+    ensure!(
+        norm_bias == 0.0 && eps.is_finite() && eps >= 0.0,
+        "official QSA RMS policy"
+    );
+    ensure!(rot <= INDEXER_D && rot.is_multiple_of(2), "official QSA rotary dimension");
+    ensure!(cache.dtype() == DType::BF16 && ratio > 0, "official QSA block source");
+
+    let (first_block, count) = (first_block.into(), count.into());
+    if count.max == 0 {
+        return Ok(());
+    }
+    let d = INDEXER_D;
+    ensure!(
+        cache.shape().len() == 2 && cache.shape()[1] == d,
+        "cache must be [max_seq, D]"
+    );
+    ensure!(
+        blocks.shape().len() == 2
+            && blocks.shape()[1] == d
+            && blocks.dtype() == DType::BF16,
+        "blocks must be BF16 [max_blocks, D]"
+    );
+    ensure!(
+        (first_block.max + count.max) * ratio <= cache.shape()[0],
+        "block keys read past the cache"
+    );
+    ensure!(
+        first_block.max + count.max <= blocks.shape()[0],
+        "block key store overflow"
+    );
+    ensure!(
+        w.shape() == [d] && w.dtype() == DType::BF16,
+        "k norm weight must be BF16 [D]"
+    );
+    let grid = Grid::Threadgroups { groups: (count.max, 1, 1), threadgroup: (d, 1, 1) };
+    match rope {
+        Rope::Delta(delta) => {
+            let delta = Rope::delta_i32(delta)?.to_ne_bytes();
+            let (name, source) =
+                official_norm_shader("qsa_block_keys_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_with(
+                &pipeline,
+                &[cache.binding(), w.binding(), blocks.binding()],
+                &[
+                    Param::U32(d as u32),
+                    Param::U32(ratio as u32),
+                    first_block.param(),
+                    Param::U32(rot as u32),
+                    Param::F32(theta),
+                    Param::F32(eps),
+                    count.param(),
+                    Param::Bytes(&delta),
+                ],
+                grid,
+            )
+        }
+        Rope::Rows { positions, base } => {
+            // The last block's first token must have a position row; the
+            // first block's must not lie before the buffer.
+            let last_first_token = (first_block.max + count.max - 1) * ratio;
+            let pos_base = Rope::check_rows(
+                positions,
+                base,
+                first_block.min * ratio,
+                last_first_token,
+                1,
+            )?;
+            let (name, source) =
+                official_norm_shader("qsa_block_keys_mrope_bf16", norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_with(
+                &pipeline,
+                &[cache.binding(), w.binding(), blocks.binding(), positions.binding()],
+                &[
+                    Param::U32(d as u32),
+                    Param::U32(ratio as u32),
+                    first_block.param(),
+                    Param::U32(rot as u32),
+                    Param::F32(theta),
+                    Param::F32(eps),
+                    count.param(),
+                    Param::U32(pos_base as u32),
+                    Param::U32((3 * MROPE_SECTION[1]) as u32),
+                    Param::U32((3 * MROPE_SECTION[2]) as u32),
+                ],
+                grid,
+            )
+        }
+    }
+}

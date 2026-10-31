@@ -479,6 +479,7 @@ class BundleConstructionTests(unittest.TestCase):
                 "vendor/cxx/LICENSE-APACHE",
                 "vendor/lily-core/LICENSE",
                 "vendor/lily-core/LICENSE.mlx-serve",
+                "vendor/lily-core/LICENSE.mlx",
                 "vendor/lily-core/NOTICE",
                 "vendor/lily-core/UPSTREAM.md",
                 "scripts/licenses/distribution/manifest.json",
@@ -497,7 +498,13 @@ class BundleConstructionTests(unittest.TestCase):
             # Cargo's registry-license inventory deliberately skips local crates.
             lily_notices = {
                 name: (distribution.ROOT / "vendor/lily-core" / name).read_bytes()
-                for name in ("LICENSE", "LICENSE.mlx-serve", "NOTICE", "UPSTREAM.md")
+                for name in (
+                    "LICENSE",
+                    "LICENSE.mlx-serve",
+                    "LICENSE.mlx",
+                    "NOTICE",
+                    "UPSTREAM.md",
+                )
             }
             for name, contents in lily_notices.items():
                 (root / "vendor/lily-core" / name).write_bytes(contents)

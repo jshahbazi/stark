@@ -3,15 +3,51 @@
 
 use anyhow::{Result, ensure};
 
-use crate::kernels::{MROPE_SECTION, Pos, Rope, u32_bytes};
-use crate::metal::{ComputePass, Grid, MetalContext, MslVersion, Param};
-use crate::tensor::{DType, Tensor};
+use crate::{
+    kernels::{MROPE_SECTION, Pos, Rope, u32_bytes},
+    metal::{ComputePass, Grid, MetalContext, MslVersion, Param},
+    tensor::{DType, Tensor},
+};
 
 /// Hard kernel limit; checkpoint and CLI limits may be lower.
 pub const MAX_SEQ: usize = 262144;
 
 /// Attention Metal source shared with compile tests.
 pub const SOURCE: &str = include_str!("metal/attention.metal");
+const AFFINE64_SOURCE: &str = concat!(
+    include_str!("metal/attention.metal"),
+    include_str!("metal/kv_affine64_common.metal"),
+    include_str!("metal/official_norm_common.metal"),
+    include_str!("metal/attention_affine64.metal"),
+);
+/// The pinned MLX C-API component oracle established the dequantization rule.
+/// Native Metal and full-model qualification remain separate validation work.
+pub const KV_AFFINE64_DEQUANT_RULE_VERIFIED: bool = true;
+pub const KV_AFFINE64_GROUP: usize = 64;
+
+pub(crate) fn require_affine64_dequant() -> Result<()> {
+    ensure!(
+        KV_AFFINE64_DEQUANT_RULE_VERIFIED,
+        "affine64 dequantization awaits pinned MLX C-API qualification"
+    );
+    Ok(())
+}
+
+fn affine64_norm_shader(bias: f32) -> Result<(&'static str, &'static str)> {
+    ensure!(bias == 0.0, "official affine64 K norm requires folded gains");
+    static FOLDED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let source = FOLDED.get_or_init(|| {
+        AFFINE64_SOURCE.replace("1.0f + float(w[tid])", "float(w[tid])").replace(
+            "k_norm_rope_scatter_decode_affine64",
+            "k_norm_rope_scatter_decode_affine64_folded",
+        )
+    });
+    Ok(("k_norm_rope_scatter_decode_affine64_folded", source.as_str()))
+}
+
+#[cfg(test)]
+#[path = "official_kv_affine64_tests.rs"]
+mod official_kv_affine64_tests;
 
 /// Distinct compiled entry points for the official pack's already-folded
 /// Q/K gains. The Lily bias-one source and pipeline names stay unchanged.
@@ -110,6 +146,9 @@ pub enum KvFormat {
     /// (docs/architecture.md, "The 8-bit K/V cache").
     #[default]
     Q8,
+    /// Official MLX-compatible affine 8-bit groups of 64: unsigned code bits
+    /// plus interleaved bf16 scale/bias pairs. The checkpoint is unchanged.
+    Q8Affine64,
 }
 
 impl KvFormat {
@@ -118,6 +157,9 @@ impl KvFormat {
         match self {
             Self::Bf16 => d * DType::BF16.size(),
             Self::Q8 => d * DType::I8.size() + d / KV_Q8_GROUP * DType::F16.size(),
+            Self::Q8Affine64 => {
+                d * DType::I8.size() + d / KV_AFFINE64_GROUP * 2 * DType::BF16.size()
+            }
         }
     }
 
@@ -126,6 +168,7 @@ impl KvFormat {
         match self {
             Self::Bf16 => "bf16",
             Self::Q8 => "q8",
+            Self::Q8Affine64 => "q8-affine64",
         }
     }
 }
@@ -137,7 +180,10 @@ impl std::str::FromStr for KvFormat {
         match s {
             "bf16" => Ok(Self::Bf16),
             "q8" => Ok(Self::Q8),
-            other => anyhow::bail!("unknown KV cache format {other:?} (bf16 or q8)"),
+            "q8-affine64" => Ok(Self::Q8Affine64),
+            other => anyhow::bail!(
+                "unknown KV cache format {other:?} (bf16, q8 or q8-affine64)"
+            ),
         }
     }
 }
@@ -163,6 +209,17 @@ impl KvCache {
                 values: Tensor::zeros(ctx, &[heads, capacity, d], DType::BF16)?,
                 scales: None,
             },
+            KvFormat::Q8Affine64 => {
+                ensure!(d == 256, "affine64 cache currently requires D=256");
+                Self {
+                    values: Tensor::zeros(ctx, &[heads, capacity, d], DType::I8)?,
+                    scales: Some(Tensor::zeros(
+                        ctx,
+                        &[heads, capacity, d / KV_AFFINE64_GROUP * 2],
+                        DType::BF16,
+                    )?),
+                }
+            }
             KvFormat::Q8 => {
                 ensure!(
                     d.is_multiple_of(KV_Q8_GROUP),
@@ -231,6 +288,15 @@ impl<'t> Kv<'t> {
         let (heads, capacity, d) = self.shape();
         match (self.values.dtype(), self.scales) {
             (DType::BF16, None) => Ok(KvFormat::Bf16),
+            (DType::I8, Some(metadata)) if metadata.dtype() == DType::BF16 => {
+                ensure!(
+                    d == 256
+                        && metadata.shape()
+                            == [heads, capacity, d / KV_AFFINE64_GROUP * 2],
+                    "affine64 metadata does not match cache shape"
+                );
+                Ok(KvFormat::Q8Affine64)
+            }
             (DType::I8, Some(scales)) => {
                 ensure!(
                     scales.dtype() == DType::F16
@@ -407,6 +473,20 @@ pub fn scatter_kv<'t, 'c>(
                 grid,
             )
         }
+        KvFormat::Q8Affine64 => {
+            ensure!(d == 256, "affine64 scatter currently requires D=256");
+            let pipeline =
+                ctx.pipeline("scatter_kv_affine64", AFFINE64_SOURCE, MslVersion::V3_1)?;
+            pass.dispatch_with(
+                &pipeline,
+                &[cache.values.binding(), cache.scales()?.binding(), rows.binding()],
+                &params,
+                Grid::Threadgroups {
+                    groups: (m * kvh, 1, 1),
+                    threadgroup: (256, 1, 1),
+                },
+            )
+        }
         KvFormat::Q8 => {
             let pipeline = ctx.pipeline("scatter_kv_q8", SOURCE, MslVersion::V3_1)?;
             pass.dispatch_with(
@@ -552,6 +632,22 @@ pub fn k_norm_rope_scatter_decode_with_bias<'c>(
                 grid,
             )
         }
+        KvFormat::Q8Affine64 => {
+            require_affine64_dequant()?;
+            let (name, source) = affine64_norm_shader(norm_bias)?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_at(
+                &pipeline,
+                &[
+                    k.binding(),
+                    w.binding(),
+                    cache.values.binding(),
+                    cache.scales()?.binding(),
+                ],
+                &params,
+                grid,
+            )
+        }
         KvFormat::Q8 => {
             let (name, source) =
                 decode_norm_shader("k_norm_rope_scatter_decode_q8", norm_bias)?;
@@ -583,7 +679,11 @@ pub fn kv_dequant_q8<'c>(
     len: usize,
 ) -> Result<()> {
     let cache = cache.into();
-    ensure!(cache.format()? == KvFormat::Q8, "dequantizing a cache that is not q8");
+    let format = cache.format()?;
+    ensure!(format != KvFormat::Bf16, "dequantizing a cache that is not q8");
+    if format == KvFormat::Q8Affine64 {
+        require_affine64_dequant()?;
+    }
     let (kvh, max_seq, d) = cache.shape();
     ensure!(
         out.dtype() == DType::BF16
@@ -603,7 +703,12 @@ pub fn kv_dequant_q8<'c>(
     if len == 0 {
         return Ok(());
     }
-    let pipeline = ctx.pipeline("kv_dequant_q8", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if format == KvFormat::Q8Affine64 {
+        ("kv_dequant_affine64", AFFINE64_SOURCE)
+    } else {
+        ("kv_dequant_q8", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[cache.values.binding(), cache.scales()?.binding(), out.binding()],
@@ -727,7 +832,7 @@ fn sdpa_decode_inner<'c>(
     ensure!(nq.is_multiple_of(kvh), "NQ {nq} not a multiple of KVH {kvh}");
     ensure!(d <= 256, "head dim {d} > 256 unsupported");
     ensure!(len <= max_seq && max_seq <= MAX_SEQ, "len {len} exceeds kernel MAX_SEQ");
-    if format == KvFormat::Q8 {
+    if format != KvFormat::Bf16 {
         return sdpa_decode_q8(
             ctx,
             pass,
@@ -916,7 +1021,13 @@ fn sdpa_decode_q8(
         stats.numel() >= nq * splits * 2 && stats.dtype() == DType::F32,
         "split stats scratch too small"
     );
-    let stage1 = ctx.pipeline("sdpa_decode_split_q8", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if k.format()? == KvFormat::Q8Affine64 {
+        require_affine64_dequant()?;
+        ("sdpa_decode_split_affine64", AFFINE64_SOURCE)
+    } else {
+        ("sdpa_decode_split_q8", SOURCE)
+    };
+    let stage1 = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &stage1,
         &[
@@ -947,3 +1058,196 @@ fn sdpa_decode_q8(
         Grid::Threadgroups { groups: (nq, 1, 1), threadgroup: (256, 1, 1) },
     )
 }
+
+const OFFICIAL_NORM_SOURCE: &str = concat!(
+    include_str!("metal/attention.metal"),
+    include_str!("metal/official_norm_common.metal"),
+    include_str!("metal/official_attention_norm.metal"),
+);
+
+fn official_decode_norm_shader(
+    name: &'static str,
+    bias: f32,
+    eps: f32,
+) -> Result<(&'static str, &'static str)> {
+    ensure!(bias == 0.0, "official attention RMS requires raw folded BF16 gains");
+    ensure!(eps.is_finite() && eps >= 0.0, "official attention RMS epsilon");
+    match name {
+        "q_norm_rope_split_decode_bf16" => {
+            Ok(("q_norm_rope_split_decode_bf16_mlx", OFFICIAL_NORM_SOURCE))
+        }
+        "k_norm_rope_scatter_decode_bf16" => {
+            Ok(("k_norm_rope_scatter_decode_bf16_mlx", OFFICIAL_NORM_SOURCE))
+        }
+        "k_norm_rope_scatter_decode_q8" => {
+            Ok(("k_norm_rope_scatter_decode_q8_mlx", OFFICIAL_NORM_SOURCE))
+        }
+        "k_norm_rope_scatter_decode_affine64" => {
+            Ok(("k_norm_rope_scatter_decode_affine64_mlx", AFFINE64_SOURCE))
+        }
+        _ => anyhow::bail!("unknown official attention RMS kernel"),
+    }
+}
+
+/// Explicit BF16 official RMS contract. False preserves the original wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn q_norm_rope_split_decode_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qg: &Tensor,
+    w: &Tensor,
+    q: &Tensor,
+    gate: &Tensor,
+    rot: usize,
+    pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+    norm_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return q_norm_rope_split_decode_with_bias(
+            ctx, pass, qg, w, q, gate, rot, pos, theta, eps, rope_delta, norm_bias,
+        );
+    }
+    ensure!(
+        norm_bias == 0.0 && eps.is_finite() && eps >= 0.0,
+        "official attention RMS policy"
+    );
+    let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
+    let d = *q.shape().last().ok_or_else(|| anyhow::anyhow!("0-d q"))?;
+    let heads = q.numel() / d;
+    ensure!(d == 256, "decode fused Q prep requires D=256");
+    ensure!(rot <= d && rot.is_multiple_of(2), "bad rotary dim {rot}");
+    ensure!(qg.numel() == 2 * q.numel(), "qg size mismatch");
+    ensure!(gate.numel() == q.numel(), "gate size mismatch");
+    ensure!(heads > 0 && w.shape() == [d], "official Q norm shape");
+    for tensor in [qg, w, q, gate] {
+        ensure!(tensor.dtype() == DType::BF16, "fused Q prep requires BF16");
+    }
+    let (name, source) =
+        official_decode_norm_shader("q_norm_rope_split_decode_bf16", norm_bias, eps)?;
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[qg.binding(), w.binding(), q.binding(), gate.binding()],
+        &[
+            &u32_bytes(d),
+            &u32_bytes(rot),
+            &u32_bytes(pos),
+            &theta.to_ne_bytes(),
+            &eps.to_ne_bytes(),
+            &delta,
+        ],
+        Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+/// Explicit BF16 official RMS contract. False preserves the original wrapper.
+#[allow(clippy::too_many_arguments)]
+pub fn k_norm_rope_scatter_decode_with_rounding<'c>(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    k: &Tensor,
+    w: &Tensor,
+    cache: impl Into<Kv<'c>>,
+    rot: usize,
+    pos: usize,
+    theta: f32,
+    eps: f32,
+    rope_delta: i64,
+    norm_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return k_norm_rope_scatter_decode_with_bias(
+            ctx, pass, k, w, cache, rot, pos, theta, eps, rope_delta, norm_bias,
+        );
+    }
+    ensure!(
+        norm_bias == 0.0 && eps.is_finite() && eps >= 0.0,
+        "official attention RMS policy"
+    );
+    let delta = Rope::delta_i32(rope_delta)?.to_ne_bytes();
+    let cache = cache.into();
+    let format = cache.format()?;
+    let (heads, max_seq, d) = cache.shape();
+    ensure!(d == 256, "decode fused K prep requires D=256");
+    ensure!(rot <= d && rot.is_multiple_of(2), "bad rotary dim {rot}");
+    ensure!(k.numel() == heads * d, "K row size mismatch");
+    ensure!(heads > 0 && w.shape() == [d], "official K norm shape");
+    ensure!(pos < max_seq, "position {pos} exceeds cache {max_seq}");
+    for tensor in [k, w] {
+        ensure!(tensor.dtype() == DType::BF16, "fused K prep requires BF16");
+    }
+    let params: [&[u8]; 7] = [
+        &u32_bytes(d),
+        &u32_bytes(rot),
+        &u32_bytes(pos),
+        &theta.to_ne_bytes(),
+        &eps.to_ne_bytes(),
+        &u32_bytes(max_seq),
+        &delta,
+    ];
+    let grid = Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (256, 1, 1) };
+    match format {
+        KvFormat::Bf16 => {
+            let (name, source) = official_decode_norm_shader(
+                "k_norm_rope_scatter_decode_bf16",
+                norm_bias,
+                eps,
+            )?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_at(
+                &pipeline,
+                &[k.binding(), w.binding(), cache.values.binding()],
+                &params,
+                grid,
+            )
+        }
+        KvFormat::Q8Affine64 => {
+            require_affine64_dequant()?;
+            let (name, source) = official_decode_norm_shader(
+                "k_norm_rope_scatter_decode_affine64",
+                norm_bias,
+                eps,
+            )?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_at(
+                &pipeline,
+                &[
+                    k.binding(),
+                    w.binding(),
+                    cache.values.binding(),
+                    cache.scales()?.binding(),
+                ],
+                &params,
+                grid,
+            )
+        }
+        KvFormat::Q8 => {
+            let (name, source) = official_decode_norm_shader(
+                "k_norm_rope_scatter_decode_q8",
+                norm_bias,
+                eps,
+            )?;
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
+            pass.dispatch_at(
+                &pipeline,
+                &[
+                    k.binding(),
+                    w.binding(),
+                    cache.values.binding(),
+                    cache.scales()?.binding(),
+                ],
+                &params,
+                grid,
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "official_fused_rms_cache_tests.rs"]
+mod official_fused_rms_cache_tests;

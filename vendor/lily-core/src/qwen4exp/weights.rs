@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 
+use crate::kernels::hc::stock::OfficialHcReadWeights;
 use crate::metal::{Buffer, MetalContext};
 use crate::safetensors::Checkpoint;
 use crate::tensor::Tensor;
@@ -43,6 +44,8 @@ pub struct HcWeights {
     pub up: LinearWeights,
     /// `[hc_count, hc_count * h]`.
     pub inject: Option<LinearWeights>,
+    /// Optional model-owned folded metadata for the admitted stock HC read.
+    pub(crate) official_read: Option<OfficialHcReadWeights>,
 }
 
 /// Per-layer n-gram embedding module.
@@ -318,7 +321,18 @@ fn load_hc(
     } else {
         None
     };
-    Ok(HcWeights { norm, down, up, inject })
+    let official_read = OfficialHcReadWeights::prepare(
+        loader.context(),
+        &norm,
+        &down,
+        &up,
+        inject.as_ref(),
+        config.hidden_size,
+        config.hc_count,
+        config.rms_norm_eps,
+        config.official_mlx_rounding(),
+    )?;
+    Ok(HcWeights { norm, down, up, inject, official_read })
 }
 
 fn load_mlp(

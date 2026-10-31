@@ -876,3 +876,336 @@ pub fn moe_row_gate_add(
 #[cfg(test)]
 #[path = "moe_injection_tests.rs"]
 mod injection_tests;
+
+// Official-checkpoint candidates use separate source and entry points.
+// Legacy SOURCE and all its original Metal bodies remain unchanged.
+const OFFICIAL_MOE_SOURCE: &str = include_str!("metal/official_moe.metal");
+
+/// Exact model geometry audited against the served affine4 arm. The policy
+/// has not been qualified for other Qwen checkpoints or MoE architectures.
+pub(crate) fn official_moe_shape_supported(
+    experts: usize,
+    top_k: usize,
+    hidden: usize,
+    intermediate: usize,
+) -> bool {
+    (experts, top_k, hidden, intermediate) == (512, 10, 2560, 640)
+}
+
+/// Build the finite-domain activation table outside the decode loop. This
+/// candidate's primitive spelling needs exhaustive stock-MLX table controls
+/// before the official policy is activated; source similarity is insufficient.
+pub(crate) fn official_moe_sigmoid_table(ctx: &MetalContext) -> Result<Tensor> {
+    let table = Tensor::zeros(ctx, &[65536], DType::BF16)?;
+    let pass = ctx.begin()?;
+    let pipeline = ctx.pipeline(
+        "official_moe_sigmoid_table",
+        OFFICIAL_MOE_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[table.binding()],
+        &[],
+        Grid::Threads { grid: (65536, 1, 1), threadgroup: (256, 1, 1) },
+    )?;
+    pass.commit_wait()?;
+    Ok(table)
+}
+
+/// Served fused-router arithmetic over BF16 logits. Output storage remains
+/// F32 for the native expert graph; every stored value is rounded BF16.
+/// The optional gate reproduces softmax_gate's spare-SIMDgroup reduction.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_router(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    logits: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    renorm: bool,
+    gate: Option<(&Tensor, &Tensor, &Tensor)>,
+) -> Result<()> {
+    ensure!(renorm, "official MoE router requires normalized top-k probabilities");
+    let e =
+        *logits.shape().last().ok_or_else(|| anyhow::anyhow!("empty router shape"))?;
+    ensure!(
+        e == 512 && logits.dtype() == DType::BF16,
+        "official router needs BF16 [..., 512]"
+    );
+    let m = logits.numel() / e;
+    ensure!(m > 0 && indices.numel().is_multiple_of(m), "official router row geometry");
+    let k = indices.numel() / m;
+    ensure!(
+        k > 0 && k <= ROUTER_MAX_K && indices.dtype() == DType::U32,
+        "official router indices"
+    );
+    ensure!(
+        scores.dtype() == DType::F32 && scores.numel() == m * k,
+        "official router scores"
+    );
+    let (name, gx, gw, glog, gate_k) = match gate {
+        Some((x, w, out)) => {
+            ensure!(
+                m == 1 && x.dtype() == DType::BF16 && x.numel() == 2560,
+                "official folded shared gate needs one BF16 hidden row"
+            );
+            ensure!(
+                w.dtype() == DType::BF16 && w.numel() == 2560,
+                "official folded shared gate needs direct BF16 weights"
+            );
+            ensure!(
+                out.dtype() == DType::BF16 && out.numel() == 1,
+                "official folded shared gate output"
+            );
+            ("official_moe_router_gate_bf16", x, w, out, 2560)
+        }
+        None => ("official_moe_router_bf16", logits, logits, logits, 0),
+    };
+    let pipeline = ctx.pipeline(name, OFFICIAL_MOE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            logits.binding(),
+            indices.binding(),
+            scores.binding(),
+            gx.binding(),
+            gw.binding(),
+            glog.binding(),
+        ],
+        &[&u32_bytes(e), &u32_bytes(k), &u32_bytes(gate_k)],
+        Grid::Threadgroups { groups: (m, 1, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+fn check_official_bank(
+    w: &QuantWeights,
+    experts: usize,
+    n: usize,
+    k: usize,
+) -> Result<()> {
+    ensure!(
+        w.bits == 4 && w.group_size == 64,
+        "official affine4 decode is unqualified outside Q4/group64"
+    );
+    ensure!(
+        w.out_features() == experts * n && w.in_features() == k,
+        "official affine4 decode bank geometry"
+    );
+    ensure!(
+        w.codes.dtype() == DType::U32
+            && w.scales.dtype() == DType::BF16
+            && w.biases.dtype() == DType::BF16,
+        "official affine4 decode bank precision"
+    );
+    ensure!(
+        w.scales.numel() == experts * n * k / 64
+            && w.biases.numel() == w.scales.numel(),
+        "official affine4 parameter geometry"
+    );
+    Ok(())
+}
+
+pub(crate) fn official_moe_banks_supported(
+    gate: &QuantWeights,
+    up: &QuantWeights,
+    down: &QuantWeights,
+) -> Result<()> {
+    check_official_bank(gate, 512, 640, 2560)?;
+    check_official_bank(up, 512, 640, 2560)?;
+    check_official_bank(down, 512, 2560, 640)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_gate_up(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    gate: &QuantWeights,
+    up: &QuantWeights,
+    x: &Tensor,
+    indices: &Tensor,
+    table: &Tensor,
+    out: &Tensor,
+) -> Result<()> {
+    check_official_bank(gate, 512, 640, 2560)?;
+    check_official_bank(up, 512, 640, 2560)?;
+    ensure!(x.dtype() == DType::BF16 && x.numel() == 2560, "official gate/up input");
+    ensure!(
+        indices.dtype() == DType::U32 && indices.numel() == 10,
+        "official gate/up indices"
+    );
+    ensure!(
+        out.dtype() == DType::BF16 && out.numel() == 10 * 640,
+        "official gate/up output"
+    );
+    ensure!(
+        table.dtype() == DType::BF16 && table.numel() == 65536,
+        "official sigmoid table"
+    );
+    let pipeline =
+        ctx.pipeline("official_moe_gate_up_a4", OFFICIAL_MOE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            gate.codes.binding(),
+            gate.scales.binding(),
+            gate.biases.binding(),
+            up.codes.binding(),
+            up.scales.binding(),
+            up.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            table.binding(),
+            out.binding(),
+        ],
+        &[&u32_bytes(2560), &u32_bytes(640), &u32_bytes(64)],
+        Grid::Threadgroups { groups: (640 / 2, 10, 1), threadgroup: (64, 1, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_down(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    indices: &Tensor,
+    scores: &Tensor,
+    shared: Option<(&Tensor, &Tensor)>,
+    out: &Tensor,
+) -> Result<()> {
+    check_official_bank(w, 512, 2560, 640)?;
+    ensure!(x.dtype() == DType::BF16 && x.numel() == 10 * 640, "official down input");
+    ensure!(
+        indices.dtype() == DType::U32 && indices.numel() == 10,
+        "official down indices"
+    );
+    ensure!(
+        scores.dtype() == DType::F32 && scores.numel() == 10,
+        "official down scores"
+    );
+    ensure!(out.dtype() == DType::BF16 && out.numel() == 2560, "official down output");
+    let (sdown, glog) = match shared {
+        Some((sd, gl)) => {
+            ensure!(
+                sd.dtype() == DType::BF16
+                    && sd.numel() == 2560
+                    && gl.dtype() == DType::BF16
+                    && gl.numel() == 1,
+                "official shared operands"
+            );
+            (sd, gl)
+        }
+        None => (x, x),
+    };
+    let pipeline =
+        ctx.pipeline("official_moe_down_a4", OFFICIAL_MOE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            w.codes.binding(),
+            w.scales.binding(),
+            w.biases.binding(),
+            x.binding(),
+            indices.binding(),
+            scores.binding(),
+            sdown.binding(),
+            glog.binding(),
+            out.binding(),
+        ],
+        &[
+            &u32_bytes(640),
+            &u32_bytes(2560),
+            &u32_bytes(64),
+            &u32_bytes(10),
+            &u32_bytes(shared.is_some() as usize),
+        ],
+        Grid::Threadgroups { groups: (2560 / 2, 1, 1), threadgroup: (64, 1, 1) },
+    )
+}
+
+pub(crate) fn official_moe_silu_mul(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    gate: &Tensor,
+    up: &Tensor,
+    table: &Tensor,
+    out: &Tensor,
+) -> Result<()> {
+    let n = out.numel();
+    ensure!(
+        gate.numel() == n
+            && up.numel() == n
+            && [gate, up, out, table].iter().all(|t| t.dtype() == DType::BF16)
+            && table.numel() == 65536,
+        "official SwiGLU tensor contract"
+    );
+    let pipeline =
+        ctx.pipeline("official_moe_silu_mul", OFFICIAL_MOE_SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[gate.binding(), up.binding(), table.binding(), out.binding()],
+        &[&u32_bytes(n)],
+        Grid::Threads { grid: (n, 1, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn official_moe_prefill_combine(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    ed: &Tensor,
+    slots: &Tensor,
+    scores: &Tensor,
+    shared: &Tensor,
+    gate: &Tensor,
+    out: &Tensor,
+) -> Result<()> {
+    let h = 2560;
+    let m = gate.numel();
+    ensure!(
+        m > 0 && slots.dtype() == DType::U32 && slots.numel() == m * 10,
+        "official prefill slots"
+    );
+    ensure!(
+        scores.dtype() == DType::F32 && scores.numel() == m * 10,
+        "official prefill scores"
+    );
+    ensure!(
+        [ed, shared, gate, out].iter().all(|t| t.dtype() == DType::BF16)
+            && ed.numel() == m * 10 * h
+            && shared.numel() == m * h
+            && out.numel() == m * h,
+        "official prefill combine geometry"
+    );
+    let pipeline = ctx.pipeline(
+        "official_moe_prefill_combine",
+        OFFICIAL_MOE_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            ed.binding(),
+            slots.binding(),
+            scores.binding(),
+            shared.binding(),
+            gate.binding(),
+            out.binding(),
+        ],
+        &[&u32_bytes(h), &u32_bytes(10)],
+        Grid::Threads { grid: (h, m, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "official_moe_compat_tests.rs"]
+mod official_compat_tests;
+
+#[cfg(test)]
+#[path = "official_moe_oracle_tests.rs"]
+mod official_oracle_tests;
+
+#[cfg(test)]
+#[path = "official_moe_affine4_dot_tests.rs"]
+mod official_affine4_dot_tests;

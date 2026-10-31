@@ -334,3 +334,52 @@ pub fn gelu_bf16(
         Grid::Threads { grid: (n, 1, 1), threadgroup: (256.min(n), 1, 1) },
     )
 }
+
+const OFFICIAL_ATTN_GATE_SOURCE: &str =
+    include_str!("metal/official_attention_gate.metal");
+
+/// Match stock BF16 sigmoid materialization before BF16 multiplication.
+/// Reuse the source-qualified MoE scratch table; never build it in the token loop.
+#[allow(clippy::too_many_arguments)]
+pub fn sigmoid_mul_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    gate: &Tensor,
+    x: &Tensor,
+    out: &Tensor,
+    table: Option<&Tensor>,
+    official_mlx: bool,
+) -> Result<()> {
+    if !official_mlx {
+        return sigmoid_mul_bf16(ctx, pass, gate, x, out);
+    }
+    let table = table
+        .ok_or_else(|| anyhow::anyhow!("missing official attention sigmoid table"))?;
+    ensure!(
+        table.dtype() == DType::BF16 && table.shape() == [65536],
+        "official attention sigmoid table"
+    );
+    let n = gate.numel();
+    ensure!(
+        n > 0 && x.numel() == n && out.numel() == n,
+        "official attention gate sizes"
+    );
+    for t in [gate, x, out] {
+        ensure!(t.dtype() == DType::BF16, "official attention gate requires BF16");
+    }
+    let pipeline = ctx.pipeline(
+        "official_attention_sigmoid_mul_bf16",
+        OFFICIAL_ATTN_GATE_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[gate.binding(), x.binding(), table.binding(), out.binding()],
+        &[],
+        Grid::Threads { grid: (n, 1, 1), threadgroup: (256.min(n), 1, 1) },
+    )
+}
+
+#[cfg(test)]
+#[path = "official_attention_gate_tests.rs"]
+mod official_attention_gate_tests;

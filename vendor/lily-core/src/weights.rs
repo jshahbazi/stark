@@ -182,6 +182,10 @@ impl<'a> Loader<'a> {
 }
 
 impl Loader<'_> {
+    pub(crate) fn context(&self) -> &MetalContext {
+        self.ctx
+    }
+
     pub(crate) fn checkpoint(&self) -> &Checkpoint {
         &self.ckpt
     }

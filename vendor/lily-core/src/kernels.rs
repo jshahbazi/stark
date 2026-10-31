@@ -11,6 +11,7 @@ pub mod gemm;
 pub mod hc;
 pub mod moe;
 pub mod norm;
+pub(crate) mod official_q8_projection;
 pub mod ple;
 pub mod qsa;
 pub mod quant;

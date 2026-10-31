@@ -1253,3 +1253,713 @@ kernel void NAME(device bfloat*       qk    [[buffer(0)]],  /* [M, 2*HK*DIM] */ 
 GDN_CHUNK_SCAN_KERNEL(gdn_chunk_scan, bfloat)
 #undef GDN_CHUNK_SCAN_KERNEL
 #endif  // __METAL_VERSION__ >= 400
+
+
+// Official external MLX numerical contract, source revision 64ea011c /
+// MLX-Serve 046b6476. Existing Lily kernels above are intentionally retained.
+static inline bfloat official_gdn_sigmoid(bfloat x) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const bfloat e = bfloat(precise::exp(abs(float(x))));
+    const bfloat d = bfloat(1.0f + float(e));
+    const bfloat y = bfloat(1.0f / float(d));
+    return float(x) < 0.0f ? y : bfloat(1.0f - float(y));
+}
+
+static inline bfloat official_gdn_silu(float acc) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const bfloat conv = bfloat(acc);
+    const bfloat sig = official_gdn_sigmoid(conv);
+    return bfloat(float(conv) * float(sig));
+}
+
+static inline bfloat official_gdn_scaled_rms(float value, float inv, bfloat scale) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const bfloat normalized = bfloat(value * inv);
+    return bfloat(float(normalized) * float(scale));
+}
+
+static inline float official_gdn_log1p(float x) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const float xp1 = 1.0f + x;
+    if (xp1 == metal::numeric_limits<float>::max()) return metal::numeric_limits<float>::max();
+    if (xp1 == 1.0f) return x;
+    return x * (log(xp1) / (xp1 - 1.0f));
+}
+
+static inline float official_gdn_decay(float a, float a_log, float dt) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    // Official BF16 activations with F32 state use GT=F32: no BF16 add/store.
+    const float apd = a + dt;
+    const float sp = official_gdn_log1p(precise::exp(apd));
+    const float ea = precise::exp(a_log);
+    return precise::exp(-(ea * sp));
+}
+
+static inline bfloat official_gdn_normgate(float value, float inv, float weight,
+                                         bfloat z, uint gate_act) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+    const bfloat normalized = bfloat(value * inv);
+    const bfloat weighted = bfloat(weight * float(normalized));
+    const bfloat sig = official_gdn_sigmoid(z);
+    const bfloat act = gate_act == GDN_GATE_SIGMOID
+        ? sig : bfloat(float(z) * float(sig));
+    return bfloat(float(weighted) * float(act));
+}
+kernel void conv1d_step_bf16_mlx(device bfloat*       window [[buffer(0)]],  // [C, KD-1]
+                             device const bfloat* x      [[buffer(1)]],  // [C]
+                             device const bfloat* w      [[buffer(2)]],  // [KD, C]
+                             device bfloat*       out    [[buffer(3)]],  // [C]
+                             constant uint&       C      [[buffer(4)]],
+                             constant uint&       KD     [[buffer(5)]],
+                             uint c [[thread_position_in_grid]]) {
+    uint taps = KD - 1;
+    float acc = 0.0f;
+    for (uint t = 0; t < taps; ++t) {
+        acc += float(window[c * taps + t]) * float(w[t * C + c]);
+    }
+    float xc = float(x[c]);
+    acc += xc * float(w[taps * C + c]);
+    out[c] = official_gdn_silu(acc);
+    for (uint t = 0; t + 1 < taps; ++t) {
+        window[c * taps + t] = window[c * taps + t + 1];
+    }
+    window[c * taps + taps - 1] = bfloat(xc);
+}
+
+kernel void conv1d_prefill_bf16_mlx(device const bfloat* win_in  [[buffer(0)]],  // [C, KD-1]
+                                device bfloat*       win_out [[buffer(1)]],  // [C, KD-1]
+                                device const bfloat* x       [[buffer(2)]],  // [M, C]
+                                device const bfloat* w       [[buffer(3)]],  // [KD, C]
+                                device bfloat*       out     [[buffer(4)]],  // [M, C]
+                                constant uint&       C       [[buffer(5)]],
+                                constant uint&       KD      [[buffer(6)]],
+                                constant uint&       M       [[buffer(7)]],
+                                uint2 gid [[thread_position_in_grid]]) {
+    uint c = gid.x;
+    uint m0 = gid.y * CONV_TILE;
+    uint m1 = min(m0 + CONV_TILE, M);
+    uint taps = KD - 1;
+    // Prime the register window with inputs preceding this tile.
+    float win[8];  // supports KD <= 9; Qwen3.5 uses KD = 4
+    for (uint t = 0; t < taps; ++t) {
+        uint i = m0 + t;
+        win[t] = i >= taps ? float(x[(ulong)(i - taps) * C + c])
+                           : float(win_in[c * taps + i]);
+    }
+    for (uint m = m0; m < m1; ++m) {
+        float acc = 0.0f;
+        for (uint t = 0; t < taps; ++t) {
+            acc += win[t] * float(w[t * C + c]);
+        }
+        float xc = float(x[(ulong)m * C + c]);
+        acc += xc * float(w[taps * C + c]);
+        out[(ulong)m * C + c] = official_gdn_silu(acc);
+        for (uint t = 0; t + 1 < taps; ++t) {
+            win[t] = win[t + 1];
+        }
+        win[taps - 1] = xc;
+    }
+    // The final tile writes the post-chunk window.
+    if (m1 == M) {
+        for (uint t = 0; t < taps; ++t) {
+            win_out[c * taps + t] = bfloat(win[t]);
+        }
+    }
+}
+
+kernel void gdn_qk_rms_mlx(device const bfloat* qkv   [[buffer(0)]],  // [M, C]
+                          device bfloat*       qk    [[buffer(1)]],  // [M, 2*HK*DIM]
+                          constant float&      scale [[buffer(2)]],
+                          constant uint&       HK    [[buffer(3)]],
+                          constant uint&       H     [[buffer(4)]],
+                          uint3 gid  [[thread_position_in_grid]],
+                          uint  lane [[thread_index_in_simdgroup]]) {
+    const uint hk = gid.y;
+    const ulong row = (ulong)gid.z * (2 * HK + H) * DIM;
+    const ulong out_row = (ulong)gid.z * 2 * HK * DIM;
+    float qv[DIM / 32], kv[DIM / 32];
+    float sq = 0.0f, sk = 0.0f;
+    for (uint i = 0; i < DIM / 32; ++i) {
+        uint d = lane + 32 * i;
+        qv[i] = float(qkv[row + hk * DIM + d]);
+        kv[i] = float(qkv[row + (HK + hk) * DIM + d]);
+        sq += qv[i] * qv[i];
+        sk += kv[i] * kv[i];
+    }
+    float inv_q = precise::rsqrt(simd_sum(sq) / float(DIM) + 1e-6f);
+    float inv_k = precise::rsqrt(simd_sum(sk) / float(DIM) + 1e-6f);
+    for (uint i = 0; i < DIM / 32; ++i) {
+        uint d = lane + 32 * i;
+        qk[out_row + hk * DIM + d] = official_gdn_scaled_rms(qv[i], inv_q, bfloat(1.0f / float(DIM)));
+        qk[out_row + (HK + hk) * DIM + d] = official_gdn_scaled_rms(kv[i], inv_k, bfloat(scale));
+    }
+}
+
+kernel void gdn_gates_mlx(device const bfloat* a       [[buffer(0)]],  // [M, H]
+                      device const bfloat* b       [[buffer(1)]],  // [M, H]
+                      device const float*  a_log   [[buffer(2)]],  // [H]
+                      device const bfloat* dt_bias [[buffer(3)]],  // [H]
+                      device float*        decay   [[buffer(4)]],  // [M, H]
+                      device float*        beta    [[buffer(5)]],  // [M, H]
+                      constant uint&       H       [[buffer(6)]],
+                      uint gid [[thread_position_in_grid]]) {
+    uint h = gid % H;
+    decay[gid] = official_gdn_decay(float(a[gid]), a_log[h], float(dt_bias[h]));
+    beta[gid] = float(official_gdn_sigmoid(b[gid]));
+}
+
+kernel void gated_rmsnorm_bf16_mlx(device const bfloat* x    [[buffer(0)]],  // [rows, D]
+                               device const bfloat* gate [[buffer(1)]],  // [rows, D]
+                               device const float*  w    [[buffer(2)]],  // [D]
+                               device bfloat*       out  [[buffer(3)]],  // [rows, D]
+                               constant uint&       D    [[buffer(4)]],
+                               constant float&      eps  [[buffer(5)]],
+                               constant uint&       gate_act [[buffer(6)]],
+                               uint row  [[threadgroup_position_in_grid]],
+                               uint tid  [[thread_index_in_threadgroup]],
+                               uint sg   [[simdgroup_index_in_threadgroup]],
+                               uint lane [[thread_index_in_simdgroup]]) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+
+    threadgroup float partial[TG / 32];
+    threadgroup float inv_rms;
+
+    float acc = 0.0f;
+    for (uint i = tid; i < D; i += TG) {
+        float v = float(x[row * D + i]);
+        acc += v * v;
+    }
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < TG / 32; ++i) {
+            total += partial[i];
+        }
+        inv_rms = precise::rsqrt(total / float(D) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint i = tid; i < D; i += TG) {
+        out[row * D + i] = official_gdn_normgate(
+            float(x[row * D + i]), inv_rms, w[i], gate[row * D + i], gate_act);
+    }
+}
+
+template <typename StateT>
+static inline float gdn_step_body_mlx(device const bfloat* q,
+                                 device const bfloat* k,
+                                 device const bfloat* v,
+                                 device const bfloat* a,
+                                 device const bfloat* b,
+                                 device const float* a_log,
+                                 device const bfloat* dt_bias,
+                                 device StateT* state,
+                                 float scale,
+                                 uint vpk,
+                                 uint h,
+                                 uint tid,
+                                 uint sg,
+                                 uint lane,
+                                 threadgroup float* q_norm,
+                                 threadgroup float* k_norm,
+                                 threadgroup float* part_q,
+                                 threadgroup float* part_k,
+                                 threadgroup float* gates) {
+#pragma METAL fp math_mode(safe)
+#pragma METAL fp contract(off)
+
+
+    const uint hk = h / vpk;
+    float qv = float(q[hk * DIM + tid]);
+    float kv = float(k[hk * DIM + tid]);
+    float sq = simd_sum(qv * qv);
+    float sk = simd_sum(kv * kv);
+    if (lane == 0) {
+        part_q[sg] = sq;
+        part_k[sg] = sk;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float tq = 0.0f;
+        float tk = 0.0f;
+        for (uint i = 0; i < DIM / 32; ++i) {
+            tq += part_q[i];
+            tk += part_k[i];
+        }
+        // Keep zero rows finite.
+        gates[0] = precise::rsqrt(tq / float(DIM) + 1e-6f);
+        gates[1] = precise::rsqrt(tk / float(DIM) + 1e-6f);
+        gates[2] = official_gdn_decay(float(a[h]), a_log[h], float(dt_bias[h]));
+        gates[3] = float(official_gdn_sigmoid(b[h]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    q_norm[tid] = float(official_gdn_scaled_rms(qv, gates[0], bfloat(1.0f / float(DIM))));
+    k_norm[tid] = float(official_gdn_scaled_rms(kv, gates[1], bfloat(scale)));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float decay = gates[2];
+    float beta = gates[3];
+    device StateT* st = state + (ulong)h * DIM * DIM;
+
+    // Predict from the fully decayed state before applying the delta update.
+    // Both walks take the column in register blocks of GDN_STEP_RB rows
+    // (the loads of a block issued before its math) in the same
+    // accumulation order as a plain loop: the plain loop left the compiler
+    // pipelining one or two loads and ran the 48 heads' step at 19 us
+    // per layer in the decode chain against 16 for the blocked one
+    // (docs/performance.md); 16- and 32-row blocks measured within a
+    // microsecond of 8 but moved the fast-math contraction, 8 is
+    // bit-identical to the plain loop.
+    float kv_pred = 0.0f;
+    for (uint k0 = 0; k0 < DIM; k0 += GDN_STEP_RB) {
+        float sv[GDN_STEP_RB];
+        _Pragma("clang loop unroll(full)")
+        for (uint j = 0; j < GDN_STEP_RB; ++j) {
+            sv[j] = float(st[(k0 + j) * DIM + tid]);
+        }
+        _Pragma("clang loop unroll(full)")
+        for (uint j = 0; j < GDN_STEP_RB; ++j) {
+            const float decayed = sv[j] * decay;
+            kv_pred += decayed * k_norm[k0 + j];
+        }
+    }
+    const float v_new = (float(v[h * DIM + tid]) - kv_pred) * beta;
+    float o = 0.0f;
+    for (uint k0 = 0; k0 < DIM; k0 += GDN_STEP_RB) {
+        float sv[GDN_STEP_RB];
+        _Pragma("clang loop unroll(full)")
+        for (uint j = 0; j < GDN_STEP_RB; ++j) {
+            sv[j] = float(st[(k0 + j) * DIM + tid]);
+        }
+        _Pragma("clang loop unroll(full)")
+        for (uint j = 0; j < GDN_STEP_RB; ++j) {
+            const float updated = sv[j] * decay + k_norm[k0 + j] * v_new;
+            st[(k0 + j) * DIM + tid] = StateT(updated);
+            o += q_norm[k0 + j] * updated;
+        }
+    }
+    return o;
+}
+
+#define OFFICIAL_GDN_STEP_GATED_WRAPPER(NAME, STATE_T)                                 \
+kernel void NAME(device const bfloat* q       [[buffer(0)]],                  \
+                 device const bfloat* k       [[buffer(1)]],                  \
+                 device const bfloat* v       [[buffer(2)]],                  \
+                 device const bfloat* a       [[buffer(3)]],                  \
+                 device const bfloat* b       [[buffer(4)]],                  \
+                 device const float*  a_log   [[buffer(5)]],                  \
+                 device const bfloat* dt_bias [[buffer(6)]],                  \
+                 device STATE_T*      state   [[buffer(7)]],                  \
+                 device const bfloat* z       [[buffer(8)]],                  \
+                 device const float*  norm_w  [[buffer(9)]],                  \
+                 device bfloat*       out     [[buffer(10)]],                 \
+                 constant float&      scale   [[buffer(11)]],                 \
+                 constant uint&       vpk     [[buffer(12)]],                 \
+                 constant float&      eps     [[buffer(13)]],                 \
+                 constant uint&       gate_act [[buffer(14)]],                \
+                 uint h    [[threadgroup_position_in_grid]],                  \
+                 uint tid  [[thread_index_in_threadgroup]],                   \
+                 uint sg   [[simdgroup_index_in_threadgroup]],                \
+                 uint lane [[thread_index_in_simdgroup]]) {                   \
+    _Pragma("METAL fp math_mode(safe)") \
+    _Pragma("METAL fp contract(off)") \
+    threadgroup float q_norm[DIM];                                            \
+    threadgroup float k_norm[DIM];                                            \
+    threadgroup float part_q[DIM / 32];                                       \
+    threadgroup float part_k[DIM / 32];                                       \
+    threadgroup float gates[4];                                               \
+    threadgroup float norm_part[DIM / 32];                                    \
+    threadgroup float inv_rms = 0.0f;                                         \
+    const float o = gdn_step_body_mlx(q, k, v, a, b, a_log, dt_bias, state,      \
+                                  scale, vpk, h, tid, sg, lane, q_norm,       \
+                                  k_norm, part_q, part_k, gates);             \
+    const float rv = float(bfloat(o));                                        \
+    const float ss = simd_sum(rv * rv);                                       \
+    if (lane == 0) {                                                          \
+        norm_part[sg] = ss;                                                   \
+    }                                                                         \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                          \
+    if (tid == 0) {                                                           \
+        float total = 0.0f;                                                   \
+        for (uint i = 0; i < DIM / 32; ++i) {                                \
+            total += norm_part[i];                                            \
+        }                                                                     \
+        inv_rms = precise::rsqrt(total / float(DIM) + eps);                            \
+    }                                                                         \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                          \
+    out[h * DIM + tid] = official_gdn_normgate(                              \
+        rv, inv_rms, norm_w[tid], z[h * DIM + tid], gate_act);                \
+}
+
+OFFICIAL_GDN_STEP_GATED_WRAPPER(gdn_step_gated_mlx, float)
+#undef OFFICIAL_GDN_STEP_GATED_WRAPPER
+
+// MIT License
+// Copyright (c) 2026 David Dalcu
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+//
+// Source contract: mlx-serve 046b647686419df06c6c7132fb1d15d76185c3e5,
+// gdn_decode.zig K1_SOURCE; inline BF16 sigmoid and SiLU. MLX BF16 wrappers
+// round each arithmetic result. Stark port uses integer RNE barriers so native
+// bfloat promotion/fast-math cannot erase intermediate BF16 boundaries.
+// MODE0 keeps the literal non-precise metal::exp(float) intrinsic. MODE1/2
+// are explicit diagnostic controls only; they do not select production policy.
+
+#include <metal_stdlib>
+using namespace metal;
+
+static inline float official_gdn_k1_round_bf16(float x) {
+    const uint bits = as_type<uint>(x);
+    // Preserve infinities/NaNs. All oracle inputs are finite; exp can overflow.
+    if ((bits & 0x7f800000u) == 0x7f800000u) return x;
+    const uint rounded = bits + 0x7fffu + ((bits >> 16) & 1u);
+    return as_type<float>(rounded & 0xffff0000u);
+}
+
+template <uint MODE>
+static inline float official_gdn_k1_sigmoid_f32(float x) {
+    float ex;
+    if constexpr (MODE == 1) ex = metal::precise::exp(metal::abs(x));
+    else if constexpr (MODE == 2) ex = metal::fast::exp(metal::abs(x));
+    else ex = metal::exp(metal::abs(x));
+    const float e = official_gdn_k1_round_bf16(ex);
+    const float d = official_gdn_k1_round_bf16(1.0f + e);
+    const float y = official_gdn_k1_round_bf16(1.0f / d);
+    return x < 0.0f ? y : official_gdn_k1_round_bf16(1.0f - y);
+}
+
+template <uint MODE>
+static inline float official_gdn_k1_silu_f32(float acc) {
+    const float x = official_gdn_k1_round_bf16(acc);
+    const float sig = official_gdn_k1_sigmoid_f32<MODE>(x);
+    return official_gdn_k1_round_bf16(x * sig);
+}
+
+kernel void official_gdn_k1_helper_exhaustive(
+    device const bfloat* x [[buffer(0)]],
+    device bfloat* default_sig [[buffer(1)]],
+    device bfloat* default_silu [[buffer(2)]],
+    device bfloat* precise_sig [[buffer(3)]],
+    device bfloat* precise_silu [[buffer(4)]],
+    device bfloat* fast_sig [[buffer(5)]],
+    device bfloat* fast_silu [[buffer(6)]],
+    uint i [[thread_position_in_grid]]) {
+    const float value = float(x[i]);
+    default_sig[i] = bfloat(official_gdn_k1_sigmoid_f32<0>(value));
+    default_silu[i] = bfloat(official_gdn_k1_silu_f32<0>(value));
+    precise_sig[i] = bfloat(official_gdn_k1_sigmoid_f32<1>(value));
+    precise_silu[i] = bfloat(official_gdn_k1_silu_f32<1>(value));
+    fast_sig[i] = bfloat(official_gdn_k1_sigmoid_f32<2>(value));
+    fast_silu[i] = bfloat(official_gdn_k1_silu_f32<2>(value));
+}
+
+// Retained native serial scan, physical state/mid indexing only.
+template <typename StateT, int CS, bool PF>
+static inline void gdn_prefill_regscan_value_key_cols_body(device const bfloat* qkv,
+                                                 device const bfloat* qk,
+                                                 device const float* decay,
+                                                 device const float* beta,
+                                                 device StateT* state,
+                                                 device bfloat* out,
+                                                 device StateT* mid,
+                                                 uint M,
+                                                 uint H,
+                                                 uint vpk,
+                                                 uint mid_count,
+                                                 uint2 tg,
+                                                 uint sg,
+                                                 uint lane) {
+    const uint NK = DIM / 32;
+    const uint h = tg.x;
+    const uint dv = (tg.y * 4 + sg) * uint(CS);
+    const uint HK = H / vpk;
+    const uint hk = h / vpk;
+    const uint C = (2 * HK + H) * DIM;
+
+    device StateT* st = state + ((ulong)h * DIM + dv) * DIM + NK * lane;
+    float s[CS][DIM / 32];
+    for (uint c = 0; c < uint(CS); ++c) {
+        for (uint i = 0; i < NK; ++i) {
+            s[c][i] = st[c * DIM + i];
+        }
+    }
+    float kh[DIM / 32], qh[DIM / 32], g = 0.0f, b = 0.0f, v[CS];
+    if (PF && M > 0) {
+        gdn_scan_load(qk, decay, beta, 0u, H, HK, hk, h, NK * lane, kh, qh, g, b);
+        for (uint c = 0; c < uint(CS); ++c) {
+            v[c] = float(qkv[(2 * HK + h) * DIM + dv + c]);
+        }
+    }
+    for (uint t = 0; t < M; ++t) {
+        float kn[DIM / 32], qn[DIM / 32], gn = 0.0f, bn = 0.0f, vn[CS];
+        if (PF) {
+            if (t + 1 < M) {
+                gdn_scan_load(qk, decay, beta, t + 1, H, HK, hk, h, NK * lane, kn, qn, gn, bn);
+                for (uint c = 0; c < uint(CS); ++c) {
+                    vn[c] = float(qkv[(ulong)(t + 1) * C + (2 * HK + h) * DIM + dv + c]);
+                }
+            }
+        } else {
+            gdn_scan_load(qk, decay, beta, t, H, HK, hk, h, NK * lane, kh, qh, g, b);
+            for (uint c = 0; c < uint(CS); ++c) {
+                v[c] = float(qkv[(ulong)t * C + (2 * HK + h) * DIM + dv + c]);
+            }
+        }
+        float kv[CS];
+        for (uint c = 0; c < uint(CS); ++c) {
+            kv[c] = 0.0f;
+        }
+        for (uint i = 0; i < NK; ++i) {
+            for (uint c = 0; c < uint(CS); ++c) {
+                s[c][i] *= g;
+                kv[c] += kh[i] * s[c][i];
+            }
+        }
+        float vnew[CS];
+        for (uint c = 0; c < uint(CS); ++c) {
+            vnew[c] = (v[c] - simd_sum(kv[c])) * b;
+        }
+        float o[CS];
+        for (uint c = 0; c < uint(CS); ++c) {
+            o[c] = 0.0f;
+        }
+        for (uint i = 0; i < NK; ++i) {
+            for (uint c = 0; c < uint(CS); ++c) {
+                s[c][i] += kh[i] * vnew[c];
+                o[c] += qh[i] * s[c][i];
+            }
+        }
+        for (uint c = 0; c < uint(CS); ++c) {
+            const float oc = simd_sum(o[c]);
+            if (lane == 0) {
+                out[((ulong)t * H + h) * DIM + dv + c] = bfloat(oc);
+            }
+        }
+        if (t < mid_count) {
+            device StateT* md = mid + (ulong)t * H * DIM * DIM
+                + ((ulong)h * DIM + dv) * DIM + NK * lane;
+            for (uint c = 0; c < uint(CS); ++c) {
+                for (uint i = 0; i < NK; ++i) {
+                    md[c * DIM + i] = StateT(s[c][i]);
+                }
+            }
+        }
+        if (PF) {
+            for (uint i = 0; i < NK; ++i) {
+                kh[i] = kn[i];
+                qh[i] = qn[i];
+            }
+            g = gn;
+            b = bn;
+            for (uint c = 0; c < uint(CS); ++c) {
+                v[c] = vn[c];
+            }
+        }
+    }
+    for (uint c = 0; c < uint(CS); ++c) {
+        for (uint i = 0; i < NK; ++i) {
+            st[c * DIM + i] = StateT(s[c][i]);
+        }
+    }
+}
+
+
+kernel void gdn_prefill_regscan_value_key_mlx(
+    device const bfloat* qkv [[buffer(0)]],
+    device const bfloat* qk [[buffer(1)]],
+    device const float* decay [[buffer(2)]],
+    device const float* beta [[buffer(3)]],
+    device float* state [[buffer(4)]],
+    device bfloat* out [[buffer(5)]],
+    device float* mid [[buffer(6)]],
+    constant uint& M [[buffer(7)]],
+    constant uint& H [[buffer(8)]],
+    constant uint& vpk [[buffer(9)]],
+    constant uint& mid_count [[buffer(10)]],
+    uint2 tg [[threadgroup_position_in_grid]],
+    uint sg [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    gdn_prefill_regscan_value_key_cols_body<float, 4, false>(
+        qkv, qk, decay, beta, state, out, mid, M, H, vpk, mid_count, tg, sg, lane);
+}
+
+// Stock-served K1 arithmetic/tiling port; convolution is materialized separately.
+// Source: mlx-serve 26.10.3, revision 046b647686419df06c6c7132fb1d15d76185c3e5,
+// src/gdn_decode.zig K1_SOURCE, SHA-256
+// fc49d3147ca3a99d616556464b42d1adada426540a7545985dd7c67baa4bf16c.
+// Modifications by Stark: strict BF16/F32 Hk16/Hv48/D128 specialization;
+// qkv is already convolved/SiLU-rounded; state updates in place at owned rows;
+// A_log is widened losslessly from the original BF16 values by the loader.
+// K1 raw readout is materialized for the existing separate norm-gate dispatch.
+//
+// MIT License
+// Copyright (c) 2026 David Dalcu
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+// Keep the served header's F32 arithmetic and default log intrinsic policy.
+// Do not inherit the older helper's function-local safe/contract-off policy.
+inline float gdn_value_key_stock_log1p(float x) {
+    float xp1 = 1.0f + x;
+    if (xp1 == metal::numeric_limits<float>::max()) { return metal::numeric_limits<float>::max(); }
+    if (xp1 == 1.0f) { return x; }
+    return x * (metal::log(xp1) / (xp1 - 1.0f));
+}
+
+kernel void gdn_step_raw_value_key_mlx(
+    device const bfloat* qkv [[buffer(0)]],
+    device const bfloat* a_in [[buffer(1)]],
+    device const bfloat* b_in [[buffer(2)]],
+    device const float* A_log [[buffer(3)]],
+    device const bfloat* dt_bias [[buffer(4)]],
+    device float* state [[buffer(5)]],
+    device bfloat* y [[buffer(6)]],
+    constant float& k_scale_f32 [[buffer(7)]],
+    uint tg [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    using T = bfloat;
+    constexpr int HK = 16, HV = 48, DK = 128, DV = 128;
+    constexpr int NT = 256, SPLIT = 4, NSG = NT / 32;
+    constexpr int RB = DV / SPLIT, R = RB / NSG, GRP = HV / HK;
+    const T q_scale = T(1.0f / float(DK));
+    const T k_scale = T(k_scale_f32);
+    uint hv = tg / SPLIT;
+    uint part = tg % SPLIT;
+    uint hk = hv / GRP;
+    threadgroup float qs[DK], ks[DK], vs[DV];
+    threadgroup float gb[2];
+    uint row0 = part * RB + sg * R;
+    float st[R][4];
+    for (int j = 0; j < R; ++j) {
+        uint base = (hv * DV + row0 + j) * DK + lane * 4;
+        for (int i = 0; i < 4; ++i) st[j][i] = state[base + i];
+    }
+    // The native qualified convolution produces exactly the BF16 act[i]
+    // boundary from stock K1. Never update convolution history in V tiles.
+    if (sg < 3) {
+        uint cb = sg == 0 ? hk * DK : (sg == 1 ? HK * DK + hk * DK : 2 * HK * DK + hv * DV);
+        T act[4];
+        float sumsq = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            act[i] = qkv[cb + lane * 4 + i];
+            float v = float(act[i]);
+            sumsq += v * v;
+        }
+        if (sg < 2) {
+            sumsq = simd_sum(sumsq);
+            float inv = metal::precise::rsqrt(sumsq / float(DK) + 1e-6f);
+            const T scale = sg == 0 ? q_scale : k_scale;
+            threadgroup float* dst = sg == 0 ? qs : ks;
+            // Materialize the normalized BF16 row and separate BF16 scalar
+            // product, retaining the source's measured rounding boundaries.
+            for (int i = 0; i < 4; ++i) dst[lane * 4 + i] = float(official_gdn_scaled_rms(float(act[i]), inv, scale));
+        } else {
+            for (int i = 0; i < 4; ++i) vs[lane * 4 + i] = float(act[i]);
+        }
+    }
+    if (sg == (NSG > 3 ? 3 : 0) && lane == 31) {
+        const T bv = b_in[hv];
+        gb[1] = official_gdn_k1_sigmoid_f32<0>(float(bv));
+        const float apd = float(a_in[hv]) + float(dt_bias[hv]);
+        float sp = gdn_value_key_stock_log1p(metal::precise::exp(apd));
+        float ea = metal::precise::exp(A_log[hv]);
+        gb[0] = metal::precise::exp(-(ea * sp));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float kk[4], qq[4];
+    for (int i = 0; i < 4; ++i) { kk[i] = ks[lane * 4 + i]; qq[i] = qs[lane * 4 + i]; }
+    const float g = gb[0], beta = gb[1];
+    for (int j = 0; j < R; ++j) {
+        uint dv = row0 + j;
+        float kv_mem = 0.0f;
+        for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] * g; kv_mem += st[j][i] * kk[i]; }
+        kv_mem = simd_sum(kv_mem);
+        float delta = (vs[dv] - kv_mem) * beta;
+        float out = 0.0f;
+        for (int i = 0; i < 4; ++i) { st[j][i] = st[j][i] + kk[i] * delta; out += st[j][i] * qq[i]; }
+        out = simd_sum(out);
+        uint base = (hv * DV + dv) * DK + lane * 4;
+        for (int i = 0; i < 4; ++i) state[base + i] = st[j][i];
+        if (lane == 0) y[hv * DV + dv] = static_cast<T>(out);
+    }
+}
+
+// Keep the native channel-major history and tap-major weights; only the
+// admitted VK decode path uses the actual custom-K1 BF16 SiLU contract.
+kernel void conv1d_step_value_key_mlx(
+    device bfloat* window [[buffer(0)]],
+    device const bfloat* x [[buffer(1)]],
+    device const bfloat* w [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant uint& C [[buffer(4)]],
+    constant uint& KD [[buffer(5)]],
+    uint c [[thread_position_in_grid]]) {
+    const uint taps = KD - 1;
+    float acc = 0.0f;
+    for (uint tap = 0; tap < taps; ++tap) acc += float(window[c * taps + tap]) * float(w[tap * C + c]);
+    acc += float(x[c]) * float(w[taps * C + c]);
+    out[c] = bfloat(official_gdn_k1_silu_f32<0>(acc));
+    for (uint tap = 0; tap + 1 < taps; ++tap) window[c * taps + tap] = window[c * taps + tap + 1];
+    window[c * taps + taps - 1] = x[c];
+}
+
+// transformer.zig GDN_NORMGATE_SOURCE, admitted non-Hadamard decode S1:
+// TAB=0, SWISH=0, 32 lanes x four contiguous DV values, one group/head.
+kernel void gdn_normgate_value_key_mlx(
+    device const bfloat* y [[buffer(0)]],
+    device const bfloat* z [[buffer(1)]],
+    device const float* norm_w [[buffer(2)]],
+    device bfloat* out [[buffer(3)]],
+    constant float& eps [[buffer(4)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]) {
+    const uint base = head * 128 + lane * 4;
+    float xs[4];
+    float sumsq = 0.0f;
+    for (uint i = 0; i < 4; ++i) { xs[i] = float(y[base + i]); sumsq += xs[i] * xs[i]; }
+    sumsq = simd_sum(sumsq);
+    const float inv = metal::precise::rsqrt(sumsq / 128.0f + eps);
+    for (uint i = 0; i < 4; ++i) {
+        const float normed = official_gdn_k1_round_bf16(norm_w[lane * 4 + i] * official_gdn_k1_round_bf16(xs[i] * inv));
+        const float sig = official_gdn_k1_sigmoid_f32<0>(float(z[base + i]));
+        out[base + i] = bfloat(official_gdn_k1_round_bf16(normed * sig));
+    }
+}

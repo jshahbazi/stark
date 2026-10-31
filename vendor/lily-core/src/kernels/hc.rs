@@ -11,6 +11,11 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/hc.metal");
+const OFFICIAL_SOURCE: &str = include_str!("metal/official_hc.metal");
+const OFFICIAL_FUSION_SOURCE: &str = concat!(
+    include_str!("metal/skinny.metal"),
+    include_str!("metal/official_hc_fusion.metal"),
+);
 const TG: usize = 256;
 /// Streams the fused read-gate kernels are instantiated for (`HC_MAX_G`).
 const HC_MAX_G: usize = 8;
@@ -46,6 +51,24 @@ pub fn rmsnorm_grouped_bf16(
     eps: f32,
     w_bias: f32,
 ) -> Result<()> {
+    rmsnorm_grouped_bf16_with_rounding(
+        ctx, pass, x, w, out, h, groups, eps, w_bias, false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn rmsnorm_grouped_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    x: &Tensor,
+    w: &Tensor,
+    out: &Tensor,
+    h: usize,
+    groups: usize,
+    eps: f32,
+    w_bias: f32,
+    official_mlx: bool,
+) -> Result<()> {
     ensure!(groups > 0 && h > 0, "empty grouped norm");
     let rows = bf16_rows(x, groups * h, "grouped norm input")?;
     ensure!(
@@ -53,7 +76,16 @@ pub fn rmsnorm_grouped_bf16(
         "weight must be BF16 [G*H]"
     );
     ensure!(out.numel() == x.numel() && out.dtype() == DType::BF16, "output mismatch");
-    let pipeline = ctx.pipeline("rmsnorm_grouped_bf16", SOURCE, MslVersion::V3_1)?;
+    ensure!(
+        !official_mlx || w_bias == 0.0,
+        "official grouped norm requires folded gain"
+    );
+    let (name, source) = if official_mlx {
+        ("rmsnorm_grouped_bf16_mlx", OFFICIAL_SOURCE)
+    } else {
+        ("rmsnorm_grouped_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[x.binding(), w.binding(), out.binding()],
@@ -70,13 +102,38 @@ pub fn silu_scaled_bf16(
     out: &Tensor,
     inv_scale: f32,
 ) -> Result<()> {
+    silu_scaled_bf16_with_rounding(ctx, pass, x, out, inv_scale, false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn silu_scaled_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    x: &Tensor,
+    out: &Tensor,
+    inv_scale: f32,
+    official_mlx: bool,
+    primitive_sigmoid: bool,
+) -> Result<()> {
     let n = x.numel();
     ensure!(n > 0 && out.numel() == n, "size mismatch");
     ensure!(
         x.dtype() == DType::BF16 && out.dtype() == DType::BF16,
         "silu_scaled expects BF16"
     );
-    let pipeline = ctx.pipeline("silu_scaled_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        (
+            if primitive_sigmoid {
+                "silu_scaled_bf16_mlx_primitive"
+            } else {
+                "silu_scaled_bf16_mlx"
+            },
+            OFFICIAL_SOURCE,
+        )
+    } else {
+        ("silu_scaled_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[x.binding(), out.binding()],
@@ -95,13 +152,47 @@ pub fn hc_mix_bf16(
     h: usize,
     groups: usize,
 ) -> Result<()> {
+    hc_mix_bf16_with_rounding(ctx, pass, up, hn, mixed, h, groups, false, false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hc_mix_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    up: &Tensor,
+    hn: &Tensor,
+    mixed: &Tensor,
+    h: usize,
+    groups: usize,
+    official_mlx: bool,
+    primitive_sigmoid: bool,
+    sequential_mean: bool,
+) -> Result<()> {
+    ensure!(
+        !official_mlx || !sequential_mean || primitive_sigmoid,
+        "official sequential HC mean requires primitive sigmoid"
+    );
     let rows = bf16_rows(up, groups * h, "read-gate logits")?;
     ensure!(hn.numel() == up.numel() && hn.dtype() == DType::BF16, "hn mismatch");
     ensure!(
         mixed.numel() == rows * h && mixed.dtype() == DType::BF16,
         "mixed must be BF16 [rows, h]"
     );
-    let pipeline = ctx.pipeline("hc_mix_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        (
+            if sequential_mean {
+                "hc_mix_bf16_mlx_prefill"
+            } else if primitive_sigmoid {
+                "hc_mix_bf16_mlx_primitive"
+            } else {
+                "hc_mix_bf16_mlx"
+            },
+            OFFICIAL_SOURCE,
+        )
+    } else {
+        ("hc_mix_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[up.binding(), hn.binding(), mixed.binding()],
@@ -120,6 +211,21 @@ pub fn hc_inject_bf16(
     h: usize,
     groups: usize,
 ) -> Result<()> {
+    hc_inject_bf16_with_rounding(ctx, pass, hyper, branch, inj, h, groups, false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hc_inject_bf16_with_rounding(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    hyper: &Tensor,
+    branch: &Tensor,
+    inj: &Tensor,
+    h: usize,
+    groups: usize,
+    official_mlx: bool,
+    primitive_sigmoid: bool,
+) -> Result<()> {
     let rows = bf16_rows(hyper, groups * h, "hyper stream")?;
     ensure!(
         branch.numel() == rows * h && branch.dtype() == DType::BF16,
@@ -130,7 +236,19 @@ pub fn hc_inject_bf16(
         "inject logits must be BF16 [rows, G]"
     );
     let inv_g = 1.0 / groups as f32;
-    let pipeline = ctx.pipeline("hc_inject_bf16", SOURCE, MslVersion::V3_1)?;
+    let (name, source) = if official_mlx {
+        (
+            if primitive_sigmoid {
+                "hc_inject_bf16_mlx_primitive"
+            } else {
+                "hc_inject_bf16_mlx"
+            },
+            OFFICIAL_SOURCE,
+        )
+    } else {
+        ("hc_inject_bf16", SOURCE)
+    };
+    let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
     pass.dispatch_at(
         &pipeline,
         &[hyper.binding(), branch.binding(), inj.binding()],
@@ -192,6 +310,44 @@ pub fn fused_read_supported(
                 || (w.bits == 16
                     && w.codes.dtype() == DType::BF16
                     && w.in_features() == groups * h)
+        })
+}
+
+/// The admitted official checkpoint uses MLX's custom F32-sigmoid HC tail
+/// only inside its served narrow geometry. Other descriptors retain the
+/// primitive BF16 sigmoid chain. No-inject final mixers are allowed by
+/// hcReadFusedFor/hc_decode2.read; hcReadJoined's inject requirement is separate.
+pub fn official_narrow_sigmoid_supported(
+    norm: &Tensor,
+    down: &QuantWeights,
+    up: &QuantWeights,
+    inject: Option<&QuantWeights>,
+    h: usize,
+    groups: usize,
+    rows: usize,
+) -> bool {
+    let (k, r) = (10240, 320);
+    let q8 = |w: &QuantWeights, n: usize, width: usize| {
+        w.bits == 8
+            && w.group_size == 64
+            && w.codes.dtype() == DType::U32
+            && w.codes.shape() == [n, width / 4].as_slice()
+            && w.scales.dtype() == DType::BF16
+            && w.biases.dtype() == DType::BF16
+            && w.scales.shape() == [n, width / 64].as_slice()
+            && w.biases.shape() == w.scales.shape()
+    };
+    (1..=16).contains(&rows)
+        && h == 2560
+        && groups == 4
+        && norm.dtype() == DType::BF16
+        && norm.numel() == k
+        && q8(down, r, k)
+        && q8(up, k, r)
+        && inject.is_none_or(|w| {
+            w.bits == 16
+                && w.codes.dtype() == DType::BF16
+                && w.codes.shape() == [groups, k].as_slice()
         })
 }
 
@@ -707,6 +863,113 @@ pub fn hc_read_up_mix_q8_rows(
     )
 }
 
+/// Decode-only exact-boundary HC fusion for the admitted external geometry.
+/// The normalized BF16 tensor remains materialized by the qualified grouped
+/// norm. These kernels fuse only operations after that boundary, retaining
+/// skinny.metal's register-A Q8 lane/block/reduction order.
+fn check_official_read_q8(w: &QuantWeights, n: usize, k: usize) -> Result<()> {
+    check_hc_q8(w, n, k, "official HC read weight")?;
+    ensure!(
+        w.group_size == 64
+            && w.scales.dtype() == DType::BF16
+            && w.biases.dtype() == DType::BF16,
+        "official HC read requires affine Q8/group64 with BF16 metadata"
+    );
+    Ok(())
+}
+
+pub(crate) fn official_hc_down_act_q8(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    down: &QuantWeights,
+    hn: &Tensor,
+    down_out: &Tensor,
+    act_out: &Tensor,
+) -> Result<()> {
+    check_official_read_q8(down, 320, 10240)?;
+    ensure!(
+        hn.dtype() == DType::BF16 && hn.numel() == 10240,
+        "official HC normalized input must be one BF16 row"
+    );
+    ensure!(
+        down_out.dtype() == DType::BF16
+            && down_out.numel() == 320
+            && act_out.dtype() == DType::BF16
+            && act_out.numel() == 320,
+        "official HC down/activation output mismatch"
+    );
+    let pipeline = ctx.pipeline(
+        "official_hc_down_act_q8_m1",
+        OFFICIAL_FUSION_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            down.codes.binding(),
+            down.scales.binding(),
+            down.biases.binding(),
+            hn.binding(),
+            down_out.binding(),
+            act_out.binding(),
+        ],
+        &[],
+        Grid::Threadgroups { groups: (80, 1, 1), threadgroup: (64, 1, 1) },
+    )
+}
+
+pub(crate) fn official_hc_up_mix_q8(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    up: &QuantWeights,
+    act: &Tensor,
+    hn: &Tensor,
+    mixed: &Tensor,
+) -> Result<()> {
+    check_official_read_q8(up, 10240, 320)?;
+    ensure!(
+        act.dtype() == DType::BF16 && act.numel() == 320,
+        "official HC activation must be one BF16 row"
+    );
+    ensure!(
+        hn.dtype() == DType::BF16 && hn.numel() == 10240,
+        "official HC normalized input must be one BF16 row"
+    );
+    ensure!(
+        mixed.dtype() == DType::BF16 && mixed.numel() == 2560,
+        "official HC mixed output must be one BF16 row"
+    );
+    let pipeline = ctx.pipeline(
+        "official_hc_up_mix_q8_m1",
+        OFFICIAL_FUSION_SOURCE,
+        MslVersion::V3_1,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            up.codes.binding(),
+            up.scales.binding(),
+            up.biases.binding(),
+            act.binding(),
+            hn.binding(),
+            mixed.binding(),
+        ],
+        &[],
+        Grid::Threadgroups { groups: (320, 1, 1), threadgroup: (128, 1, 1) },
+    )
+}
+
 #[cfg(test)]
 #[path = "hc_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "official_hc_ple_rounding_tests.rs"]
+mod official_rounding_tests;
+
+#[cfg(test)]
+#[path = "official_hc_fusion_tests.rs"]
+mod official_fusion_tests;
+
+#[path = "official_hc_stock.rs"]
+pub(crate) mod stock;

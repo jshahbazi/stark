@@ -47,7 +47,7 @@ use crate::kernels::spec::{
 };
 use crate::kernels::{Arg, Pos, Rope};
 use crate::metal::{EncodedPass, MetalContext, PendingPass};
-use crate::moe_ffn::{prefix_rows, project_mat};
+use crate::moe_ffn::prefix_rows;
 use crate::tensor::Tensor;
 
 use super::model::{
@@ -393,7 +393,7 @@ impl Qwen4ExpModel {
             let per_state = heads * GDN_HEAD_DIM * GDN_HEAD_DIM;
             let mut gdn_index = 0usize;
             for lstate in &state.layers {
-                if let LayerState::Gdn { state: st, conv_windows } = lstate {
+                if let LayerState::Gdn { state: st, conv_windows, .. } = lstate {
                     let mid = sp.mid[gdn_index].view(0, &[m - 1, per_state])?;
                     copy_row(ctx, &pass, &mid, Arg::Gpu(&accepted), st)?;
                     let x = prefix_rows(&sp.conv_in[gdn_index], m)?;
@@ -466,13 +466,14 @@ impl Qwen4ExpModel {
                 // (the trunk's, or its 4-bit copy), argmax.
                 self.hc_read_batched(ctx, &pass, &mtp.mixer, &last, s, &ps1)?;
                 let logits = sp.logits.view(0, &[1, cfg.vocab_size])?;
-                project_mat(
+                crate::moe_ffn::project_lm_logits(
                     ctx,
                     &pass,
                     &ps1.hc.mixed,
                     mtp.head(&self.weights.lm_head),
                     &logits,
                     &s.dequant,
+                    self.config.official_mlx_rounding(),
                 )?;
                 pass.level_barrier(&[&logits])?;
                 let out = sp.draft_tokens.view(i, &[1])?;
@@ -567,7 +568,7 @@ impl Qwen4ExpModel {
             let per_state = heads * GDN_HEAD_DIM * GDN_HEAD_DIM;
             let mut gdn_index = 0usize;
             for lstate in &state.layers {
-                if let LayerState::Gdn { state: st, conv_windows } = lstate {
+                if let LayerState::Gdn { state: st, conv_windows, .. } = lstate {
                     let mid = sp.mid[gdn_index].view(
                         accepted * per_state,
                         &[heads, GDN_HEAD_DIM, GDN_HEAD_DIM],
@@ -628,13 +629,14 @@ impl Qwen4ExpModel {
                     // head (the trunk's, or its 4-bit copy), argmax.
                     self.hc_read_batched(ctx, &pass, &mtp.mixer, &last, s, &ps1)?;
                     let logits = sp.logits.view(0, &[1, cfg.vocab_size])?;
-                    project_mat(
+                    crate::moe_ffn::project_lm_logits(
                         ctx,
                         &pass,
                         &ps1.hc.mixed,
                         mtp.head(&self.weights.lm_head),
                         &logits,
                         &s.dequant,
+                        self.config.official_mlx_rounding(),
                     )?;
                     pass.level_barrier(&[&logits])?;
                     let out = sp.draft_tokens.view(i, &[1])?;
