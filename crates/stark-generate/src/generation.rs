@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::HashSet,
     io::{BufRead, Read, Write},
     time::{Duration, Instant},
@@ -237,6 +238,15 @@ pub(crate) struct GeneratedTokens {
     pub text: Option<String>,
 }
 
+/// Content-free wall-clock observations of native token sampling. The first
+/// sample belongs to prefill, including when that sample is a terminal token.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GenerationProgress {
+    pub sampled_tokens: usize,
+    pub elapsed_seconds: f64,
+    pub prefill_seconds: Option<f64>,
+}
+
 fn tokens_per_second(
     tokens: usize,
     seconds: Option<f64>,
@@ -247,26 +257,6 @@ fn tokens_per_second(
     })
 }
 
-#[cfg(test)]
-pub(crate) fn collect_tokens_observed(
-    stream: impl Iterator<Item = Result<u64, &'static str>>,
-    input_tokens: usize,
-    options: &GenerationOptions,
-    vocab_size: usize,
-    started: Instant,
-    on_token: &mut dyn FnMut(u32) -> Result<(), &'static str>,
-) -> Result<GeneratedTokens, &'static str> {
-    collect_tokens_controlled(
-        stream,
-        input_tokens,
-        options,
-        vocab_size,
-        started,
-        &mut |token| on_token(token).map(|()| true),
-        &mut || Ok(false),
-    )
-}
-
 /// Own the stream so its Drop drains native work before the result is observable.
 pub(crate) fn collect_tokens_controlled(
     stream: impl Iterator<Item = Result<u64, &'static str>>,
@@ -275,6 +265,7 @@ pub(crate) fn collect_tokens_controlled(
     vocab_size: usize,
     started: Instant,
     on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    on_progress: Option<&mut ProgressCallback<'_>>,
     cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
     collect_tokens_with_clock_and_callback(
@@ -284,6 +275,7 @@ pub(crate) fn collect_tokens_controlled(
         vocab_size,
         || started.elapsed(),
         on_token,
+        on_progress,
         cancelled,
     )
 }
@@ -316,6 +308,7 @@ fn collect_tokens_with_clock(
         vocab_size,
         elapsed,
         &mut |_| Ok(true),
+        None,
         &mut || Ok(false),
     )
 }
@@ -327,6 +320,7 @@ fn collect_tokens_with_clock_and_callback(
     vocab_size: usize,
     mut elapsed: impl FnMut() -> Duration,
     on_token: &mut dyn FnMut(u32) -> Result<bool, &'static str>,
+    mut on_progress: Option<&mut ProgressCallback<'_>>,
     cancelled: &mut dyn FnMut() -> Result<bool, &'static str>,
 ) -> Result<GeneratedTokens, &'static str> {
     let capacity = options.context_tokens as usize - input_tokens;
@@ -362,6 +356,13 @@ fn collect_tokens_with_clock_and_callback(
         first_sample.get_or_insert(sample_time);
         last_sample = Some(sample_time);
         result.sampled_tokens += 1;
+        if let Some(callback) = on_progress.as_deref_mut() {
+            callback(GenerationProgress {
+                sampled_tokens: result.sampled_tokens,
+                elapsed_seconds: sample_time.as_secs_f64(),
+                prefill_seconds: first_sample.map(|time| time.as_secs_f64()),
+            })?;
+        }
         if options.eos_token_ids.contains(&token) {
             result.finish_reason = FinishReason::Eos;
             result.stop_token_id = Some(token);
@@ -408,6 +409,7 @@ pub(crate) trait GenerationBackend {
         input: &[u32],
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str>;
     fn supports_images(&self) -> bool {
         false
@@ -450,12 +452,14 @@ pub(crate) trait GenerationBackend {
         _image: Self::PreparedImage,
         _options: &GenerationOptions,
         _on_text: Option<&mut TextCallback<'_>>,
+        _on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         Err("images_not_supported")
     }
 }
 
 pub(crate) type TextCallback<'a> = dyn FnMut(&str) -> Result<(), &'static str> + 'a;
+pub(crate) type ProgressCallback<'a> = dyn FnMut(GenerationProgress) -> Result<(), &'static str> + 'a;
 
 pub(crate) struct GenerationWorker<B: GenerationBackend> {
     backend: B,
@@ -576,23 +580,47 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         output: &mut impl Write,
     ) -> Result<Value, &'static str> {
         let started = Instant::now();
+        let output_token_budget = (options.context_tokens as usize - input_tokens).min(options.max_new_tokens as usize);
+        if stream {
+            write_reply(
+                output,
+                &json!({"event":"progress","input_tokens":input_tokens,"sampled_tokens":0,
+                    "output_token_budget":output_token_budget,"elapsed_seconds":0.0,"prefill_seconds":null}),
+            )?;
+        }
         let mut emitted = String::new();
         let generated = {
+            // Text and progress callbacks share the same framed output sink.
+            // Neither callback retains a borrow across the native invocation.
+            let output = RefCell::new(&mut *output);
             let mut on_text = |text: &str| {
                 if !text.is_empty() {
-                    write_reply(output, &json!({"event":"delta","text":text}))?;
+                    write_reply(&mut **output.borrow_mut(), &json!({"event":"delta","text":text}))?;
                     emitted.push_str(text);
                 }
                 Ok(())
+            };
+            let mut on_progress = |progress: GenerationProgress| {
+                write_reply(
+                    &mut **output.borrow_mut(),
+                    &json!({"event":"progress","input_tokens":input_tokens,
+                        "sampled_tokens":progress.sampled_tokens,"output_token_budget":output_token_budget,
+                        "elapsed_seconds":progress.elapsed_seconds,"prefill_seconds":progress.prefill_seconds}),
+                )
             };
             let on_text = if stream {
                 Some(&mut on_text as &mut TextCallback<'_>)
             } else {
                 None
             };
+            let on_progress = if stream {
+                Some(&mut on_progress as &mut ProgressCallback<'_>)
+            } else {
+                None
+            };
             match image {
-                Some(image) => self.backend.generate_image(image, options, on_text)?,
-                None => self.backend.generate(input, options, on_text)?,
+                Some(image) => self.backend.generate_image(image, options, on_text, on_progress)?,
+                None => self.backend.generate(input, options, on_text, on_progress)?,
             }
         };
         if !valid_ids(&generated.generated_token_ids, self.backend.vocab_size())
@@ -901,6 +929,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "max_context_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
+        "generation_progress":"token-counts-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
@@ -1108,6 +1137,7 @@ mod tests {
             input: &[u32],
             options: &GenerationOptions,
             mut on_text: Option<&mut TextCallback<'_>>,
+            on_progress: Option<&mut ProgressCallback<'_>>,
         ) -> Result<GeneratedTokens, &'static str> {
             self.generation_calls += 1;
             self.inputs.push(input.to_vec());
@@ -1124,9 +1154,9 @@ mod tests {
                         _ => "",
                     })?;
                 }
-                Ok(())
+                Ok(true)
             };
-            collect_tokens_observed(
+            collect_tokens_controlled(
                 TestStream {
                     tokens: self.tokens.clone().into(),
                     drained: self.drained.clone(),
@@ -1136,6 +1166,8 @@ mod tests {
                 self.vocab_size(),
                 Instant::now(),
                 &mut on_token,
+                on_progress,
+                &mut || Ok(false),
             )
         }
 
@@ -1215,9 +1247,10 @@ mod tests {
             _image: FakePreparedImage,
             options: &GenerationOptions,
             on_text: Option<&mut TextCallback<'_>>,
+            on_progress: Option<&mut ProgressCallback<'_>>,
         ) -> Result<GeneratedTokens, &'static str> {
             self.image_generations += 1;
-            self.generate(&[2; 7], options, on_text)
+            self.generate(&[2; 7], options, on_text, on_progress)
         }
     }
     fn worker() -> GenerationWorker<FakeBackend> {
@@ -1498,7 +1531,7 @@ mod tests {
     ) -> Value {
         let mut output = Vec::new();
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
-        serde_json::from_slice(&output).unwrap()
+        serde_json::from_slice(output.split(|byte| *byte == b'\n').rfind(|line| !line.is_empty()).unwrap()).unwrap()
     }
 
     fn image_worker(root: &crate::media::tests::PrivateRoot) -> GenerationWorker<FakeBackend> {
@@ -1640,11 +1673,18 @@ mod tests {
             .filter(|line| !line.is_empty())
             .map(|line| serde_json::from_slice::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(frames.len(), 3);
-        assert_eq!(frames[0]["event"], "delta");
-        assert_eq!(frames[1]["event"], "delta");
-        assert_eq!(frames[2]["input_tokens"], 7);
-        assert_eq!(frames[2]["finish_reason"], "eos");
+        assert_eq!(frames.len(), 7);
+        let progress: Vec<_> = frames.iter().filter(|frame| frame["event"] == "progress").collect();
+        assert_eq!(progress.len(), 4);
+        for (sampled_tokens, frame) in progress.into_iter().enumerate() {
+            assert_eq!(frame["input_tokens"], 7);
+            assert_eq!(frame["output_token_budget"], 8);
+            assert_eq!(frame["sampled_tokens"], sampled_tokens);
+        }
+        let deltas: Vec<_> = frames.iter().filter(|frame| frame["event"] == "delta").collect();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(frames.last().unwrap()["input_tokens"], 7);
+        assert_eq!(frames.last().unwrap()["finish_reason"], "eos");
         assert!(worker.backend.drained.load(Ordering::SeqCst));
         assert!(worker.prepared.is_none());
     }
@@ -1797,6 +1837,145 @@ mod tests {
     }
 
     #[test]
+    fn progress_observes_terminal_samples_with_the_same_stage_clock_as_the_result() {
+        let options = GenerationOptions {
+            context_tokens: 16,
+            max_new_tokens: 8,
+            seed: 0,
+            sampling: Sampling::Greedy {},
+            mtp_drafts: 0,
+            eos_token_ids: vec![1],
+            extra_stop_token_ids: Vec::new(),
+            stop: Vec::new(),
+            request_id: 0,
+        };
+        let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();
+        let mut progress = Vec::new();
+        let mut emitted = Vec::new();
+        let result = collect_tokens_with_clock_and_callback(
+            vec![Ok(3), Ok(4), Ok(1), Ok(7)].into_iter(),
+            4,
+            &options,
+            8,
+            || clock.next().unwrap(),
+            &mut |token| {
+                emitted.push(token);
+                Ok(true)
+            },
+            Some(&mut |sample| {
+                progress.push(sample);
+                Ok(())
+            }),
+            &mut || Ok(false),
+        )
+        .unwrap();
+        assert_eq!(emitted, vec![3, 4]);
+        assert_eq!(
+            progress,
+            vec![
+                GenerationProgress {
+                    sampled_tokens: 1,
+                    elapsed_seconds: 2.0,
+                    prefill_seconds: Some(2.0)
+                },
+                GenerationProgress {
+                    sampled_tokens: 2,
+                    elapsed_seconds: 3.0,
+                    prefill_seconds: Some(2.0)
+                },
+                GenerationProgress {
+                    sampled_tokens: 3,
+                    elapsed_seconds: 6.0,
+                    prefill_seconds: Some(2.0)
+                },
+            ]
+        );
+        assert_eq!(result.sampled_tokens, progress.last().unwrap().sampled_tokens);
+        assert_eq!(result.prefill_seconds, progress[0].prefill_seconds);
+        assert_eq!(result.decode_seconds, Some(4.0));
+    }
+
+    #[test]
+    fn progress_reports_context_clipped_budget_and_precedes_empty_eos_reply() {
+        let mut worker = worker();
+        worker.backend.tokens = vec![Ok(1)];
+        let mut request = standard();
+        request["context_tokens"] = json!(4);
+        request["stream"] = json!(true);
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frames: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(frames.len(), 3);
+        assert_eq!(frames[0]["event"], "progress");
+        assert_eq!(frames[0]["sampled_tokens"], 0);
+        assert_eq!(frames[0]["output_token_budget"], 3);
+        assert_eq!(frames[1]["sampled_tokens"], 1);
+        assert_eq!(frames[1]["output_token_budget"], 3);
+        assert_eq!(frames[1]["elapsed_seconds"], frames[1]["prefill_seconds"]);
+        assert_eq!(frames[2]["text"], "");
+        assert_eq!(frames[2]["output_tokens"], 0);
+        assert_eq!(frames[2]["sampled_tokens"], 1);
+        assert_eq!(frames[2]["finish_reason"], "eos");
+    }
+
+    #[test]
+    fn progress_is_stream_only_and_invalid_requests_do_not_begin_progress() {
+        let mut worker = worker();
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&standard()).unwrap(), &mut output).unwrap();
+        let frame: Value = serde_json::from_slice(&output).unwrap();
+        assert!(frame.get("event").is_none());
+        assert_eq!(frame["finish_reason"], "eos");
+        let mut request = standard();
+        request["stream"] = json!(true);
+        request["context_tokens"] = json!(1);
+        output.clear();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frame: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(frame, json!({"error":"context_overflow"}));
+    }
+
+    #[test]
+    fn progress_callback_failure_drains_without_returning_a_successful_result() {
+        let drained = Arc::new(AtomicBool::new(false));
+        let options = GenerationOptions {
+            context_tokens: 8,
+            max_new_tokens: 4,
+            seed: 0,
+            sampling: Sampling::default(),
+            mtp_drafts: 0,
+            eos_token_ids: vec![1],
+            extra_stop_token_ids: Vec::new(),
+            stop: Vec::new(),
+            request_id: 0,
+        };
+        let mut samples = Vec::new();
+        let result = collect_tokens_controlled(
+            TestStream {
+                tokens: vec![Ok(3), Ok(4), Ok(1)].into(),
+                drained: drained.clone(),
+            },
+            1,
+            &options,
+            8,
+            Instant::now(),
+            &mut |_| panic!("text callback must not run after progress callback failure"),
+            Some(&mut |sample| {
+                samples.push(sample.sampled_tokens);
+                Err("protocol_write_failed")
+            }),
+            &mut || Ok(false),
+        );
+        assert!(result.is_err_and(|code| code == "protocol_write_failed"));
+        assert_eq!(samples, vec![1]);
+        assert!(drained.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn cleanup_failure_fences_success_and_cancellation_before_the_result_is_visible() {
         struct LookaheadStream {
             fence: Arc<AtomicBool>,
@@ -1837,6 +2016,7 @@ mod tests {
                     8,
                     Instant::now(),
                     &mut |_| Ok(true),
+                    None,
                     &mut || Ok(cancelled),
                 );
                 let result = native_result_after_cleanup(result, fence.load(Ordering::SeqCst));
@@ -1903,7 +2083,9 @@ mod tests {
             }
             fn flush(&mut self) -> io::Result<()> {
                 let value: Value = serde_json::from_slice(&self.pending).unwrap();
-                if value.get("event").is_some() {
+                if value["event"] == "progress" && value["sampled_tokens"] == 0 {
+                    assert!(self.drained.load(Ordering::SeqCst));
+                } else if value.get("event").is_some() {
                     assert!(!self.drained.load(Ordering::SeqCst));
                 } else {
                     assert!(self.drained.load(Ordering::SeqCst));
@@ -1922,12 +2104,29 @@ mod tests {
         let mut request = standard();
         request["stream"] = json!(true);
         worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
-        assert_eq!(output.frames.len(), 3);
-        assert_eq!(output.frames[0], json!({"event":"delta","text":"ré"}));
-        assert_eq!(output.frames[1], json!({"event":"delta","text":"sultat\n"}));
-        assert_eq!(output.frames[2]["text"], "résultat\n");
-        assert_eq!(output.frames[2]["generated_token_ids"], json!([3, 4]));
-        assert_eq!(output.frames[2]["finish_reason"], "eos");
+        assert_eq!(output.frames.len(), 7);
+        let progress: Vec<_> = output.frames.iter().filter(|frame| frame["event"] == "progress").collect();
+        assert_eq!(progress.len(), 4);
+        assert_eq!(progress[0]["input_tokens"], 1);
+        assert_eq!(progress[0]["sampled_tokens"], 0);
+        assert_eq!(progress[0]["output_token_budget"], 8);
+        assert_eq!(progress[0]["elapsed_seconds"], 0.0);
+        assert!(progress[0]["prefill_seconds"].is_null());
+        for (sampled_tokens, frame) in progress.iter().enumerate().skip(1) {
+            assert_eq!(frame["sampled_tokens"], sampled_tokens);
+            assert_eq!(frame["prefill_seconds"], progress[1]["prefill_seconds"]);
+            assert!(frame["elapsed_seconds"].as_f64().unwrap() >= frame["prefill_seconds"].as_f64().unwrap());
+            assert_eq!(frame.as_object().unwrap().len(), 6);
+        }
+        let deltas: Vec<_> = output.frames.iter().filter(|frame| frame["event"] == "delta").collect();
+        assert_eq!(*deltas[0], json!({"event":"delta","text":"ré"}));
+        assert_eq!(*deltas[1], json!({"event":"delta","text":"sultat\n"}));
+        let terminal = output.frames.last().unwrap();
+        assert_eq!(terminal["text"], "résultat\n");
+        assert_eq!(terminal["generated_token_ids"], json!([3, 4]));
+        assert_eq!(terminal["finish_reason"], "eos");
+        assert_eq!(terminal["sampled_tokens"], progress.last().unwrap()["sampled_tokens"]);
+        assert_eq!(terminal["prefill_seconds"], progress[1]["prefill_seconds"]);
     }
 
     #[test]
@@ -1943,9 +2142,10 @@ mod tests {
             .filter(|b| !b.is_empty())
             .map(|b| serde_json::from_slice(b).unwrap())
             .collect();
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0], json!({"event":"delta","text":"ré"}));
-        assert_eq!(frames[1]["finish_reason"], "stop_token");
+        assert_eq!(frames.len(), 5);
+        assert_eq!(frames[2], json!({"event":"delta","text":"ré"}));
+        assert_eq!(frames[3]["sampled_tokens"], 2);
+        assert_eq!(frames[4]["finish_reason"], "stop_token");
         for fail_flush in [false, true] {
             let mut output = FailingWriter {
                 fail_flush,

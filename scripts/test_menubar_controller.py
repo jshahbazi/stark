@@ -169,7 +169,118 @@ extension EngineController {
             ["schema_version": 1, "action": action, "label": action == "trash" ? "Move to Trash" : "Remove from Stark",
              "message": action == "trash" ? "Its files will move to Trash." : "Its folder will remain on this Mac."]
         }
+        func generationProgress(id: String? = nil, sampled: Int = 0, elapsed: Double = 0) -> [String: Any] {
+            ["event": "generation_progress", "id": id ?? engine.pendingMessageID!.uuidString.lowercased(),
+             "model": "fixture-model", "phase": sampled == 0 ? "prefill" : "decode",
+             "sampled_tokens": sampled, "output_token_budget": 64, "elapsed_seconds": elapsed,
+             "ttft_seconds": sampled == 0 ? NSNull() : 0.5,
+             "ttft_lower_seconds": 0.3, "ttft_upper_seconds": 0.8,
+             "remaining_lower_seconds": 2.0, "remaining_upper_seconds": 6.0, "calibrated": true]
+        }
         switch scenario {
+        case "generation-progress-external-activity":
+            engine.mode = .chat; engine.loadedMode = .chat
+            engine.state = "generating"; engine.message = "Connected application request"
+            guard !engine.hasPlaygroundGeneration else { return false }
+            engine.apply(generationProgress(id: UUID().uuidString))
+            guard engine.generationProgress == nil, engine.message == "Connected application request" else { return false }
+            engine.state = "ready"; engine.draft = "synthetic prompt"
+            engine.generate(); _ = command()
+            guard engine.hasPlaygroundGeneration else { return false }
+            engine.apply(["event": "reply", "text": "synthetic answer"])
+            return !engine.hasPlaygroundGeneration
+        case "generation-progress-request-and-lifecycle":
+            engine.mode = .chat; engine.loadedMode = .chat; engine.draft = "synthetic prompt"
+            engine.generate()
+            let requested = command()
+            let id = engine.pendingMessageID!.uuidString.lowercased()
+            guard requested["request_id"] as? String == id else { return false }
+            engine.apply(generationProgress())
+            guard engine.generationProgress?.sampledTokens == 0 else { return false }
+            var wrongModel = generationProgress(sampled: 1, elapsed: 0.5)
+            wrongModel["model"] = "replacement-model"
+            engine.apply(wrongModel)
+            engine.apply(generationProgress(id: UUID().uuidString, sampled: 1, elapsed: 0.5))
+            guard engine.generationProgress?.sampledTokens == 0 else { return false }
+            engine.apply(generationProgress(sampled: 4, elapsed: 0.9))
+            guard engine.generationProgress?.sampledTokens == 4,
+                  engine.generationProgress?.firstTokenSeconds == 0.5 else { return false }
+            engine.apply(generationProgress(sampled: 3, elapsed: 1.0))
+            engine.apply(generationProgress(sampled: 5, elapsed: 0.8))
+            var changedFirst = generationProgress(sampled: 5, elapsed: 1.0)
+            changedFirst["ttft_seconds"] = 0.6
+            engine.apply(changedFirst)
+            guard engine.generationProgress?.sampledTokens == 4 else { return false }
+            engine.apply(["event": "reply", "request_id": UUID().uuidString, "text": "stale synthetic answer"])
+            guard engine.pendingMessageID != nil, engine.messages.count == 1 else { return false }
+            engine.apply(["event": "reply", "request_id": id, "text": "synthetic answer", "prefill_seconds": 0.5])
+            guard engine.generationProgress == nil, engine.pendingMessageID == nil,
+                  engine.firstTokenSeconds == 0.5, engine.messages.count == 2 else { return false }
+            engine.apply(generationProgress(id: id, sampled: 8, elapsed: 1.2))
+            return engine.generationProgress == nil
+        case "generation-progress-validation":
+            let base = generationProgress(id: UUID().uuidString)
+            guard GenerationTimingProgress(base) != nil else { return false }
+            for key in ["sampled_tokens", "output_token_budget", "elapsed_seconds", "ttft_lower_seconds",
+                        "ttft_upper_seconds", "remaining_lower_seconds", "remaining_upper_seconds"] {
+                for invalid: Any in [true, -1, "1", Double.nan, Double.infinity] {
+                    var event = base; event[key] = invalid
+                    guard GenerationTimingProgress(event) == nil else { return false }
+                }
+            }
+            for (key, invalid): (String, Any) in [
+                ("sampled_tokens", 0.5), ("sampled_tokens", 65), ("output_token_budget", 0),
+                ("phase", "decode"), ("ttft_seconds", 0.5), ("ttft_lower_seconds", 0.9),
+                ("remaining_upper_seconds", 1.0), ("remaining_lower_seconds", NSNull()), ("calibrated", 1)
+            ] {
+                var event = base; event[key] = invalid
+                guard GenerationTimingProgress(event) == nil else { return false }
+            }
+            var decode = generationProgress(id: UUID().uuidString, sampled: 1, elapsed: 0.4)
+            guard GenerationTimingProgress(decode) == nil else { return false }
+            decode["elapsed_seconds"] = 0.5
+            guard GenerationTimingProgress(decode) != nil else { return false }
+            var learning = base
+            for key in ["ttft_lower_seconds", "ttft_upper_seconds", "remaining_lower_seconds", "remaining_upper_seconds"] {
+                learning[key] = NSNull()
+            }
+            learning["calibrated"] = false
+            guard let progress = GenerationTimingProgress(learning) else { return false }
+            return progress.firstTokenRange == nil && progress.remainingRange == nil && !progress.calibrated
+        case "generation-progress-clear-and-fence":
+            engine.mode = .chat; engine.loadedMode = .chat; engine.draft = "synthetic prompt"
+            engine.generate(); _ = command()
+            let oldID = engine.pendingMessageID!.uuidString
+            engine.apply(generationProgress())
+            engine.stop(); _ = command()
+            engine.apply(generationProgress(id: oldID, sampled: 2, elapsed: 0.7))
+            guard engine.generationProgress == nil else { return false }
+            engine.loadedMode = .chat; engine.state = "ready"; engine.draft = "synthetic retry"
+            engine.generate(); _ = command()
+            engine.apply(generationProgress(id: oldID, sampled: 2, elapsed: 0.7))
+            guard engine.generationProgress == nil else { return false }
+            engine.apply(generationProgress())
+            guard engine.generationProgress != nil else { return false }
+            engine.apply(["event": "error", "message": "Synthetic failure"])
+            guard engine.generationProgress == nil else { return false }
+            engine.state = "ready"; engine.draft = "synthetic retry"
+            engine.generate(); _ = command(); engine.apply(generationProgress())
+            engine.state = "loading"
+            return engine.generationProgress == nil
+        case "generation-progress-formatting":
+            let now = Date(timeIntervalSinceReferenceDate: 0)
+            var initial = generationProgress(id: UUID().uuidString)
+            guard let progress = GenerationTimingProgress(initial, receivedAt: now),
+                  progress.firstTokenDetail(at: now) == "About 0.3 s–0.8 s",
+                  progress.firstTokenDetail(at: now.addingTimeInterval(1)) == "Taking longer than estimated…",
+                  progress.completionDetail(at: now.addingTimeInterval(3)) == "About 0.0 s–3.0 s remaining",
+                  progress.completionDetail(at: now.addingTimeInterval(7)) == "Updating estimate…" else { return false }
+            initial["sampled_tokens"] = 2; initial["phase"] = "decode"
+            initial["elapsed_seconds"] = 0.7; initial["ttft_seconds"] = 0.5
+            guard let decoded = GenerationTimingProgress(initial, receivedAt: now),
+                  decoded.firstTokenDetail(at: now.addingTimeInterval(20)) == "0.5 s" else { return false }
+            return GenerationTimingProgress.duration(120) == "2.0 min" &&
+                GenerationTimingProgress.duration(7200) == "2.0 hr"
         case "context-model-defaults":
             engine.mode = .chat
             for limit in [2, 512, 32_768, 262_144, 1_048_576] {
@@ -1526,7 +1637,7 @@ extension EngineController {
             engine.draft = "synthetic question"
             engine.generate()
             let initial = command()
-            guard initial["image"] is [String: Any], initial.keys.sorted() == ["command", "image", "text"],
+            guard initial["image"] is [String: Any], initial.keys.sorted() == ["command", "image", "request_id", "text"],
                   engine.messages.count == 1, engine.messages[0].image != nil,
                   engine.draftImage == nil, staged().count == 1 else { return false }
             engine.apply(["event": "image_progress", "phase": "preparing"])
@@ -1657,6 +1768,21 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
     "Apple silicon macOS required",
 )
 class ControllerLifecycleTests(unittest.TestCase):
+    def test_connected_application_activity_does_not_show_playground_timing(self):
+        self.exercise("generation-progress-external-activity")
+
+    def test_generation_progress_matches_active_request_and_retains_actual_first_token(self):
+        self.exercise("generation-progress-request-and-lifecycle")
+
+    def test_generation_progress_rejects_invalid_counts_times_and_partial_ranges(self):
+        self.exercise("generation-progress-validation")
+
+    def test_generation_progress_clears_on_failure_stop_and_model_replacement(self):
+        self.exercise("generation-progress-clear-and-fence")
+
+    def test_generation_timing_counts_down_and_handles_estimate_overruns(self):
+        self.exercise("generation-progress-formatting")
+
     def test_blocked_keychain_read_keeps_main_loop_usable_and_admission_bounded(self):
         self.exercise("api-blocked-read-keeps-main-loop-usable")
 
@@ -1710,6 +1836,16 @@ class ControllerLifecycleTests(unittest.TestCase):
                     "arm64-apple-macosx26.4",
                     str(test_source),
                     str(ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopClientPeer.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopConnectionApproval.swift"),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopConnectionBroker.swift"),
+                    str(
+                        ROOT / "apps/menu-bar/Sources/OpenWorkConnectorInstaller.swift"
+                    ),
+                    str(
+                        ROOT
+                        / "apps/menu-bar/Sources/OpenWorkConnectionController.swift"
+                    ),
                     "-o",
                     str(cls.executable),
                 ],

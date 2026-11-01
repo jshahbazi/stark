@@ -39,10 +39,12 @@ struct ConnectionDetailsView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect to Stark").font(.title2.weight(.semibold))
-            Text("In your application's provider settings, choose OpenAI-compatible or Custom OpenAI, then paste these values.")
+            Text("For OpenWork, use the connection button below. For other applications, choose OpenAI-compatible or Custom OpenAI in their provider settings.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
+            OpenWorkConnectionView(connection: engine.openWorkConnection)
+            Divider()
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
             HStack {
                 Text("Saved port").font(.caption).foregroundStyle(.secondary)
@@ -103,7 +105,7 @@ struct ConnectionDetailsView: View {
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text("Every connected app will need the replacement key. A Keychain storage failure keeps the existing key working.")
+                        Text("Apps using a copied API key will need the replacement. Managed OpenWork connections refresh automatically. A Keychain storage failure keeps the existing key working.")
                     }
             }
             Divider()
@@ -168,5 +170,31 @@ struct ConnectionDetailsView: View {
 
     private func copy(_ value: String, label: String, sensitive: Bool = false) {
         copied = ConnectionClipboard.write(value, sensitive: sensitive) ? label : ""
+    }
+}
+
+private struct OpenWorkConnectionView: View {
+    @ObservedObject var connection: OpenWorkConnectionController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("OpenWork").font(.headline)
+                Spacer()
+                if connection.disconnectPending {
+                    Button("Retry Disconnect") { connection.disconnect() }.disabled(connection.busy)
+                } else if connection.approved {
+                    Button("Reconnect") { connection.connect() }.disabled(connection.busy)
+                    Button("Disconnect") { connection.disconnect() }.disabled(connection.busy)
+                } else {
+                    Button("Connect to OpenWork") { connection.connect() }.disabled(connection.busy)
+                }
+            }
+            Text(connection.message).font(.callout).fixedSize(horizontal: false, vertical: true)
+            Text("Uses a private connection on this Mac. Your API key stays in Stark's Keychain.")
+                .font(.caption).foregroundStyle(.secondary)
+            Text("If you previously added a provider named stark manually in OpenWork, remove that provider in OpenWork's settings first.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }

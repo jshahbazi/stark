@@ -25,6 +25,7 @@ SPEC = importlib.util.spec_from_file_location(
 assert SPEC is not None and SPEC.loader is not None
 signing = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(signing)
+import verify_distribution as verification
 
 SOURCE = "a" * 40
 IDENTITY = {"sha1": "B" * 40, "team_id": "ABCDEFGHIJ"}
@@ -85,7 +86,9 @@ def app_fixture(bundle: Path) -> Path:
             {
                 "CFBundleIdentifier": signing.APPLICATION_ID,
                 "CFBundleExecutable": "Stark",
-                "CFBundleVersion": "0.1.0",
+                "CFBundleShortVersionString": "0.0.0",
+                "CFBundleVersion": "20261101010203000004",
+                "StarkBuildChannel": "development",
             }
         )
     )
@@ -98,6 +101,9 @@ def app_fixture(bundle: Path) -> Path:
     (contents / "Resources/menu-bar-manifest.json").write_text(
         json.dumps(
             {
+                "application_version": "0.0.0",
+                "build_number": "20261101010203000004",
+                "build_channel": "development",
                 "base_runtime": {"manifest_sha256": "f" * 64},
                 "overlays_sha256": {NATIVE_NAMES[1]: "e" * 64},
                 "executable_before_signing_sha256": "d" * 64,
@@ -285,6 +291,16 @@ class SigningTests(unittest.TestCase):
                         manifest["base_runtime"]["manifest_sha256"], "f" * 64
                     )
                     self.assertEqual(manifest["signed_runtime"]["version"], "0.1.2")
+                    self.assertEqual(manifest["application_version"], "0.0.0")
+                    self.assertEqual(manifest["build_channel"], "development")
+                    self.assertEqual(
+                        manifest["signed_application"],
+                        {
+                            "application_version": "0.1.2",
+                            "build_number": "0.1.2",
+                            "build_channel": "stable",
+                        },
+                    )
                     worker = app / "Contents/Resources/runtime" / NATIVE_NAMES[1]
                     self.assertEqual(
                         manifest["signed_overlays_sha256"][NATIVE_NAMES[1]],
@@ -292,7 +308,7 @@ class SigningTests(unittest.TestCase):
                     )
                 return result()
 
-            signing.prepare_application_version(bundle, "0.1.2")
+            signing.prepare_application_version(bundle, "0.1.2", development=False)
             with (
                 patch.object(signing, "run", side_effect=command),
                 patch.object(signing, "verify_signature"),
@@ -314,6 +330,174 @@ class SigningTests(unittest.TestCase):
                 ],
                 "0.1.2",
             )
+            self.assertEqual(
+                plistlib.loads((app / "Contents/Info.plist").read_bytes())[
+                    "StarkBuildChannel"
+                ],
+                "stable",
+            )
+
+    def test_local_signed_apps_keep_development_build_identity(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            bundle = root / "source/stark"
+            app = app_fixture(bundle)
+            path = app / "Contents/Info.plist"
+            metadata = plistlib.loads(path.read_bytes())
+            metadata.update(
+                CFBundleShortVersionString="0.0.0",
+                CFBundleVersion="20261101010203000004",
+                StarkBuildChannel="development",
+            )
+            path.write_bytes(plistlib.dumps(metadata))
+            signing.prepare_application_version(
+                bundle, "0.11.14-dev.1", development=True
+            )
+            self.assertEqual(plistlib.loads(path.read_bytes()), metadata)
+            signing.refresh_application_manifest(bundle, IDENTITY)
+            manifest = json.loads(
+                (app / "Contents/Resources/menu-bar-manifest.json").read_bytes()
+            )
+            self.assertEqual(
+                manifest["signed_application"],
+                {
+                    "application_version": "0.0.0",
+                    "build_number": "20261101010203000004",
+                    "build_channel": "development",
+                },
+            )
+            self.assertEqual(manifest["base_runtime"]["manifest_sha256"], "f" * 64)
+            self.assertEqual(
+                (app / "Contents/Resources/runtime/share/stark/VERSION").read_text(),
+                "0.11.14-dev.1\n",
+            )
+
+    def test_sign_only_normalizes_legacy_patch_labels_and_release_promotes_app(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture(root)
+            bundle = root / "source/stark"
+            app = app_fixture(bundle)
+            path = app / "Contents/Info.plist"
+            legacy = plistlib.loads(path.read_bytes())
+            legacy.update(
+                CFBundleShortVersionString="0.11.14", CFBundleVersion="0.11.14"
+            )
+            legacy.pop("StarkBuildChannel")
+            path.write_bytes(plistlib.dumps(legacy))
+            signing.prepare_application_version(
+                bundle, "0.11.14-dev.1", development=True
+            )
+            metadata = plistlib.loads(path.read_bytes())
+            self.assertEqual(metadata["CFBundleShortVersionString"], "0.0.0")
+            self.assertEqual(metadata["StarkBuildChannel"], "development")
+            self.assertRegex(metadata["CFBundleVersion"], r"^[1-9][0-9]{0,19}$")
+            self.assertNotEqual(metadata["CFBundleVersion"], "20261101010203000004")
+            signing.prepare_application_version(bundle, "0.11.3", development=False)
+            metadata = plistlib.loads(path.read_bytes())
+            self.assertEqual(metadata["CFBundleShortVersionString"], "0.11.3")
+            self.assertEqual(metadata["CFBundleVersion"], "0.11.3")
+            self.assertEqual(metadata["StarkBuildChannel"], "stable")
+            with self.assertRaisesRegex(
+                signing.SigningError, "stable_version_required"
+            ):
+                signing.prepare_application_version(
+                    bundle, "0.11.4-dev.1", development=False
+                )
+
+    def test_release_signing_rejects_development_archive_labels_before_tools(self):
+        with patch.object(signing, "environment") as environment:
+            with self.assertRaisesRegex(
+                signing.SigningError, "stable_version_required"
+            ):
+                signing.sign(
+                    argparse.Namespace(sign_only=False, version="0.11.3-dev.1")
+                )
+            environment.assert_not_called()
+
+    def test_sign_only_rejects_stable_archive_labels_before_tools(self):
+        for version in ("0.11.14", "0.1.0", "00.1.0", "0.1.0-", "invalid"):
+            with (
+                self.subTest(version=version),
+                patch.object(signing, "environment") as environment,
+                self.assertRaisesRegex(
+                    signing.SigningError, "development_version_required"
+                ),
+            ):
+                signing.sign(argparse.Namespace(sign_only=True, version=version))
+            environment.assert_not_called()
+
+    def test_archive_verification_checks_app_build_channel(self):
+        development = {
+            "CFBundleShortVersionString": "0.0.0",
+            "CFBundleVersion": "20261101010203000004",
+            "StarkBuildChannel": "development",
+        }
+        verification.verify_application_version(
+            development, "0.11.14-test.1", require_notarized=False
+        )
+        with self.assertRaisesRegex(
+            verification.VerificationFailed, "application_version"
+        ):
+            verification.verify_application_version(
+                development, "0.11.14", require_notarized=False
+            )
+        verification.verify_application_version(
+            development, "0.11.14", require_notarized=False, release_input=True
+        )
+        for version in ("0.11", "00.11.14", "invalid"):
+            with (
+                self.subTest(version=version),
+                self.assertRaisesRegex(
+                    verification.VerificationFailed, "application_version"
+                ),
+            ):
+                verification.verify_application_version(
+                    development, version, require_notarized=False, release_input=True
+                )
+        with self.assertRaisesRegex(
+            verification.VerificationFailed, "application_version"
+        ):
+            verification.verify_application_version(
+                development, "0.11.14", require_notarized=True, release_input=True
+            )
+        for altered in (
+            {**development, "CFBundleShortVersionString": "0.11.14"},
+            {**development, "CFBundleVersion": "0"},
+            {**development, "CFBundleVersion": "01"},
+            {**development, "CFBundleVersion": "9" * 21},
+            {**development, "CFBundleVersion": "0.11.14"},
+            {**development, "StarkBuildChannel": "unknown"},
+        ):
+            with (
+                self.subTest(metadata=altered),
+                self.assertRaisesRegex(
+                    verification.VerificationFailed, "application_version"
+                ),
+            ):
+                verification.verify_application_version(
+                    altered, "0.11.14", require_notarized=False
+                )
+        with self.assertRaisesRegex(
+            verification.VerificationFailed, "application_version"
+        ):
+            verification.verify_application_version(
+                development, "0.11.14", require_notarized=True
+            )
+        for channel in (None, "stable"):
+            stable = {"CFBundleShortVersionString": "0.11.2"}
+            if channel is not None:
+                stable["StarkBuildChannel"] = channel
+            verification.verify_application_version(
+                stable, "0.11.2", require_notarized=True
+            )
+            with self.assertRaisesRegex(
+                verification.VerificationFailed, "application_version"
+            ):
+                verification.verify_application_version(
+                    stable, "0.11.3", require_notarized=True
+                )
 
     def test_application_ticket_is_required_when_notarization_is_required(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -579,7 +763,7 @@ class SigningTests(unittest.TestCase):
                 archive=archive,
                 input_sha256=digest,
                 expected_source=SOURCE,
-                version="0.1.1",
+                version="0.1.2-dev.1",
                 sign_identity=IDENTITY["sha1"],
                 notary_profile=None,
                 keychain=None,
@@ -615,7 +799,7 @@ class SigningTests(unittest.TestCase):
             self.assertEqual(len(list(options.output_dir.glob("*"))), 3)
             signed_archive = (
                 options.output_dir
-                / "stark-0.1.1-aarch64-apple-darwin-signed-unnotarized.tar.gz"
+                / "stark-0.1.2-dev.1-aarch64-apple-darwin-signed-unnotarized.tar.gz"
             )
             with tarfile.open(signed_archive) as contents:
                 manifest = json.load(contents.extractfile("stark/" + signing.MANIFEST))
@@ -630,7 +814,7 @@ class SigningTests(unittest.TestCase):
                         signing.hashlib.sha256(signed).hexdigest(),
                     )
             self.assertEqual(manifest["source"], original["source"])
-            self.assertEqual(manifest["version"], "0.1.1")
+            self.assertEqual(manifest["version"], "0.1.2-dev.1")
             self.assertEqual(manifest["distribution_source"], recipe)
 
     def test_normal_mode_requires_acceptance_and_online_executable_tickets(self):

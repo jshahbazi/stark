@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
+import os
 import plistlib
 import shutil
 import subprocess
@@ -72,13 +74,31 @@ def make_converter_wheel(
 
 
 class RuntimeVerificationTests(unittest.TestCase):
-    def test_release_version_is_recorded_without_a_build_timestamp(self):
+    def test_local_builds_never_claim_a_release_patch_version(self):
+        for version in (None, "0.11.14", "0.11.14-preview.1", "0.0.0-dev.abc.12"):
+            with self.subTest(version=version):
+                info = {"CFBundleShortVersionString": "0.11.14"}
+                builder.set_application_version(info, version, "20261031234500123456")
+                self.assertEqual(info["CFBundleShortVersionString"], "0.0.0")
+                self.assertEqual(info["CFBundleVersion"], "20261031234500123456")
+                self.assertEqual(info["StarkBuildChannel"], "development")
+
+    def test_local_build_number_defaults_to_microsecond_utc_timestamp(self):
         info = {}
-        builder.set_application_version(info, "0.1.2-preview.1")
-        self.assertEqual(info["CFBundleShortVersionString"], "0.1.2")
-        self.assertEqual(info["CFBundleVersion"], "0.1.2")
+        builder.set_application_version(info, None)
+        self.assertRegex(info["CFBundleVersion"], r"^[1-9][0-9]{19}$")
+
+    def test_invalid_local_build_metadata_is_rejected(self):
         with self.assertRaisesRegex(builder.BuildError, "application_version_invalid"):
             builder.set_application_version({}, "../../0.1.2")
+        for number in ("", "0", "01", "0.11.14", "-1", "build-1", "1" * 21):
+            with (
+                self.subTest(build_number=number),
+                self.assertRaisesRegex(
+                    builder.BuildError, "application_build_number_invalid"
+                ),
+            ):
+                builder.set_application_version({}, None, number)
 
     def test_combined_runtime_is_pruned_without_recursive_application_embedding(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -194,6 +214,440 @@ class RuntimeVerificationTests(unittest.TestCase):
             (runtime / "unexpected-link").symlink_to(make_runtime_path)
             with self.assertRaises(builder.BuildError):
                 builder.verify_runtime(runtime)
+
+
+class OpenWorkConnectorBundleTests(unittest.TestCase):
+    def make_source(self, root: Path) -> Path:
+        source = root / "connector"
+        source.mkdir()
+        package = {
+            "name": "@stark/openwork-provider",
+            "version": "0.1.0",
+            "type": "module",
+            "main": "./server.js",
+            "exports": {".": "./index.js", "./server": "./server.js"},
+        }
+        for name in builder.OPENWORK_CONNECTOR_FILES:
+            data = (
+                json.dumps(package).encode()
+                if name == "package.json"
+                else f"public fixture: {name}\n".encode()
+            )
+            (source / name).write_bytes(data)
+        return source
+
+    def make_lock(self, root: Path, source: Path, *, pinned: bool = True) -> Path:
+        path = root / "connector-lock.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "protocol_version": 1,
+                    "repository": builder.OPENWORK_CONNECTOR_REPOSITORY,
+                    "revision": "a" * 40 if pinned else None,
+                    "files_sha256": {
+                        name: builder.sha256(source / name)
+                        for name in builder.OPENWORK_CONNECTOR_FILES
+                    }
+                    if pinned
+                    else {},
+                }
+            )
+        )
+        return path
+
+    def resources(self, root: Path) -> Path:
+        resources = root / "Resources"
+        resources.mkdir()
+        return resources
+
+    def test_local_pinned_source_embeds_only_allowlist_and_records_resource_hashes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source)
+            resources = self.resources(root)
+            (source / "unrelated-executable").write_bytes(b"not included")
+            (source / "unrelated-executable").chmod(0o755)
+            metadata = builder.install_openwork_connector(
+                resources, source=source, lockfile=lock
+            )
+            target = resources / "OpenWorkConnector"
+            self.assertEqual(
+                {path.name for path in target.iterdir()},
+                set(builder.OPENWORK_CONNECTOR_FILES),
+            )
+            self.assertFalse(metadata["development_override"])
+            self.assertEqual(metadata["revision"], "a" * 40)
+            self.assertEqual(metadata["source_mode"], "local")
+            self.assertEqual(metadata["lock_sha256"], builder.sha256(lock))
+            for name in builder.OPENWORK_CONNECTOR_FILES:
+                self.assertEqual(
+                    (target / name).read_bytes(), (source / name).read_bytes()
+                )
+                self.assertEqual((target / name).stat().st_mode & 0o777, 0o644)
+                self.assertEqual(
+                    metadata["files_sha256"][name], builder.sha256(target / name)
+                )
+                self.assertEqual(
+                    metadata["resources_sha256"][f"OpenWorkConnector/{name}"],
+                    builder.sha256(target / name),
+                )
+
+    def test_unpinned_local_source_requires_explicit_development_override(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source, pinned=False)
+            resources = self.resources(root)
+            with self.assertRaisesRegex(
+                builder.BuildError, "openwork_connector_lock_unpinned"
+            ):
+                builder.install_openwork_connector(
+                    resources, source=source, lockfile=lock
+                )
+            with self.assertRaisesRegex(
+                builder.BuildError, "openwork_connector_development_source_required"
+            ):
+                builder.install_openwork_connector(
+                    resources, allow_development=True, lockfile=lock
+                )
+            metadata = builder.install_openwork_connector(
+                resources, source=source, allow_development=True, lockfile=lock
+            )
+            self.assertTrue(metadata["development_override"])
+            self.assertIsNone(metadata["revision"])
+            self.assertEqual(
+                set(metadata["files_sha256"]), set(builder.OPENWORK_CONNECTOR_FILES)
+            )
+
+    def test_pinned_hash_mismatch_cannot_be_bypassed_by_development_flag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source)
+            resources = self.resources(root)
+            (source / "server.js").write_text("changed source")
+            for development in (False, True):
+                with self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_hash_mismatch"
+                ):
+                    builder.install_openwork_connector(
+                        resources,
+                        source=source,
+                        allow_development=development,
+                        lockfile=lock,
+                    )
+                self.assertFalse((resources / "OpenWorkConnector").exists())
+
+    def test_rejects_unsafe_local_files_and_source_directory(self):
+        for failure in (
+            "symlink",
+            "hardlink",
+            "missing",
+            "executable",
+            "writable",
+            "directory",
+            "root-symlink",
+        ):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = self.make_source(root)
+                lock = self.make_lock(root, source)
+                resources = self.resources(root)
+                selected = source / "server.js"
+                if failure == "symlink":
+                    selected.unlink()
+                    selected.symlink_to(source / "connector.js")
+                elif failure == "hardlink":
+                    os.link(selected, root / "linked.js")
+                elif failure == "missing":
+                    selected.unlink()
+                elif failure == "executable":
+                    selected.chmod(0o755)
+                elif failure == "writable":
+                    selected.chmod(0o666)
+                elif failure == "directory":
+                    selected.unlink()
+                    selected.mkdir()
+                else:
+                    alias = root / "alias"
+                    alias.symlink_to(source, target_is_directory=True)
+                    source = alias
+                with self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_source_invalid"
+                ):
+                    builder.install_openwork_connector(
+                        resources, source=source, lockfile=lock
+                    )
+                self.assertFalse((resources / "OpenWorkConnector").exists())
+
+    def test_lock_rejects_mutable_revisions_other_hosts_path_escape_and_duplicate_keys(
+        self,
+    ):
+        for failure in (
+            "repository",
+            "revision",
+            "file",
+            "protocol",
+            "duplicate",
+            "symlink",
+        ):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = self.make_source(root)
+                lock = self.make_lock(root, source)
+                value = json.loads(lock.read_text())
+                if failure == "repository":
+                    value["repository"] = "https://example.invalid/connector"
+                elif failure == "revision":
+                    value["revision"] = "main"
+                elif failure == "file":
+                    value["files_sha256"]["../outside"] = "0" * 64
+                elif failure == "protocol":
+                    value["protocol_version"] = True
+                elif failure == "duplicate":
+                    lock.write_text(
+                        lock.read_text().replace(
+                            '"schema_version": 1',
+                            '"schema_version": 1, "schema_version": 1',
+                        )
+                    )
+                elif failure == "symlink":
+                    alias = root / "lock-alias"
+                    alias.symlink_to(lock)
+                    lock = alias
+                if failure not in {"duplicate", "symlink"}:
+                    lock.write_text(json.dumps(value))
+                with self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_lock_invalid"
+                ):
+                    builder.read_openwork_connector_lock(lock)
+
+    def test_file_and_aggregate_size_limits(self):
+        for failure in ("file", "total"):
+            with (
+                self.subTest(failure=failure),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = self.make_source(root)
+                if failure == "file":
+                    (source / "server.js").write_bytes(
+                        b"x" * (builder.MAX_CONNECTOR_FILE_BYTES + 1)
+                    )
+                else:
+                    for name in builder.OPENWORK_CONNECTOR_FILES:
+                        if name != "package.json":
+                            (source / name).write_bytes(
+                                b"x" * builder.MAX_CONNECTOR_FILE_BYTES
+                            )
+                lock = self.make_lock(root, source, pinned=False)
+                with self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_source_invalid"
+                ):
+                    builder.install_openwork_connector(
+                        self.resources(root),
+                        source=source,
+                        allow_development=True,
+                        lockfile=lock,
+                    )
+
+    def test_default_download_uses_only_pinned_revision_and_verifies_bytes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source)
+            payload = {
+                name: (source / name).read_bytes()
+                for name in builder.OPENWORK_CONNECTOR_FILES
+            }
+            with patch.object(
+                builder,
+                "_download_openwork_connector_file",
+                side_effect=lambda revision, name: payload[name],
+            ) as download:
+                metadata = builder.install_openwork_connector(
+                    self.resources(root), lockfile=lock
+                )
+            self.assertEqual(download.call_count, len(builder.OPENWORK_CONNECTOR_FILES))
+            self.assertTrue(
+                all(call.args[0] == "a" * 40 for call in download.call_args_list)
+            )
+            self.assertEqual(metadata["source_mode"], "download")
+            self.assertFalse(metadata["development_override"])
+
+    def test_download_transport_rejects_redirects_wrong_status_and_large_payloads(self):
+        class Response(io.BytesIO):
+            def __init__(self, payload, *, status=200, url=None, size=None):
+                super().__init__(payload)
+                self.status = status
+                self.url = url
+                self.headers = {
+                    "Content-Length": str(len(payload) if size is None else size)
+                }
+
+            def geturl(self):
+                return self.url
+
+        expected = (
+            "https://raw.githubusercontent.com/jshahbazi/stark-openwork/"
+            + "a" * 40
+            + "/server.js"
+        )
+        for failure in ("ok", "redirect", "status", "size", "body"):
+            with self.subTest(failure=failure):
+                data = (
+                    b"public fixture"
+                    if failure != "body"
+                    else b"x" * (builder.MAX_CONNECTOR_FILE_BYTES + 1)
+                )
+                response = Response(
+                    data,
+                    status=302 if failure == "status" else 200,
+                    url="https://example.invalid/redirect"
+                    if failure == "redirect"
+                    else expected,
+                    size=builder.MAX_CONNECTOR_FILE_BYTES + 1
+                    if failure == "size"
+                    else 1
+                    if failure == "body"
+                    else None,
+                )
+                opener = unittest.mock.Mock()
+                opener.open.return_value = response
+                with patch.object(
+                    builder.urllib.request, "build_opener", return_value=opener
+                ) as factory:
+                    if failure == "ok":
+                        self.assertEqual(
+                            builder._download_openwork_connector_file(
+                                "a" * 40, "server.js"
+                            ),
+                            data,
+                        )
+                        self.assertEqual(
+                            opener.open.call_args.args[0].full_url, expected
+                        )
+                        self.assertIsNone(
+                            factory.call_args.args[0].redirect_request(
+                                None, None, None, None, None, None
+                            )
+                        )
+                    else:
+                        with self.assertRaisesRegex(
+                            builder.BuildError, "openwork_connector_download_failed"
+                        ):
+                            builder._download_openwork_connector_file(
+                                "a" * 40, "server.js"
+                            )
+        for revision, name in (("main", "server.js"), ("a" * 40, "../outside")):
+            with self.assertRaisesRegex(
+                builder.BuildError, "openwork_connector_download_failed"
+            ):
+                builder._download_openwork_connector_file(revision, name)
+
+    def test_copy_failure_removes_only_its_partial_destination(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source)
+            resources = self.resources(root)
+            unrelated = resources / "preserve"
+            unrelated.write_text("unchanged")
+            with (
+                patch.object(Path, "write_bytes", side_effect=OSError),
+                self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_copy_failed"
+                ),
+            ):
+                builder.install_openwork_connector(
+                    resources, source=source, lockfile=lock
+                )
+            self.assertFalse((resources / "OpenWorkConnector").exists())
+            self.assertEqual(unrelated.read_text(), "unchanged")
+
+    def test_destination_and_dependency_manifest_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            resources = self.resources(root)
+            target = resources / "OpenWorkConnector"
+            target.mkdir()
+            (target / "preserve").write_text("unchanged")
+            lock = self.make_lock(root, source)
+            with self.assertRaisesRegex(
+                builder.BuildError, "openwork_connector_destination_invalid"
+            ):
+                builder.install_openwork_connector(
+                    resources, source=source, lockfile=lock
+                )
+            self.assertEqual((target / "preserve").read_text(), "unchanged")
+            shutil.rmtree(target)
+            package_path = source / "package.json"
+            package = json.loads(package_path.read_text())
+            package["dependencies"] = {"unexpected": "1.0.0"}
+            package_path.write_text(json.dumps(package))
+            lock = self.make_lock(root, source)
+            with self.assertRaisesRegex(
+                builder.BuildError, "openwork_connector_package_invalid"
+            ):
+                builder.install_openwork_connector(
+                    resources, source=source, lockfile=lock
+                )
+
+    def test_destination_created_by_another_writer_is_not_removed_on_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = self.make_source(root)
+            lock = self.make_lock(root, source)
+            resources = self.resources(root)
+            target = resources / "OpenWorkConnector"
+            original_mkdir = Path.mkdir
+
+            def raced_mkdir(path, *arguments, **keywords):
+                original_mkdir(path, *arguments, **keywords)
+                (path / "other-writer").write_text("preserve")
+                raise FileExistsError
+
+            with (
+                patch.object(Path, "mkdir", raced_mkdir),
+                self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_copy_failed"
+                ),
+            ):
+                builder.install_openwork_connector(
+                    resources, source=source, lockfile=lock
+                )
+            self.assertEqual((target / "other-writer").read_text(), "preserve")
+
+    def test_package_exports_cannot_reference_unbundled_or_parent_paths(self):
+        for exports in ("./index.js", {".": "./index.js", "./server": "../outside.js"}):
+            with (
+                self.subTest(exports=exports),
+                tempfile.TemporaryDirectory() as temporary,
+            ):
+                root = Path(temporary)
+                source = self.make_source(root)
+                package_path = source / "package.json"
+                package = json.loads(package_path.read_text())
+                package["exports"] = exports
+                package_path.write_text(json.dumps(package))
+                lock = self.make_lock(root, source)
+                with self.assertRaisesRegex(
+                    builder.BuildError, "openwork_connector_package_invalid"
+                ):
+                    builder.install_openwork_connector(
+                        self.resources(root), source=source, lockfile=lock
+                    )
 
 
 class NativeNoticeTests(unittest.TestCase):
@@ -613,6 +1067,13 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
                     str(
                         builder.ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"
                     ),
+                    *[
+                        str(path)
+                        for pattern in ("Desktop*.swift", "OpenWork*.swift")
+                        for path in sorted(
+                            (builder.ROOT / "apps/menu-bar/Sources").glob(pattern)
+                        )
+                    ],
                     "-o",
                     str(executable),
                 ],

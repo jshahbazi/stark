@@ -259,6 +259,76 @@ def tool_parser_for(codec: dict | None) -> str | None:
     return None
 
 
+class ToolTextStream:
+    """Stream only text before a possible call; calls require terminal validation.
+
+    Keep marker prefixes and trailing whitespace private until their meaning is
+    known. The final parsed content is authoritative, including its rstrip when
+    a call follows text. Work is linear in the bounded native output, even for
+    a long run of whitespace delivered in many small deltas.
+    """
+
+    _markers = ("<tool_call", "</tool_call")
+
+    def __init__(self, deliver):
+        self.deliver = deliver
+        self.tail = ""
+        self.whitespace = []
+        self.blocked = False
+        self.bytes = 0
+        self.emitted = 0
+        self.digest = hashlib.sha256()
+
+    def feed(self, text: str) -> None:
+        try:
+            self.bytes += len(text.encode("utf-8"))
+        except UnicodeEncodeError:
+            self.blocked = True
+        if self.bytes > MAX_TOOL_OUTPUT_BYTES:
+            self.blocked = True
+        if self.blocked:
+            self.tail = ""
+            self.whitespace.clear()
+            return
+        value = self.tail + text
+        self.tail = ""
+        positions = [position for marker in self._markers if (position := value.find(marker)) >= 0]
+        if positions:
+            value = value[: min(positions)]
+            self.blocked = True
+        else:
+            # Only a fixed-size suffix can become a marker in the next delta.
+            for size in range(min(len(value), max(map(len, self._markers)) - 1), 0, -1):
+                if any(marker.startswith(value[-size:]) for marker in self._markers):
+                    self.tail, value = value[-size:], value[:-size]
+                    break
+        visible = value.rstrip()
+        if visible:
+            self._emit("".join(self.whitespace) + visible)
+            self.whitespace.clear()
+        if self.blocked:
+            self.whitespace.clear()
+        elif suffix := value[len(visible) :]:
+            self.whitespace.append(suffix)
+
+    def _emit(self, value: str) -> None:
+        self.deliver(value)
+        self.emitted += len(value)
+        self.digest.update(value.encode("utf-8"))
+
+    def finish(self, content: str | None) -> None:
+        content = content or ""
+        if (
+            self.emitted > len(content)
+            or hashlib.sha256(content[: self.emitted].encode("utf-8")).digest() != self.digest.digest()
+        ):
+            raise ValueError("Invalid worker stream")
+        if suffix := content[self.emitted :]:
+            self._emit(suffix)
+        self.tail = ""
+        self.whitespace.clear()
+
+
 def parse_tool_output(
     text: str,
     tools: list[dict],
@@ -271,9 +341,15 @@ def parse_tool_output(
 ) -> tuple[dict, str]:
     """Parse only complete calls after generation; never repair model output.
 
-    Streaming callers buffer this path and emit calls once after validation.
+    Streaming callers can emit text prefixes while this path keeps calls private.
     No call may be emitted before the native terminal frame is received.
     """
+    try:
+        oversized = len(text.encode("utf-8")) > MAX_TOOL_OUTPUT_BYTES
+    except UnicodeEncodeError:
+        oversized = True
+    if oversized:
+        raise APIError(502, "The model output exceeded the tool parser's limits.", "invalid_tool_call")
     message = {"role": "assistant", "content": text}
     reason = "length" if finish_reason in {"length", "context"} else "stop"
     start = text.find("<tool_call")
@@ -291,11 +367,6 @@ def parse_tool_output(
         raise invalid()
     if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
         raise ValueError("Invalid private tool-call ID prefix")
-    try:
-        if len(text.encode("utf-8")) > MAX_TOOL_OUTPUT_BYTES:
-            raise invalid()
-    except UnicodeEncodeError:
-        raise invalid() from None
     if start < 0 or "</tool_call" in text[:start] or "```" in text[:start]:
         raise invalid()
     names = {tool["function"]["name"] for tool in tools}

@@ -13,8 +13,8 @@ use stark_engine::{
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, PreparedImageMetadata, Sampling,
-        TextCallback, collect_tokens_controlled, native_result_after_cleanup,
+        GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, PreparedImageMetadata,
+        ProgressCallback, Sampling, TextCallback, collect_tokens_controlled, native_result_after_cleanup,
     },
     text_stop::StopFilter,
 };
@@ -170,8 +170,9 @@ impl GenerationBackend for NativeBackend {
         input: &[u32],
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
-        self.generate_inner(input, None, options, on_text)
+        self.generate_inner(input, None, options, on_text, on_progress)
     }
 
     fn supports_images(&self) -> bool {
@@ -286,8 +287,9 @@ impl GenerationBackend for NativeBackend {
         image: NativePreparedImage,
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
-        self.generate_inner(&[], Some(image), options, on_text)
+        self.generate_inner(&[], Some(image), options, on_text, on_progress)
     }
 }
 
@@ -298,6 +300,7 @@ impl NativeBackend {
         image: Option<NativePreparedImage>,
         options: &GenerationOptions,
         mut on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         // Include native state allocation, stream setup and the first GPU wait.
         // The engine's iterator can encode one lookahead decode before returning
@@ -404,6 +407,7 @@ impl NativeBackend {
                 }
                 Ok(true)
             },
+            on_progress,
             &mut cancelled,
         );
         // collect_tokens has dropped and drained the stream, including its lookahead.

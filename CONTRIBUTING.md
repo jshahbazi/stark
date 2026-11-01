@@ -21,7 +21,7 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 | Engine | `crates/stark-engine/src`, kernels under `src/backends/metal/kernel`, build script under `build/` | `crates/stark-engine/unit` (nightly, see below), `tests/cxx_string.rs` |
 | Workers | `crates/stark-generate/src`, `crates/stark-score/src` | Unit tests inside each module; `scripts/test_generation_process.py`, `scripts/test_scoring_process.py` |
 | Converter, chat, API, app backend | `tools/converter/stark_convert` | `tools/converter/tests` (pytest, model-free, fixtures with recorded provenance) |
-| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py` (needs Xcode, not run in CI) |
+| Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
 | Installer and release | `install.sh`, `scripts/stark`, `scripts/*.py`, `.github/workflows` | `scripts/test_*.py`, `scripts/ci/test_*.py` |
 
 `tools/data_exporter`, `tools/gpu_trace` and `tools/model_compare` are inherited from Uzu and are not part of the product.
@@ -100,6 +100,12 @@ printf '%s\n' '{"operation":"score","input_token_ids":[151644,872,198],"candidat
 - Write Markdown without emojis and without shell heredocs in examples.
 - Put the evidence for a change (test counts, manual checks, measurements) in the pull request description. A record that must outlive the pull request goes under `docs/archive/runs/` with its date and the commit it describes; a benchmark goes under `docs/benchmarks/` and is added to the [benchmarks index](docs/benchmarks/README.md) with a note on what it supersedes.
 - Keep models, private fixtures, converted outputs and runtime artifacts out of Git; publish aggregate results and hashes only.
+
+### OpenWork managed connection
+
+The OpenWork connector source is maintained in the separate `stark-openwork` repository and bundled into the menu bar app as a pinned public resource. Do not copy connector implementation into this repository or edit OpenWork itself. Connector or installer changes must preserve the key boundary: public OpenCode configuration may contain the connector path, private socket path, expected loopback API URL and ownership marker, but never the API key or request capability. Stark keeps the master key in Keychain, keeps approval in a separate Keychain item, and issues renewable 120-second bearer capabilities only after verifying the OpenCode sidecar, associating each grant with that process identity and the current API session. The HTTP bearer can be transferred if exposed; process identity gates issuance but is not enforced on each HTTP request. Lease expiry does not cancel already-admitted streams; explicit revocation cancels active requests.
+
+The accepted native client identity is OpenWork's signed macOS app (`com.differentai.openwork`, Team ID `F5DJWB4CCV`) with its signed `opencode2` sidecar. This identity check does not sandbox third-party plugins running in the same OpenWork process. Keep that trust boundary explicit in user documentation. Cover Connect, Disconnect/revocation, reconnect after port changes, preserving unrelated JSONC settings, and cleanup on failure in installer/controller tests. Treat helper-based client runs as historical evidence; only a fresh helperless run can qualify the managed connector, and should be recorded separately with versions, hashes and aggregate results rather than prompt/response data.
 
 ## Commits and pull requests
 

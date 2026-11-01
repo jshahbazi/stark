@@ -927,6 +927,91 @@ struct ModelSupportReport {
     }
 }
 
+struct GenerationTimingProgress {
+    let sampledTokens: Int
+    let outputTokenBudget: Int
+    let elapsedSeconds: Double
+    let firstTokenSeconds: Double?
+    let firstTokenRange: ClosedRange<Double>?
+    let remainingRange: ClosedRange<Double>?
+    let calibrated: Bool
+    let receivedAt: Date
+
+    init?(_ event: [String: Any], receivedAt: Date = Date()) {
+        guard let phase = event["phase"] as? String,
+              let sampled = Self.count(event["sampled_tokens"]),
+              let budget = Self.count(event["output_token_budget"]), budget > 0, sampled <= budget,
+              phase == (sampled == 0 ? "prefill" : "decode"),
+              let elapsed = Self.seconds(event["elapsed_seconds"]),
+              let calibration = event["calibrated"] as? NSNumber,
+              CFGetTypeID(calibration) == CFBooleanGetTypeID() else { return nil }
+        for key in ["ttft_seconds", "ttft_lower_seconds", "ttft_upper_seconds",
+                    "remaining_lower_seconds", "remaining_upper_seconds"] {
+            guard event[key] == nil || event[key] is NSNull || Self.seconds(event[key]) != nil else { return nil }
+        }
+        let first = Self.seconds(event["ttft_seconds"])
+        guard (sampled == 0 && first == nil) || (sampled > 0 && first != nil && first! <= elapsed),
+              Self.validRange(event["ttft_lower_seconds"], event["ttft_upper_seconds"]),
+              Self.validRange(event["remaining_lower_seconds"], event["remaining_upper_seconds"]) else { return nil }
+        sampledTokens = sampled; outputTokenBudget = budget; elapsedSeconds = elapsed
+        firstTokenSeconds = first
+        firstTokenRange = Self.range(event["ttft_lower_seconds"], event["ttft_upper_seconds"])
+        remainingRange = Self.range(event["remaining_lower_seconds"], event["remaining_upper_seconds"])
+        calibrated = calibration.boolValue; self.receivedAt = receivedAt
+    }
+
+    func firstTokenDetail(at now: Date) -> String {
+        if let actual = firstTokenSeconds { return Self.duration(actual) }
+        guard let estimate = firstTokenRange else { return "Measuring…" }
+        if elapsedSeconds + age(at: now) > estimate.upperBound { return "Taking longer than estimated…" }
+        return "About " + Self.durationRange(estimate)
+    }
+
+    func completionDetail(at now: Date) -> String {
+        guard let remaining = remainingRange else { return "Learning timing…" }
+        let age = age(at: now)
+        guard remaining.upperBound > age else { return "Updating estimate…" }
+        let range = max(0, remaining.lowerBound - age)...max(0, remaining.upperBound - age)
+        return "About " + Self.durationRange(range) + " remaining"
+    }
+
+    static func duration(_ seconds: Double) -> String {
+        if seconds < 60 { return String(format: seconds < 10 ? "%.1f s" : "%.0f s", seconds) }
+        if seconds < 3600 { return String(format: "%.1f min", seconds / 60) }
+        return String(format: "%.1f hr", seconds / 3600)
+    }
+
+    private func age(at now: Date) -> Double { max(0, now.timeIntervalSince(receivedAt)) }
+
+    private static func durationRange(_ range: ClosedRange<Double>) -> String {
+        let lower = duration(range.lowerBound), upper = duration(range.upperBound)
+        return lower == upper ? lower : lower + "–" + upper
+    }
+
+    static func seconds(_ value: Any?) -> Double? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.doubleValue.isFinite, number.doubleValue >= 0 else { return nil }
+        return number.doubleValue
+    }
+
+    private static func count(_ value: Any?) -> Int? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              number.int64Value >= 0, number.compare(NSNumber(value: number.int64Value)) == .orderedSame,
+              let result = Int(exactly: number.int64Value) else { return nil }
+        return result
+    }
+
+    private static func validRange(_ lower: Any?, _ upper: Any?) -> Bool {
+        let lowerMissing = lower == nil || lower is NSNull, upperMissing = upper == nil || upper is NSNull
+        return (lowerMissing && upperMissing) || range(lower, upper) != nil
+    }
+
+    private static func range(_ lower: Any?, _ upper: Any?) -> ClosedRange<Double>? {
+        guard let lower = seconds(lower), let upper = seconds(upper), lower <= upper else { return nil }
+        return lower...upper
+    }
+}
+
 final class EngineController: ObservableObject {
     @Published var models: [InstalledModel] = []
     @Published var selectedID = UserDefaults.standard.string(forKey: "selectedModel") ?? ""
@@ -935,6 +1020,7 @@ final class EngineController: ObservableObject {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
+            if state != "generating" { generationProgress = nil }
         }
     }
     @Published var message = "Starting Stark…"
@@ -967,6 +1053,8 @@ final class EngineController: ObservableObject {
     @Published var finishReason = ""
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
+    @Published private(set) var firstTokenSeconds: Double?
+    @Published private(set) var generationProgress: GenerationTimingProgress?
     @Published private(set) var gpuMemoryBytes: Int64?
     @Published var inputTokens = 0
     @Published var outputTokens = 0
@@ -1011,6 +1099,20 @@ final class EngineController: ObservableObject {
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
 
+    lazy var openWorkConnection = OpenWorkConnectionController(service: apiCredentials.service,
+        send: { [weak self] value in self?.send(value) ?? false },
+        snapshot: { [weak self] in
+            guard let self else { return ["api_base_url": "", "models": []] }
+            var served: [[String: Any]] = []
+            if let model = self.activeModel, self.loadedMode == .chat, !self.apiBaseURL.isEmpty {
+                served = [["id": model.apiID, "name": model.name,
+                           "context_length": self.contextCapacityKnown ? self.apiContextTokens as Any : NSNull(),
+                           "context_capacity_known": self.contextCapacityKnown,
+                           "max_output_tokens": self.apiMaxNewTokens, "tool_calling": self.supportsTools]]
+            }
+            return ["api_base_url": self.apiBaseURL, "models": served]
+        })
+
     init(apiCredentials: APICredentialStore = APICredentialStore(), apiDefaults: UserDefaults = .standard,
          gpuMemoryBudgetBytes: UInt64? = MTLCreateSystemDefaultDevice()?.recommendedMaxWorkingSetSize) {
         self.apiCredentials = apiCredentials
@@ -1023,6 +1125,9 @@ final class EngineController: ObservableObject {
     var busy: Bool {
         ["loading", "generating", "deciding", "installing", "stopping", "configuring", "removing"].contains(state) ||
             catalogInstallation != nil || removingModelID != nil
+    }
+    var hasPlaygroundGeneration: Bool {
+        mode == .chat && loadedMode == .chat && state == "generating" && pendingMessageID != nil
     }
     var modelReady: Bool { state == "ready" && !busy && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var modelControlID: String {
@@ -1175,6 +1280,9 @@ final class EngineController: ObservableObject {
         case "connection":
             apiBaseURL = event["base_url"] as? String ?? ""
             apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
+            openWorkConnection.receiveConnection(event)
+        case "api_client":
+            openWorkConnection.receiveAcknowledgement(event)
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
@@ -1280,17 +1388,33 @@ final class EngineController: ObservableObject {
         case "reply":
             guard mode == .chat, loadedMode == .chat, pendingMessageID != nil,
                   let text = event["text"] as? String else { return }
+            if let requestID = event["request_id"] as? String,
+               UUID(uuidString: requestID) != pendingMessageID { return }
             messages.append(ChatMessage(text: text, isUser: false))
             if conversationImage == nil, let id = pendingMessageID {
                 conversationImage = messages.first { $0.id == id }?.image
             }
             pendingMessageID = nil
+            generationProgress = nil
             imageProgress = ""
             attachmentStaging?.clear()
             finishReason = event["finish_reason"] as? String ?? ""
             applyMetrics(event)
         case "metrics":
             applyMetrics(event)
+        case "generation_progress":
+            guard mode == .chat, loadedMode == .chat, state == "generating",
+                  let expected = pendingMessageID, event["id"] as? String != nil,
+                  UUID(uuidString: event["id"] as? String ?? "") == expected,
+                  !loadedID.isEmpty, event["model"] as? String == loadedID,
+                  let progress = GenerationTimingProgress(event) else { return }
+            if let previous = generationProgress {
+                guard progress.elapsedSeconds >= previous.elapsedSeconds,
+                      progress.sampledTokens >= previous.sampledTokens,
+                      progress.outputTokenBudget == previous.outputTokenBudget,
+                      previous.firstTokenSeconds == nil || progress.firstTokenSeconds == previous.firstTokenSeconds else { return }
+            }
+            generationProgress = progress
         case "image_progress":
             guard state == "generating", pendingMessageID != nil else { return }
             if event["phase"] as? String == "preparing" { imageProgress = "Preparing image…" }
@@ -1364,6 +1488,7 @@ final class EngineController: ObservableObject {
         outputTokens = event["output_tokens"] as? Int ?? 0
         inputSpeed = rate(event["input_tokens_per_second"])
         outputSpeed = rate(event["output_tokens_per_second"])
+        firstTokenSeconds = GenerationTimingProgress.seconds(event["prefill_seconds"])
     }
 
     private func rate(_ value: Any?) -> Double? {
@@ -1562,6 +1687,9 @@ final class EngineController: ObservableObject {
                 guard self.input === privateInput, !self.shuttingDown else { return }
                 switch result {
                 case .success(let key):
+#if STARK_CONNECTION_VALIDATION
+                    ConnectionPrivacyAudit.remember(key)
+#endif
                     self.apiKey = key
                     self.apiMessage = regenerate
                         ? "API key replaced. Update connected apps with the replacement key."
@@ -1721,7 +1849,9 @@ final class EngineController: ObservableObject {
         let image = conversationImage ?? draftImage
         if image != nil && !supportsImages { errorMessage = "The running model does not support image attachments."; return }
         errorMessage = nil
-        var payload: [String: Any] = ["command": "generate", "text": text]
+        let entry = ChatMessage(text: text, isUser: true, image: conversationImage == nil ? draftImage : nil)
+        var payload: [String: Any] = ["command": "generate", "text": text,
+                                      "request_id": entry.id.uuidString.lowercased()]
         if let image = image {
             imageProgress = "Preparing image…"
             do {
@@ -1730,8 +1860,8 @@ final class EngineController: ObservableObject {
             } catch { imageProgress = ""; imageError(error); return }
         }
         state = "generating"; message = "Generating…"; finishReason = ""
+        generationProgress = nil
         if send(payload) {
-            let entry = ChatMessage(text: text, isUser: true, image: conversationImage == nil ? draftImage : nil)
             messages.append(entry)
             pendingMessageID = entry.id
             draft = ""
@@ -1821,6 +1951,7 @@ final class EngineController: ObservableObject {
 
     private func discardPendingMessage() {
         imageProgress = ""
+        generationProgress = nil
         attachmentStaging?.clear()
         guard let id = pendingMessageID else { return }
         if let entry = messages.first(where: { $0.id == id }) { draft = entry.text; draftImage = entry.image }
@@ -1831,6 +1962,7 @@ final class EngineController: ObservableObject {
     private func clearConversation() {
         messages.removeAll(); pendingMessageID = nil
         finishReason = ""; inputSpeed = nil; outputSpeed = nil
+        generationProgress = nil; firstTokenSeconds = nil
         inputTokens = 0; outputTokens = 0
         draftImage = nil; conversationImage = nil; imageProgress = ""
         attachmentLoading = false
@@ -1840,6 +1972,10 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
+        openWorkConnection.shutdown()
+#if STARK_CONNECTION_VALIDATION
+        ConnectionPrivacyAudit.finish()
+#endif
         gpuMemoryBytes = nil
         clearInstallSupport()
         clearBrowserRequests()
@@ -1875,10 +2011,16 @@ struct StatusLine: View {
 struct SpeedView: View {
     @ObservedObject var engine: EngineController
     var body: some View {
-        HStack(spacing: 12) {
-            metric("Input", engine.inputSpeed)
-            Divider().frame(height: 40)
-            metric("Output", engine.outputSpeed)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                metric("Input", engine.inputSpeed)
+                Divider().frame(height: 40)
+                metric("Output", engine.outputSpeed)
+            }
+            if let firstToken = engine.firstTokenSeconds {
+                Text("First token: " + GenerationTimingProgress.duration(firstToken))
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
@@ -1892,6 +2034,27 @@ struct SpeedView: View {
                 Text("tok/s").font(.caption).foregroundStyle(.secondary)
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct GenerationTimingView: View {
+    @ObservedObject var engine: EngineController
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
+            VStack(alignment: .leading, spacing: 5) {
+                detail("Time to first token", engine.generationProgress?.firstTokenDetail(at: timeline.date) ?? "Waiting for generation…")
+                detail("Estimated completion", engine.generationProgress?.completionDetail(at: timeline.date) ?? "Learning timing…")
+            }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+        }
+        .help("Timing starts when generation begins, after waiting and prompt preparation. Completion is an estimate that adjusts as tokens arrive; response length and other GPU activity can change it.")
+        .accessibilityElement(children: .combine)
+    }
+
+    private func detail(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title + ":")
+            Text(value).fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -1927,7 +2090,10 @@ struct MenuView: View {
                 }
                 Spacer()
             }
-            StatusLine(engine: engine)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                StatusLine(engine: engine)
+                GPUMemoryView(engine: engine)
+            }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
             if engine.mode == .chat {
@@ -2721,11 +2887,18 @@ struct ChatContentView: View {
                         }
                         ForEach(engine.messages) { ChatBubble(message: $0) }
                         if engine.state == "generating" {
-                            HStack(spacing: 8) {
-                                ProgressView().controlSize(.small)
-                                Text(engine.imageProgress.isEmpty ? "Stark is thinking…" : engine.imageProgress)
-                                    .font(.callout).foregroundStyle(.secondary)
-                                Button("Cancel", action: engine.stop)
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack(spacing: 8) {
+                                    ProgressView().controlSize(.small)
+                                    Text(engine.hasPlaygroundGeneration
+                                         ? (engine.imageProgress.isEmpty
+                                            ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
+                                            : engine.imageProgress)
+                                         : engine.message)
+                                        .font(.callout).foregroundStyle(.secondary)
+                                    Button("Cancel", action: engine.stop)
+                                }
+                                if engine.hasPlaygroundGeneration { GenerationTimingView(engine: engine) }
                             }.padding(.horizontal, 4)
                         }
                         Color.clear.frame(height: 1).id("latest")
@@ -2790,7 +2963,7 @@ private final class MenuPanel: NSPanel {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private let engine = EngineController()
+    private let engine: EngineController
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -2800,6 +2973,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
+
+    init(engine: EngineController = EngineController()) {
+        self.engine = engine
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -2843,6 +3021,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.backgroundColor = .clear
         menuPanel.hasShadow = true
         menuPanel.isReleasedWhenClosed = false
+        menuPanel.isRestorable = false
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
@@ -2860,14 +3039,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { if engine.models.isEmpty { toggle() } else { showPrompt() } }
-        return true
+        if !flag { toggle() }
+        // Handle app reopens here; AppKit must not bring unrelated Stark windows
+        // forward or open the Playground as a side effect of activation.
+        return false
     }
 
     @objc private func toggle() {
         if menuPanel.isVisible { dismissMenu(); return }
         updater.checkIfNeeded()
-        guard let button = status.button, let statusWindow = button.window,
+        guard let button = status?.button, let statusWindow = button.window,
               let screen = statusWindow.screen else { return }
         let buttonFrame = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let safe = screen.visibleFrame.insetBy(dx: 8, dy: 8)
@@ -2983,13 +3164,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         result.title = title
         result.styleMask = resizable ? [.titled, .closable, .miniaturizable, .resizable] : [.titled, .closable]
         result.isReleasedWhenClosed = false
+        result.isRestorable = false
+        result.disableSnapshotRestoration()
         result.center()
         return result
     }
 
     private func present(_ window: NSWindow?) {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        guard let window else { return }
+        // Select the requested key/main window before activation. AppKit's
+        // default activation brings those windows forward; never activate all.
+        window.makeKeyAndOrderFront(nil)
+        NSRunningApplication.current.activate(options: [])
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

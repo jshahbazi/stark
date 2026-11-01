@@ -20,6 +20,28 @@ struct ReleaseVersion: Comparable, Equatable {
     }
 }
 
+struct InstalledAppBuild {
+    let shortVersion: String
+    let buildNumber: String
+    let channel: String
+
+    var updateComparisonVersion: String {
+        channel == "development" ? "0.0.0" : shortVersion
+    }
+
+    var label: String {
+        channel == "development" ? "Development build \(buildNumber)" : "Version \(shortVersion)"
+    }
+
+    static var current: InstalledAppBuild {
+        let info = Bundle.main.infoDictionary ?? [:]
+        return InstalledAppBuild(
+            shortVersion: info["CFBundleShortVersionString"] as? String ?? "0.0.0",
+            buildNumber: info["CFBundleVersion"] as? String ?? "0",
+            channel: info["StarkBuildChannel"] as? String ?? "stable")
+    }
+}
+
 enum AppUpdateError: Error, LocalizedError {
     case release, download, checksum, signature, metadata, location, helper, command
 
@@ -134,6 +156,7 @@ enum AppUpdateFiles {
               info["CFBundleIdentifier"] as? String == appID,
               info["CFBundleExecutable"] as? String == "Stark",
               info["CFBundleShortVersionString"] as? String == version,
+              info["StarkBuildChannel"] == nil || info["StarkBuildChannel"] as? String == "stable",
               let minimum = info["LSMinimumSystemVersion"] as? String else { throw AppUpdateError.metadata }
         let minimumParts = minimum.split(separator: ".", omittingEmptySubsequences: false)
         let parts = minimumParts.compactMap { Int($0) }
@@ -300,7 +323,7 @@ final class AppUpdateController: ObservableObject {
     private var automaticChecks: Task<Void, Never>?
     private var lastCheck: Date?
     private var installFailed = false
-    private let installed: String
+    private let installedBuild: InstalledAppBuild
     private let operations: AppUpdateOperations
     private let now: () -> Date
     private let automaticCheckInterval: TimeInterval
@@ -311,12 +334,18 @@ final class AppUpdateController: ObservableObject {
         return "Check for Updates…"
     }
 
-    var versionLabel: String { "Version \(installed)" }
+    var versionLabel: String { installedBuild.label }
 
-    init(installed: String = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0",
+    init(installed: String? = nil, installedBuild: InstalledAppBuild? = nil,
          operations: AppUpdateOperations? = nil, now: @escaping () -> Date = Date.init,
          automaticCheckInterval: TimeInterval = 60 * 60, restorePreviousFailure: Bool = true) {
-        self.installed = installed
+        if let installedBuild {
+            self.installedBuild = installedBuild
+        } else if let installed {
+            self.installedBuild = InstalledAppBuild(shortVersion: installed, buildNumber: installed, channel: "stable")
+        } else {
+            self.installedBuild = .current
+        }
         self.operations = operations ?? .live()
         self.now = now
         self.automaticCheckInterval = automaticCheckInterval
@@ -373,7 +402,7 @@ final class AppUpdateController: ObservableObject {
         if !background { message = "Checking for updates…" }
         task = Task {
             do {
-                available = try await operations.fetch(installed)
+                available = try await operations.fetch(installedBuild.updateComparisonVersion)
                 if !background || !installFailed {
                     message = available == nil ? (background ? "" : "Stark is up to date.") : "A new version is available."
                     installFailed = false

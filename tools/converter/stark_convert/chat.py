@@ -17,6 +17,7 @@ from jinja2.exceptions import TemplateError
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from ._build_metadata import ConversionError, file_hash, open_regular
+from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
 from .vision_runtime import (
@@ -439,13 +440,13 @@ class Worker:
         except (ValueError, UnicodeError):
             raise ChatError("Invalid worker reply; chat closed.") from None
 
-    def request(self, payload, on_delta=None, cancelled=None):
+    def request(self, payload, on_delta=None, cancelled=None, *, on_progress=None):
         lock = getattr(self, "_transaction_lock", None)
         if lock is None:
             lock = self._transaction_lock = threading.RLock()
         with lock:
             try:
-                return self._request(payload, on_delta=on_delta, cancelled=cancelled)
+                return self._request(payload, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress)
             except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
                 raise
             except BaseException:
@@ -456,7 +457,12 @@ class Worker:
                     pass  # Preserve the primary failure; this process rejects its cache key.
                 raise
 
-    def _request(self, payload, on_delta=None, cancelled=None):
+    def _request(self, payload, on_delta=None, cancelled=None, *, on_progress=None):
+        if on_progress is not None and on_delta is None and payload.get("stream") is True:
+
+            def on_delta(_text):
+                pass
+
         if cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
         cancellable_operation = payload.get("operation") in {"generate", "prepare_image", "generate_image"}
@@ -479,6 +485,7 @@ class Worker:
                     raise ChatError("Cannot send request to worker.")
                 view = view[count:]
         chunks = []
+        progress = None
         control = cancelled
         while True:
             if control is not None and control.is_set() and request_id is not None:
@@ -492,6 +499,22 @@ class Worker:
                 if on_delta is not None and "error" not in reply and reply.get("text") != "".join(chunks):
                     raise ChatError("Invalid worker stream; restart the model.")
                 return reply
+            if reply.get("event") == "progress":
+                accepted = progress_frame(reply, progress)
+                if (
+                    payload.get("stream") is not True
+                    or payload.get("operation") not in {"generate", "generate_image"}
+                    or accepted is None
+                ):
+                    raise ChatError("Invalid worker stream; restart the model.")
+                progress = accepted
+                if on_progress is not None and (control is None or not control.is_set()):
+                    try:
+                        on_progress(accepted)
+                    except OSError:
+                        control = control or threading.Event()
+                        control.set()
+                continue
             if (
                 on_delta is None
                 or set(reply) != {"event", "text"}
@@ -507,7 +530,7 @@ class Worker:
                     control = control or threading.Event()
                     control.set()
 
-    def request_image(self, prompt, image, options, on_delta=None, cancelled=None):
+    def request_image(self, prompt, image, options, on_delta=None, cancelled=None, *, on_progress=None):
         """Own one complete prepare/generate/discard transaction on the serialized worker."""
         with self._transaction_lock:
             self._last_image_tokens = None
@@ -517,7 +540,9 @@ class Worker:
                 min(deadline, verification_deadline) if verification_deadline is not None else deadline
             )
             try:
-                return self._request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
+                return self._request_image(
+                    prompt, image, options, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress
+                )
             except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
                 raise
             except BaseException:
@@ -569,7 +594,7 @@ class Worker:
             except OSError:
                 pass  # A concurrent close already invalidated this descriptor.
 
-    def _request_image(self, prompt, image, options, on_delta=None, cancelled=None):
+    def _request_image(self, prompt, image, options, on_delta=None, cancelled=None, *, on_progress=None):
         if self.media is None or self.image_input is None:
             raise ChatImageError("images_not_supported")
         primary_fatal = None
@@ -605,6 +630,7 @@ class Worker:
                         {**options, "operation": "generate_image", "prepared_id": identifier},
                         on_delta=on_delta,
                         cancelled=cancelled,
+                        **({"on_progress": on_progress} if on_progress is not None else {}),
                     )
                     self._check_image_reply(reply)
                     if (

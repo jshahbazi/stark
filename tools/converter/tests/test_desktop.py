@@ -54,9 +54,15 @@ def executable(tmp_path):
         "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
         "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
         "    if request.get('stream'):\n"
+        "        p={'event':'progress','input_tokens':20,'sampled_tokens':0,"
+        "'output_token_budget':request['max_new_tokens'],'elapsed_seconds':0.0,'prefill_seconds':None}\n"
+        "        print(json.dumps(p),flush=True)\n"
+        "        print(json.dumps({**p,'sampled_tokens':1,'elapsed_seconds':0.2,'prefill_seconds':0.2}),flush=True)\n"
         "        for chunk in ['synthetic ', 'answer']: print(json.dumps({'event':'delta','text':chunk}),flush=True)\n"
+        "        print(json.dumps({**p,'sampled_tokens':5,'elapsed_seconds':0.28,'prefill_seconds':0.2}),flush=True)\n"
         "    reply={'token_count':20,'token_ids':[2]*20} if request['operation']=='tokenize' else {\n"
-        "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'finish_reason':'eos',\n"
+        "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'sampled_tokens':5,\n"
+        "        'finish_reason':'eos',\n"
         "        'input_tokens_per_second':100.0,'output_tokens_per_second':50.0,\n"
         "        'prefill_seconds':0.2,'decode_seconds':0.08}\n"
         "    print(json.dumps(reply),flush=True)\n"
@@ -172,6 +178,66 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     assert desktop.worker.process is process
 
 
+def test_playground_streams_content_free_eta_and_calibrates_the_next_request(desktop, model):
+    identifier = running(desktop, model)
+    request_id = "11111111-2222-4333-8444-555555555555"
+    desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
+    finish(desktop)
+    first = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [event["sampled_tokens"] for event in first] == [0, 1, 5]
+    assert all(event["id"] == request_id and event["model"] == identifier for event in first)
+    assert first[0]["ttft_seconds"] is None and first[0]["ttft_lower_seconds"] is None
+    assert first[1]["ttft_seconds"] == 0.2
+    assert first[-1]["remaining_upper_seconds"] > 0
+    assert all("text" not in event and "token_ids" not in event for event in first)
+    assert [event for event in events(desktop) if event["event"] == "reply"][-1]["request_id"] == request_id
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    desktop.dispatch({"command": "generate", "text": "next timing fixture", "request_id": "second-request"})
+    finish(desktop)
+    second = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert second[0]["calibrated"]
+    assert second[0]["ttft_lower_seconds"] <= 0.2 <= second[0]["ttft_upper_seconds"]
+    assert second[0]["remaining_upper_seconds"] > second[0]["remaining_lower_seconds"] > 0
+    assert second[-1]["remaining_upper_seconds"] != second[0]["remaining_upper_seconds"]
+
+
+def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, model, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    previous = desktop.worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return previous(payload, **options)
+        desktop.epoch += 1
+        with pytest.raises(OSError, match="no longer belongs"):
+            options["on_progress"](
+                {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": 512,
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+            )
+        raise APIError(503, "Request stopped.", "request_stopped")
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.dispatch({"command": "generate", "text": "replacement timing fixture", "request_id": "replacement"})
+    finish(desktop)
+    assert not any(event["event"] == "generation_progress" for event in events(desktop))
+    assert not desktop.generation_estimates.history
+
+
+@pytest.mark.parametrize("request_id", [None, "", "bad id", 3])
+def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
+    with pytest.raises(DesktopError, match="Invalid app command"):
+        desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
+
+
 @pytest.fixture
 def tool_desktop(desktop, model, monkeypatch):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
@@ -189,9 +255,17 @@ def tool_desktop(desktop, model, monkeypatch):
         seen.append(payload)
         if payload["operation"] == "tokenize":
             return {"token_count": 24, "token_ids": [2] * 24}
+        if on_delta := options.get("on_delta"):
+            try:
+                on_delta(reply["text"])
+            except OSError:
+                from stark_convert.chat import ChatCancelled
+
+                raise ChatCancelled("Request cancelled.") from None
         return dict(reply)
 
     monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.worker.streaming = True
     monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: "qwen3-hermes-v1")
     desktop.template = ImmutableSandboxedEnvironment().from_string("{{ tools | tojson }};{{ messages | tojson }}")
     payload = {
@@ -320,6 +394,84 @@ def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
     assert error.value.code == "request_cancelled"
     assert desktop.worker is worker and desktop.job is None
     assert desktop.api_complete(payload)["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_tool_enabled_http_delivers_text_before_generation_finishes(tool_desktop, monkeypatch):
+    import threading
+    import urllib.request
+
+    from stark_convert.local_api import LocalAPI
+
+    desktop, payload, _, reply = tool_desktop
+    original = desktop.worker.request
+    release = threading.Event()
+    terminal = threading.Event()
+
+    def generate(request, **options):
+        if request["operation"] != "generate":
+            return original(request, **options)
+        assert request["stream"] is True
+        options["on_delta"]("Early text")
+        assert release.wait(5)
+        options["on_delta"](" then final.")
+        terminal.set()
+        return {**reply, "text": "Early text then final."}
+
+    monkeypatch.setattr(desktop.worker, "request", generate)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="b" * 64, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({**payload, "stream": True}).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            chunks = []
+            while True:
+                line = response.readline()
+                assert line
+                if line.startswith(b"data: {"):
+                    item = json.loads(line[6:])
+                    chunks.append(item)
+                    if item["choices"][0]["delta"].get("content"):
+                        break
+            assert not terminal.is_set()  # The HTTP client can render while native work is still active.
+            release.set()
+            rest = response.read()
+        chunks += [json.loads(line[6:]) for line in rest.splitlines() if line.startswith(b"data: {")]
+        text = "".join(choice["delta"].get("content", "") for chunk in chunks for choice in chunk["choices"])
+        assert text == "Early text then final."
+        assert rest.count(b"data: [DONE]") == 1
+        assert desktop.job is None and desktop.api_queue == []
+    finally:
+        release.set()
+        api.close()
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unknown", "truncated"])
+def test_tool_stream_failure_after_provisional_text_recovers(tool_desktop, failure):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    worker = desktop.worker
+    if failure == "malformed":
+        reply["text"] = "<tool_call>{"
+    elif failure == "unknown":
+        reply["text"] = reply["text"].replace("lookup", "unknown")
+    else:
+        reply["finish_reason"] = "length"
+    reply["text"] = "Provisional text \n" + reply["text"]
+    delivered = []
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, on_delta=delivered.append)
+    assert error.value.code == "invalid_tool_call"
+    assert "".join(delivered) == "Provisional text"
+    assert desktop.worker is worker and desktop.job is None and desktop.api_queue == []
+    reply.update(text="Fresh response.", finish_reason="eos")
+    delivered.clear()
+    result = desktop.api_complete(payload, on_delta=delivered.append)
+    assert "".join(delivered) == result["choices"][0]["message"]["content"] == "Fresh response."
 
 
 def test_private_api_configuration_preserves_listener_on_port_conflict(desktop):
@@ -1281,6 +1433,99 @@ def mtp_executable(tmp_path):
 
 def set_mtp(desktop, identifier, enabled):
     desktop.dispatch({"command": "configure_mtp", "model_id": identifier, "enabled": enabled})
+
+
+@pytest.fixture
+def timed_mtp_requests(desktop, model, mtp_executable, monkeypatch):
+    """Give the real worker bridge distinct, deterministic MTP stage timings."""
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    request = desktop.worker.request
+    drafts_seen = []
+
+    def timed_request(payload, **options):
+        reply = request(payload, **options)
+        if payload["operation"] == "generate":
+            drafts = payload.get("mtp_drafts", 0)
+            drafts_seen.append(drafts)
+            prefill, decode = (0.6, 0.03) if drafts else (0.2, 0.06)
+            reply.update(sampled_tokens=4, prefill_seconds=prefill, decode_seconds=decode)
+            if options.get("on_progress") is not None:
+                frame = {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": payload["max_new_tokens"],
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+                for value in (
+                    frame,
+                    {**frame, "sampled_tokens": 1, "elapsed_seconds": prefill, "prefill_seconds": prefill},
+                    {**frame, "sampled_tokens": 4, "elapsed_seconds": prefill + decode, "prefill_seconds": prefill},
+                ):
+                    options["on_progress"](value)
+        return reply
+
+    monkeypatch.setattr(desktop.worker, "request", timed_request)
+    return identifier, drafts_seen
+
+
+def test_playground_eta_profiles_follow_mtp_toggle_and_infer_selection(desktop, timed_mtp_requests):
+    identifier, drafts_seen = timed_mtp_requests
+
+    def generate(request_id):
+        desktop.output.seek(0)
+        desktop.output.truncate()
+        desktop.dispatch({"command": "generate", "text": "MTP timing fixture", "request_id": request_id})
+        finish(desktop)
+        progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+        assert [event["sampled_tokens"] for event in progress] == [0, 1, 4]
+        return progress[0]
+
+    assert not generate("off-first")["calibrated"]
+    assert generate("off-second")["calibrated"]
+    set_mtp(desktop, identifier, True)
+    assert not generate("on-first")["calibrated"]
+    on = generate("on-second")
+    assert on["calibrated"]
+    assert on["ttft_lower_seconds"] <= 0.6 <= on["ttft_upper_seconds"]
+    set_mtp(desktop, identifier, False)
+    off = generate("off-again")
+    assert off["calibrated"]
+    assert off["ttft_lower_seconds"] <= 0.2 <= off["ttft_upper_seconds"] < 0.6
+    assert drafts_seen == [0, 0, 2, 2, 0]
+    assert len(desktop.generation_estimates.history) == 2
+
+    progress = []
+    desktop.infer(
+        [{"role": "user", "content": "Direct MTP timing fixture"}],
+        16,
+        mtp=True,
+        on_progress=progress.append,
+    )
+    assert progress[0]["calibrated"]
+    assert progress[0]["ttft_lower_seconds"] <= 0.6 <= progress[0]["ttft_upper_seconds"]
+    assert drafts_seen[-1] == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_eta_profiles_follow_request_local_mtp_override(desktop, timed_mtp_requests, stream):
+    identifier, drafts_seen = timed_mtp_requests
+    set_mtp(desktop, identifier, True)
+    payload = {"messages": [{"role": "user", "content": "API MTP timing fixture"}], "temperature": 0}
+    for override in (False, True, False, None, False):
+        request = {**payload, **({"mtp": override} if override is not None else {})}
+        desktop.api_complete(request, on_delta=(lambda _: None) if stream else None)
+    profiles = list(desktop.generation_estimates.history.values())
+    assert len(profiles) == 2
+    assert sorted(len(profile) for profile in profiles) == [2, 3]
+    assert {tuple(sample.prefill_seconds for sample in profile) for profile in profiles} == {
+        (0.2, 0.2, 0.2),
+        (0.6, 0.6),
+    }
+    assert drafts_seen == [0, 2, 0, 2, 0]
+    assert desktop.settings_summary()["mtp_enabled"] is True
 
 
 @pytest.mark.parametrize("override, expected", [(None, 2), (True, 2), (False, 0)])

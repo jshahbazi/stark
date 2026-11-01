@@ -819,6 +819,12 @@ let invalid = ["0.3", "01.2.3", "1.2.3-beta", "v1.2.3", "-1.2.3", "1.2.3.4", "1.
 precondition(valid.allSatisfy { ReleaseVersion($0) != nil })
 precondition(invalid.allSatisfy { ReleaseVersion($0) == nil })
 precondition(ReleaseVersion("0.10.0")! > ReleaseVersion("0.9.9")!)
+let local = InstalledAppBuild(shortVersion: "0.11.14", buildNumber: "20261031123456", channel: "development")
+precondition(local.updateComparisonVersion == "0.0.0")
+precondition(local.label == "Development build 20261031123456")
+let stable = InstalledAppBuild(shortVersion: "0.11.14", buildNumber: "0.11.14", channel: "stable")
+precondition(stable.updateComparisonVersion == "0.11.14")
+precondition(stable.label == "Version 0.11.14")
 let asset: [String: Any] = [
     "name": "stark-0.4.0-aarch64-apple-darwin.dmg", "size": 100,
     "browser_download_url": "https://github.com/jshahbazi/stark/releases/download/v0.4.0/stark-0.4.0-aarch64-apple-darwin.dmg",
@@ -832,6 +838,36 @@ let newer = try decode([asset]).update(after: "0.3.0")
 let same = try decode([asset]).update(after: "0.4.0")
 let older = try decode([asset]).update(after: "0.5.0")
 precondition(newer?.version == "0.4.0" && same == nil && older == nil)
+let devPromotionAsset: [String: Any] = [
+    "name": "stark-0.11.2-aarch64-apple-darwin.dmg", "size": 100,
+    "browser_download_url": "https://github.com/jshahbazi/stark/releases/download/v0.11.2/stark-0.11.2-aarch64-apple-darwin.dmg",
+    "digest": "sha256:" + String(repeating: "b", count: 64)
+]
+let devPromotion = try decode([devPromotionAsset], tag: "v0.11.2")
+let devUpdate = try devPromotion.update(after: local.updateComparisonVersion)
+let equalStableUpdate = try devPromotion.update(after: "0.11.2")
+let olderStableUpdate = try devPromotion.update(after: "0.11.3")
+precondition(devUpdate?.version == "0.11.2" && equalStableUpdate == nil && olderStableUpdate == nil)
+let metadataApp = FileManager.default.temporaryDirectory.appendingPathComponent("stark-metadata-" + UUID().uuidString)
+try FileManager.default.createDirectory(at: metadataApp.appendingPathComponent("Contents/MacOS"), withIntermediateDirectories: true)
+defer { try? FileManager.default.removeItem(at: metadataApp) }
+try Data([0xcf,0xfa,0xed,0xfe,0x0c,0,0,1]).write(to: metadataApp.appendingPathComponent("Contents/MacOS/Stark"))
+var metadata: [String: Any] = ["CFBundleIdentifier": AppUpdateFiles.appID, "CFBundleExecutable": "Stark",
+                              "CFBundleShortVersionString": "0.4.0", "LSMinimumSystemVersion": "1.0"]
+func writeMetadata() throws {
+    try PropertyListSerialization.data(fromPropertyList: metadata, format: .xml, options: 0)
+        .write(to: metadataApp.appendingPathComponent("Contents/Info.plist"))
+}
+try writeMetadata()
+try AppUpdateFiles.verifyMetadata(metadataApp, version: "0.4.0")
+metadata["StarkBuildChannel"] = "stable"
+try writeMetadata()
+try AppUpdateFiles.verifyMetadata(metadataApp, version: "0.4.0")
+for channel: Any in ["development", "preview", 1, false] {
+    metadata["StarkBuildChannel"] = channel
+    try writeMetadata()
+    do { try AppUpdateFiles.verifyMetadata(metadataApp, version: "0.4.0"); fatalError("non-stable candidate accepted") } catch {}
+}
 for key in ["name", "digest", "browser_download_url", "size"] {
     var broken = asset
     broken[key] = key == "size" ? 2_147_483_648 : "invalid"
@@ -872,10 +908,12 @@ final class Scenario {
     var installGate: CheckedContinuation<Void, Never>?
     var assertBusy: (() -> Void)?
     var workspaces: [URL] = []
+    var expectedVersion = "0.3.0"
+    var installedBuild: InstalledAppBuild?
 
     func controller(interval: TimeInterval = 3600) -> AppUpdateController {
         let effects = AppUpdateOperations(fetch: { [self] installed in
-            precondition(installed == "0.3.0")
+            precondition(installed == expectedVersion)
             fetchCount += 1
             events.append("fetch")
             if blockFetch { await withCheckedContinuation { fetchGate = $0 } }
@@ -900,7 +938,8 @@ final class Scenario {
             if let installFailure { throw installFailure }
             events.append("quit")
         })
-        return AppUpdateController(installed: "0.3.0", operations: effects, now: { self.date },
+        return AppUpdateController(installed: installedBuild == nil ? "0.3.0" : nil,
+                                   installedBuild: installedBuild, operations: effects, now: { self.date },
                                    automaticCheckInterval: interval, restorePreviousFailure: false)
     }
 
@@ -958,6 +997,19 @@ struct ControllerChecks {
         await waitFor { discovery.events.last == "quit" }
         precondition(first.busy && discovery.fetchCount == 1)
         discovery.cleanup()
+
+        let development = Scenario()
+        development.expectedVersion = "0.0.0"
+        development.installedBuild = InstalledAppBuild(
+            shortVersion: "0.11.14", buildNumber: "20261031123456", channel: "development")
+        development.latest = AppUpdateDownload(
+            version: "0.11.2", url: URL(string: "https://example.invalid/update.dmg")!,
+            sha256: String(repeating: "b", count: 64), size: 100)
+        let developmentController = development.controller()
+        precondition(developmentController.versionLabel == "Development build 20261031123456")
+        developmentController.check()
+        await waitFor { !developmentController.busy }
+        precondition(development.fetchCount == 1 && developmentController.available?.version == "0.11.2")
 
         // Menu checks are throttled; manual checks can force a retry.
         let throttle = Scenario()
@@ -1032,6 +1084,49 @@ struct ControllerChecks {
     }
 }
 """
+
+
+class ReleaseMetadataChannelTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="stark candidate metadata ")
+        self.addCleanup(temporary.cleanup)
+        self.app = fixture(Path(temporary.name) / "Stark.app", "0.4.0")
+        self.info_path = self.app / "Contents/Info.plist"
+        self.info = plistlib.loads(self.info_path.read_bytes())
+        self.validate = patch.object(installer, "validate", return_value="a" * 64)
+        self.validate.start()
+        self.addCleanup(self.validate.stop)
+
+    def set_channel(self, channel):
+        self.info["StarkBuildChannel"] = channel
+        self.info_path.write_bytes(plistlib.dumps(self.info))
+
+    def test_development_and_unknown_channels_are_rejected_before_signature_commands(
+        self,
+    ):
+        for channel in ("development", "preview", 1, False):
+            with self.subTest(channel=channel):
+                self.set_channel(channel)
+                with patch.object(installer, "command") as command:
+                    with self.assertRaisesRegex(
+                        installer.AppError, "update version does not match release"
+                    ):
+                        updater.verify_release(self.app, "0.4.0")
+                    command.assert_not_called()
+
+    def test_legacy_and_stable_channels_with_exact_version_are_accepted(self):
+        for channel in (None, "stable"):
+            with self.subTest(channel=channel):
+                self.info.pop("StarkBuildChannel", None)
+                if channel is not None:
+                    self.set_channel(channel)
+                else:
+                    self.info_path.write_bytes(plistlib.dumps(self.info))
+                with patch.object(installer, "command", return_value=b"") as command:
+                    self.assertEqual(
+                        updater.verify_release(self.app, "0.4.0"), "a" * 64
+                    )
+                    self.assertEqual(command.call_count, 2)
 
 
 @unittest.skipUnless(sys.platform == "darwin", "AppKit required")

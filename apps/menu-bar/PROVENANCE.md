@@ -15,6 +15,14 @@ The app carries the base CLI runtime's licenses, notices and source manifest. `s
 
 `Contents/Resources/menu-bar-manifest.json` records the source revision and hashes, whether the checkout was dirty, the base runtime manifest hash and every file the builder adds, including the Python package files. Its `converter_package` record identifies the wheel, build backend, source hashes and installed converter provenance. `artifacts/menu-bar/Stark.app.manifest.json` additionally records the signed executable hash.
 
+The original app's `application_version`, `build_number` and `build_channel` are
+recorded separately from the optional `distribution_version` archive identifier.
+Local builds have application version `0.0.0` and channel `development`; their
+numeric build number defaults to a UTC timestamp with microseconds. The signing
+step preserves these source-bound build records and adds `signed_application`
+metadata for the delivered app. The release signing path assigns the selected
+stable version; `--sign-only` retains development identity.
+
 `--worker-build-record PATH` and `--score-worker-build-record PATH` embed optional worker build records after checking their `worker_sha256` against the selected binaries, preserving the distinction between a fresh locked Cargo build and a development worker that reused compiled engine libraries. The builder checks both workers' fixed invalid-argument replies before packaging.
 
 The builder checks imports of the attachment staging, common media pipeline and
