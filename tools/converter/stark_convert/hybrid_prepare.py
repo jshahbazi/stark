@@ -52,6 +52,18 @@ SOURCES = {
         "weight_bytes": 106_195_031_237,
         "quantization": "MLX mixed 4/8-bit",
     },
+    "qwen38-mlx-serve-mixed": {
+        "architecture": "qwen4_exp",
+        "weights_repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "weights_revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "weights_patterns": ["*.safetensors", "ngram_table.bin", "model.safetensors.index.json", "README.md"],
+        "metadata_repo": "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit",
+        "metadata_revision": "788c07a8725642bccf13a0a3b8a21954ab84b4f2",
+        "weight_bytes": 107_303_406_192,
+        "weight_shards": 101,
+        "external_weight_files": {"ngram_table.bin": 32_000_153_976},
+        "quantization": "MLX-Serve mixed 4/8-bit",
+    },
     "qwen38-lily-q4-xl": {
         "architecture": "qwen4_exp",
         "weights_repo": "fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl",
@@ -100,9 +112,21 @@ def _ids(value):
     raise ValueError("invalid EOS metadata")
 
 
+def _external_weight_files(directory: Path, source: dict) -> list[Path]:
+    """Include only explicitly pinned external payloads, preserving their size."""
+    result = []
+    for name, size in source.get("external_weight_files", {}).items():
+        path = directory / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size != size:
+            raise ValueError("incomplete pinned external weight file")
+        result.append(path)
+    return result
+
+
 def finish_metadata(directory: Path, choice: str) -> dict:
     """Bind the preserved architecture and tokenizer template for CLI chat."""
     source = SOURCES[choice]
+    external_weights = _external_weight_files(directory, source)
     config = _json(directory / "config.json")
     if config.get("model_type") != source["architecture"]:
         raise ValueError("source architecture changed")
@@ -153,7 +177,7 @@ def finish_metadata(directory: Path, choice: str) -> dict:
         "config_sha256": hashlib.sha256(encoded).hexdigest(),
         "native_loading": "unverified",
         "execution": "unverified",
-        "weight_bytes": sum(
+        "weight_bytes": sum(path.stat().st_size for path in external_weights) + sum(
             path.stat().st_size for path in directory.iterdir() if path.suffix in {".gguf", ".safetensors"}
         ),
     }
@@ -315,9 +339,13 @@ def prepared_identity(directory: Path) -> dict | None:
         if any(not (directory / name).is_file() or (directory / name).is_symlink() for name in required_files):
             return None
         size = sum(path.stat().st_size for path in files)
+        external_weights = _external_weight_files(directory, source)
+        size += sum(path.stat().st_size for path in external_weights)
         if receipt.get("weight_bytes") != size:
             return None
         if "storage_alignment" in receipt:
+            if external_weights:
+                return None
             if not _aligned_storage_identity(directory, receipt, source, files, size):
                 return None
         elif size != source["weight_bytes"]:
@@ -408,7 +436,8 @@ def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
         raise ValueError("invalid prepared weight files")
     if "weight_shards" in source and len(weights) != source["weight_shards"]:
         raise ValueError("incomplete pinned weight shard set")
-    weight_bytes = sum(path.stat().st_size for path in weights)
+    external_weights = _external_weight_files(stage, source)
+    weight_bytes = sum(path.stat().st_size for path in weights + external_weights)
     if weight_bytes != source["weight_bytes"]:
         raise ValueError("pinned weight size mismatch")
     receipt = finish_metadata(stage, choice)

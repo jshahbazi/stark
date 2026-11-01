@@ -17,6 +17,7 @@ The preparation command pins these sources:
 | --- | --- | --- |
 | `glm53-q2` | `unsloth/GLM-5.3-Flash-GGUF`, `UD-Q2_K_XL`, revision `a38483c8cd5df544f53d70fb281afe97369d5ab6` | 108,720,071,552 bytes, 101.25 GiB |
 | `qwen38-mixed` | `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit`, revision `b2c422f3c643e36f04227a64d61796b44a4b1029` | 106,195,031,237 bytes, 98.90 GiB |
+| `qwen38-mlx-serve-mixed` | `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, revision `788c07a8725642bccf13a0a3b8a21954ab84b4f2` | 107,303,406,192 bytes, 99.93 GiB, including the external n-gram table |
 | `qwen38-lily-q4-xl` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83` | 106,905,155,192 bytes, 99.56 GiB |
 | `flint-int4` | `RecursiveSI/flint-int4`, revision `3b93f9053b530488405ae9fca51d4900d6ce21f0` | 22,568,912,600 bytes, 21.02 GiB |
 
@@ -37,6 +38,7 @@ Run from the source checkout:
 ```sh
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare glm53-q2 --output models/glm53-q2
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-mixed --output models/qwen38-mixed
+uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-mlx-serve-mixed --output models/qwen38-mlx-serve-mixed
 uv run --project tools/converter --locked --python 3.13.13 python -m stark_convert.hybrid_prepare qwen38-lily-q4-xl --output models/qwen38-lily-q4-xl
 cargo +1.98.1 build --release --locked -p stark-generate
 cargo +1.98.1 build --release --locked -p stark-score --features optimized
@@ -80,6 +82,17 @@ generation worker. These native-source downloads use the preparation commands
 above. The family registry also includes the typed Uzu Qwen3.8 text converter.
 An incomplete prepared folder is rejected before registration. The native
 loader remains responsible for tensor admission.
+
+The MLX-Serve mixed checkpoint retains 101 Safetensors shards plus the separate
+32,000,153,976-byte `ngram_table.bin`. Preparation and local import require that
+external payload at its pinned size and include it in the recorded weight bytes.
+Its prepared metadata needs an app build containing this source entry; an older
+desktop importer cannot register the raw MLX-Serve checkpoint. This recipe
+preserves the source's affine quantization and external table without converting
+them. The [matched-checkpoint study](benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md)
+and [MTP study](benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md) retain their
+original source-bound validation; preparation does not upgrade those records or
+qualify another execution build.
 
 ## Qwen3.8 Uzu text artifacts
 

@@ -175,6 +175,121 @@ def test_lily_q4_xl_recipe_is_pinned_and_quantization_label_is_distinct():
     assert source["required_files"] == ["LICENSE", "README.md"]
 
 
+def test_mlx_serve_recipe_pins_external_table_and_distinct_source():
+    source = hybrid.SOURCES["qwen38-mlx-serve-mixed"]
+    assert source["weights_repo"] == "ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
+    assert source["weights_revision"] == "788c07a8725642bccf13a0a3b8a21954ab84b4f2"
+    assert source["metadata_repo"] == source["weights_repo"]
+    assert source["metadata_revision"] == source["weights_revision"]
+    assert source["weight_shards"] == 101
+    assert source["weight_bytes"] == 75_303_252_216 + 32_000_153_976
+    assert source["external_weight_files"] == {"ngram_table.bin": 32_000_153_976}
+    assert "ngram_table.bin" in source["weights_patterns"]
+    assert source["weights_repo"] != hybrid.SOURCES["qwen38-mixed"]["weights_repo"]
+
+
+@pytest.fixture
+def mlx_serve_model(tmp_path, monkeypatch):
+    source = {
+        **hybrid.SOURCES["qwen38-mlx-serve-mixed"],
+        "weight_bytes": 8,
+        "weight_shards": 2,
+        "external_weight_files": {"ngram_table.bin": 4},
+    }
+    monkeypatch.setitem(hybrid.SOURCES, "qwen38-mlx-serve-mixed", source)
+    calls = []
+
+    def download(repo, **options):
+        calls.append((repo, options))
+        root = Path(options["local_dir"])
+        if "*.safetensors" in options["allow_patterns"]:
+            (root / "model-00001.safetensors").write_bytes(b"ab")
+            (root / "model-00002.safetensors").write_bytes(b"cd")
+            (root / "ngram_table.bin").write_bytes(b"efgh")
+            (root / "model.safetensors.index.json").write_text("{}")
+        else:
+            metadata(root, "qwen4_exp")
+            config = json.loads((root / "config.json").read_text())
+            config["ngram_table"] = {"file": "ngram_table.bin", "bits": 4, "group_size": 32}
+            config["quantization"] = {"mode": "affine", "bits": 4, "group_size": 64}
+            (root / "config.json").write_text(json.dumps(config))
+
+    monkeypatch.setattr(hybrid, "snapshot_download", download)
+    output = tmp_path / "mlx-serve"
+    receipt = hybrid.prepare("qwen38-mlx-serve-mixed", output, offline=True)
+    return output, source, receipt, calls
+
+
+def test_mlx_serve_preparation_preserves_external_payload_and_imports(mlx_serve_model):
+    output, source, receipt, calls = mlx_serve_model
+    assert receipt["weight_bytes"] == 8
+    assert receipt["native_loading"] == receipt["execution"] == "unverified"
+    assert (output / "ngram_table.bin").read_bytes() == b"efgh"
+    assert (output / "model-00001.safetensors").read_bytes() == b"ab"
+    assert all(repo == source["weights_repo"] for repo, _ in calls)
+    assert all(options["revision"] == source["weights_revision"] for _, options in calls)
+    assert all(options["local_files_only"] for _, options in calls)
+    assert calls[0][1]["allow_patterns"] == source["weights_patterns"]
+    config = json.loads((output / "config.json").read_text())
+    assert config["ngram_table"] == {"file": "ngram_table.bin", "bits": 4, "group_size": 32}
+    assert config["quantization"] == {"mode": "affine", "bits": 4, "group_size": 64}
+    identity = hybrid.prepared_identity(output)
+    assert identity["repo"] == source["weights_repo"]
+    assert identity["revision"] == source["weights_revision"]
+    assert identity["weight_bytes"] == 8
+    from stark_convert.desktop import model_valid
+    from stark_convert.model_inventory import model_display
+
+    assert model_valid(output)
+    display = model_display({"id": "mlx-serve", "name": "MLX-Serve mixed", "path": str(output)})
+    assert display["weight_bytes"] == 8
+    assert display["quantization"] == source["quantization"]
+
+
+@pytest.mark.parametrize("mutation", ["missing", "truncated", "symlink", "wrong-source"])
+def test_mlx_serve_import_rejects_missing_external_payload_or_wrong_source(mlx_serve_model, mutation):
+    import hashlib
+
+    output, _, _, _ = mlx_serve_model
+    table = output / "ngram_table.bin"
+    if mutation == "missing":
+        table.unlink()
+    elif mutation == "truncated":
+        table.write_bytes(b"efg")
+        # Keeping total bytes unchanged cannot replace the exact external table.
+        (output / "model-00001.safetensors").write_bytes(b"abc")
+    elif mutation == "symlink":
+        table.rename(output / "other.bin")
+        table.symlink_to(output / "other.bin")
+    else:
+        config_path = output / "config.json"
+        config = json.loads(config_path.read_text())
+        config["stark_native_hybrid"]["source"] = hybrid.SOURCES["qwen38-mixed"]["weights_repo"]
+        config_path.write_text(json.dumps(config))
+        receipt_path = output / "native-source.json"
+        receipt = json.loads(receipt_path.read_text())
+        receipt["config_sha256"] = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        receipt_path.write_text(json.dumps(receipt))
+    assert hybrid.prepared_identity(output) is None
+    from stark_convert.desktop import model_valid
+
+    assert not model_valid(output)
+
+
+@pytest.mark.parametrize("table_bytes", [None, b"abc"])
+def test_mlx_serve_metadata_does_not_publish_incomplete_external_weights(tmp_path, monkeypatch, table_bytes):
+    source = {**hybrid.SOURCES["qwen38-mlx-serve-mixed"], "external_weight_files": {"ngram_table.bin": 4}}
+    monkeypatch.setitem(hybrid.SOURCES, "qwen38-mlx-serve-mixed", source)
+    metadata(tmp_path, "qwen4_exp")
+    if table_bytes is not None:
+        (tmp_path / "ngram_table.bin").write_bytes(table_bytes)
+    original = (tmp_path / "config.json").read_bytes()
+    with pytest.raises(ValueError, match="external weight"):
+        hybrid.finish_metadata(tmp_path, "qwen38-mlx-serve-mixed")
+    assert (tmp_path / "config.json").read_bytes() == original
+    assert not (tmp_path / "native-source.json").exists()
+
+
 def test_lily_q4_xl_preparation_preserves_config_metadata_and_import_identity(tmp_path, monkeypatch):
     source = {**hybrid.SOURCES["qwen38-lily-q4-xl"], "weight_bytes": 55}
     monkeypatch.setitem(hybrid.SOURCES, "qwen38-lily-q4-xl", source)
