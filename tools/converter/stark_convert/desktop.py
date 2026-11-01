@@ -35,6 +35,7 @@ from .chat import (
 )
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
+from .generation_eta import GenerationEstimates
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
@@ -220,6 +221,7 @@ class Desktop:
         # None tracks each loaded model's maximum; retain custom requests across clamps.
         self.context_override = None
         self.maximum = 512
+        self.generation_estimates = GenerationEstimates()
         self.system_prompt = None
         self.thinking = False
         self.context_limit = 0
@@ -1334,7 +1336,7 @@ class Desktop:
             self.messages = [{"role": "system", "content": system}] if system else []
             self.image_identity = None
 
-    def generate(self, epoch, text, reference=None):
+    def generate(self, epoch, text, reference=None, request_id=None):
         with self.lock:
             if epoch != self.epoch:
                 return
@@ -1352,6 +1354,7 @@ class Desktop:
                 raise DesktopError("Resupply the conversation image or start a new chat.")
             history = list(self.messages)
             maximum, thinking = self.maximum, self.thinking
+            estimate_key = self.estimate_key(thinking=thinking, image=reference is not None)
         image = None
         identity = None
         try:
@@ -1369,18 +1372,36 @@ class Desktop:
             candidate = [*history, {"role": "user", "content": content}]
             if image is not None:
                 self.emit("image_progress", epoch, phase="generating")
-            reply = self.infer(candidate, maximum, epoch=epoch, thinking=thinking, image=image)
+            def on_progress(value):
+                self.emit("generation_progress", epoch, id=request_id, model=self.active_model, **value)
+
+            reply = self.infer(
+                candidate, maximum, epoch=epoch, thinking=thinking, image=image,
+                on_progress=on_progress, estimate_key=estimate_key,
+            )
         except (MediaError, ChatImageError) as error:
             raise DesktopError(str(error)) from None
         with self.lock:
             if epoch != self.epoch:
                 return
+            self.generation_estimates.record(estimate_key, reply)
             self.messages = [*candidate, {"role": "assistant", "content": reply["text"]}]
             self.image_identity = identity
             fields = metrics(reply)
             self.emit("metrics", epoch, **fields)
-            self.emit("reply", epoch, text=reply["text"], finish_reason=reply.get("finish_reason"), **fields)
+            self.emit(
+                "reply", epoch, text=reply["text"], finish_reason=reply.get("finish_reason"),
+                **({"request_id": request_id} if request_id else {}), **fields,
+            )
             self.status("ready", "Ready", epoch)
+
+    def estimate_key(self, *, context=None, sampling=None, thinking=False, image=False, tools=False, stop=None):
+        """A model-load/settings identity containing no conversation content."""
+        return (
+            self.epoch, self.active_model, context or self.context,
+            json.dumps(sampling or {"mode": "greedy"}, sort_keys=True),
+            bool(thinking), bool(image), bool(tools), bool(stop),
+        )
 
     def infer(
         self,
@@ -1397,6 +1418,8 @@ class Desktop:
         thinking=False,
         image=None,
         tools=None,
+        on_progress=None,
+        estimate_key=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
@@ -1405,12 +1428,21 @@ class Desktop:
             dispatch_epoch, identifier = self.epoch, self.active_model
             context = context or self.context
             context_capacity_known = self.context_capacity_known
+            estimate_key = estimate_key or self.estimate_key(
+                context=context, sampling=sampling, thinking=thinking, image=image is not None,
+                tools=tools is not None, stop=stop,
+            )
         if worker is None or template is None:
             raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
         if on_delta is not None and not worker.streaming:
             raise APIError(
                 503, "This worker needs an update for streaming. Rebuild or reinstall Stark.", "streaming_unavailable"
             )
+        # Playground needs token progress without exposing partial response text.
+        # Retain compatibility with older workers which only return final metrics.
+        if on_progress is not None and worker.streaming and on_delta is None:
+            def on_delta(_text):
+                pass
         if stop and not worker.stop_sequences:
             raise APIError(503, "This worker needs an update for stop sequences.", "stop_sequences_unavailable")
         if on_delta is not None:
@@ -1424,6 +1456,17 @@ class Desktop:
                     if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
                         raise OSError("Request no longer belongs to the running model.")
                     deliver(text)
+
+        def progress(value):
+            with self.lock:
+                if self.epoch != dispatch_epoch or self.worker is not worker or self.active_model != identifier:
+                    raise OSError("Request no longer belongs to the running model.")
+                if cancelled is not None and cancelled.is_set():
+                    raise OSError("Request cancelled.")
+                if on_progress is not None:
+                    on_progress(self.generation_estimates.estimate(estimate_key, value))
+
+        progress_options = {"on_progress": progress} if on_progress is not None and worker.streaming else {}
 
         try:
             prompt = template.render(
@@ -1453,7 +1496,9 @@ class Desktop:
                 "stop": stop or [],
                 "stream": on_delta is not None,
             }
-            reply = worker.request_image(prompt, image, options, on_delta=on_delta, cancelled=cancelled)
+            reply = worker.request_image(
+                prompt, image, options, on_delta=on_delta, cancelled=cancelled, **progress_options
+            )
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ValueError
             return reply
@@ -1489,7 +1534,7 @@ class Desktop:
             request["stop"] = stop
         if on_delta is not None:
             request["stream"] = True
-            reply = worker.request(request, on_delta=on_delta, cancelled=cancelled)
+            reply = worker.request(request, on_delta=on_delta, cancelled=cancelled, **progress_options)
         else:
             reply = worker.request(request, cancelled=cancelled)
         if not isinstance(reply.get("text"), str) or "error" in reply:
@@ -1717,6 +1762,10 @@ class Desktop:
                 self.api_queue.remove(ticket)
                 self.api_condition.notify_all()
             self.job = threading.current_thread()
+            estimate_key = self.estimate_key(
+                context=self.api_context, sampling=request["sampling"], image=request["image"] is not None,
+                tools=tool_request, stop=request["stop"],
+            )
             candidate = template_messages(messages) if tool_request else [dict(m) for m in messages]
             system = (self.codec or {}).get("default_system_prompt")
             if system and not any(m["role"] == "system" for m in candidate):
@@ -1736,6 +1785,7 @@ class Desktop:
                 epoch=epoch,
                 image=request["image"],
                 tools=render_tools(request),
+                estimate_key=estimate_key,
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
@@ -1765,6 +1815,7 @@ class Desktop:
                         # The terminal worker frame is already consumed. A
                         # failed client write must not unload the aligned model.
                         raise APIError(499, "Request cancelled.", "request_cancelled") from None
+                self.generation_estimates.record(estimate_key, reply)
                 self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
             completion_tokens = metric(reply, "output_tokens") or 0
@@ -1926,14 +1977,23 @@ class Desktop:
             and isinstance(payload.get("text"), str)
             and (payload["text"].strip() or "image" in payload)
         ):
-            if set(payload) not in ({"command", "text"}, {"command", "text", "image"}):
+            if set(payload) - {"command", "text", "image", "request_id"}:
+                raise DesktopError("Invalid app command.")
+            request_id = payload.get("request_id")
+            if "request_id" in payload and not self.request_id(request_id):
                 raise DesktopError("Invalid app command.")
             if "image" in payload:
                 if not isinstance(payload["image"], dict):
                     raise DesktopError("Invalid image attachment.")
-                self.start(self.generate, "generating", "Generating…", payload["text"], payload["image"])
+                self.start(
+                    self.generate, "generating", "Generating…", payload["text"], payload["image"], request_id,
+                    request_id=request_id,
+                )
             else:
-                self.start(self.generate, "generating", "Generating…", payload["text"])
+                self.start(
+                    self.generate, "generating", "Generating…", payload["text"], None, request_id,
+                    request_id=request_id,
+                )
         elif command == "decide":
             try:
                 answers = validate_inputs(payload.get("text"), payload.get("question"), payload.get("answers"))

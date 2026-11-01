@@ -8,8 +8,8 @@ use stark_engine::engine::hybrid::{Model, finite_guard, profile};
 use crate::{
     cancel::CancelSignal,
     generation::{
-        GeneratedTokens, GenerationBackend, GenerationOptions, Sampling, TextCallback, collect_tokens_controlled,
-        native_result_after_cleanup,
+        GeneratedTokens, GenerationBackend, GenerationOptions, ProgressCallback, Sampling, TextCallback,
+        collect_tokens_controlled, native_result_after_cleanup,
     },
     text_stop::StopFilter,
 };
@@ -181,6 +181,7 @@ impl HybridBackend {
         input: &[u32],
         options: &GenerationOptions,
         mut on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         let started = Instant::now();
         let tokenizer = self.model.tokenizer().clone();
@@ -274,6 +275,7 @@ impl HybridBackend {
                 }
                 Ok(true)
             },
+            on_progress,
             &mut cancelled,
         );
         // The collector has dropped its iterator and drained any submitted
@@ -330,6 +332,7 @@ impl GenerationBackend for HybridBackend {
         input: &[u32],
         options: &GenerationOptions,
         on_text: Option<&mut TextCallback<'_>>,
+        on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         self.nucleus_sampler.clear();
         let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
@@ -341,7 +344,7 @@ impl GenerationBackend for HybridBackend {
         if self.profile_output.as_ref().is_some_and(|output| output.failed) {
             return Err("native_profile_output_failed");
         }
-        let result = self.generate_inner(input, options, on_text);
+        let result = self.generate_inner(input, options, on_text, on_progress);
         self.model.reset();
         self.nucleus_sampler.clear();
         if let Some(output) = self.profile_output.as_mut() {

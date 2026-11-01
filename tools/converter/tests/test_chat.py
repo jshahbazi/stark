@@ -309,6 +309,64 @@ def test_worker_dispatches_deltas_before_reading_final_response():
     assert received == ["é", "界"]
 
 
+def test_worker_delivers_progress_without_ending_the_stream():
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    progress = {
+        "event": "progress", "input_tokens": 20, "sampled_tokens": 0,
+        "output_token_budget": 5, "elapsed_seconds": 0.0, "prefill_seconds": None,
+    }
+    replies = iter([
+        progress,
+        {**progress, "sampled_tokens": 1, "elapsed_seconds": 0.2, "prefill_seconds": 0.2},
+        {"event": "delta", "text": "fixture"},
+        {"text": "fixture"},
+    ])
+    worker.read = lambda: next(replies)
+    received = []
+    result = worker.request(
+        {"operation": "generate", "stream": True}, on_delta=lambda _text: None,
+        on_progress=lambda value: received.append(value),
+    )
+    assert result == {"text": "fixture"}
+    assert [value["sampled_tokens"] for value in received] == [0, 1]
+    assert all("text" not in value and "token_ids" not in value for value in received)
+
+
+def test_worker_ignores_valid_progress_for_existing_stream_consumers():
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    replies = iter([
+        {"event": "progress", "input_tokens": 20, "sampled_tokens": 0,
+         "output_token_budget": 5, "elapsed_seconds": 0.0, "prefill_seconds": None},
+        {"event": "delta", "text": "fixture"}, {"text": "fixture"},
+    ])
+    worker.read = lambda: next(replies)
+    assert worker.request(
+        {"operation": "generate", "stream": True}, on_delta=lambda _text: None
+    ) == {"text": "fixture"}
+
+
+def test_worker_rejects_regressing_progress():
+    import io
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    progress = {"event": "progress", "input_tokens": 20, "sampled_tokens": 2,
+                "output_token_budget": 5, "elapsed_seconds": 0.3, "prefill_seconds": 0.2}
+    replies = iter([progress, {**progress, "sampled_tokens": 1}])
+    worker.read = lambda: next(replies)
+    with pytest.raises(ChatError, match="Invalid worker stream"):
+        worker.request({"operation": "generate", "stream": True}, on_delta=lambda _text: None)
+
+
 @pytest.mark.parametrize(
     "frames",
     [

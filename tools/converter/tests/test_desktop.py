@@ -54,9 +54,15 @@ def executable(tmp_path):
         "    if request['operation']=='generate' and 'wait fixture' in last_prompt: time.sleep(30)\n"
         "    if request['operation']=='generate' and 'failure fixture' in last_prompt: raise SystemExit(2)\n"
         "    if request.get('stream'):\n"
+        "        p={'event':'progress','input_tokens':20,'sampled_tokens':0,"
+        "'output_token_budget':request['max_new_tokens'],'elapsed_seconds':0.0,'prefill_seconds':None}\n"
+        "        print(json.dumps(p),flush=True)\n"
+        "        print(json.dumps({**p,'sampled_tokens':1,'elapsed_seconds':0.2,'prefill_seconds':0.2}),flush=True)\n"
         "        for chunk in ['synthetic ', 'answer']: print(json.dumps({'event':'delta','text':chunk}),flush=True)\n"
+        "        print(json.dumps({**p,'sampled_tokens':5,'elapsed_seconds':0.28,'prefill_seconds':0.2}),flush=True)\n"
         "    reply={'token_count':20,'token_ids':[2]*20} if request['operation']=='tokenize' else {\n"
-        "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'finish_reason':'eos',\n"
+        "        'text':'synthetic answer','input_tokens':20,'output_tokens':4,'sampled_tokens':5,\n"
+        "        'finish_reason':'eos',\n"
         "        'input_tokens_per_second':100.0,'output_tokens_per_second':50.0,\n"
         "        'prefill_seconds':0.2,'decode_seconds':0.08}\n"
         "    print(json.dumps(reply),flush=True)\n"
@@ -171,6 +177,59 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     assert len(desktop.messages) == 3
     assert desktop.worker.process is process
 
+
+def test_playground_streams_content_free_eta_and_calibrates_the_next_request(desktop, model):
+    identifier = running(desktop, model)
+    request_id = "11111111-2222-4333-8444-555555555555"
+    desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
+    finish(desktop)
+    first = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [event["sampled_tokens"] for event in first] == [0, 1, 5]
+    assert all(event["id"] == request_id and event["model"] == identifier for event in first)
+    assert first[0]["ttft_seconds"] is None and first[0]["ttft_lower_seconds"] is None
+    assert first[1]["ttft_seconds"] == 0.2
+    assert first[-1]["remaining_upper_seconds"] > 0
+    assert all("text" not in event and "token_ids" not in event for event in first)
+    assert [event for event in events(desktop) if event["event"] == "reply"][-1]["request_id"] == request_id
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    desktop.dispatch({"command": "generate", "text": "next timing fixture", "request_id": "second-request"})
+    finish(desktop)
+    second = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert second[0]["calibrated"]
+    assert second[0]["ttft_lower_seconds"] <= 0.2 <= second[0]["ttft_upper_seconds"]
+    assert second[0]["remaining_upper_seconds"] > second[0]["remaining_lower_seconds"] > 0
+    assert second[-1]["remaining_upper_seconds"] != second[0]["remaining_upper_seconds"]
+
+
+def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, model, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    previous = desktop.worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return previous(payload, **options)
+        desktop.epoch += 1
+        with pytest.raises(OSError, match="no longer belongs"):
+            options["on_progress"]({
+                "event": "progress", "input_tokens": 20, "sampled_tokens": 0,
+                "output_token_budget": 512, "elapsed_seconds": 0.0, "prefill_seconds": None,
+            })
+        raise APIError(503, "Request stopped.", "request_stopped")
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.dispatch({"command": "generate", "text": "replacement timing fixture", "request_id": "replacement"})
+    finish(desktop)
+    assert not any(event["event"] == "generation_progress" for event in events(desktop))
+    assert not desktop.generation_estimates.history
+
+
+@pytest.mark.parametrize("request_id", [None, "", "bad id", 3])
+def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
+    with pytest.raises(DesktopError, match="Invalid app command"):
+        desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
 
 @pytest.fixture
 def tool_desktop(desktop, model, monkeypatch):

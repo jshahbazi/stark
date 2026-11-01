@@ -9,6 +9,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from stark_convert.chat import ChatCancelled, ChatImageError, Worker
 from stark_convert.desktop import Desktop
+from stark_convert.generation_eta import GenerationEstimates
 from stark_convert.local_api import APIError
 from stark_convert.media import PrivateMediaStore
 from stark_convert.vision_contract import REPO, REVISION
@@ -108,6 +109,7 @@ def make_desktop(worker):
     desktop.epoch = 1
     desktop.job = None
     desktop.worker = worker
+    desktop.generation_estimates = GenerationEstimates()
     desktop.active_model = "private-model-id"
     desktop.active_mode = "chat"
     desktop.codec = {"bos_token": "", "eos_token": "", "default_system_prompt": None}

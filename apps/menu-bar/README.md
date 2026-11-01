@@ -137,6 +137,8 @@ Images briefly use opaque files in per-process owner-only temporary directories;
 
 Input throughput is a first-token wall-clock proxy that includes native setup; output throughput counts sampling after the first token. Both describe the last request; short replies may not produce an output rate. See the [timing contract](../../docs/GENERATION.md#generate).
 
+While Chat generates a reply, the playground shows time to the first sampled token and an estimated range for the remaining completion time. Estimates update from live token timings and recent successful requests for the same model session and options. A new session starts by learning its speed; unavailable estimates stay marked as such. After the first token, its measured time replaces the prediction. Response length and system load can change the completion estimate. These timings start when the worker begins generation; loading, queueing and prompt preparation are separate. Estimates and calibration counts stay in memory, and replies still appear when generation finishes.
+
 ## Connect another application
 
 Select **Connection Details…** in the menu or playground window. Choose an OpenAI-compatible provider in your application and copy the **Base URL**, **API key** and **Model ID** individually, or use **Copy All as JSON** to share formatted settings with an agent or LLM. Model IDs use the Hugging Face repository ID (`owner/model`) for Hugging Face installs and the model name for local installs. Existing installations expose these names automatically.

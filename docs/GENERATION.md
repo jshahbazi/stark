@@ -158,15 +158,21 @@ The sampler applies temperature before filtering and evaluates top-k and top-p a
 
 ### Streaming
 
-With `stream: true`, the worker writes zero or more delta lines while generating, then the normal terminal reply:
+With `stream: true`, the worker writes progress and delta lines while generating, then the normal terminal reply:
 
 ```json
+{"event":"progress","input_tokens":12,"sampled_tokens":0,"output_token_budget":64,"elapsed_seconds":0.0,"prefill_seconds":null}
+{"event":"progress","input_tokens":12,"sampled_tokens":1,"output_token_budget":64,"elapsed_seconds":0.2,"prefill_seconds":0.2}
 {"event":"delta","text":"Hel"}
 {"event":"delta","text":"lo"}
 {"generated_token_ids":[...],"text":"Hello", ...}
 ```
 
-Consume every delta and the terminal reply before sending another request. The concatenated deltas equal the terminal `text`. Incremental decoding buffers incomplete multi-byte characters, so a delta never splits a character; a final delta may be emitted after native cleanup to flush such a buffer. Streaming timings include decoding and output back-pressure.
+Consume every progress event, delta and the terminal reply before sending another request. Progress events contain counts and timings only. `output_token_budget` is the smaller of the requested output limit and the remaining context capacity. `sampled_tokens` includes sampled EOS and stop tokens, even when they produce no text delta. `prefill_seconds` becomes available at the first sampled token; `elapsed_seconds` starts before native generation setup, after prompt preparation. Progress is provisional until the terminal reply succeeds. Nonstreaming replies are unchanged.
+
+The concatenated deltas equal the terminal `text`. Incremental decoding buffers incomplete multi-byte characters, so a delta never splits a character; a final delta may be emitted after native cleanup to flush such a buffer. Streaming timings include decoding and output back-pressure.
+
+The desktop playground uses progress events to update a time-to-first-token estimate and a remaining-completion range. Calibration uses bounded, in-memory timing and count history from successful comparable requests; it stores no conversation content. With no matching history, the first-token estimate is unavailable and live decode measurements can establish a completion range after generation starts. The range estimates an unknown response length within the output budget and can change as generation continues. It is not a deadline or a statistical coverage guarantee. Loading, queueing, prompt tokenization and CPU image decoding/preprocessing are outside the generation timing; vision-tower and decoder inference are included. Failed, cancelled and stale requests do not train the estimator.
 
 ### Stop sequences
 
