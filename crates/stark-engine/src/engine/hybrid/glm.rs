@@ -870,29 +870,30 @@ fn encode_metal_layer(
             let (indices, probabilities) =
                 super::glm_metal::route(&mut graph, &logits, bias, c.active_experts, c.routed_scale)?;
             graph.diagnostic_checkpoint("glm.router")?;
-            if decode.parallel_projections {
-                graph.begin_projection_level()?;
-            }
-            let gate = banks.encode_indexed_matvec(
+            let gate_name = format!("{prefix}.ffn_gate_exps.weight");
+            let up_name = format!("{prefix}.ffn_up_exps.weight");
+            let activation = if let Some(activation) = banks.try_encode_iq2_gate_up(
                 &mut graph,
-                &format!("{prefix}.ffn_gate_exps.weight"),
+                &gate_name,
+                &up_name,
                 &indices,
                 c.active_experts,
                 &norm,
-                false,
-            )?;
-            let up = banks.encode_indexed_matvec(
-                &mut graph,
-                &format!("{prefix}.ffn_up_exps.weight"),
-                &indices,
-                c.active_experts,
-                &norm,
-                false,
-            )?;
-            if decode.parallel_projections {
-                graph.end_projection_level()?;
-            }
-            let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+                c.swiglu_limit,
+            )? {
+                activation
+            } else {
+                if decode.parallel_projections {
+                    graph.begin_projection_level()?;
+                }
+                let gate =
+                    banks.encode_indexed_matvec(&mut graph, &gate_name, &indices, c.active_experts, &norm, false)?;
+                let up = banks.encode_indexed_matvec(&mut graph, &up_name, &indices, c.active_experts, &norm, false)?;
+                if decode.parallel_projections {
+                    graph.end_projection_level()?;
+                }
+                graph.swiglu(&gate, &up, Some(c.swiglu_limit))?
+            };
             let down = banks.encode_indexed_matvec(
                 &mut graph,
                 &format!("{prefix}.ffn_down_exps.weight"),

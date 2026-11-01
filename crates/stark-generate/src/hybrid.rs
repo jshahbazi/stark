@@ -23,6 +23,7 @@ pub(crate) struct HybridBackend {
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
     profile_mode: Option<AggregateProfileMode>,
+    native_prefill_snapshot: Option<BTreeMap<&'static str, profile::Counter>>,
     probability_mapper: ProbabilityMapper,
     nucleus_sampler: nucleus::NucleusSampler,
     last_mtp: Option<serde_json::Value>,
@@ -99,6 +100,68 @@ struct AggregateProfile {
     sampled_tokens: Option<usize>,
     output_tokens: Option<usize>,
     counters: BTreeMap<&'static str, profile::Counter>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    native_phase_counters: Option<NativePhaseCounters>,
+}
+
+#[derive(serde::Serialize)]
+/// Native diagnostic categories are inclusive and must not be summed. Decode
+/// ends at the final request snapshot, including iterator drain and cleanup.
+struct NativePhaseCounters {
+    boundary: &'static str,
+    counter_semantics: &'static str,
+    prefill: BTreeMap<&'static str, profile::Counter>,
+    decode: BTreeMap<&'static str, ProfileCounterDelta>,
+}
+
+#[derive(serde::Serialize)]
+struct ProfileCounterDelta {
+    calls: u64,
+    seconds: f64,
+    bytes: u64,
+    // A cumulative snapshot cannot recover a phase-local maximum when the
+    // earlier phase set a higher mark. This value is deliberately not a delta.
+    request_max_bytes_at_end: u64,
+}
+
+fn profile_counter_difference(
+    start: &BTreeMap<&'static str, profile::Counter>,
+    end: &BTreeMap<&'static str, profile::Counter>,
+) -> BTreeMap<&'static str, ProfileCounterDelta> {
+    let zero = profile::Counter::default();
+    end.iter()
+        .filter_map(|(&name, counter)| {
+            let prior = start.get(name).unwrap_or(&zero);
+            let seconds = counter.seconds - prior.seconds;
+            let delta = ProfileCounterDelta {
+                calls: counter.calls.saturating_sub(prior.calls),
+                seconds: if seconds.is_finite() && seconds >= 0.0 {
+                    seconds
+                } else {
+                    0.0
+                },
+                bytes: counter.bytes.saturating_sub(prior.bytes),
+                request_max_bytes_at_end: counter.max_bytes,
+            };
+            (delta.calls != 0 || delta.seconds != 0.0 || delta.bytes != 0).then_some((name, delta))
+        })
+        .collect()
+}
+
+fn native_phase_counters(
+    mode: Option<AggregateProfileMode>,
+    prefill: Option<BTreeMap<&'static str, profile::Counter>>,
+    total: &BTreeMap<&'static str, profile::Counter>,
+) -> Option<NativePhaseCounters> {
+    if mode != Some(AggregateProfileMode::NativeHybrid) {
+        return None;
+    }
+    prefill.map(|prefill| NativePhaseCounters {
+        boundary: "after_final_prompt_model_readout_before_initial_sampling",
+        counter_semantics: "inclusive categories; prefill max_bytes is request-so-far; decode request_max_bytes_at_end is request-wide, not phase-local",
+        decode: profile_counter_difference(&prefill, total),
+        prefill,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,6 +273,7 @@ impl HybridBackend {
             cancellation,
             profile_output,
             profile_mode,
+            native_prefill_snapshot: None,
             probability_mapper: ProbabilityMapper::default(),
             nucleus_sampler: nucleus::NucleusSampler::default(),
             last_mtp: None,
@@ -240,19 +304,32 @@ impl HybridBackend {
         }
         let mut logits = Vec::new();
         let mut greedy_token = None;
-        for (index, &token) in input.iter().enumerate() {
-            if cancelled()? {
-                return Err("generation_cancelled");
-            }
-            if index + 1 == input.len() {
-                if gpu_greedy {
-                    greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
-                } else {
-                    logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
-                }
-            } else {
-                self.model.ingest(token).map_err(|_| "native_generation_failed")?;
-            }
+        let mut prefill_control_error = None;
+        let prefill = self.model.ingest_prefix(&input[..input.len() - 1], || {
+            let control = match cancelled() {
+                Ok(false) => return Ok(()),
+                Ok(true) => "generation_cancelled",
+                Err(error) => error,
+            };
+            prefill_control_error = Some(control);
+            Err(stark_engine::engine::hybrid::Error::Invalid("prefill control stopped"))
+        });
+        if prefill.is_err() {
+            return Err(prefill_control_error.unwrap_or("native_generation_failed"));
+        }
+        if cancelled()? {
+            return Err("generation_cancelled");
+        }
+        let token = input[input.len() - 1];
+        if gpu_greedy {
+            greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
+        } else {
+            logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
+        }
+        // Native-only diagnostics add one request boundary. Qwen's existing
+        // BF16 diagnostic schema/stage hooks and profiling-off work stay intact.
+        if self.profile_mode == Some(AggregateProfileMode::NativeHybrid) {
+            self.native_prefill_snapshot = Some(profile::snapshot());
         }
         let model = &mut self.model;
         let probability_mapper = &mut self.probability_mapper;
@@ -394,6 +471,7 @@ impl GenerationBackend for HybridBackend {
             .map_err(|_| "inference_activity_unavailable")?;
         if self.profile_output.is_some() {
             profile::reset();
+            self.native_prefill_snapshot = None;
         }
         self.model.reset();
         self.last_mtp = None;
@@ -414,6 +492,9 @@ impl GenerationBackend for HybridBackend {
         self.model.reset();
         self.nucleus_sampler.clear();
         if let Some(output) = self.profile_output.as_mut() {
+            let counters = profile::snapshot();
+            let native_phase_counters =
+                native_phase_counters(self.profile_mode, self.native_prefill_snapshot.take(), &counters);
             output.write(&AggregateProfile {
                 schema_version: 1,
                 scope: self.profile_mode.expect("profile output has mode").scope(),
@@ -421,7 +502,8 @@ impl GenerationBackend for HybridBackend {
                 input_tokens: input.len(),
                 sampled_tokens: result.as_ref().ok().map(|tokens| tokens.sampled_tokens),
                 output_tokens: result.as_ref().ok().map(|tokens| tokens.generated_token_ids.len()),
-                counters: profile::snapshot(),
+                counters,
+                native_phase_counters,
             })?;
         }
         result
@@ -730,7 +812,119 @@ mod tests {
                     max_bytes: 0,
                 },
             )]),
+            native_phase_counters: None,
         }
+    }
+
+    fn counter(
+        calls: u64,
+        seconds: f64,
+        bytes: u64,
+        max_bytes: u64,
+    ) -> profile::Counter {
+        profile::Counter {
+            calls,
+            seconds,
+            bytes,
+            max_bytes,
+        }
+    }
+
+    #[test]
+    fn native_phase_difference_subtracts_additive_counters_without_inventing_maxima() {
+        let start = BTreeMap::from([
+            ("native.metal.gpu", counter(2, 0.5, 100, 90)),
+            ("native.metal.map", counter(1, 0.25, 64, 64)),
+            ("native.removed", counter(1, 0.125, 8, 8)),
+        ]);
+        let end = BTreeMap::from([
+            ("native.metal.gpu", counter(5, 1.25, 140, 90)),
+            ("native.metal.map", counter(1, 0.25, 64, 64)),
+            ("native.sample", counter(1, 0.125, 7, 7)),
+        ]);
+        let delta = profile_counter_difference(&start, &end);
+        assert_eq!(delta.len(), 2);
+        assert_eq!(delta["native.metal.gpu"].calls, 3);
+        assert_eq!(delta["native.metal.gpu"].seconds, 0.75);
+        assert_eq!(delta["native.metal.gpu"].bytes, 40);
+        // The earlier phase's 90-byte mark remains the request high-water
+        // value; subtracting it or labeling it decode-local would be wrong.
+        assert_eq!(delta["native.metal.gpu"].request_max_bytes_at_end, 90);
+        assert_eq!(delta["native.sample"].calls, 1);
+        assert_eq!(delta["native.sample"].seconds, 0.125);
+        assert_eq!(delta["native.sample"].bytes, 7);
+        assert!(!delta.contains_key("native.metal.map"));
+        assert!(!delta.contains_key("native.removed"));
+    }
+
+    #[test]
+    fn native_phase_difference_clamps_regressions_and_nonfinite_seconds() {
+        let start = BTreeMap::from([("native.reset", counter(5, 3.0, 90, 90))]);
+        let end = BTreeMap::from([
+            ("native.reset", counter(1, 1.0, 20, 20)),
+            ("native.nan", counter(1, f64::NAN, 1, 1)),
+            ("native.infinity", counter(1, f64::INFINITY, 1, 1)),
+        ]);
+        let delta = profile_counter_difference(&start, &end);
+        assert!(!delta.contains_key("native.reset"));
+        assert_eq!(delta["native.nan"].seconds, 0.0);
+        assert_eq!(delta["native.infinity"].seconds, 0.0);
+        assert_eq!(delta["native.nan"].calls, 1);
+        assert_eq!(delta["native.infinity"].bytes, 1);
+        assert!(profile_counter_difference(&BTreeMap::new(), &BTreeMap::new()).is_empty());
+    }
+
+    #[test]
+    fn native_phase_output_is_optional_mode_scoped_and_aggregate_only() {
+        let prefill = BTreeMap::from([("native.metal.gpu", counter(2, 0.5, 100, 90))]);
+        let total = BTreeMap::from([("native.metal.gpu", counter(5, 1.25, 140, 90))]);
+        // Failed/cancelled requests that never reached prompt completion have
+        // no boundary; later failures preserve the completed prefill snapshot.
+        assert!(native_phase_counters(Some(AggregateProfileMode::NativeHybrid), None, &total).is_none());
+        assert!(native_phase_counters(None, Some(prefill.clone()), &total).is_none());
+        assert!(native_phase_counters(Some(AggregateProfileMode::Qwen38Bf16), Some(prefill.clone()), &total).is_none());
+        let mut record = aggregate_profile_fixture(false);
+        let qwen = serde_json::to_value(&record).unwrap();
+        assert!(qwen.get("native_phase_counters").is_none());
+        record.scope = AggregateProfileMode::NativeHybrid.scope();
+        record.counters = total.clone();
+        record.native_phase_counters =
+            native_phase_counters(Some(AggregateProfileMode::NativeHybrid), Some(prefill), &total);
+        let value = serde_json::to_value(&record).unwrap();
+        let allowed = [
+            "schema_version",
+            "scope",
+            "success",
+            "input_tokens",
+            "sampled_tokens",
+            "output_tokens",
+            "counters",
+            "native_phase_counters",
+        ];
+        let fields = value.as_object().unwrap();
+        assert_eq!(fields.len(), allowed.len());
+        assert!(fields.keys().all(|key| allowed.contains(&key.as_str())));
+        assert_eq!(value["success"], false);
+        assert!(value["sampled_tokens"].is_null());
+        let phases = &value["native_phase_counters"];
+        let allowed = ["boundary", "counter_semantics", "prefill", "decode"];
+        let fields = phases.as_object().unwrap();
+        assert_eq!(fields.len(), allowed.len());
+        assert!(fields.keys().all(|key| allowed.contains(&key.as_str())));
+        assert_eq!(phases["boundary"], "after_final_prompt_model_readout_before_initial_sampling");
+        assert!(phases["counter_semantics"].as_str().unwrap().contains("not phase-local"));
+        for (phase, maximum) in [("prefill", "max_bytes"), ("decode", "request_max_bytes_at_end")] {
+            let counters = phases[phase].as_object().unwrap();
+            assert_eq!(counters.len(), 1);
+            for fields in counters.values() {
+                let fields = fields.as_object().unwrap();
+                let allowed = ["calls", "seconds", "bytes", maximum];
+                assert_eq!(fields.len(), allowed.len());
+                assert!(fields.keys().all(|key| allowed.contains(&key.as_str())));
+                assert!(fields.values().all(serde_json::Value::is_number));
+            }
+        }
+        assert_eq!(phases["decode"]["native.metal.gpu"]["calls"], 3);
     }
 
     #[test]

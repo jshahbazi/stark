@@ -49,7 +49,10 @@ def checkout_identity():
             digest.update(path.relative_to(root).as_posix().encode() + b"\0" + path.read_bytes() + b"\0")
     return {
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
-        "tracked_diff_sha256": hashlib.sha256(subprocess.check_output(["git", "diff", "HEAD", "--"], cwd=root)).hexdigest(),
+        "tracked_diff_sha256": hashlib.sha256(subprocess.check_output(
+            ["git", "diff", "--no-ext-diff", "--no-textconv", "--binary", "--no-color", "HEAD", "--"], cwd=root,
+        )).hexdigest(),
+        "tracked_diff_format": "git diff --no-ext-diff --no-textconv --binary --no-color HEAD --",
         "hybrid_source_bundle_sha256": digest.hexdigest(),
         "binding": "Harness checkout identity; executable source must be bound separately by its build receipt.",
     }
@@ -122,6 +125,10 @@ def run(args):
                 "STARK_GLM53_SCRATCH_HEAP", "STARK_GLM53_CONTROL_FUSED_PARALLEL",
                 "STARK_GLM53_Q8_GROUPED8",
                 "STARK_GLM53_Q4_GROUPED32", "STARK_GLM53_GPU_GREEDY",
+                "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_KDA_PARALLEL_NORM",
+                "STARK_GLM53_PREFILL_QUEUED",
+                "STARK_GLM53_IQ_FUSED_GATE_UP",
+                "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
                 "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS",
                 "STARK_HYBRID_BYTE_LOADS", "STARK_HYBRID_VECTOR8",
                 "STARK_HYBRID_SCALAR_UINT_LOADS", "STARK_HYBRID_FACTORED_AFFINE",

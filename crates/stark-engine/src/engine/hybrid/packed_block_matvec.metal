@@ -1,6 +1,14 @@
 // Original Stark block/lane GEMV for GGML Q4_K, Q5_K and Q6_K.
 // GGML conventions and helper attribution remain in packed_matvec.metal.
 
+// Test-only grouped load specialization. Every participating block/row stride
+// is even; its caller must also prove an even effective encoded-buffer offset.
+template<bool TypedHalf>
+inline float hybrid_grouped_half(device const uchar *p) {
+    if (TypedHalf) return float(*(device const half *)p);
+    return hybrid_half(p);
+}
+
 inline float hybrid_packed_block_dot(device const uchar *codes, device const float *input,
     ulong row_offset, ulong input_offset, uint columns, uint lane) {
     const uint kind = hybrid_packed_kind;

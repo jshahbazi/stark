@@ -12,6 +12,10 @@ using namespace metal;
 #ifndef STARK_GLM_KDA_FUSED_STATE
 #define STARK_GLM_KDA_FUSED_STATE 0
 #endif
+#ifndef STARK_GLM_KDA_PARALLEL_NORM
+#define STARK_GLM_KDA_PARALLEL_NORM 0
+#endif
+
 
 static float glm_sigmoid(float x) {
     if (x >= 0.0f) return 1.0f / (1.0f + exp(-x));
@@ -160,6 +164,84 @@ struct GlmKdaParameters {
     float lower_bound;
 };
 
+#if STARK_GLM_KDA_PARALLEL_NORM
+// Original Stark optional norm reduction. The normal tree changes F32
+// association. Each extreme vector retains its original chronological sum.
+// Threadgroup storage belongs to the kernel, never this inline helper.
+template<bool Pair, bool Rms>
+inline void glm_kda_parallel_norm(
+    threadgroup const float *a, threadgroup const float *b,
+    threadgroup float *partial_a, threadgroup float *partial_b,
+    threadgroup uint *risks, threadgroup float *scales,
+    uint tid, uint width, float epsilon) {
+    const uint lane = tid % 32;
+    const uint sg = tid / 32;
+    const uint groups = (width + 31) / 32;
+    const float av = tid < width ? a[tid] : 0.0f;
+    const float bv = Pair && tid < width ? b[tid] : 0.0f;
+    const bool risky_a = simd_any(!isfinite(av) || fabs(av) > 1e15f);
+    const bool risky_b = simd_any(Pair && (!isfinite(bv) || fabs(bv) > 1e15f));
+    const float sum_a = simd_sum(av * av);
+    const float sum_b = simd_sum(bv * bv);
+    if (lane == 0) {
+        partial_a[sg] = sum_a;
+        partial_b[sg] = sum_b;
+        risks[sg] = (risky_a ? 1u : 0u) | (risky_b ? 2u : 0u);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        const bool ordered_a = simd_any(lane < groups ? risks[lane] != 0 : false);
+        const bool ordered_b = Pair && ordered_a;
+        float total_a = simd_sum(lane < groups ? partial_a[lane] : 0.0f);
+        float total_b = simd_sum(lane < groups ? partial_b[lane] : 0.0f);
+        if (lane == 0) {
+            if (ordered_a) {
+                total_a = 0.0f;
+                for (uint i = 0; i < width; ++i) total_a += a[i] * a[i];
+            }
+            if (Pair && ordered_b) {
+                total_b = 0.0f;
+                for (uint i = 0; i < width; ++i) total_b += b[i] * b[i];
+            }
+            scales[0] = Rms ? 1.0f / sqrt(total_a / float(width) + epsilon) : sqrt(total_a + epsilon);
+            if (Pair) scales[1] = Rms ? 1.0f / sqrt(total_b / float(width) + epsilon) : sqrt(total_b + epsilon);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+}
+
+// Test fixture for the only changed arithmetic. All values outside width are
+// masked; the original lane0 reference and candidate share sqrt/divide policy.
+kernel void glm_kda_parallel_norm_probe(
+    device const float *input [[buffer(0)]], device float *output [[buffer(1)]],
+    constant uint *p [[buffer(2)]], device atomic_uint *failure [[buffer(30)]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    threadgroup float values[256];
+    threadgroup float partial_a[8], partial_b[8], scales[2];
+    threadgroup uint risks[8];
+    values[tid] = tid < p[0] ? input[tid] : 0.0f;
+    if (tid < p[0] && !isfinite(values[tid])) atomic_fetch_or_explicit(failure,1u,memory_order_relaxed);
+    if (p[2]) {
+        if (p[1]) glm_kda_parallel_norm<false,true>(values,values,partial_a,partial_b,risks,scales,tid,p[0],as_type<float>(p[3]));
+        else glm_kda_parallel_norm<false,false>(values,values,partial_a,partial_b,risks,scales,tid,p[0],as_type<float>(p[3]));
+    } else {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            float sum = 0.0f;
+            for (uint i=0;i<p[0];++i) sum += values[i]*values[i];
+            scales[0] = p[1] ? 1.0f/sqrt(sum/float(p[0])+as_type<float>(p[3]))
+                            : sqrt(sum+as_type<float>(p[3]));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid < p[0]) {
+        float value = p[1] ? values[tid]*scales[0] : values[tid]/scales[0];
+        output[tid] = value;
+        if (!isfinite(value)) atomic_fetch_or_explicit(failure,1u,memory_order_relaxed);
+    }
+}
+#endif
+
 kernel void glm_kda_decode(
     device const float *input [[buffer(0)]],
     device const float *weight [[buffer(1)]],
@@ -175,6 +257,10 @@ kernel void glm_kda_decode(
     threadgroup float decay[256];
     threadgroup float values[256];
     threadgroup float scales[3];
+    #if STARK_GLM_KDA_PARALLEL_NORM
+    threadgroup float norm_partial_a[8], norm_partial_b[8];
+    threadgroup uint norm_risks[8];
+    #endif
     const uint history_length = p.inner * (p.conv_width - 1);
     const uint coefficient_length = p.inner * p.conv_width;
     const uint channel = head * p.dim + lane;
@@ -204,6 +290,9 @@ kernel void glm_kda_decode(
         float g = p.lower_bound * glm_sigmoid(-a[head] * (input[3 * p.inner + channel] + dt[channel]));
         decay[lane] = exp(g);
     }
+    #if STARK_GLM_KDA_PARALLEL_NORM
+    glm_kda_parallel_norm<true,false>(q,k,norm_partial_a,norm_partial_b,norm_risks,scales,lane,p.dim,1e-6f);
+    #else
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (lane == 0) {
         float q_sum = 0.0f;
@@ -216,6 +305,7 @@ kernel void glm_kda_decode(
         scales[1] = sqrt(k_sum + 1e-6f);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    #endif
     if (lane < p.dim) {
         q[lane] /= scales[0];
         k[lane] /= scales[1];
@@ -251,6 +341,9 @@ kernel void glm_kda_decode(
         #endif
         values[lane] = sum * (1.0f / sqrt(float(p.dim)));
     }
+    #if STARK_GLM_KDA_PARALLEL_NORM
+    glm_kda_parallel_norm<false,true>(values,values,norm_partial_a,norm_partial_b,norm_risks,scales+2,lane,p.dim,p.rms_eps);
+    #else
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (lane == 0) {
         float sum = 0.0f;
@@ -258,6 +351,7 @@ kernel void glm_kda_decode(
         scales[2] = 1.0f / sqrt(sum / float(p.dim) + p.rms_eps);
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
+    #endif
     if (lane < p.dim) {
         device const float *norm = weight + 3 * coefficient_length + p.inner;
         output[channel] = values[lane] * scales[2] * norm[lane] * glm_sigmoid(input[4 * p.inner + channel]);

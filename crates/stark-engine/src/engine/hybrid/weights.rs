@@ -636,6 +636,42 @@ impl BoundedBankGroup<'_> {
         self.registered_bytes
     }
 
+    #[expect(clippy::too_many_arguments, reason = "whitelisted pair of independent expert banks and shared input")]
+    pub(super) fn try_encode_iq2_gate_up(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        gate_name: &str,
+        up_name: &str,
+        indices: &super::weight_metal::DeviceVector,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+        limit: f32,
+    ) -> Result<Option<super::weight_metal::DeviceVector>> {
+        if !self.names.contains(gate_name) || !self.names.contains(up_name) {
+            return Err(Error::Invalid("fused bank is outside admitted encoder group"));
+        }
+        if !self.encoder_registry || !super::weight_metal::iq_fused_gate_up_enabled() {
+            return Ok(None);
+        }
+        if self.registered_bytes > self.budget {
+            return Err(Error::Invalid("fused banks exceed admitted encoder budget"));
+        }
+        let (gate, gate_shape) = self.weights.indexed_geometry(gate_name, selected)?;
+        let (up, up_shape) = self.weights.indexed_geometry(up_name, selected)?;
+        let gate_format = self.weights.matrix_format(gate)?;
+        let up_format = self.weights.matrix_format(up)?;
+        if gate_shape != up_shape
+            || gate_shape[1..] != [2048, 4096]
+            || gate_format != super::weight_metal::MatrixFormat::Packed(17)
+            || up_format != super::weight_metal::MatrixFormat::Packed(17)
+        {
+            return Ok(None);
+        }
+        let gate = self.weights.encoder_bank_matrix(gate_name, gate)?;
+        let up = self.weights.encoder_bank_matrix(up_name, up)?;
+        graph.try_iq2_gate_up(&gate, gate_format, gate_shape, &up, up_format, up_shape, indices, selected, input, limit)
+    }
+
     pub(super) fn encode_indexed_matvec(
         &self,
         graph: &mut super::weight_metal::DecodeGraph,
@@ -3131,6 +3167,118 @@ mod tests {
         }
         assert!(weights.bounded_indexed_group(&names[0]).is_err());
         assert!(weights.bank_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn fused_encoder_pair_preserves_whitelist_budget_and_unsupported_fallback() {
+        use super::super::weight_metal::DecodeGraph;
+        let fixture = Fixture::new();
+        let data = vec![0u8; 4 * 2 * 32 * 4];
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("gate", "F32", vec![4, 2, 32], data.clone()),
+                ("up", "F32", vec![4, 2, 32], data.clone()),
+                ("outside", "F32", vec![4, 2, 32], data),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let names = vec!["gate".to_owned(), "up".to_owned()];
+        let budget = weights.bounded_bank_bytes(&names).unwrap();
+        assert!(
+            weights.indexed_group_with_budget(&names, budget - 1, true).is_err(),
+            "fused pair relaxed encoder budget"
+        );
+        let group = weights.indexed_group_with_budget(&names, budget, true).unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        let input = DecodeGraph::upload(&vec![1.0; 32]).unwrap();
+        let indices = DecodeGraph::upload(&[0.0]).unwrap();
+        assert!(group.try_encode_iq2_gate_up(&mut graph, "gate", "outside", &indices, 1, &input, 11.0).is_err());
+        assert!(group.try_encode_iq2_gate_up(&mut graph, "outside", "up", &indices, 1, &input, 11.0).is_err());
+        assert!(group.try_encode_iq2_gate_up(&mut graph, "gate", "up", &indices, 1, &input, 11.0).unwrap().is_none());
+        assert_eq!(group.registered_bytes(), budget);
+        graph.finish(&[]).unwrap();
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn fused_encoder_pair_actual_iq2_shape_retains_mappings_after_weights_drop() {
+        use super::super::weight_metal::DecodeGraph;
+        assert!(
+            super::super::weight_metal::iq_fused_gate_up_enabled()
+                && super::super::weight_metal::iq_signed_factor_schedule(
+                    super::super::weight_metal::MatrixFormat::Packed(17),
+                    4096,
+                    0
+                ),
+            "fresh process requires fused/bound/typed/signed IQ flags"
+        );
+        let fixture = Fixture::new();
+        let count = 8usize * 2048 * 4096 / 256 * 74;
+        let mut header = b"GGUF".to_vec();
+        header.extend(3u32.to_le_bytes());
+        header.extend(2u64.to_le_bytes());
+        header.extend(0u64.to_le_bytes());
+        for (name, offset) in [("gate", 0usize), ("up", count)] {
+            header.extend((name.len() as u64).to_le_bytes());
+            header.extend(name.as_bytes());
+            header.extend(3u32.to_le_bytes());
+            for dim in [4096u64, 2048, 8] {
+                header.extend(dim.to_le_bytes());
+            }
+            header.extend(17u32.to_le_bytes());
+            header.extend((offset as u64).to_le_bytes());
+        }
+        while !header.len().is_multiple_of(32) {
+            header.push(0);
+        }
+        let mut payload = vec![0u8; 2 * count];
+        for block in payload.chunks_exact_mut(74) {
+            block[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+        }
+        header.extend(payload);
+        fs::write(fixture.0.join("model.gguf"), header).unwrap();
+        let (pending, mapping, expected) = objc2::rc::autoreleasepool(|_| {
+            let weights = Weights::open(&fixture.0).unwrap();
+            assert_eq!(weights.shape("gate").unwrap(), &[8, 2048, 4096]);
+            let names = vec!["gate".to_owned(), "up".to_owned()];
+            let budget = weights.bounded_bank_bytes(&names).unwrap();
+            let mapping = Arc::downgrade(&weights.files[0]);
+            let group = weights.indexed_group_with_budget(&names, budget, true).unwrap();
+            let input = DecodeGraph::upload(&vec![1.0; 4096]).unwrap();
+            let ids = DecodeGraph::upload(&(0..8u32).map(f32::from_bits).collect::<Vec<_>>()).unwrap();
+            let mut reference = DecodeGraph::new().unwrap();
+            let gate = group.encode_indexed_matvec(&mut reference, "gate", &ids, 8, &input, false).unwrap();
+            let up = group.encode_indexed_matvec(&mut reference, "up", &ids, 8, &input, false).unwrap();
+            let output = reference.swiglu(&gate, &up, Some(11.0)).unwrap();
+            let expected = reference.finish(&[output]).unwrap().remove(0);
+            let mut graph = DecodeGraph::new_unretained().unwrap();
+            let output =
+                group.try_encode_iq2_gate_up(&mut graph, "gate", "up", &ids, 8, &input, 11.0).unwrap().unwrap();
+            graph.validate_queued_submission().unwrap();
+            let pending = graph.submit(&[output]).unwrap();
+            drop(group);
+            drop(weights);
+            drop(input);
+            drop(ids);
+            assert!(mapping.upgrade().is_some(), "fused pending graph lost mmap owner");
+            (pending, mapping, expected)
+        });
+        let actual = objc2::rc::autoreleasepool(|_| pending.wait().unwrap().remove(0));
+        assert!(
+            actual.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+            "fused encoder group actual parity"
+        );
+        for _ in 0..100 {
+            if mapping.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(mapping.upgrade().is_none(), "completed fused graphs retained expert mapping");
     }
 
     #[cfg(feature = "metal")]

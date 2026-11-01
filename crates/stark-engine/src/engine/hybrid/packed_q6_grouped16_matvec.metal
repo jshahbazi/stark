@@ -10,7 +10,7 @@ constant uint hybrid_q6_grouped16_bounded_only [[function_constant(73)]];
 
 // Explicit-FMA experiments use separate entrypoints. The production wrapper
 // instantiates false/false and retains the original arithmetic/fallback.
-template<bool InnerFma, bool BlockFma>
+template<bool InnerFma, bool BlockFma, bool TypedHalf = false>
 inline void hybrid_q6_grouped16_matvec_impl(
     device const uchar *codes_base, device const float *input,
     device float *output, constant HybridMatrixParams &p,
@@ -86,9 +86,9 @@ inline void hybrid_q6_grouped16_matvec_impl(
                 float local = fma(partial.y, s1, partial.x * s0);
                 local = fma(partial.z, s2, local);
                 local = fma(partial.w, s3, local);
-                sums[r] = fma(hybrid_half(block + 208), local, sums[r]);
+                sums[r] = fma(hybrid_grouped_half<TypedHalf>(block + 208), local, sums[r]);
             } else {
-            sums[r] += hybrid_half(block + 208) * (partial.x * s0 + partial.y * s1 + partial.z * s2 + partial.w * s3);
+            sums[r] += hybrid_grouped_half<TypedHalf>(block + 208) * (partial.x * s0 + partial.y * s1 + partial.z * s2 + partial.w * s3);
             }
         }
     }
@@ -135,3 +135,14 @@ kernel void hybrid_q6_grouped16_fma_block_matvec(
     hybrid_q6_grouped16_matvec_impl<true, true>(codes_base, input, output, p, offsets, tile, lane, simd_group);
 }
 
+
+#ifdef STARK_KQUANT_TYPED_HALF_TESTS
+// Test-only; typed half loads require host admission of even code offsets.
+kernel void hybrid_q6_grouped16_typedhalf_matvec(
+    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
+    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    hybrid_q6_grouped16_matvec_impl<false, false, true>(codes_base, input, output, p, offsets, tile, lane, simd_group);
+}
+#endif

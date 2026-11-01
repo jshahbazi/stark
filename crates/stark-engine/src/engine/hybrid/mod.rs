@@ -376,6 +376,32 @@ impl Model {
         result
     }
 
+    /// Ingest a known prefix, leaving its final readout token for `step`.
+    /// Returns only after every submitted state writer is checked and fenced.
+    /// The control callback may run more than once per token; an error stops
+    /// submission, drains in-flight work, and resets the model before return.
+    pub fn ingest_prefix(
+        &mut self,
+        tokens: &[u32],
+        mut before_token: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        #[cfg(feature = "metal")]
+        if let Forward::Glm(model) = &mut self.forward {
+            let result = model.ingest_prefix(tokens, &mut before_token);
+            if result.is_err() {
+                self.reset();
+            }
+            return result;
+        }
+        for &token in tokens {
+            if let Err(error) = before_token().and_then(|_| self.ingest(token)) {
+                self.reset();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
     /// Native greedy continuation is available for selected Metal backends.
     pub fn supports_greedy_readout(&self) -> bool {
         #[cfg(feature = "metal")]

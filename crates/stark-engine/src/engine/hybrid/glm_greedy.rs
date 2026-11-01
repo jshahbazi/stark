@@ -42,6 +42,187 @@ impl GlmModel {
         self.cleanup_failed
     }
 
+    /// Ingest known prefix tokens and fence all state writers before return.
+    /// The callback is checked before reserving/committing known future tokens.
+    /// Queued mode relies on tracked same-queue hazards between two writers;
+    /// the control mode validates each predecessor before its successor commit.
+    pub fn ingest_prefix(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        let overlap = std::env::var_os("STARK_GLM53_PREFILL_OVERLAP").is_some_and(|value| value == "1");
+        let queued = std::env::var_os("STARK_GLM53_PREFILL_QUEUED").is_some_and(|value| value == "1");
+        self.ingest_prefix_policy(tokens, before_token, overlap, queued)
+    }
+
+    fn ingest_prefix_policy(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+        overlap: bool,
+        queued: bool,
+    ) -> Result<()> {
+        // Keep submitted ownership outside the fallible encoder/control
+        // scope, so an earlier error cannot hide a failed completion in Drop.
+        let mut pending: Option<PendingDecodeGraph> = None;
+        let mut queued_pending = std::collections::VecDeque::<PendingDecodeGraph>::with_capacity(if queued {
+            2
+        } else {
+            0
+        });
+        let result = (|| {
+            if !overlap && !queued {
+                for &token in tokens {
+                    before_token()?;
+                    self.ingest(token)?;
+                }
+                return Ok(());
+            }
+            if self.cleanup_failed {
+                return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
+            }
+            if tokens.is_empty() {
+                return Ok(());
+            }
+            let enabled = |name| std::env::var_os(name).is_some_and(|value| value == "1");
+            // GREEDY_OVERLAP already reserves two complete graph workspaces.
+            // Both modes keep at most two live graphs: one pending plus one
+            // encoded, or two committed. No third scratch allowance is added.
+            if !self.supports_greedy_readout()
+                || !enabled("STARK_GLM53_RESIDENT_BANKS")
+                || !enabled("STARK_GLM53_WIDE_ENCODER")
+                || enabled("STARK_GLM53_CONCURRENT_ENCODER")
+                || enabled("STARK_GLM53_PARALLEL_PROJECTIONS")
+            {
+                return Err(Error::Unsupported("GLM prefill overlap requires serial resident wide-encoder overlap"));
+            }
+            if queued && !enabled("STARK_GLM53_UNRETAINED_GRAPH") {
+                return Err(Error::Unsupported("GLM queued prefill requires the audited unretained graph"));
+            }
+            if tokens.iter().any(|&token| token as usize >= self.config.vocab)
+                || self.position.checked_add(tokens.len()).is_none_or(|end| end > self.config.max_context)
+            {
+                return Err(Error::Invalid("GLM prefill token or context boundary"));
+            }
+            self.last_greedy = None;
+            before_token()?;
+            // Bootstrap lazy Metal/control/state construction through the
+            // unchanged synchronous path. Subsequent passes can encode ahead.
+            self.ingest(tokens[0])?;
+            if self
+                .decode
+                .as_ref()
+                .and_then(|decode| decode.bounded_plan.as_ref())
+                .is_none_or(|plan| plan.groups.len() != 1)
+            {
+                return Err(Error::Unsupported("GLM prefill overlap requires one admitted encoder bank group"));
+            }
+            for &token in &tokens[1..] {
+                if queued {
+                    objc2::rc::autoreleasepool(|_| -> Result<()> {
+                        if queued_pending.len() == 2 {
+                            // Release the oldest owner before constructing a
+                            // third graph. The second writer is already queued.
+                            queued_pending.pop_front().unwrap().wait()?;
+                        }
+                        before_token()?;
+                        let next = self.encode_pass(None)?;
+                        self.stage_pass(&next, token)?;
+                        next.graph.validate_queued_submission()?;
+                        before_token()?;
+                        queued_pending.push_back(next.graph.submit(&[])?);
+                        crate::engine::hybrid::profile::record(
+                            "native.glm.prefill.queued_pending",
+                            0.0,
+                            queued_pending.len(),
+                        );
+                        Ok(())
+                    })?;
+                    continue;
+                }
+                let submitted = objc2::rc::autoreleasepool(|_| {
+                    before_token()?;
+                    let next = self.encode_pass(None)?;
+                    self.stage_pass(&next, token)?;
+                    if let Some(previous) = pending.take() {
+                        previous.wait()?;
+                        self.check_greedy_completed()?;
+                        // Cancellation during the preceding GPU pass stops
+                        // this still-unsubmitted future state writer.
+                        before_token()?;
+                    }
+                    next.graph.submit(&[])
+                })?;
+                pending = Some(submitted);
+            }
+            if let Some(previous) = pending.take() {
+                previous.wait()?;
+                self.check_greedy_completed()?;
+            }
+            if queued {
+                while let Some(previous) = queued_pending.pop_front() {
+                    previous.wait()?;
+                }
+                // Shared KDA status is GPU-writable by every queued token.
+                // Read it only after the tail completion fence, never when
+                // merely recycling the oldest completed graph owner.
+                self.check_greedy_completed()?;
+            }
+            crate::engine::hybrid::profile::record(
+                if queued {
+                    "native.glm.prefill.queued_tokens"
+                } else {
+                    "native.glm.prefill.overlap_tokens"
+                },
+                0.0,
+                tokens.len(),
+            );
+            Ok(())
+        })();
+        // Closure locals, especially any unsubmitted future graph, are gone
+        // before explicitly draining the preceding submitted state writer.
+        if result.is_err() {
+            if queued {
+                self.drain_prefill_queued_error(queued_pending);
+            } else {
+                self.drain_prefill_error(pending.take());
+            }
+        }
+        result
+    }
+
+    fn drain_prefill_queued_error(
+        &mut self,
+        mut pending: std::collections::VecDeque<PendingDecodeGraph>,
+    ) {
+        let mut failed = false;
+        while let Some(previous) = pending.pop_front() {
+            // Drain every queued writer even when an earlier completion
+            // failed. No shared KDA status may be read during this loop.
+            failed |= previous.wait().is_err();
+        }
+        failed |= self.check_greedy_completed().is_err();
+        if failed {
+            self.cleanup_failed = true;
+        }
+        self.reset();
+    }
+
+    fn drain_prefill_error(
+        &mut self,
+        pending: Option<PendingDecodeGraph>,
+    ) {
+        if let Some(previous) = pending
+            && previous.wait().and_then(|_| self.check_greedy_completed()).is_err()
+        {
+            // Preserve a failure found only during cancellation/error
+            // cleanup. Reset must never make this model reusable.
+            self.cleanup_failed = true;
+        }
+        self.reset();
+    }
+
     pub fn supports_greedy_readout(&self) -> bool {
         !self.cleanup_failed && self.decode_graph_enabled
             && std::env::var_os("STARK_GLM53_GREEDY_OVERLAP").is_some_and(|value| value == "1")
@@ -100,11 +281,15 @@ impl GlmModel {
         })
     }
 
-    fn encode_greedy(
+    fn encode_pass(
         &mut self,
-        gpu_greedy: bool,
+        readout: Option<bool>,
     ) -> Result<EncodedGreedy> {
-        let _encode = crate::engine::hybrid::profile::Scope::new("native.glm.greedy.encode_cpu");
+        let _encode = crate::engine::hybrid::profile::Scope::new(if readout.is_some() {
+            "native.glm.greedy.encode_cpu"
+        } else {
+            "native.glm.prefill.encode_cpu"
+        });
         let c = &self.config;
         if self.position >= c.max_context {
             return Err(Error::Invalid("GLM greedy context boundary"));
@@ -141,13 +326,18 @@ impl GlmModel {
                 graph.resource_boundary()?;
             }
         }
-        let mean = super::super::glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
-        let norm = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
-        let output = self.weights.encode_matvec(&mut graph, "output.weight", &norm)?;
-        let output = if gpu_greedy {
-            graph.greedy_argmax(&output)?
+        let output = if let Some(gpu_greedy) = readout {
+            let mean = super::super::glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
+            let norm = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+            let logits = self.weights.encode_matvec(&mut graph, "output.weight", &norm)?;
+            if gpu_greedy {
+                graph.greedy_argmax(&logits)?
+            } else {
+                logits
+            }
         } else {
-            output
+            graph.check_finite(&streams)?;
+            streams
         };
         // Attention metadata reserves this encoded position. Discarding an
         // unsubmitted future therefore requires a drained model reset.
@@ -159,7 +349,7 @@ impl GlmModel {
         })
     }
 
-    fn stage_greedy(
+    fn stage_pass(
         &self,
         next: &EncodedGreedy,
         token: u32,
@@ -229,14 +419,14 @@ impl GreedyDecode<'_> {
         if self.current.is_some() {
             return Err(Error::Invalid("GLM greedy pending command"));
         }
-        self.model.stage_greedy(&next, token)?;
+        self.model.stage_pass(&next, token)?;
         self.current = Some(next.graph.submit(&[next.output])?);
         Ok(())
     }
 
     fn encode_ahead(&mut self) -> Result<()> {
         if self.produced + 1 < self.remaining {
-            self.ahead = Some(self.model.encode_greedy(self.gpu_greedy)?);
+            self.ahead = Some(self.model.encode_pass(Some(self.gpu_greedy))?);
         }
         Ok(())
     }
@@ -257,7 +447,7 @@ impl GreedyDecode<'_> {
 
     fn next_draw(&mut self) -> Result<u32> {
         if self.current.is_none() {
-            let next = self.model.encode_greedy(self.gpu_greedy)?;
+            let next = self.model.encode_pass(Some(self.gpu_greedy))?;
             self.submit(next, self.first)?;
             self.encode_ahead()?;
         }
@@ -309,6 +499,10 @@ impl Drop for GreedyDecode<'_> {
         self.drain();
     }
 }
+
+#[cfg(test)]
+#[path = "glm_prefill_tests.rs"]
+mod prefill_tests;
 
 #[cfg(test)]
 mod tests {

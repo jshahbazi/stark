@@ -1,0 +1,317 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-01",
+  "status": "pending_end_to_end_qualification",
+  "goal_met": false,
+  "comparison_scope": "GLM-5.3-Flash follow-up; measured component gains, limited full-model numerical agreement, no established total-request improvement",
+  "source": {
+    "starting_revision": "9cc4fe90",
+    "starting_state": "clean and pushed",
+    "followup_runtime_directory": "runtime/glm53-followup-20261101"
+  },
+  "model_and_host": {
+    "checkpoint_repo": "unsloth/GLM-5.3-Flash-GGUF",
+    "checkpoint_revision": "a38483c8cd5df544f53d70fb281afe97369d5ab6",
+    "quantization": "UD-Q2_K_XL",
+    "prior_v39_host": "Mac17,7 Apple M5 Max, 128 GiB, macOS 26.7.1",
+    "payload_hashes_recomputed": false
+  },
+  "sealed_v39_reference": {
+    "build_receipt": "runtime/glm53-optimization-20261101/build-receipt-v39.json",
+    "generator_sha256": "0191ff9aff0eac1022a433604ca3d71de929fb557c4945c49201cfdad00db44c",
+    "scorer_sha256": "5a4af2f26271a265938eebec8f7a48ed9ae8b7c480cb95b3bc0c6fc0e3a2cc58",
+    "screened_receipt": "runtime/glm53-optimization-20261101/final-screened-v39.json",
+    "useful_median_tokens_per_second": 34.80021952602642,
+    "all_sampled_median_tokens_per_second": 35.922807252672435,
+    "context_tokens": 512,
+    "input_tokens": 14,
+    "requested_output_tokens": 32,
+    "sampling": "greedy_no_speculation"
+  },
+  "fresh_v39_screened_control": {
+    "receipt": "runtime/glm53-followup-20261101/screened-control-v39.json",
+    "receipt_sha256": "4c81e018adcfdc6dc985a405fd9f3c9b8d08ec1fb970d1e6d3568d575276dbac",
+    "worker_sha256": "0191ff9aff0eac1022a433604ca3d71de929fb557c4945c49201cfdad00db44c",
+    "passed": true,
+    "screened": true,
+    "useful_median_tokens_per_second": 34.70560686039077,
+    "all_sampled_median_tokens_per_second": 35.82514256556466,
+    "prefill_median_tokens_per_second": 32.015106570901764,
+    "warmups": 4,
+    "accepted_measured_requests": 4,
+    "excluded_attempts": 0
+  },
+  "kda_parallel_norm_v40": {
+    "runtime_flag": "STARK_GLM53_KDA_PARALLEL_NORM=1",
+    "default_enabled": false,
+    "additional_admission_requirements": [
+      "fused KDA state enabled",
+      "transposed recurrent state enabled",
+      "dimension 128"
+    ],
+    "numerical_oracle_tests_passed": 3,
+    "component_receipt": "runtime/glm53-followup-20261101/kda-norm-component-v40.log",
+    "oracle_receipt": "runtime/glm53-followup-20261101/kda-norm-oracle-v40.log",
+    "timer_scope": "same-process paired Safe ABBA; recurrence component per layer",
+    "warm_samples": 16,
+    "heads": 64,
+    "dimension": 128,
+    "serial_median_microseconds_per_layer": 58.10784333495094,
+    "parallel_median_microseconds_per_layer": 50.93321070650264,
+    "component_reduction_percent": 12.347,
+    "end_to_end_gain_claimed": false
+  },
+  "queued_prefill": {
+    "status": "implemented and fixture-checked; optional research, disabled in the v43 qualification recipe",
+    "required_contract": [
+      "Encode the next prompt token while the prior graph runs.",
+      "Keep resources referenced by submitted work alive until completion.",
+      "Preserve same-queue ordering and automatic hazard synchronization for directly bound tracked resources.",
+      "Read CPU-visible KDA failure/status only after every queued writer completes."
+    ],
+    "apple_references": [
+      "https://developer.apple.com/documentation/metal/resource-synchronization",
+      "https://developer.apple.com/documentation/Metal/setting-up-a-command-structure"
+    ],
+    "v43_recipe": {
+      "STARK_GLM53_KDA_PARALLEL_NORM": "1",
+      "STARK_GLM53_IQ_FUSED_GATE_UP": "1",
+      "STARK_GLM53_PREFILL_OVERLAP": "1",
+      "STARK_GLM53_PREFILL_QUEUED": "0"
+    },
+    "queue_policy_observation": "Queued policy differences were within noise; retain as optional research.",
+    "final_end_to_end_qualification": "pending; v43 short run is provisional"
+  },
+  "queued_kda_candidate_v41": {
+    "status": "superseded provisional run; not final qualification",
+    "receipt": "runtime/glm53-followup-20261101/queued-kda-screened-v41.json",
+    "receipt_sha256": "9e92d9dfaaf1b5d59e56d512d4d4b25327589298268ba9c35d0673d42a4563b6",
+    "generator_receipt": "runtime/glm53-followup-20261101/generator-receipt-v41.json",
+    "generator_receipt_sha256": "fe7c8ac387e0fa9a7ec6dd5bb3dc053937aaa294bb8445c81c41c15c339e66ab",
+    "generator_sha256": "215621ae901f50b0b2efc1159ef70c4a0f3e8baf5d9b884a31b2af40676e6303",
+    "generator_source_unchanged_during_build": true,
+    "scorer_rebuilt": false,
+    "scorer_score_parity_available": false,
+    "passed_screened_run": true,
+    "input_tokens": 14,
+    "context_tokens": 512,
+    "requested_output_tokens": 32,
+    "sampling": "greedy_no_speculation",
+    "useful_median_tokens_per_second": 34.948310923091086,
+    "all_sampled_median_tokens_per_second": 36.07567579157789,
+    "prefill_median_tokens_per_second": 32.54087779378221,
+    "warmups": 4,
+    "accepted_measured_requests": 4,
+    "excluded_attempts": 4,
+    "excluded_attempts_reason": "Paging deltas; not included in accepted median.",
+    "fresh_control_useful_median_tokens_per_second": 34.70560686039077,
+    "useful_rate_difference_tokens_per_second": 0.2427040627003123,
+    "useful_rate_difference_percent": 0.6993223419968775,
+    "fresh_control_all_sampled_median_tokens_per_second": 35.82514256556466,
+    "all_sampled_rate_difference_tokens_per_second": 0.250533226013232,
+    "fresh_control_prefill_median_tokens_per_second": 32.015106570901764,
+    "prefill_rate_difference_tokens_per_second": 0.5257712228804436,
+    "input_token_hash_matches_control": true,
+    "configuration_tokenizer_template_hashes_match_control": true,
+    "checkpoint_file_identity_matches_control": true,
+    "repeated_decoded_text_hash_matches_control": true,
+    "matched_identity_hashes": {
+      "input_token_ids_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+      "configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+      "prompt_template_sha256": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891",
+      "source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+      "weights_receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb"
+    },
+    "candidate_output_token_ids_sha256": "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c",
+    "decoded_text_sha256": "386d79a13ffaa7e65b514edc6a58fbf2cccf934202c5c08e95022d0799e75f36",
+    "qualification_note": "Combined queued-prefill and parallel KDA norm run; four paging exclusions and no rebuilt scorer prevented final performance/quality qualification. Superseded by v43 recipe."
+  },
+  "queued_prefill_validation_v41": {
+    "prefill_fixture_log": "runtime/glm53-followup-20261101/prefill-fixture-v41.log",
+    "prefill_fixture_passed": 5,
+    "prefill_fixture_failed": 0,
+    "queued_graph_log": "runtime/glm53-followup-20261101/queued-graph-v41.log",
+    "queued_graph_passed": 4,
+    "queued_graph_failed": 0,
+    "queued_graph_ignored": 1,
+    "kda_runtime_admission_log": "runtime/glm53-followup-20261101/kda-runtime-admission-v41.log",
+    "kda_runtime_admission_passed": 1,
+    "kda_runtime_graph_log": "runtime/glm53-followup-20261101/kda-runtime-graph-v41.log",
+    "kda_runtime_graph_passed": 1
+  },
+  "iq_constant_table_trial": {
+    "oracle_passed": true,
+    "v40_component_receipt_metadata_valid": false,
+    "v41_component_receipt": "runtime/glm53-followup-20261101/iq-constant-component-v41.log",
+    "v41_corrected_rerun_complete": true,
+    "corrected_component_results": {
+      "iq2_microseconds_before_after": [
+        232.52,
+        229.95
+      ],
+      "iq3_microseconds_before_after": [
+        58.91,
+        58.61
+      ]
+    },
+    "qualitative_observation": "Small differences were within variability; no reliable gain.",
+    "promoted": false
+  },
+  "iq_fused_gate_up_v42": {
+    "component_receipt": "runtime/glm53-followup-20261101/iq-fused-component-v42.log",
+    "oracle_receipt": "runtime/glm53-followup-20261101/iq-fused-oracle-v42.log",
+    "component_median_microseconds_per_8_experts_before": 145.984,
+    "component_median_microseconds_per_8_experts_after": 131.703,
+    "component_reduction_percent": 9.78,
+    "correctness_tests_passed": 2,
+    "gate_up_activation_bitwise_equal": true,
+    "integrated_model_gain_claimed": false
+  },
+  "typed_kquant_trial": {
+    "status": "completed, test-only and not promoted",
+    "component_receipt": "runtime/glm53-followup-20261101/kquant-half-component-v41.log",
+    "oracle_receipt": "runtime/glm53-followup-20261101/kquant-half-oracle-v41.log",
+    "oracle_passed": true,
+    "qualitative_observation": "Small or inconsistent effects; Q5 output regressed.",
+    "promoted": false
+  },
+  "qualification_requirements": {
+    "screened_end_to_end_native_run": "provisional v43 short run exists; repeated qualification and quality parity pending",
+    "same_model_input_context_decode_sampling_and_host_admission": "required",
+    "paired_worker_checks": "pending for v43",
+    "oracle_results": "keep separate from throughput claims",
+    "index_entry_added": false,
+    "next_trials": [
+      "one-pending-prefill ablation",
+      "retry same-source fusion-off ablation after quiet admission",
+      "matched long-context candidate run"
+    ]
+  },
+  "diagnostic_phase_v42": {
+    "receipt": "runtime/glm53-followup-20261101/phases-probe-v42.json",
+    "screened": false,
+    "warm_prefill_gpu_utilization_percent": 98.6,
+    "interpretation": "Diagnostic activity observation only; not comparable to quiet-admission screened prefill rates."
+  },
+  "v43_short_candidate": {
+    "status": "provisional; final qualification pending",
+    "run_receipt": "runtime/glm53-followup-20261101/fused-overlap-screened-v43.json",
+    "run_receipt_sha256": "be107221ad2ec86936b295143c06010119c053e2a529c962077d8d3fc442af17",
+    "build_receipt": "runtime/glm53-followup-20261101/build-receipt-v43.json",
+    "build_receipt_sha256": "770386fe3714d976b64e568cc05b2decd1f8c243d8784e31759b17a3a0f53436",
+    "generator_sha256": "33e3e9b9af86c339b197efcc93e67a940c50defa7beb7f0fba1777fafa80f951",
+    "scorer_sha256": "ceaedfbf2d6c0241084ab2e83ce858fef10a7a4f95332ded91031bd481a14e20",
+    "source_unchanged_during_build": true,
+    "useful_median_tokens_per_second": 34.90059536167764,
+    "all_sampled_median_tokens_per_second": 36.02642101850595,
+    "prefill_median_tokens_per_second": 33.046707006481356,
+    "fresh_control_useful_median_tokens_per_second": 34.70560686039077,
+    "point_estimate_useful_rate_difference_percent": 0.5618357347020098,
+    "warmups": 4,
+    "accepted_measured_requests": 4,
+    "paging_excluded_attempts": 3,
+    "same_recipe": {
+      "kda_parallel_norm": true,
+      "iq_fused_gate_up": true,
+      "one_pending_prefill_overlap": true,
+      "queued_prefill": false
+    },
+    "input_config_tokenizer_template_and_checkpoint_identity_match_control": true,
+    "decoded_text_hash_matches_control": true,
+    "same_source_fusion_off_ablation": {
+      "receipt": "runtime/glm53-followup-20261101/unfused-overlap-screened-v43.json",
+      "passed_quiet_admission": false,
+      "reason": "Unrelated compiler activity; its single measured row is not used.",
+      "row_aggregated": false,
+      "retry_pending": false,
+      "retry_receipt": "runtime/glm53-followup-20261101/unfused-overlap-screened-retry-v43.json"
+    },
+    "score_parity_pending": false,
+    "long_context_candidate_pending": false
+  },
+  "context96_control_v39": {
+    "receipt": "runtime/glm53-followup-20261101/context96-control-v39.json",
+    "passed": true,
+    "candidate_comparison_pending": true
+  },
+  "privacy": "Aggregate scalars, hashes and test counts only; no prompts, completions, token vectors, decision probabilities or exception payloads.",
+  "production_defaults_changed": false,
+  "v43_score_parity": {
+    "candidate_worker_sha256": "ceaedfbf2d6c0241084ab2e83ce858fef10a7a4f95332ded91031bd481a14e20",
+    "max_absolute_logprob_delta": 1.4185903996377647e-05,
+    "passed": true,
+    "reference_worker_sha256": "190930839f1525722a6f90e2b27c12171a9ddb6af6e5e2bb0595ed319b5d9c3d",
+    "rms_logprob_delta": 5.898910284575336e-06,
+    "score_point_count": 128,
+    "receipt": "runtime/glm53-followup-20261101/score-parity-v43.json",
+    "receipt_sha256": "bafbef7925a1014a84a6916ae7b0898976cf2ddb6cf9369a0a4d03dd3b50864c"
+  },
+  "v43_unfused_retry": {
+    "worker_sha256": "33e3e9b9af86c339b197efcc93e67a940c50defa7beb7f0fba1777fafa80f951",
+    "input_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+    "median_warm_decode_tokens_per_second": 34.97268611584063,
+    "median_warm_prefill_tokens_per_second": 30.76850592388335,
+    "median_warm_all_sampled_tokens_per_decode_second": 36.100837280867744,
+    "repeat_exact": true,
+    "passed": true,
+    "receipt": "runtime/glm53-followup-20261101/unfused-overlap-screened-retry-v43.json",
+    "receipt_sha256": "98501d4b9861ebf639088451571292002ddd7844a878919bb461d5cc882dc23a",
+    "warmups": 4,
+    "accepted_measured_requests": 4,
+    "excluded_attempts": 6
+  },
+  "v43_context96_candidate": {
+    "worker_sha256": "33e3e9b9af86c339b197efcc93e67a940c50defa7beb7f0fba1777fafa80f951",
+    "input_sha256": "da577625b599110274643266397b057f833510568c471efca58f36eb100734cd",
+    "repeat_exact": true,
+    "median_wall_seconds": 3.181383332994301,
+    "median_warm_decode_tokens_per_second": 31.734038327526513,
+    "median_warm_prefill_tokens_per_second": 33.215047664489646,
+    "passed": true,
+    "receipt": "runtime/glm53-followup-20261101/context96-candidate-v43.json",
+    "receipt_sha256": "faf126ecb5c938c8ace61d10bc09b210a3e74af66198443b2f0327b5a5786c70"
+  },
+  "v43_paired_workers": {
+    "family": "glm5_next",
+    "generation": {
+      "eos_union": true,
+      "invalid_request_recovery": true,
+      "reference_greedy_agreement": 4,
+      "request_isolation": true,
+      "tokenize_decode": true
+    },
+    "passed": true,
+    "scoring": {
+      "consecutive_repeat_hits": true,
+      "intervening_request_invalidates": true,
+      "invalid_request_clears_cache": true,
+      "maximum_absolute_logit_error": 1.33514404296875e-05,
+      "reference_logits_close": true,
+      "tokenize": true
+    },
+    "receipt": "runtime/glm53-followup-20261101/paired-workers-v43.json",
+    "receipt_sha256": "3d7d3781a06c9ed35a809f85bcee267b9a163d0e44b1a78fef894aed9fc9c76b"
+  },
+  "selected_wrapper_changes": {
+    "STARK_GLM53_KDA_PARALLEL_NORM": "1",
+    "STARK_GLM53_PREFILL_OVERLAP": "1",
+    "STARK_GLM53_PREFILL_QUEUED": "0",
+    "STARK_GLM53_IQ_FUSED_GATE_UP": "0",
+    "STARK_GLM53_IQ_FUSED_GATE_UP_R2": "0"
+  },
+  "validation_checkpoint": {
+    "hybrid_passed": 187,
+    "hybrid_ignored": 69,
+    "prefill_fixture_passed": 5,
+    "source_oracle_pool2_positions": 94,
+    "source_oracle_pool4_positions": 94,
+    "generator_library_passed": 92,
+    "generator_library_ignored": 2,
+    "scorer_units_passed": 21,
+    "worker_clippy_passed": true,
+    "repository_policy_passed": true,
+    "whole_engine_suite_completed": false,
+    "new_r2_runtime_route": "passed parity, failures/recovery, parent-flag admission and queued mmap-owner lifetime; full-model timing pending"
+  }
+}

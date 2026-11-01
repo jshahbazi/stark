@@ -41,6 +41,18 @@ mod q8_grouped_tests;
 #[path = "weight_metal_q4_grouped_tests.rs"]
 mod q4_grouped_tests;
 
+#[cfg(test)]
+#[path = "weight_metal_iq_constant_tests.rs"]
+mod iq_constant_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_kquant_typed_half_tests.rs"]
+mod kquant_typed_half_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_iq_fused_gate_up_tests.rs"]
+mod iq_fused_gate_up_tests;
+
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -61,6 +73,8 @@ struct Executor {
     iq_bound_indexed_pipelines: PipelineCache,
     iq_bound_typed_indexed_pipelines: PipelineCache,
     iq_bound_factor_indexed_pipelines: PipelineCache,
+    iq_fused_gate_up_pipelines: PipelineCache,
+    iq_fused_gate_up_r2_pipelines: PipelineCache,
     checked_matrix_pipelines: PipelineCache,
     typed_matrix_pipelines: PipelineCache,
     typed_indexed_pipelines: PipelineCache,
@@ -94,6 +108,8 @@ static IQ_MULTIROW: OnceLock<bool> = OnceLock::new();
 static IQ_GPU_BOUND: OnceLock<bool> = OnceLock::new();
 static IQ_TYPED16: OnceLock<bool> = OnceLock::new();
 static IQ_SIGNED_FACTOR: OnceLock<bool> = OnceLock::new();
+static IQ_FUSED_GATE_UP: OnceLock<bool> = OnceLock::new();
+static IQ_FUSED_GATE_UP_R2: OnceLock<bool> = OnceLock::new();
 static Q6_GROUPED16: OnceLock<bool> = OnceLock::new();
 static Q5_GROUPED32: OnceLock<bool> = OnceLock::new();
 
@@ -140,6 +156,16 @@ pub(super) fn iq_signed_factor_schedule(
     iq_typed16_schedule(format, columns, offset)
         && *IQ_SIGNED_FACTOR
             .get_or_init(|| std::env::var_os("STARK_GLM53_IQ_SIGNED_FACTOR").is_some_and(|value| value == "1"))
+}
+
+pub(super) fn iq_fused_gate_up_enabled() -> bool {
+    *IQ_FUSED_GATE_UP.get_or_init(|| std::env::var_os("STARK_GLM53_IQ_FUSED_GATE_UP").is_some_and(|v| v == "1"))
+}
+
+pub(super) fn iq_fused_gate_up_r2_enabled() -> bool {
+    iq_fused_gate_up_enabled()
+        && *IQ_FUSED_GATE_UP_R2
+            .get_or_init(|| std::env::var_os("STARK_GLM53_IQ_FUSED_GATE_UP_R2").is_some_and(|v| v == "1"))
 }
 
 pub(super) fn iq_bound_factor_name(format: MatrixFormat) -> Result<&'static str> {
@@ -642,6 +668,8 @@ fn executor() -> Result<&'static Executor> {
             let device = <dyn MTLDevice>::system_default().ok_or("Metal device unavailable")?;
             let queue = device.new_command_queue().ok_or("Metal queue unavailable")?;
             let mut source = String::from("#include <metal_stdlib>\nusing namespace metal;\n");
+            #[cfg(test)]
+            source.push_str("#define STARK_KQUANT_TYPED_HALF_TESTS 1\n");
             for (name, table) in
                 [("iq2xxs_grid", weights::IQ2XXS_GRID.as_slice()), ("iq2xs_grid", weights::IQ2XS_GRID.as_slice())]
             {
@@ -671,6 +699,8 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_iq_multirow_matvec.metal"));
             source.push_str(include_str!("packed_iq_staged_matvec.metal"));
             source.push_str(include_str!("packed_iq_grouped32_matvec.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("packed_iq_constant_matvec.metal"));
             source.push_str(include_str!("packed_iq4_matvec.metal"));
             source.push_str(include_str!("packed_block_matvec.metal"));
             source.push_str(include_str!("packed_q8_grouped8_matvec.metal"));
@@ -683,6 +713,8 @@ fn executor() -> Result<&'static Executor> {
             #[cfg(test)]
             source.push_str(include_str!("packed_q5_multirow_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
+            source.push_str(include_str!("packed_iq_fused_gate_up.metal"));
+            source.push_str(include_str!("packed_iq_fused_gate_up_r2.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
             source.push_str(include_str!("affine_uint_matvec.metal"));
@@ -733,6 +765,8 @@ fn executor() -> Result<&'static Executor> {
                 iq_bound_indexed_pipelines: Mutex::new(HashMap::new()),
                 iq_bound_typed_indexed_pipelines: Mutex::new(HashMap::new()),
                 iq_bound_factor_indexed_pipelines: Mutex::new(HashMap::new()),
+                iq_fused_gate_up_pipelines: Mutex::new(HashMap::new()),
+                iq_fused_gate_up_r2_pipelines: Mutex::new(HashMap::new()),
                 checked_matrix_pipelines: Mutex::new(HashMap::new()),
                 typed_matrix_pipelines: Mutex::new(HashMap::new()),
                 typed_indexed_pipelines: Mutex::new(HashMap::new()),
@@ -1481,6 +1515,19 @@ impl Executor {
         self.cached_pipeline(format, name, cache)
     }
 
+    /// Pair the separately cached Safe PSO with its complete output-row tile.
+    fn iq_fused_gate_up_pipeline(
+        &self,
+        r2: bool,
+    ) -> Result<(PipelineState, usize)> {
+        let (name, cache, tile) = if r2 {
+            ("hybrid_graph_iq2_fused_gate_up_r2", &self.iq_fused_gate_up_r2_pipelines, 4)
+        } else {
+            ("hybrid_graph_iq2_fused_gate_up", &self.iq_fused_gate_up_pipelines, 8)
+        };
+        self.cached_pipeline(MatrixFormat::Packed(17), name, cache).map(|pipeline| (pipeline, tile))
+    }
+
     fn cached_pipeline(
         &self,
         format: MatrixFormat,
@@ -1499,8 +1546,13 @@ impl Executor {
         let set = |index, value: u32| {
             values.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
         };
-        if name == "hybrid_graph_iq_indexed_multirow" || name.starts_with("hybrid_graph_iq_indexed_gpu_bound_") {
+        if matches!(name, "hybrid_graph_iq_indexed_multirow" | "hybrid_graph_iq2_fused_gate_up")
+            || name.starts_with("hybrid_graph_iq_indexed_gpu_bound_")
+        {
             set(71, 4);
+        }
+        if name == "hybrid_graph_iq2_fused_gate_up_r2" {
+            set(71, 2);
         }
         if name == "hybrid_q6_grouped16_matvec" {
             // Production always preserves the input-envelope fallback. The
@@ -1532,6 +1584,8 @@ impl Executor {
                 | "hybrid_q8_grouped8_safe_matvec"
                 | "hybrid_q8_grouped8_r4g2_matvec"
                 | "hybrid_q8_segmented8_safe_matvec"
+                | "hybrid_graph_iq2_fused_gate_up"
+                | "hybrid_graph_iq2_fused_gate_up_r2"
         ) || name.starts_with("hybrid_graph_iq_indexed_gpu_bound_")
         {
             &self.library
@@ -2310,7 +2364,7 @@ mod tests {
         }
     }
 
-    fn finite_packed_codes(
+    pub(super) fn finite_packed_codes(
         kind: u32,
         rows: usize,
         columns: usize,
@@ -2334,7 +2388,7 @@ mod tests {
         codes
     }
 
-    fn packed_f64_oracle(
+    pub(super) fn packed_f64_oracle(
         kind: u32,
         codes: &[u8],
         rows: usize,
@@ -4293,7 +4347,7 @@ mod tests {
         }
     }
 
-    fn safe_iq_test_pipeline(
+    pub(super) fn safe_iq_test_pipeline(
         kind: u32,
         name: &str,
         rows_per_simd: u32,
@@ -4465,7 +4519,7 @@ mod tests {
     }
 
     #[expect(clippy::too_many_arguments, reason = "test keeps indexed geometry and source buffers explicit")]
-    fn run_iq_indexed_test_with_bound(
+    pub(super) fn run_iq_indexed_test_with_bound(
         pipeline: &PipelineState,
         codes: &[u8],
         input: &[f32],

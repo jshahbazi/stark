@@ -12,7 +12,7 @@
 
 // Explicit-FMA experiments use separate entrypoints. The production wrapper
 // instantiates false/false and retains the original arithmetic/fallback.
-template<bool InnerFma, bool BlockFma>
+template<bool InnerFma, bool BlockFma, bool TypedHalf = false>
 inline void hybrid_q5_grouped32_matvec_impl(
     device const uchar *codes_base, device const float *input,
     device float *output, constant HybridMatrixParams &p,
@@ -75,11 +75,11 @@ inline void hybrid_q5_grouped32_matvec_impl(
             float mdot = fma(input_sum.y, float(sm1.y), input_sum.x * float(sm0.y));
             mdot = fma(input_sum.z, float(sm2.y), mdot);
             mdot = fma(input_sum.w, float(sm3.y), mdot);
-            sum += fma(hybrid_half(block), qdot, -hybrid_half(block + 2) * mdot);
+            sum += fma(hybrid_grouped_half<TypedHalf>(block), qdot, -hybrid_grouped_half<TypedHalf>(block + 2) * mdot);
         } else {
-        sum += hybrid_half(block) * (float(sm0.x) * group_dot.x + float(sm1.x) * group_dot.y
+        sum += hybrid_grouped_half<TypedHalf>(block) * (float(sm0.x) * group_dot.x + float(sm1.x) * group_dot.y
             + float(sm2.x) * group_dot.z + float(sm3.x) * group_dot.w)
-            - hybrid_half(block + 2) * (input_sum.x * float(sm0.y) + input_sum.y * float(sm1.y)
+            - hybrid_grouped_half<TypedHalf>(block + 2) * (input_sum.x * float(sm0.y) + input_sum.y * float(sm1.y)
             + input_sum.z * float(sm2.y) + input_sum.w * float(sm3.y));
         }
     }
@@ -128,3 +128,21 @@ kernel void hybrid_q5_grouped32_fma_block_matvec(
     hybrid_q5_grouped32_matvec_impl<true, true>(codes_base, input, output, p, offsets, tile, lane, simd_group);
 }
 
+
+#ifdef STARK_KQUANT_TYPED_HALF_TESTS
+// Test-only; typed half loads require host admission of even code offsets.
+kernel void hybrid_q5_grouped32_typedhalf_matvec(
+    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
+    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    hybrid_q5_grouped32_matvec_impl<false, false, true>(codes_base, input, output, p, offsets, tile, lane, simd_group);
+}
+kernel void hybrid_q4_grouped32_typedhalf_matvec(
+    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
+    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    hybrid_q5_grouped32_matvec_impl<false, false, true>(codes_base, input, output, p, offsets, tile, lane, simd_group);
+}
+#endif

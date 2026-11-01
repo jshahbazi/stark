@@ -26,6 +26,7 @@ struct Executor {
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     transposed_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    parallel_norm_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     graph_pipelines: HashMap<&'static str, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
@@ -69,6 +70,25 @@ fn executor() -> Result<&'static Executor> {
             if transposed_pipeline.max_total_threads_per_threadgroup() < 256 {
                 return Err("Metal transposed KDA execution width is unsupported");
             }
+            // The new norm tree is qualified only with the transposed/fused
+            // state policy. Keep its Safe PSO distinct from both references.
+            let parallel_norm_pipeline =
+                if fused == 1 && std::env::var_os("STARK_GLM53_KDA_PARALLEL_NORM").is_some_and(|value| value == "1") {
+                    let norm_source = format!("#define STARK_GLM_KDA_PARALLEL_NORM 1\n{transposed_source}");
+                    let norm_library = device
+                        .new_library_with_source(&norm_source, Some(&options))
+                        .map_err(|_| "Metal parallel-norm KDA compilation failed")?;
+                    let norm_function = norm_library
+                        .new_function_with_name("glm_kda_decode")
+                        .ok_or("Metal parallel-norm KDA function unavailable")?;
+                    let candidate = device
+                        .new_compute_pipeline_state_with_function(&norm_function)
+                        .map_err(|_| "Metal parallel-norm KDA pipeline failed")?;
+                    (candidate.thread_execution_width() == 32 && candidate.max_total_threads_per_threadgroup() >= 128)
+                        .then_some(candidate)
+                } else {
+                    None
+                };
             let mut graph_pipelines = HashMap::new();
             for name in [
                 "glm_control_project",
@@ -129,6 +149,7 @@ fn executor() -> Result<&'static Executor> {
                 queue,
                 pipeline,
                 transposed_pipeline,
+                parallel_norm_pipeline,
                 graph_pipelines,
             })
         })
@@ -279,6 +300,13 @@ impl Kda {
         self.encode_inner(encoding, true)
     }
 
+    fn parallel_norm_admitted(
+        &self,
+        executor: &Executor,
+    ) -> bool {
+        self.transposed_state && self.dim() == 128 && executor.parallel_norm_pipeline.is_some()
+    }
+
     fn encode_inner(
         &mut self,
         encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
@@ -290,7 +318,9 @@ impl Kda {
             unsafe { self.failure.contents().as_ptr().cast::<u32>().write(0) };
         }
         let executor = executor()?;
-        encoding.set_compute_pipeline_state(if self.transposed_state {
+        encoding.set_compute_pipeline_state(if self.parallel_norm_admitted(executor) {
+            executor.parallel_norm_pipeline.as_ref().ok_or(Error::Invalid("Metal KDA norm pipeline admission"))?
+        } else if self.transposed_state {
             &executor.transposed_pipeline
         } else {
             &executor.pipeline
@@ -2208,3 +2238,7 @@ mod tests {
         assert_eq!(state.step([&[0.0; 4]; 5], &[0.0]).unwrap(), [0.0; 4]);
     }
 }
+
+#[cfg(test)]
+#[path = "glm_kda_parallel_norm_tests.rs"]
+mod kda_parallel_norm_tests;

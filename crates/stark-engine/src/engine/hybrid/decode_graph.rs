@@ -421,6 +421,41 @@ impl DecodeGraph {
         &self.failure
     }
 
+    /// Known-token queued passes use the legacy MTLCommandQueue contract:
+    /// tracked, directly bound resources synchronize conflicts in queue order.
+    /// https://developer.apple.com/documentation/metal/resource-synchronization
+    /// https://developer.apple.com/documentation/metal/setting-up-a-command-structure
+    pub fn validate_queued_submission(&self) -> Result<()> {
+        // Unretained GLM graphs explicitly collect every external/raw buffer
+        // binding in addition to generic bindings, making this audit complete.
+        // Internal independent MLA projection transitions remain unchanged.
+        if !self.unretained
+            || self.single_encoder
+            || self.encoding_dispatch != MTLDispatchType::SERIAL
+            || self.projection_level
+            || self.phase_timing
+            || self.encoder_timing.is_some()
+        {
+            return Err(Error::Unsupported("queued GLM graph requires the audited serial unretained transport"));
+        }
+        let mut unique = std::collections::HashSet::new();
+        let external = self.external_resources.borrow();
+        for buffer in self
+            .resources
+            .iter()
+            .chain(external.iter())
+            .chain(self.scratch.iter().map(|(buffer, _)| buffer))
+            .chain(std::iter::once(&self.failure.buffer))
+        {
+            if unique.insert(Retained::as_ptr(buffer) as usize)
+                && metal::MTLResource::hazard_tracking_mode(&**buffer) != metal::MTLHazardTrackingMode::Tracked
+            {
+                return Err(Error::Unsupported("queued GLM graph requires tracked resources"));
+            }
+        }
+        Ok(())
+    }
+
     /// Safe greedy-only readout. Every logit is checked before reducing exact
     /// (value, first index) pairs; F32 indices are exact within this bound.
     /// The full-logit API and its finite obligations remain unchanged.
@@ -1238,6 +1273,119 @@ impl DecodeGraph {
         Ok(output)
     }
 
+    /// Narrow IQ2 gate/up fusion. None preserves the caller's existing two-
+    /// projection route; no GPU work or ownership mutation precedes admission.
+    #[expect(clippy::too_many_arguments, reason = "two independent checked bank descriptors and shared input")]
+    pub fn try_iq2_gate_up(
+        &mut self,
+        gate: &MappedMatrix,
+        gate_format: MatrixFormat,
+        gate_shape: [usize; 3],
+        up: &MappedMatrix,
+        up_format: MatrixFormat,
+        up_shape: [usize; 3],
+        indices: &DeviceVector,
+        selected: usize,
+        input: &DeviceVector,
+        limit: f32,
+    ) -> Result<Option<DeviceVector>> {
+        if !iq_fused_gate_up_enabled()
+            || self.projection_level
+            || gate_format != MatrixFormat::Packed(17)
+            || up_format != MatrixFormat::Packed(17)
+            || gate_shape != up_shape
+            || gate_shape[1..] != [2048, 4096]
+            || input.len != 4096
+            || gate.planes.is_some()
+            || up.planes.is_some()
+            || !iq_signed_factor_schedule(gate_format, 4096, gate.codes.offset)
+            || !iq_signed_factor_schedule(up_format, 4096, up.codes.offset)
+        {
+            return Ok(None);
+        }
+        let [experts, rows, columns] = gate_shape;
+        if experts == 0
+            || selected == 0
+            || selected > 64
+            || selected > experts
+            || indices.len != selected
+            || !limit.is_finite()
+            || limit <= 0.0
+        {
+            return Err(Error::Invalid("IQ2 fused gate/up geometry or clipping"));
+        }
+        input.validate()?;
+        indices.validate()?;
+        for matrix in [gate, up] {
+            MappedOperation {
+                matrices: vec![matrix.clone()],
+                inputs: &[],
+                rows: rows.checked_mul(experts).ok_or(Error::Invalid("IQ2 fused bank row overflow"))?,
+                columns,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(17),
+            }
+            .parameters_for_input(columns)?;
+            if matrix.codes.offset.checked_add(matrix.codes.length).is_none_or(|end| end > matrix.codes.buffer.length())
+            {
+                return Err(Error::Invalid("IQ2 fused mapped bank span"));
+            }
+        }
+        let count = rows.checked_mul(selected).ok_or(Error::Invalid("IQ2 fused output overflow"))?;
+        let output = self.scratch(count)?;
+        let gate_values = self.scratch(count)?;
+        let up_values = self.scratch(count)?;
+        let bounds = self.iq_input_bounds(input, columns, 1)?;
+        let executor = executor()?;
+        let r2 = iq_fused_gate_up_r2_enabled();
+        let (pipeline, tile_rows) = executor.iq_fused_gate_up_pipeline(r2)?;
+        self.order_dispatch();
+        self.encoding.set_compute_pipeline_state(&pipeline);
+        self.encoding.set_buffer(Some(&gate.codes.buffer), gate.codes.offset, 0);
+        self.encoding.set_buffer(Some(&up.codes.buffer), up.codes.offset, 1);
+        self.encoding.set_buffer(Some(&input.buffer), input.offset, 2);
+        self.encoding.set_buffer(Some(&output.buffer), output.offset, 3);
+        let p = [rows as u32, columns as u32, experts as u32, 0, limit.to_bits()];
+        self.encoding.set_bytes(NonNull::from(&p).cast(), std::mem::size_of_val(&p), 4);
+        self.encoding.set_buffer(Some(&indices.buffer), indices.offset, 5);
+        self.encoding.set_buffer(Some(&bounds.buffer), bounds.offset, 6);
+        self.encoding.set_buffer(Some(&gate_values.buffer), gate_values.offset, 7);
+        self.encoding.set_buffer(Some(&up_values.buffer), up_values.offset, 8);
+        self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 30);
+        self.encoding.dispatch_threadgroups(
+            MTLSize {
+                width: rows.div_ceil(tile_rows),
+                height: selected,
+                depth: 1,
+            },
+            MTLSize {
+                width: 64,
+                height: 1,
+                depth: 1,
+            },
+        );
+        // Both mapped owners and every raw binding survive submission, even
+        // with unretained command references and queued/ahead graph encoding.
+        self.resources.extend([
+            gate.codes.buffer.clone(),
+            up.codes.buffer.clone(),
+            input.buffer.clone(),
+            output.buffer.clone(),
+            indices.buffer.clone(),
+            bounds.buffer.clone(),
+            gate_values.buffer.clone(),
+            up_values.buffer.clone(),
+        ]);
+        profile::record("native.metal.graph.iq_fused_gate_up", 0.0, count);
+        if r2 {
+            profile::record("native.metal.graph.iq_fused_gate_up_r2", 0.0, count);
+        }
+        // This kernel checks both unclipped projections and activation before
+        // publishing any finite result. Existing pending producer obligations
+        // remain queued and flush normally at submission.
+        Ok(Some(output))
+    }
+
     fn iq_input_bounds(
         &mut self,
         input: &DeviceVector,
@@ -1652,6 +1800,10 @@ mod scratch_heap_tests;
 #[cfg(test)]
 #[path = "decode_graph_greedy_tests.rs"]
 mod greedy_readout_tests;
+
+#[cfg(test)]
+#[path = "decode_graph_queued_tests.rs"]
+mod queued_submission_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2570,3 +2722,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "decode_graph_iq_fused_tests.rs"]
+mod iq_fused_route_tests;
