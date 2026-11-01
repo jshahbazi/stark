@@ -1,5 +1,6 @@
 mod error;
 mod kernel;
+mod materialize;
 mod policy;
 mod selection;
 mod specialization;

@@ -3,6 +3,7 @@ use std::collections::{HashMap, hash_map::Entry};
 use super::{
     super::{MatmulOutputWork, supports_integer_right_operand},
     GemmEngine, GemmPlan,
+    materialize::{MAX_MATERIALIZED_AFFINE_BYTES, materialized_affine_bytes},
     selection::{GemmProblem, outer_block_k},
     specialization::GemmSpecialization,
 };
@@ -24,7 +25,7 @@ use crate::{
             command_buffer::MetalCommandBufferEncoding,
             context::MetalContext,
             error::MetalError,
-            kernel::{GemmMetalKernel, GemmSplitKReduceMetalKernel},
+            kernel::{GemmMetalKernel, GemmSplitKReduceMetalKernel, MaterializeAffineQ4MetalKernel},
         },
     },
     data_type::DataType,
@@ -36,6 +37,11 @@ pub struct GemmKernel {
     output_data_type: DataType,
     kernels: HashMap<GemmSpecialization, GemmMetalKernel>,
     split_k_reduce: HashMap<GemmDTransform, GemmSplitKReduceMetalKernel>,
+    materialize_affine: Option<MaterializeAffineQ4MetalKernel>,
+    #[cfg(test)]
+    materialization_enabled: bool,
+    #[cfg(test)]
+    materialization_count: usize,
 }
 
 impl GemmKernel {
@@ -50,7 +56,25 @@ impl GemmKernel {
             output_data_type,
             kernels: HashMap::new(),
             split_k_reduce: HashMap::new(),
+            materialize_affine: None,
+            #[cfg(test)]
+            materialization_enabled: true,
+            #[cfg(test)]
+            materialization_count: 0,
         }
+    }
+
+    #[cfg(test)]
+    pub fn set_affine_materialization_enabled(
+        &mut self,
+        enabled: bool,
+    ) {
+        self.materialization_enabled = enabled;
+    }
+
+    #[cfg(test)]
+    pub fn affine_materialization_count(&self) -> usize {
+        self.materialization_count
     }
 
     fn get_or_create(
@@ -163,17 +187,82 @@ impl GemmKernel {
             MatmulB::FullPrecision {
                 b: weights,
             } => self.encode_weights(a, weights, None, d, d_transform, shape, plan, output_work, command_buffer),
-            MatmulB::Quantized(quantized) => self.encode_weights(
-                a,
-                quantized.codes,
-                Some(quantized),
-                d,
-                d_transform,
-                shape,
-                plan,
-                output_work,
-                command_buffer,
-            ),
+            MatmulB::Quantized(quantized) => {
+                #[cfg(test)]
+                let enabled = self.materialization_enabled;
+                #[cfg(not(test))]
+                let enabled = true;
+                if enabled
+                    && let Some(bytes) = materialized_affine_bytes(
+                        shape,
+                        plan,
+                        self.weights_data_type,
+                        self.input_data_type,
+                        self.output_data_type,
+                    )
+                {
+                    // Use one shared pool bucket for every matrix. The handle
+                    // returns its page immediately after this encode, and the
+                    // command-buffer hazard tracker fences the next overwrite.
+                    let mut materialized = command_buffer.allocate_scratch(MAX_MATERIALIZED_AFFINE_BYTES)?;
+                    if self.materialize_affine.is_none() {
+                        self.materialize_affine =
+                            Some(MaterializeAffineQ4MetalKernel::new(command_buffer.context(), DataType::BF16)?);
+                    }
+                    let stride = quantized.params.scale_strides();
+                    let pairs = (bytes / 4) as u32;
+                    self.materialize_affine.as_ref().unwrap().encode(
+                        quantized.codes,
+                        quantized.scales,
+                        quantized.biases().expect("affine bias plane"),
+                        &mut materialized,
+                        pairs,
+                        shape.k,
+                        stride.output_stride,
+                        stride.group_stride,
+                        pairs.div_ceil(256),
+                        command_buffer,
+                    );
+                    #[cfg(test)]
+                    {
+                        self.materialization_count += 1;
+                    }
+                    let dense_shape = MatmulShape {
+                        b_prologue: GemmBPrologueKind::FullPrecision,
+                        b_bits: None,
+                        b_group_size: None,
+                        signed_codes: false,
+                        params_layout: None,
+                        ..shape
+                    };
+                    // Keep the original M/N geometry and split count. Eligibility
+                    // requires whole K256 partitions, so the dense K32 MMA loop
+                    // visits exactly the same ordered products and reductions.
+                    self.encode_weights(
+                        a,
+                        &materialized,
+                        None,
+                        d,
+                        d_transform,
+                        dense_shape,
+                        plan,
+                        output_work,
+                        command_buffer,
+                    )
+                } else {
+                    self.encode_weights(
+                        a,
+                        quantized.codes,
+                        Some(quantized),
+                        d,
+                        d_transform,
+                        shape,
+                        plan,
+                        output_work,
+                        command_buffer,
+                    )
+                }
+            },
         }
     }
 

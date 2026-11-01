@@ -73,6 +73,7 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 | Study | Date | Status |
 | --- | --- | --- |
+| [Qwen3 long-prompt prefill candidate](QWEN3_LONG_PREFILL_CANDIDATE_2026_11_01.md) | 2026-11-01 | Qualification incomplete: full tools/history retained; numerical and repeated generation controls pass, one initial continuation failure remains unexplained; no accepted timing or installed-app result |
 | [Qwen3.8 matched-checkpoint optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | 2026-10-30 | Current: same files and quantization, no speculation; maximum 66.81 vs 61.17 tok/s (+9.21%); numerical equivalence unestablished |
 | [Qwen3.8 same-checkpoint maximum throughput baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical baseline before the matched-checkpoint optimization: maximum 58.13 vs 60.95 tok/s; source-bound evidence retained |
 | [Earlier Qwen3.8 Stark / MLX-Serve comparison](QWEN38_STARK_MLX_SERVE_2026_10_30.md) | 2026-10-30 | Historical different-pack comparison: maximum 79.52 vs 61.00 tok/s; does not isolate engine efficiency |

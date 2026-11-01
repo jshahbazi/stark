@@ -72,6 +72,15 @@ uv run --project tools/converter --locked --python 3.13.13 ruff format --check t
 uv lock --check --directory tools/converter
 ```
 
+The model-free prefill measurement and numerical-comparison controllers also run
+in CI. Run their focused checks without loading a model:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 pytest scripts/test_benchmark_native_prefill.py scripts/test_validate_native_prefill_logits.py -q
+uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/benchmark_native_prefill.py scripts/test_benchmark_native_prefill.py scripts/validate_native_prefill_logits.py scripts/test_validate_native_prefill_logits.py
+uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/benchmark_native_prefill.py scripts/test_benchmark_native_prefill.py scripts/validate_native_prefill_logits.py scripts/test_validate_native_prefill_logits.py
+```
+
 Installer, app and release scripts (shell syntax plus every unit test CI runs):
 
 ```sh

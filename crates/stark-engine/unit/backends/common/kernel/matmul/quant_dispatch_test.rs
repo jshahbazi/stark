@@ -5,6 +5,161 @@ use std::{
     fmt::{Debug, Display},
 };
 
+#[stark_test]
+fn materialized_affine_prefill_matches_staged_reference_bitwise() {
+    let context = MetalContext::new().expect("Metal context");
+    if !context.supports_mxu {
+        return;
+    }
+    for (m, k, n) in [(513, 256, 129), (1024, 2560, 6144), (1024, 4096, 2560), (1024, 2560, 19456), (1024, 9728, 2560)]
+    {
+        for group_output in [false, true] {
+            let input = QuantInput::<bf16>::new(m, k, n, 64, 4, QuantizationMethod::ScaleBias, 97);
+            let input = if group_output {
+                input.with_group_output()
+            } else {
+                input
+            };
+            let actual = run_affine_materialization_case(&context, &input, true, 1);
+            let reference = run_affine_materialization_case(&context, &input, false, 0);
+            assert_eq!(reference.len(), actual.len());
+            let mismatches =
+                reference.iter().zip(&actual).filter(|(expected, got)| expected.to_bits() != got.to_bits()).count();
+            assert_eq!(mismatches, 0, "materialized affine mismatches m={m} k={k} n={n} group_output={group_output}");
+            if m == 513 {
+                let oracle = run_quant_cpu::<bf16>(&input);
+                let mismatches = oracle
+                    .iter()
+                    .zip(&actual)
+                    .filter(|(expected, got)| !check_tolerance(expected.to_f32(), got.to_f32(), 0.05, 0.4))
+                    .count();
+                assert_eq!(mismatches, 0, "materialized affine CPU oracle mismatches group_output={group_output}");
+            }
+        }
+    }
+}
+
+fn run_affine_materialization_case(
+    context: &MetalContext,
+    input: &QuantInput<bf16>,
+    enabled: bool,
+    expected_count: usize,
+) -> Vec<bf16> {
+    let mut buffers = QuantBuffers::<Metal, bf16>::allocate(context, input);
+    let mut matmul = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::new(
+        context,
+        bf16::data_type(),
+        bf16::data_type(),
+        bf16::data_type(),
+    )
+    .expect("MatmulMetalKernel");
+    matmul.gemm.set_affine_materialization_enabled(enabled);
+    let mut command_buffer = context.create_command_buffer(None, None).unwrap();
+    matmul
+        .encode_with_gemm_engine(quant_arguments(&mut buffers, input), GemmEngine::Mxu, &mut command_buffer)
+        .expect("encode materialization parity case");
+    command_buffer.end_encoding().submit().wait_until_completed().unwrap();
+    assert_eq!(matmul.gemm.affine_materialization_count(), expected_count);
+    buffer_to_vec::<Metal, bf16>(&buffers.y)
+}
+
+#[stark_test]
+fn materialization_small_and_short_partitions_keep_staged_path() {
+    let context = MetalContext::new().expect("Metal context");
+    if !context.supports_mxu {
+        return;
+    }
+    for (m, k, n) in [(511, 256, 129), (1024, 1024, 512)] {
+        let input = QuantInput::<bf16>::new(m, k, n, 64, 4, QuantizationMethod::ScaleBias, 101);
+        let actual = run_affine_materialization_case(&context, &input, true, 0);
+        let reference = run_affine_materialization_case(&context, &input, false, 0);
+        let mismatches =
+            reference.iter().zip(&actual).filter(|(expected, got)| expected.to_bits() != got.to_bits()).count();
+        assert_eq!(mismatches, 0, "materialization fallback mismatches m={m} k={k} n={n}");
+    }
+}
+
+#[stark_test]
+fn materialization_workspace_overwrites_are_fenced_in_one_submission() {
+    let context = MetalContext::new().expect("Metal context");
+    if !context.supports_mxu {
+        return;
+    }
+    let inputs = [
+        QuantInput::<bf16>::new(513, 256, 129, 64, 4, QuantizationMethod::ScaleBias, 107),
+        QuantInput::<bf16>::new(513, 512, 257, 64, 4, QuantizationMethod::ScaleBias, 109).with_group_output(),
+        QuantInput::<bf16>::new(513, 256, 129, 64, 4, QuantizationMethod::ScaleBias, 113),
+    ];
+    let mut buffers =
+        inputs.iter().map(|input| QuantBuffers::<Metal, bf16>::allocate(&context, input)).collect::<Vec<_>>();
+    let mut command_buffer = context.create_command_buffer(None, None).unwrap();
+    for (input, buffers) in inputs.iter().zip(&mut buffers) {
+        // Distinct per-layer kernels still share this command-buffer pool.
+        let mut matmul = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::new(
+            &context,
+            bf16::data_type(),
+            bf16::data_type(),
+            bf16::data_type(),
+        )
+        .expect("MatmulMetalKernel");
+        matmul
+            .encode_with_gemm_engine(quant_arguments(buffers, input), GemmEngine::Mxu, &mut command_buffer)
+            .expect("encode reused materialization workspace");
+        assert_eq!(matmul.gemm.affine_materialization_count(), 1);
+    }
+    command_buffer.end_encoding().submit().wait_until_completed().unwrap();
+    for (input, buffers) in inputs.iter().zip(&buffers) {
+        let actual = buffer_to_vec::<Metal, bf16>(&buffers.y);
+        let reference = run_affine_materialization_case(&context, input, false, 0);
+        let mismatches =
+            reference.iter().zip(&actual).filter(|(expected, got)| expected.to_bits() != got.to_bits()).count();
+        assert_eq!(mismatches, 0, "materialization workspace overwrite mismatches");
+    }
+}
+
+#[stark_test]
+fn materialization_workspace_reuse_is_fenced_across_submitted_batches() {
+    let context = MetalContext::new().expect("Metal context");
+    if !context.supports_mxu {
+        return;
+    }
+    let inputs = [
+        QuantInput::<bf16>::new(513, 256, 129, 64, 4, QuantizationMethod::ScaleBias, 127),
+        QuantInput::<bf16>::new(513, 512, 257, 64, 4, QuantizationMethod::ScaleBias, 131).with_group_output(),
+        QuantInput::<bf16>::new(513, 256, 129, 64, 4, QuantizationMethod::ScaleBias, 137),
+    ];
+    let mut buffers =
+        inputs.iter().map(|input| QuantBuffers::<Metal, bf16>::allocate(&context, input)).collect::<Vec<_>>();
+    let allocation_pool = context.create_allocation_pool();
+    let mut submitted = Vec::new();
+    for (input, buffers) in inputs.iter().zip(&mut buffers) {
+        let mut command_buffer = context.create_command_buffer(None, Some(allocation_pool.clone())).unwrap();
+        let mut matmul = <<Metal as Backend>::Kernels as Kernels>::MatmulKernel::new(
+            &context,
+            bf16::data_type(),
+            bf16::data_type(),
+            bf16::data_type(),
+        )
+        .expect("MatmulMetalKernel");
+        matmul
+            .encode_with_gemm_engine(quant_arguments(buffers, input), GemmEngine::Mxu, &mut command_buffer)
+            .expect("encode cross-batch materialization workspace reuse");
+        assert_eq!(matmul.gemm.affine_materialization_count(), 1);
+        submitted.push(command_buffer.end_encoding().submit());
+    }
+    // Match direct scoring: queue every batch before waiting for any of them.
+    for pending in submitted {
+        pending.wait_until_completed().unwrap();
+    }
+    for (input, buffers) in inputs.iter().zip(&buffers) {
+        let actual = buffer_to_vec::<Metal, bf16>(&buffers.y);
+        let reference = run_affine_materialization_case(&context, input, false, 0);
+        let mismatches =
+            reference.iter().zip(&actual).filter(|(expected, got)| expected.to_bits() != got.to_bits()).count();
+        assert_eq!(mismatches, 0, "cross-batch materialization workspace overwrite mismatches");
+    }
+}
+
 use QuantParamsLayout::{GroupOutput, OutputGroup};
 use QuantizationMethod::{ScaleBias, ScaleZeroPoint};
 use half::bf16;

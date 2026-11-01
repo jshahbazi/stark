@@ -219,6 +219,54 @@ mod initialized_scratch_tests {
     }
 
     #[stark_test]
+    fn queued_scratch_reuse_capability_preserves_cpu_batch_isolation() {
+        use std::{sync::mpsc, time::Duration};
+
+        use crate::backends::{
+            common::{Backend, CommandBufferExecutable, CommandBufferPending},
+            cpu::Cpu,
+        };
+
+        let context = CpuContext::new().unwrap();
+        let shared = Cpu::QUEUED_SCRATCH_REUSE_SAFE.then(|| context.create_allocation_pool());
+        let first_pool = shared.clone().unwrap_or_else(|| context.create_allocation_pool());
+        let mut first = context.create_command_buffer(None, Some(first_pool)).unwrap();
+        let mut scratch = first.allocate_scratch(4).unwrap();
+        first.encode_fill(&mut scratch, 42);
+        let (filled, has_filled) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        first.push_command(move || {
+            let _ = filled.send(());
+            let _ = gate.recv();
+        });
+        struct Release(Option<mpsc::Sender<()>>);
+        impl Drop for Release {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let release = Release(Some(release));
+        let mut observed = context.create_buffer(4).unwrap();
+        first.encode_copy(&scratch, &mut observed);
+        drop(scratch);
+        let first_pending = first.end_encoding().submit();
+        has_filled.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        // If CPU ever opts into unsafe sharing, this host allocation clears the
+        // first batch's page while its queued copy is deliberately paused.
+        let second_pool = shared.unwrap_or_else(|| context.create_allocation_pool());
+        let mut second = context.create_command_buffer(None, Some(second_pool)).unwrap();
+        let mut later_scratch = second.allocate_scratch(4).unwrap();
+        second.encode_fill(&mut later_scratch, 7);
+        drop(later_scratch);
+        let second_pending = second.end_encoding().submit();
+        drop(release);
+        first_pending.wait_until_completed().unwrap();
+        second_pending.wait_until_completed().unwrap();
+        assert!(observed.copyout::<u8>().iter().all(|&value| value == 42));
+    }
+
+    #[stark_test]
     fn queued_cpu_storage_survives_forgotten_wait_and_owner_drop() {
         use std::sync::mpsc;
 

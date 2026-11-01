@@ -142,6 +142,11 @@ where
             .transformer_state
             .prepare(((number_of_batches - 1) * max_batch_size) as u32, usize::min(max_batch_size, input.len()) as u32)
             .map_err(LanguageModelScoreError::Backend)?;
+        // Only backends with GPU-only scratch allocation and cross-submission
+        // queue barriers may share pages before earlier batches finish. CPU
+        // scratch allocation clears pages on the host and needs separate pools.
+        // CPU uploads always keep per-command-buffer constant allocators.
+        let allocation_pool = B::QUEUED_SCRATCH_REUSE_SAFE.then(|| self.engine.context.create_allocation_pool());
         let mut final_logits = None;
         // Declared after state/readout so this guard drains queued GPU work
         // before either resource can be dropped during an error unwind.
@@ -149,13 +154,13 @@ where
             pending: Vec::with_capacity(number_of_batches),
         };
         for (batch_idx, batch) in input.chunks(max_batch_size).enumerate() {
-            // Independent pools prevent host encoding of the next batch from
-            // recycling scratch storage still used by an in-flight batch.
-            let allocation_pool = self.engine.context.create_allocation_pool();
             let mut command_buffer = self
                 .engine
                 .context
-                .create_command_buffer(Some("score prefill batch"), Some(allocation_pool))
+                .create_command_buffer(
+                    Some("score prefill batch"),
+                    Some(allocation_pool.clone().unwrap_or_else(|| self.engine.context.create_allocation_pool())),
+                )
                 .map_err(LanguageModelScoreError::Backend)?;
             let last_batch = batch_idx + 1 == number_of_batches;
             let split = last_batch && self.decoder.prefill_cache_skips_trailing_layers() && batch.len() > 1;

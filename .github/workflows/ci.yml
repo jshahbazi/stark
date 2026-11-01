@@ -56,11 +56,13 @@ jobs:
         env:
           HF_HUB_OFFLINE: '1'
           TOKENIZERS_PARALLELISM: 'false'
-        run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
+        run: uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests scripts/test_benchmark_native_prefill.py scripts/test_validate_native_prefill_logits.py -q
       - name: Lint converter source and tests
         run: |
           uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
+          uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/benchmark_native_prefill.py scripts/test_benchmark_native_prefill.py scripts/validate_native_prefill_logits.py scripts/test_validate_native_prefill_logits.py
+          uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/benchmark_native_prefill.py scripts/test_benchmark_native_prefill.py scripts/validate_native_prefill_logits.py scripts/test_validate_native_prefill_logits.py
           uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/build_distribution.py scripts/test_build_distribution.py scripts/install_app.py scripts/test_install_app.py scripts/test_install.py scripts/test_stark_cli.py scripts/build_menubar.py scripts/test_build_menubar.py
           uv run --project tools/converter --locked --python 3.13.13 ruff format --check scripts/build_distribution.py scripts/test_build_distribution.py scripts/install_app.py scripts/test_install_app.py scripts/test_install.py scripts/test_stark_cli.py scripts/build_menubar.py scripts/test_build_menubar.py
           uv run --project tools/converter --locked --python 3.13.13 ruff check scripts/verify_distribution.py

@@ -30,4 +30,9 @@ impl Backend for Metal {
     type Error = MetalError;
 
     const NAME: &'static str = "metal";
+
+    // Scratch allocation never touches buffer contents. Every encoder begins
+    // and ends with Device queue barriers, and constants have their own bump
+    // allocator, so GPU-only scratch can alias across queued command buffers.
+    const QUEUED_SCRATCH_REUSE_SAFE: bool = true;
 }
