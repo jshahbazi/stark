@@ -1,0 +1,54 @@
+{
+  "status": "rejected_component_experiment",
+  "model_weights_loaded": false,
+  "geometry": {
+    "hidden": 4096,
+    "streams": 4,
+    "controls_per_command": 10,
+    "measured_replays": 4,
+    "concurrent_encoder": false
+  },
+  "validation": {
+    "test": "fused_control_preserves_pre_post_bits_and_nonfinite_recovery",
+    "passed": 1,
+    "failed": 0,
+    "coverage": "Bitwise pre/mix/input/post parity, nonfinite detection and fresh-command recovery; four geometries, 1/8/16/32 chunks"
+  },
+  "gpu_microseconds_per_control": [
+    {
+      "chunks": 8,
+      "unfused": 111.75625040777959,
+      "fused": 120.825000340119
+    },
+    {
+      "chunks": 16,
+      "unfused": 101.29375077667646,
+      "fused": 109.6062500437256
+    },
+    {
+      "chunks": 32,
+      "unfused": 96.59791612648405,
+      "fused": 97.05416596261784
+    }
+  ],
+  "identity": {
+    "status": "rejected_component_experiment",
+    "reason": "No admitted component speed gain at 8/16/32 chunks; removed from active runtime",
+    "head": "e0f2708ae1d6a5332afc214096c27e3c7d4af5b2",
+    "candidate_files": {
+      "crates/stark-engine/src/engine/hybrid/glm_metal.rs": "2996344074d346e7c09700341a08b99162ba6c364812810fc0a9996e6ed99bea",
+      "crates/stark-engine/src/engine/hybrid/glm_control_split.metal": "718b4a687bfc7e267861edd9f6fbed4e78e9462feedc36ccaf3259b36fa1c3f2"
+    },
+    "evidence": {
+      "runtime/glm53-optimization-20261101/control-fused-bits-v2.log": "8e873cd4ba17ea9e04554dbb471605001dfe6dca32a155caff2165fa45351bb0",
+      "runtime/glm53-optimization-20261101/control-stages-v2.log": "91c35d2a49db54e1ff869a371164cf36565ddc3dd3b678c1ac4f8efb52637092"
+    },
+    "restored_files": {
+      "crates/stark-engine/src/engine/hybrid/glm_metal.rs": "f1630d6a08262fd9ddccf34854e25224d827a07ce5411f7f9df8efb97cc068c6",
+      "crates/stark-engine/src/engine/hybrid/glm_control_split.metal": "64dda9f09d20a641e3e95004857202e7d2d94464fafe338a793d570e059a0d79"
+    },
+    "patch_sha256": "27ae02568420b9132a64bc4123f72ac023750dce4f547516962b1626d58ceee8"
+  },
+  "whole_model_qualification": false,
+  "clock_policy": "Not independently recorded for this isolated exploratory run"
+}

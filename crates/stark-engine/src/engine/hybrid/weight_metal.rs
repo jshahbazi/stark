@@ -23,18 +23,44 @@ type PipelineCache = Mutex<HashMap<MatrixFormat, PipelineState>>;
 
 #[path = "decode_graph.rs"]
 mod decode_graph;
-pub(super) use decode_graph::{DecodeGraph, DeviceVector};
+pub(super) use decode_graph::{DecodeGraph, DeviceVector, PendingDecodeGraph, ScratchHeap};
+
+#[cfg(test)]
+#[path = "weight_metal_kquant_fma_tests.rs"]
+mod kquant_fma_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_storage_tests.rs"]
+mod storage_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_q8_grouped_tests.rs"]
+mod q8_grouped_tests;
+
+#[cfg(test)]
+#[path = "weight_metal_q4_grouped_tests.rs"]
+mod q4_grouped_tests;
 
 struct Executor {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     library: Retained<ProtocolObject<dyn MTLLibrary>>,
+    packed_fast_library: Option<Retained<ProtocolObject<dyn MTLLibrary>>>,
     pipelines: PipelineCache,
+    q8_block_pipelines: PipelineCache,
+    q8_grouped8_pipelines: PipelineCache,
+    q8_segmented8_pipelines: PipelineCache,
+    q6_grouped16_pipelines: PipelineCache,
+    q5_grouped32_pipelines: PipelineCache,
+    q4_grouped32_pipelines: PipelineCache,
     ffn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     hc_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     gdn_pipelines: Mutex<Option<(PipelineState, PipelineState)>>,
     graph_pipelines: Mutex<HashMap<&'static str, PipelineState>>,
     indexed_pipelines: PipelineCache,
+    iq_bound_indexed_pipelines: PipelineCache,
+    iq_bound_typed_indexed_pipelines: PipelineCache,
+    iq_bound_factor_indexed_pipelines: PipelineCache,
     checked_matrix_pipelines: PipelineCache,
     typed_matrix_pipelines: PipelineCache,
     typed_indexed_pipelines: PipelineCache,
@@ -49,9 +75,178 @@ struct Executor {
     tiled_pipelines: PipelineCache,
     #[cfg(test)]
     scalar_pipelines: PipelineCache,
+    #[cfg(test)]
+    block_test_pipelines: PipelineCache,
+    #[cfg(test)]
+    factored_test_pipelines: PipelineCache,
+    #[cfg(test)]
+    iq4_test_pipelines: PipelineCache,
 }
 
 static EXECUTOR: OnceLock<std::result::Result<Executor, &'static str>> = OnceLock::new();
+static Q4K_BLOCK: OnceLock<bool> = OnceLock::new();
+static Q4_GROUPED32: OnceLock<bool> = OnceLock::new();
+static KQUANT_FACTORED: OnceLock<bool> = OnceLock::new();
+static Q8_SHAPES: OnceLock<bool> = OnceLock::new();
+static Q8_GROUPED8: OnceLock<bool> = OnceLock::new();
+static IQ4_VECTOR: OnceLock<bool> = OnceLock::new();
+static IQ_MULTIROW: OnceLock<bool> = OnceLock::new();
+static IQ_GPU_BOUND: OnceLock<bool> = OnceLock::new();
+static IQ_TYPED16: OnceLock<bool> = OnceLock::new();
+static IQ_SIGNED_FACTOR: OnceLock<bool> = OnceLock::new();
+static Q6_GROUPED16: OnceLock<bool> = OnceLock::new();
+static Q5_GROUPED32: OnceLock<bool> = OnceLock::new();
+
+pub(super) fn iq_bound_schedule(
+    format: MatrixFormat,
+    columns: usize,
+) -> bool {
+    matches!(format, MatrixFormat::Packed(17 | 18))
+        && matches!(columns, 2048 | 4096)
+        && *IQ_GPU_BOUND.get_or_init(|| std::env::var_os("STARK_GLM53_IQ_GPU_BOUND").is_some_and(|value| value == "1"))
+}
+
+pub(super) fn iq_bound_name(format: MatrixFormat) -> Result<&'static str> {
+    match format {
+        MatrixFormat::Packed(17) => Ok("hybrid_graph_iq_indexed_gpu_bound_iq2xs"),
+        MatrixFormat::Packed(18) => Ok("hybrid_graph_iq_indexed_gpu_bound_iq3xxs"),
+        _ => Err(Error::Invalid("GPU-bound IQ format")),
+    }
+}
+
+pub(super) fn iq_typed16_schedule(
+    format: MatrixFormat,
+    columns: usize,
+    offset: usize,
+) -> bool {
+    iq_bound_schedule(format, columns)
+        && offset.is_multiple_of(2)
+        && *IQ_TYPED16.get_or_init(|| std::env::var_os("STARK_GLM53_IQ_TYPED16").is_some_and(|value| value == "1"))
+}
+
+pub(super) fn iq_bound_typed_name(format: MatrixFormat) -> Result<&'static str> {
+    match format {
+        MatrixFormat::Packed(17) => Ok("hybrid_graph_iq_indexed_gpu_bound_typed16_iq2xs"),
+        MatrixFormat::Packed(18) => Ok("hybrid_graph_iq_indexed_gpu_bound_typed16_iq3xxs"),
+        _ => Err(Error::Invalid("typed GPU-bound IQ format")),
+    }
+}
+
+pub(super) fn iq_signed_factor_schedule(
+    format: MatrixFormat,
+    columns: usize,
+    offset: usize,
+) -> bool {
+    iq_typed16_schedule(format, columns, offset)
+        && *IQ_SIGNED_FACTOR
+            .get_or_init(|| std::env::var_os("STARK_GLM53_IQ_SIGNED_FACTOR").is_some_and(|value| value == "1"))
+}
+
+pub(super) fn iq_bound_factor_name(format: MatrixFormat) -> Result<&'static str> {
+    match format {
+        MatrixFormat::Packed(17) => Ok("hybrid_graph_iq_indexed_gpu_bound_factor_iq2xs"),
+        MatrixFormat::Packed(18) => Ok("hybrid_graph_iq_indexed_gpu_bound_factor_iq3xxs"),
+        _ => Err(Error::Invalid("signed-factor GPU-bound IQ format")),
+    }
+}
+
+fn q4_grouped32_shape(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> bool {
+    matches!(format, MatrixFormat::Packed(12))
+        && rows == 154_880
+        && columns == 4096
+        && *Q4_GROUPED32.get_or_init(|| std::env::var_os("STARK_GLM53_Q4_GROUPED32").is_some_and(|value| value == "1"))
+}
+
+fn q5_grouped32_shape(
+    format: MatrixFormat,
+    columns: usize,
+) -> bool {
+    matches!(format, MatrixFormat::Packed(13))
+        && columns != 0
+        && *Q5_GROUPED32.get_or_init(|| std::env::var_os("STARK_GLM53_Q5_GROUPED32").is_some_and(|value| value == "1"))
+}
+
+fn q6_grouped16_shape(
+    format: MatrixFormat,
+    columns: usize,
+) -> bool {
+    // Indexed dispatch queries geometry with columns=0 and keeps its old row
+    // helper. Only dense/selected-view matrices admit this guarded experiment.
+    matches!(format, MatrixFormat::Packed(14))
+        && columns != 0
+        && *Q6_GROUPED16.get_or_init(|| std::env::var_os("STARK_GLM53_Q6_GROUPED16").is_some_and(|value| value == "1"))
+}
+
+fn iq_multirow_schedule(format: MatrixFormat) -> bool {
+    matches!(format, MatrixFormat::Packed(17 | 18))
+        && *IQ_MULTIROW.get_or_init(|| std::env::var_os("STARK_GLM53_IQ_MULTIROW").is_some_and(|value| value == "1"))
+}
+
+fn iq4_vector_schedule(format: MatrixFormat) -> bool {
+    matches!(format, MatrixFormat::Packed(23))
+        && *IQ4_VECTOR.get_or_init(|| std::env::var_os("STARK_GLM53_IQ4_VECTOR").is_some_and(|value| value == "1"))
+}
+
+// Only the two measured dense geometries admit the reassociated Safe schedule.
+// Indexed dispatch asks with columns=0 and therefore retains its prior route.
+fn q8_grouped8_shape(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> Option<bool> {
+    if !matches!(format, MatrixFormat::Packed(8))
+        || !*Q8_GROUPED8.get_or_init(|| std::env::var_os("STARK_GLM53_Q8_GROUPED8").is_some_and(|v| v == "1"))
+    {
+        return None;
+    }
+    match (rows, columns) {
+        (16384, 1536) => Some(true),
+        (8192, 128) => Some(false),
+        _ => None,
+    }
+}
+
+fn q8_block_shape(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> bool {
+    matches!(format, MatrixFormat::Packed(8))
+        && matches!((rows, columns), (16_384, 1536) | (8192, 128))
+        && *Q8_SHAPES.get_or_init(|| std::env::var_os("STARK_GLM53_Q8_SHAPES").is_some_and(|value| value == "1"))
+}
+
+fn q4k_block_enabled() -> bool {
+    // Freeze this diagnostic before the first packed dispatch so the
+    // format-keyed pipeline caches and their grid geometry cannot disagree.
+    *Q4K_BLOCK.get_or_init(|| std::env::var_os("STARK_GLM53_Q4K_BLOCK").is_some_and(|value| value == "1"))
+}
+
+fn block_schedule(format: MatrixFormat) -> bool {
+    matches!(format, MatrixFormat::Packed(13 | 14))
+        || matches!(format, MatrixFormat::Packed(12)) && (q4k_block_enabled() || factored_schedule(format))
+}
+
+fn factored_schedule(format: MatrixFormat) -> bool {
+    matches!(format, MatrixFormat::Packed(12 | 13))
+        && *KQUANT_FACTORED
+            .get_or_init(|| std::env::var_os("STARK_GLM53_KQUANT_FACTORED").is_some_and(|value| value == "1"))
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TestMatrixSchedule {
+    Production,
+    Scalar,
+    Tiled,
+    Block,
+    Factored,
+    IQ4Vector,
+}
 
 /// A byte span backed by a Metal buffer whose deallocator retains the source
 /// allocation. Only Mapping constructs these views; arbitrary Vec storage is
@@ -65,6 +260,10 @@ pub(super) struct MappedSlice {
 }
 
 impl MappedSlice {
+    pub(super) fn buffer(&self) -> &Retained<ProtocolObject<dyn MTLBuffer>> {
+        &self.buffer
+    }
+
     pub(super) fn registered_bytes(&self) -> usize {
         self.registered_length
     }
@@ -468,7 +667,21 @@ fn executor() -> Result<&'static Executor> {
             source.push_str("};\n");
             source.push_str(include_str!("packed_matvec.metal"));
             source.push_str(include_str!("packed_vector_matvec.metal"));
+            source.push_str(include_str!("packed_iq_rows_matvec.metal"));
+            source.push_str(include_str!("packed_iq_multirow_matvec.metal"));
+            source.push_str(include_str!("packed_iq_staged_matvec.metal"));
+            source.push_str(include_str!("packed_iq_grouped32_matvec.metal"));
+            source.push_str(include_str!("packed_iq4_matvec.metal"));
             source.push_str(include_str!("packed_block_matvec.metal"));
+            source.push_str(include_str!("packed_q8_grouped8_matvec.metal"));
+            source.push_str(include_str!("packed_factored_matvec.metal"));
+            source.push_str(include_str!("packed_kquant_multirow_matvec.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("packed_q6_coalesced_factored_matvec.metal"));
+            source.push_str(include_str!("packed_q6_grouped16_matvec.metal"));
+            source.push_str(include_str!("packed_q5_grouped32_matvec.metal"));
+            #[cfg(test)]
+            source.push_str(include_str!("packed_q5_multirow_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));
             source.push_str(include_str!("qwen_gdn.metal"));
             source.push_str(include_str!("decode_graph.metal"));
@@ -485,16 +698,41 @@ fn executor() -> Result<&'static Executor> {
             let library = device
                 .new_library_with_source(&source, Some(&options))
                 .map_err(|_| "Metal kernel compilation failed")?;
+            // Only low-bit projection functions use this experimental policy.
+            // State, normalization, control, failure scans and float matrices
+            // continue to resolve functions from the safe-math library.
+            let packed_fast_library =
+                if std::env::var_os("STARK_GLM53_PACKED_FAST_MATH").is_some_and(|value| value == "1") {
+                    let fast_options = metal::MTLCompileOptions::new();
+                    fast_options.set_math_mode(metal::MTLMathMode::Fast);
+                    Some(
+                        device
+                            .new_library_with_source(&source, Some(&fast_options))
+                            .map_err(|_| "Metal fast projection compilation failed")?,
+                    )
+                } else {
+                    None
+                };
             Ok(Executor {
                 device,
                 queue,
                 library,
+                packed_fast_library,
                 pipelines: Mutex::new(HashMap::new()),
+                q8_block_pipelines: Mutex::new(HashMap::new()),
+                q8_grouped8_pipelines: Mutex::new(HashMap::new()),
+                q8_segmented8_pipelines: Mutex::new(HashMap::new()),
+                q6_grouped16_pipelines: Mutex::new(HashMap::new()),
+                q5_grouped32_pipelines: Mutex::new(HashMap::new()),
+                q4_grouped32_pipelines: Mutex::new(HashMap::new()),
                 ffn_pipelines: Mutex::new(None),
                 hc_pipelines: Mutex::new(None),
                 gdn_pipelines: Mutex::new(None),
                 graph_pipelines: Mutex::new(HashMap::new()),
                 indexed_pipelines: Mutex::new(HashMap::new()),
+                iq_bound_indexed_pipelines: Mutex::new(HashMap::new()),
+                iq_bound_typed_indexed_pipelines: Mutex::new(HashMap::new()),
+                iq_bound_factor_indexed_pipelines: Mutex::new(HashMap::new()),
                 checked_matrix_pipelines: Mutex::new(HashMap::new()),
                 typed_matrix_pipelines: Mutex::new(HashMap::new()),
                 typed_indexed_pipelines: Mutex::new(HashMap::new()),
@@ -509,6 +747,12 @@ fn executor() -> Result<&'static Executor> {
                 tiled_pipelines: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 scalar_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                block_test_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                factored_test_pipelines: Mutex::new(HashMap::new()),
+                #[cfg(test)]
+                iq4_test_pipelines: Mutex::new(HashMap::new()),
             })
         })
         .as_ref()
@@ -530,9 +774,17 @@ fn buffer(
 fn matrix_groups(
     format: MatrixFormat,
     rows: usize,
+    columns: usize,
 ) -> usize {
     match format {
-        MatrixFormat::Packed(13 | 14) => rows.div_ceil(2),
+        format if q4_grouped32_shape(format, rows, columns) => rows.div_ceil(2),
+        format if q8_grouped8_shape(format, rows, columns) == Some(true) => rows.div_ceil(4),
+        format if q8_grouped8_shape(format, rows, columns) == Some(false) => rows.div_ceil(8),
+        format if q5_grouped32_shape(format, columns) => rows.div_ceil(2),
+        format if q6_grouped16_shape(format, columns) => rows.div_ceil(4),
+        format if q8_block_shape(format, rows, columns) => rows.div_ceil(2),
+        format if block_schedule(format) => rows.div_ceil(2),
+        format if iq4_vector_schedule(format) => rows.div_ceil(8),
         MatrixFormat::Packed(17 | 18)
         | MatrixFormat::Affine {
             ..
@@ -541,22 +793,93 @@ fn matrix_groups(
     }
 }
 
-fn matrix_threads(format: MatrixFormat) -> usize {
+fn matrix_threads(
+    format: MatrixFormat,
+    rows: usize,
+    columns: usize,
+) -> usize {
     match format {
-        MatrixFormat::Packed(13 | 14) => 64,
+        format if q4_grouped32_shape(format, rows, columns) => 64,
+        format if q8_grouped8_shape(format, rows, columns) == Some(true) => 64,
+        format if q8_grouped8_shape(format, rows, columns) == Some(false) => 64,
+        format if q5_grouped32_shape(format, columns) => 64,
+        format if q6_grouped16_shape(format, columns) => 64,
+        format if q8_block_shape(format, rows, columns) => 64,
+        format if block_schedule(format) => 64,
         _ => 256,
     }
 }
 
+/// Indexed banks preserve the selected-view matrix reduction. The opt-in IQ
+/// multirow geometry shares input loads across independent row accumulators.
+/// Affine typed dispatch is selected separately by DecodeGraph.
+pub(super) fn indexed_name(format: MatrixFormat) -> &'static str {
+    match format {
+        format if factored_schedule(format) => "hybrid_graph_packed_indexed_factored",
+        format if block_schedule(format) => "hybrid_graph_packed_indexed_block",
+        format if iq4_vector_schedule(format) => "hybrid_graph_iq4_indexed_vector8",
+        format if iq_multirow_schedule(format) => "hybrid_graph_iq_indexed_multirow",
+        MatrixFormat::Packed(17 | 18) => "hybrid_graph_iq_indexed_vector8",
+        MatrixFormat::Packed(_) => "hybrid_graph_packed_indexed",
+        MatrixFormat::Affine {
+            ..
+        } => "hybrid_graph_affine_indexed",
+    }
+}
+
+pub(super) fn indexed_groups(
+    format: MatrixFormat,
+    rows: usize,
+) -> usize {
+    // Q8 shape admission is for the two measured dense projections only.
+    // Indexed IQ multirow still owns eight rows per group; only its thread
+    // count changes. Other banks retain their established schedules.
+    matrix_groups(format, rows, 0)
+}
+
+pub(super) fn indexed_threads(format: MatrixFormat) -> usize {
+    if iq_multirow_schedule(format) {
+        return 64;
+    }
+    matrix_threads(format, 0, 0)
+}
+
 impl Executor {
+    fn pipeline_for_geometry(
+        &self,
+        format: MatrixFormat,
+        rows: usize,
+        columns: usize,
+    ) -> Result<PipelineState> {
+        if q8_grouped8_shape(format, rows, columns) == Some(true) {
+            self.cached_pipeline(format, "hybrid_q8_grouped8_r4g2_matvec", &self.q8_grouped8_pipelines)
+        } else if q8_grouped8_shape(format, rows, columns) == Some(false) {
+            self.cached_pipeline(format, "hybrid_q8_segmented8_safe_matvec", &self.q8_segmented8_pipelines)
+        } else if q4_grouped32_shape(format, rows, columns) {
+            self.cached_pipeline(format, "hybrid_q4_grouped32_matvec", &self.q4_grouped32_pipelines)
+        } else if q5_grouped32_shape(format, columns) {
+            self.cached_pipeline(format, "hybrid_q5_grouped32_matvec", &self.q5_grouped32_pipelines)
+        } else if q6_grouped16_shape(format, columns) {
+            self.cached_pipeline(format, "hybrid_q6_grouped16_matvec", &self.q6_grouped16_pipelines)
+        } else if q8_block_shape(format, rows, columns) {
+            // One format can select either shape schedule in the same model;
+            // keep the block pipeline separate from the scalar format cache.
+            self.cached_pipeline(format, "hybrid_packed_block_matvec", &self.q8_block_pipelines)
+        } else {
+            self.pipeline(format)
+        }
+    }
+
     fn run_glm_kda(
         &self,
         operations: &[MappedOperation<'_>; 9],
         parameters: &[[u32; 8]],
         state: &mut super::glm_metal::Kda,
     ) -> Result<Vec<f32>> {
-        let pipelines =
-            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let pipelines = operations
+            .iter()
+            .map(|operation| self.pipeline_for_geometry(operation.format, operation.rows, operation.columns))
+            .collect::<Result<Vec<_>>>()?;
         let inner = state.inner();
         let rank = state.dim();
         let dim = operations[8].rows;
@@ -665,8 +988,10 @@ impl Executor {
         parameters: &[[u32; 8]],
         state: &mut QwenGdnState,
     ) -> Result<Vec<f32>> {
-        let pipelines =
-            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let pipelines = operations
+            .iter()
+            .map(|operation| self.pipeline_for_geometry(operation.format, operation.rows, operation.columns))
+            .collect::<Result<Vec<_>>>()?;
         let (conv_pipeline, recurrent_pipeline) = self.gdn_pipelines()?;
         let g = &state.geometry;
         let threads = g.key_dim.max(g.value_dim).next_power_of_two();
@@ -800,8 +1125,10 @@ impl Executor {
         normalized: &[f32],
         streams: usize,
     ) -> Result<(Vec<f32>, Vec<f32>)> {
-        let pipelines =
-            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let pipelines = operations
+            .iter()
+            .map(|operation| self.pipeline_for_geometry(operation.format, operation.rows, operation.columns))
+            .collect::<Result<Vec<_>>>()?;
         let (activation_pipeline, mix_pipeline) = self.hc_pipelines()?;
         let dim = normalized.len() / streams;
         let low_rank = operations[0].rows;
@@ -955,12 +1282,12 @@ impl Executor {
             encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
             encoding.dispatch_threadgroups(
                 MTLSize {
-                    width: matrix_groups(operation.format, operation.rows),
+                    width: matrix_groups(operation.format, operation.rows, operation.columns),
                     height: 1,
                     depth: 1,
                 },
                 MTLSize {
-                    width: matrix_threads(operation.format),
+                    width: matrix_threads(operation.format, operation.rows, operation.columns),
                     height: 1,
                     depth: 1,
                 },
@@ -979,8 +1306,10 @@ impl Executor {
         shared_up: &[f32],
         clamp: Option<(f32, f32)>,
     ) -> Result<Vec<f32>> {
-        let pipelines =
-            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let pipelines = operations
+            .iter()
+            .map(|operation| self.pipeline_for_geometry(operation.format, operation.rows, operation.columns))
+            .collect::<Result<Vec<_>>>()?;
         let (activation_pipeline, reduction_pipeline) = self.ffn_pipelines()?;
         let experts = probabilities.len();
         let hidden = operations[0].rows;
@@ -1115,7 +1444,9 @@ impl Executor {
         format: MatrixFormat,
     ) -> Result<PipelineState> {
         let name = match format {
-            MatrixFormat::Packed(13 | 14) => "hybrid_packed_block_matvec",
+            format if factored_schedule(format) => "hybrid_packed_factored_matvec",
+            format if block_schedule(format) => "hybrid_packed_block_matvec",
+            format if iq4_vector_schedule(format) => "hybrid_iq4_matvec_vector8",
             MatrixFormat::Packed(17 | 18) => "hybrid_iq_matvec_vector8",
             MatrixFormat::Packed(_) => "hybrid_packed_matvec",
             MatrixFormat::Affine {
@@ -1168,6 +1499,14 @@ impl Executor {
         let set = |index, value: u32| {
             values.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
         };
+        if name == "hybrid_graph_iq_indexed_multirow" || name.starts_with("hybrid_graph_iq_indexed_gpu_bound_") {
+            set(71, 4);
+        }
+        if name == "hybrid_q6_grouped16_matvec" {
+            // Production always preserves the input-envelope fallback. The
+            // bounded-only constructor exists exclusively in cfg(test).
+            set(73, 0);
+        }
         match format {
             MatrixFormat::Packed(kind) => {
                 let (block, bytes) = weights::block_layout(kind)?;
@@ -1185,8 +1524,23 @@ impl Executor {
                 set(3, scale_dtype);
             },
         };
-        let function = self
-            .library
+        let library = if matches!(
+            name,
+            "hybrid_q6_grouped16_matvec"
+                | "hybrid_q5_grouped32_matvec"
+                | "hybrid_q4_grouped32_matvec"
+                | "hybrid_q8_grouped8_safe_matvec"
+                | "hybrid_q8_grouped8_r4g2_matvec"
+                | "hybrid_q8_segmented8_safe_matvec"
+        ) || name.starts_with("hybrid_graph_iq_indexed_gpu_bound_")
+        {
+            &self.library
+        } else if matches!(format, MatrixFormat::Packed(kind) if !matches!(kind, 0 | 1 | 30)) {
+            self.packed_fast_library.as_ref().unwrap_or(&self.library)
+        } else {
+            &self.library
+        };
+        let function = library
             .new_function_with_name_constant_values(name, &values)
             .map_err(|_| Error::Invalid("Metal specialized function failed"))?;
         let pipeline = self
@@ -1220,8 +1574,10 @@ impl Executor {
                 working.push((input, output));
             }
         }
-        let pipelines =
-            operations.iter().map(|operation| self.pipeline(operation.format)).collect::<Result<Vec<_>>>()?;
+        let pipelines = operations
+            .iter()
+            .map(|operation| self.pipeline_for_geometry(operation.format, operation.rows, operation.columns))
+            .collect::<Result<Vec<_>>>()?;
         profile::record("native.metal.allocated_bytes", 0.0, self.device.current_allocated_size());
         let execute = profile::Scope::new("native.metal.execute");
         let encode = profile::Scope::new("native.metal.encode");
@@ -1248,12 +1604,12 @@ impl Executor {
                 encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
                 encoding.dispatch_threadgroups(
                     MTLSize {
-                        width: matrix_groups(operation.format, operation.rows),
+                        width: matrix_groups(operation.format, operation.rows, operation.columns),
                         height: 1,
                         depth: 1,
                     },
                     MTLSize {
-                        width: matrix_threads(operation.format),
+                        width: matrix_threads(operation.format, operation.rows, operation.columns),
                         height: 1,
                         depth: 1,
                     },
@@ -1303,7 +1659,7 @@ impl Executor {
         parameters: [u32; 8],
         affine: Option<(&[u8], &[u8])>,
     ) -> Result<Vec<f32>> {
-        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, false, true))
+        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, TestMatrixSchedule::Production))
     }
 
     #[cfg(test)]
@@ -1315,7 +1671,12 @@ impl Executor {
         affine: Option<(&[u8], &[u8])>,
         tiled: bool,
     ) -> Result<Vec<f32>> {
-        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, tiled, false))
+        let schedule = if tiled {
+            TestMatrixSchedule::Tiled
+        } else {
+            TestMatrixSchedule::Scalar
+        };
+        objc2::rc::autoreleasepool(|_| self.run_inner(codes, input, parameters, affine, schedule))
     }
 
     #[cfg(test)]
@@ -1325,8 +1686,7 @@ impl Executor {
         input: &[f32],
         parameters: [u32; 8],
         affine: Option<(&[u8], &[u8])>,
-        tiled: bool,
-        production: bool,
+        schedule: TestMatrixSchedule,
     ) -> Result<Vec<f32>> {
         // These bounded uploads retain compressed storage and are released only
         // after GPU completion. No unowned mmap page or rounded Rust allocation
@@ -1359,8 +1719,19 @@ impl Executor {
         } else {
             MatrixFormat::Packed(parameters[2])
         };
-        let pipeline = if production {
-            self.pipeline(format)?
+        let production = matches!(schedule, TestMatrixSchedule::Production);
+        let tiled = matches!(schedule, TestMatrixSchedule::Tiled);
+        let factored = matches!(schedule, TestMatrixSchedule::Factored);
+        let block = matches!(schedule, TestMatrixSchedule::Block | TestMatrixSchedule::Factored);
+        let iq4 = matches!(schedule, TestMatrixSchedule::IQ4Vector);
+        let pipeline = if factored {
+            self.cached_pipeline(format, "hybrid_packed_factored_matvec", &self.factored_test_pipelines)?
+        } else if block {
+            self.cached_pipeline(format, "hybrid_packed_block_matvec", &self.block_test_pipelines)?
+        } else if iq4 {
+            self.cached_pipeline(format, "hybrid_iq4_matvec_vector8", &self.iq4_test_pipelines)?
+        } else if production {
+            self.pipeline_for_geometry(format, parameters[0] as usize, parameters[1] as usize)?
         } else {
             self.pipeline_with_tiling(format, tiled)?
         };
@@ -1379,8 +1750,12 @@ impl Executor {
         encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
         encoding.dispatch_threadgroups(
             MTLSize {
-                width: if production {
-                    matrix_groups(format, parameters[0] as usize)
+                width: if block {
+                    (parameters[0] as usize).div_ceil(2)
+                } else if iq4 {
+                    (parameters[0] as usize).div_ceil(8)
+                } else if production {
+                    matrix_groups(format, parameters[0] as usize, parameters[1] as usize)
                 } else if tiled {
                     (parameters[0] as usize).div_ceil(4)
                 } else {
@@ -1390,8 +1765,10 @@ impl Executor {
                 depth: 1,
             },
             MTLSize {
-                width: if production {
-                    matrix_threads(format)
+                width: if block {
+                    64
+                } else if production {
+                    matrix_threads(format, parameters[0] as usize, parameters[1] as usize)
                 } else {
                     256
                 },
@@ -1930,6 +2307,5046 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    fn finite_packed_codes(
+        kind: u32,
+        rows: usize,
+        columns: usize,
+        seed: usize,
+    ) -> Vec<u8> {
+        let (block, size) = weights::block_layout(kind).unwrap();
+        let mut codes = Vec::with_capacity(rows * columns / block * size);
+        for number in 0..rows * columns / block {
+            let mut encoded: Vec<_> = (0..size).map(|i| ((i * 37 + number * 13 + seed) % 256) as u8).collect();
+            let half_offsets: &[usize] = match kind {
+                12 | 13 => &[0, 2],
+                14 => &[208],
+                8 | 17 | 18 | 23 => &[0],
+                _ => unreachable!(),
+            };
+            for &at in half_offsets {
+                encoded[at..at + 2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            codes.extend(encoded);
+        }
+        codes
+    }
+
+    fn packed_f64_oracle(
+        kind: u32,
+        codes: &[u8],
+        rows: usize,
+        columns: usize,
+        input: &[f32],
+        rows_per_batch: usize,
+    ) -> Vec<(f64, f64)> {
+        let (block, bytes) = weights::block_layout(kind).unwrap();
+        let row_bytes = columns / block * bytes;
+        (0..rows)
+            .map(|row| {
+                let input_start = if rows_per_batch == 0 {
+                    0
+                } else {
+                    row / rows_per_batch * columns
+                };
+                let mut expected = 0.0f64;
+                let mut absolute = 0.0f64;
+                for (encoded, input) in codes[row * row_bytes..(row + 1) * row_bytes]
+                    .chunks_exact(bytes)
+                    .zip(input[input_start..input_start + columns].chunks_exact(block))
+                {
+                    let mut decoded = vec![0.0; block];
+                    weights::decode_block(kind, encoded, &mut decoded).unwrap();
+                    for (weight, input) in decoded.iter().zip(input) {
+                        let product = f64::from(*weight) * f64::from(*input);
+                        expected += product;
+                        absolute += product.abs();
+                    }
+                }
+                (expected, absolute)
+            })
+            .collect()
+    }
+
+    #[stark_test]
+    fn kquant_factoring_matches_f64_and_preserves_extreme_input_failures() {
+        let (rows, batches) = (13, 3);
+        for kind in [12, 13, 14] {
+            let (block, bytes) = weights::block_layout(kind).unwrap();
+            for columns in [256, 768, 4096, 8192] {
+                let codes = finite_packed_codes(kind, rows * batches, columns, 41);
+                let input = (0..columns * batches).map(|i| (i as f32 * 0.019).sin()).collect::<Vec<_>>();
+                let parameters =
+                    [(rows * batches) as u32, columns as u32, kind, block as u32, bytes as u32, 0, rows as u32, 0];
+                let actual = objc2::rc::autoreleasepool(|_| {
+                    executor()
+                        .unwrap()
+                        .run_inner(&codes, &input, parameters, None, TestMatrixSchedule::Factored)
+                        .unwrap()
+                });
+                for (row, (expected, absolute)) in
+                    packed_f64_oracle(kind, &codes, rows * batches, columns, &input, rows).into_iter().enumerate()
+                {
+                    assert!(
+                        (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                        "factored F64 kind={kind} columns={columns} row={row}"
+                    );
+                }
+            }
+            let columns = 256;
+            let codes = finite_packed_codes(kind, 3, columns, 41);
+            let parameters = [3, columns as u32, kind, block as u32, bytes as u32, 0, 0, 0];
+            let run = |codes: &[u8], input: &[f32], schedule| {
+                objc2::rc::autoreleasepool(|_| executor().unwrap().run_inner(codes, input, parameters, None, schedule))
+            };
+            let large = (0..columns)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        1e30
+                    } else {
+                        -1e30
+                    }
+                })
+                .collect::<Vec<_>>();
+            let expected = run(&codes, &large, TestMatrixSchedule::Block).unwrap();
+            assert_eq!(
+                run(&codes, &large, TestMatrixSchedule::Factored).unwrap(),
+                expected,
+                "large finite reference fallback kind={kind}"
+            );
+            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                let invalid = vec![invalid; columns];
+                assert!(run(&codes, &invalid, TestMatrixSchedule::Block).is_err());
+                assert!(run(&codes, &invalid, TestMatrixSchedule::Factored).is_err());
+            }
+            // An overflowing sum of inputs is harmless when every decoded
+            // weight is zero. The fallback must accept this old valid case.
+            let mut zero = vec![0u8; bytes];
+            if kind == 14 {
+                zero[128..192].fill(0xaa);
+                zero[192..208].fill(1);
+                zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+            } else {
+                zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+                zero[4..16].fill(1);
+            }
+            let zero = zero.repeat(3);
+            let input = vec![f32::MAX; columns];
+            assert_eq!(run(&zero, &input, TestMatrixSchedule::Block).unwrap(), vec![0.0; 3]);
+            assert_eq!(run(&zero, &input, TestMatrixSchedule::Factored).unwrap(), vec![0.0; 3]);
+        }
+    }
+
+    #[stark_test]
+    fn q4k_block_schedule_matches_wide_f64_reference_and_batch_boundaries() {
+        let (rows, batches) = (13, 3);
+        let (block, bytes) = weights::block_layout(12).unwrap();
+        for columns in [256, 768, 4096, 8192] {
+            let codes = finite_packed_codes(12, rows * batches, columns, 29);
+            let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters =
+                [(rows * batches) as u32, columns as u32, 12, block as u32, bytes as u32, 0, rows as u32, 0];
+            let actual = objc2::rc::autoreleasepool(|_| {
+                executor().unwrap().run_inner(&codes, &input, parameters, None, TestMatrixSchedule::Block).unwrap()
+            });
+            let scalar = executor().unwrap().run_with_tiling(&codes, &input, parameters, None, false).unwrap();
+            let row_bytes = columns / block * bytes;
+            for row in 0..rows * batches {
+                let mut expected = 0.0f64;
+                let mut absolute = 0.0f64;
+                let source_input = &input[row / rows * columns..(row / rows + 1) * columns];
+                for (encoded, input) in codes[row * row_bytes..(row + 1) * row_bytes]
+                    .chunks_exact(bytes)
+                    .zip(source_input.chunks_exact(block))
+                {
+                    let mut decoded = vec![0.0; block];
+                    weights::decode_block(12, encoded, &mut decoded).unwrap();
+                    for (weight, input) in decoded.iter().zip(input) {
+                        let product = f64::from(*weight) * f64::from(*input);
+                        expected += product;
+                        absolute += product.abs();
+                    }
+                }
+                // Keep a wide F64 oracle independent of either GPU reduction.
+                let bound = 2e-6 * absolute.max(1.0);
+                assert!(
+                    (f64::from(actual[row]) - expected).abs() <= bound,
+                    "Q4_K block F64 columns={columns} row={row}"
+                );
+                assert!(
+                    (f64::from(scalar[row]) - expected).abs() <= bound,
+                    "Q4_K scalar F64 columns={columns} row={row}"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q4k_block_gpu_component_timings() {
+        struct DisableProfile;
+        impl Drop for DisableProfile {
+            fn drop(&mut self) {
+                profile::enable(false);
+            }
+        }
+        let _disable = DisableProfile;
+        // Keep the historical test selector; output identifies every case.
+        // A single head is already ~357 MB, well above device cache capacity.
+        let cases = [
+            ("glm_q4k_head", 12, 154_880usize, 4096usize),
+            ("glm_q5k_main", 13, 8192, 4096),
+            ("glm_q5k_output", 13, 4096, 8192),
+            ("glm_q6k_main", 14, 8192, 4096),
+            ("glm_q6k_shared_down", 14, 4096, 2048),
+        ];
+        let orders = [[0, 1, 2], [2, 1, 0], [1, 2, 0], [0, 2, 1], [2, 0, 1], [1, 0, 2]];
+        for (label, kind, rows, columns) in cases {
+            let (block, block_bytes) = weights::block_layout(kind).unwrap();
+            let mut codes = vec![0u8; rows * columns / block * block_bytes];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(block_bytes) {
+                if kind == 14 {
+                    encoded[208..210].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+                } else {
+                    encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+                    encoded[2..4].copy_from_slice(&half::f16::from_f32(0.001953125).to_bits().to_le_bytes());
+                }
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters = [rows as u32, columns as u32, kind, block as u32, block_bytes as u32, 0, 0, 0];
+            let run = |schedule| {
+                objc2::rc::autoreleasepool(|_| {
+                    executor().unwrap().run_inner(&codes, &input, parameters, None, schedule).unwrap()
+                })
+            };
+            let reference = run(TestMatrixSchedule::Scalar);
+            let mut timings = [Vec::new(), Vec::new(), Vec::new()];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+            for replay in 0..13 {
+                for schedule in orders[replay % orders.len()] {
+                    let variant = match schedule {
+                        0 => TestMatrixSchedule::Scalar,
+                        1 => TestMatrixSchedule::Block,
+                        _ => TestMatrixSchedule::Factored,
+                    };
+                    profile::reset();
+                    profile::enable(true);
+                    let values = run(variant);
+                    profile::enable(false);
+                    let counters = profile::snapshot();
+                    if replay > 0 {
+                        timings[schedule].push(counters["native.metal.gpu"].seconds);
+                    }
+                    let squared_error: f64 =
+                        values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    relative_rms_error[schedule] = relative_rms_error[schedule]
+                        .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    maximum_absolute_error[schedule] = maximum_absolute_error[schedule].max(
+                        values
+                            .iter()
+                            .zip(&reference)
+                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                            .fold(0.0, f64::max),
+                    );
+                }
+            }
+            for (schedule, samples) in timings.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                let gpu_seconds = (samples[5] + samples[6]) * 0.5;
+                let schedule_name = ["scalar", "block2", "factored_block2"][schedule];
+                assert!(
+                    relative_rms_error[schedule] <= 2e-5,
+                    "component relative RMS case={label} schedule={schedule_name}"
+                );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "component": label, "kind": kind, "rows": rows, "columns": columns,
+                        "encoded_bytes": codes.len(), "warm_samples": samples.len(),
+                        "schedule": schedule_name,
+                        "median_gpu_microseconds": gpu_seconds * 1e6,
+                        "minimum_gpu_microseconds": samples[0] * 1e6,
+                        "maximum_gpu_microseconds": samples[samples.len() - 1] * 1e6,
+                        "encoded_gigabytes_per_second": codes.len() as f64 / gpu_seconds / 1e9,
+                        "maximum_absolute_error_vs_scalar": maximum_absolute_error[schedule],
+                        "relative_rms_error_vs_scalar": relative_rms_error[schedule],
+                        "timer_scope": "completed_matrix_command_gpu_timestamps_uploads_excluded",
+                        "order": "all_six_permutations_twice_after_one_warmup_per_variant",
+                    })
+                );
+            }
+        }
+    }
+
+    fn run_kquant_multirow_test(
+        pipeline: &PipelineState,
+        codes: &[u8],
+        input: &[f32],
+        parameters: [u32; 8],
+        rows_per_group: usize,
+    ) -> Result<Vec<f32>> {
+        objc2::rc::autoreleasepool(|_| {
+            let executor = executor()?;
+            let count = parameters[0] as usize;
+            let codes = buffer(executor, codes)?;
+            let input = buffer(executor, bytemuck::cast_slice(input))?;
+            let output = buffer(executor, bytemuck::cast_slice(&vec![7.25f32; count + 2]))?;
+            let command = executor.queue.command_buffer().unwrap();
+            let encoding = command.compute_command_encoder().unwrap();
+            encoding.set_compute_pipeline_state(pipeline);
+            for (index, value) in [&codes, &input, &output].into_iter().enumerate() {
+                encoding.set_buffer(
+                    Some(value),
+                    if index == 2 {
+                        4
+                    } else {
+                        0
+                    },
+                    index,
+                );
+            }
+            encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+            let offsets = [0u32; 4];
+            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+            encoding.dispatch_threadgroups(
+                MTLSize {
+                    width: count.div_ceil(rows_per_group),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 64,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoding.end_encoding();
+            command.commit();
+            command.wait_until_completed();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            // SAFETY: the owned shared output has a completed GPU writer.
+            let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), count + 2) };
+            assert_eq!(values[0], 7.25, "Kquant multirow prefix guard changed");
+            assert_eq!(values[count + 1], 7.25, "Kquant multirow row tail guard changed");
+            if values.iter().any(|v| !v.is_finite()) {
+                return Err(Error::Invalid("nonfinite Kquant multirow test result"));
+            }
+            Ok(values[1..count + 1].to_vec())
+        })
+    }
+
+    #[stark_test]
+    fn kquant_multirow_preserves_safe_bits_tails_batches_and_extreme_inputs() {
+        let (rows, batches) = (13usize, 3usize);
+        for kind in [12u32, 14] {
+            let original = safe_iq_test_pipeline(
+                kind,
+                if kind == 12 {
+                    "hybrid_packed_factored_matvec"
+                } else {
+                    "hybrid_packed_block_matvec"
+                },
+                4,
+            );
+            let candidate = safe_iq_test_pipeline(kind, "hybrid_kquant_multirow_matvec", 4);
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            for columns in [256usize, 768, 4096, 8192] {
+                let codes = finite_packed_codes(kind, rows * batches, columns, 41);
+                let parameters = [(rows * batches) as u32, columns as u32, kind, 256, bytes as u32, 0, rows as u32, 0];
+                let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+                let reference = run_kquant_multirow_test(&original, &codes, &input, parameters, 2).unwrap();
+                let actual = run_kquant_multirow_test(&candidate, &codes, &input, parameters, 4).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "Kquant multirow changed Safe bits kind={kind} columns={columns}"
+                );
+                let large = (0..columns * batches)
+                    .map(|i| {
+                        if i % 2 == 0 {
+                            1e30
+                        } else {
+                            -1e30
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let reference = run_kquant_multirow_test(&original, &codes, &large, parameters, 2).unwrap();
+                let actual = run_kquant_multirow_test(&candidate, &codes, &large, parameters, 4).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "Kquant multirow changed extreme-input reference kind={kind} columns={columns}"
+                );
+                for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                    let invalid = vec![poison; columns * batches];
+                    assert!(run_kquant_multirow_test(&original, &codes, &invalid, parameters, 2).is_err());
+                    assert!(run_kquant_multirow_test(&candidate, &codes, &invalid, parameters, 4).is_err());
+                }
+            }
+            let mut zero = vec![0u8; bytes];
+            if kind == 14 {
+                zero[128..192].fill(0xaa);
+                zero[192..208].fill(1);
+                zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+            } else {
+                zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+                zero[4..16].fill(1);
+            }
+            let parameters = [(rows * batches) as u32, 256, kind, 256, bytes as u32, 0, rows as u32, 0];
+            let codes = zero.repeat(rows * batches);
+            let input = vec![f32::MAX; 256 * batches];
+            assert_eq!(
+                run_kquant_multirow_test(&original, &codes, &input, parameters, 2).unwrap(),
+                vec![0.0; rows * batches]
+            );
+            assert_eq!(
+                run_kquant_multirow_test(&candidate, &codes, &input, parameters, 4).unwrap(),
+                vec![0.0; rows * batches]
+            );
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn kquant_multirow_gpu_component_timings() {
+        let cases = [
+            ("glm_q4k_head", 12, 154_880usize, 4096usize),
+            ("glm_q6k_main", 14, 8192, 4096),
+            ("glm_q6k_output", 14, 4096, 8192),
+        ];
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let banks = (160usize * 1024 * 1024).div_ceil(matrix_bytes);
+            let mut codes = vec![0u8; matrix_bytes * banks];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                if kind == 14 {
+                    encoded[208..210].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+                } else {
+                    encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+                    encoded[2..4].copy_from_slice(&half::f16::from_f32(0.001953125).to_bits().to_le_bytes());
+                }
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let parameters = [rows as u32, columns as u32, kind, 256, bytes as u32, 0, 0, 0];
+            let pipelines = [
+                (
+                    if kind == 12 {
+                        "old_factored"
+                    } else {
+                        "old_block"
+                    },
+                    2usize,
+                    safe_iq_test_pipeline(
+                        kind,
+                        if kind == 12 {
+                            "hybrid_packed_factored_matvec"
+                        } else {
+                            "hybrid_packed_block_matvec"
+                        },
+                        4,
+                    ),
+                ),
+                ("two_rows_per_simd", 4, safe_iq_test_pipeline(kind, "hybrid_kquant_multirow_matvec", 4)),
+            ];
+            let mut timings = [Vec::<f64>::new(), Vec::<f64>::new()];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 2];
+            let mut maximum_absolute_error = [0.0f64; 2];
+            for replay in 0..7 {
+                for variant in if replay % 2 == 0 {
+                    [0usize, 1, 1, 0]
+                } else {
+                    [1usize, 0, 0, 1]
+                } {
+                    let (_, rows_per_group, pipeline) = &pipelines[variant];
+                    let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                        let command = executor.queue.command_buffer().unwrap();
+                        let encoding = command.compute_command_encoder().unwrap();
+                        encoding.set_compute_pipeline_state(pipeline);
+                        encoding.set_buffer(Some(&input), 0, 1);
+                        encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+                        let offsets = [0u32; 4];
+                        encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                        for i in 0..banks {
+                            let bank = (i + replay) % banks;
+                            encoding.set_buffer(Some(&codes), bank * matrix_bytes, 0);
+                            encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                            encoding.dispatch_threadgroups(
+                                MTLSize {
+                                    width: rows.div_ceil(*rows_per_group),
+                                    height: 1,
+                                    depth: 1,
+                                },
+                                MTLSize {
+                                    width: 64,
+                                    height: 1,
+                                    depth: 1,
+                                },
+                            );
+                        }
+                        encoding.end_encoding();
+                        command.commit();
+                        command.wait_until_completed();
+                        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                        // SAFETY: every owned shared output bank has a completed writer.
+                        let values = unsafe {
+                            std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                        }
+                        .to_vec();
+                        (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                    });
+                    assert!(values.iter().all(|v| v.is_finite()), "Kquant multirow component nonfinite");
+                    if reference.is_empty() {
+                        reference = values.clone();
+                    }
+                    if replay > 0 {
+                        timings[variant].push(seconds);
+                    }
+                    bitwise_equal[variant] &= values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                    maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                        values
+                            .iter()
+                            .zip(&reference)
+                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                            .fold(0.0, f64::max),
+                    );
+                }
+            }
+            for (variant, samples) in timings.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                let seconds = (samples[5] + samples[6]) * 0.5;
+                let (schedule, rows_per_group, pipeline) = &pipelines[variant];
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "component": label, "kind": kind, "rows": rows, "columns": columns,
+                        "math_mode": "safe", "schedule": schedule, "rows_per_group": rows_per_group,
+                        "threads_per_group": 64, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                        "rotating_banks": banks, "encoded_population_bytes": matrix_bytes * banks,
+                        "warm_samples": samples.len(), "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                        "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                        "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                        "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                        "bitwise_equal_to_original": bitwise_equal[variant],
+                        "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                        "timer_scope": "same_process_safe_ABBA_serial_rotating_banks_gpu_timestamps",
+                    })
+                );
+                assert!(bitwise_equal[variant], "Kquant multirow component changed Safe bits kind={kind}");
+            }
+        }
+    }
+
+    fn safe_q6_coalesced_test_pipeline(chains: u32) -> PipelineState {
+        let executor = executor().unwrap();
+        let constants = MTLFunctionConstantValues::new();
+        for (index, value) in [(0, 14u32), (4, 256), (5, 210), (72, chains)] {
+            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+        }
+        let function = executor
+            .library
+            .new_function_with_name_constant_values("hybrid_q6_coalesced_factored_matvec", &constants)
+            .unwrap();
+        executor.device.new_compute_pipeline_state_with_function(&function).unwrap()
+    }
+
+    fn safe_q6_grouped16_test_pipeline(bounded_only: bool) -> PipelineState {
+        let executor = executor().unwrap();
+        let constants = MTLFunctionConstantValues::new();
+        for (index, value) in [(0, 14u32), (4, 256), (5, 210), (73, u32::from(bounded_only))] {
+            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+        }
+        let function =
+            executor.library.new_function_with_name_constant_values("hybrid_q6_grouped16_matvec", &constants).unwrap();
+        executor.device.new_compute_pipeline_state_with_function(&function).unwrap()
+    }
+
+    #[stark_test]
+    fn q6_grouped16_production_admission_preserves_safe_bits_and_indexed_geometry() {
+        let (rows, columns) = (13usize, 768usize);
+        let format = MatrixFormat::Packed(14);
+        let enabled = q6_grouped16_shape(format, columns);
+        assert_eq!(indexed_name(format), "hybrid_graph_packed_indexed_block");
+        assert_eq!(indexed_groups(format, rows), rows.div_ceil(2));
+        assert_eq!(indexed_threads(format), 64);
+        assert_eq!(
+            matrix_groups(format, rows, columns),
+            rows.div_ceil(if enabled {
+                4
+            } else {
+                2
+            })
+        );
+        assert_eq!(matrix_threads(format, rows, columns), 64);
+        if enabled {
+            let codes = finite_packed_codes(14, rows, columns, 41);
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters = [rows as u32, columns as u32, 14, 256, 210, 0, 0, 0];
+            let safe = safe_q6_grouped16_test_pipeline(false);
+            let reference = run_kquant_multirow_test(&safe, &codes, &input, parameters, 4).unwrap();
+            let actual = executor()
+                .unwrap()
+                .run_inner(&codes, &input, parameters, None, TestMatrixSchedule::Production)
+                .unwrap();
+            assert!(
+                actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "Q6 production changed Safe grouped16 bits"
+            );
+        }
+    }
+
+    #[stark_test]
+    fn q6_grouped16_matches_f64_source_and_safe_fallback() {
+        let (rows, batches) = (13usize, 3usize);
+        let original = safe_iq_test_pipeline(14, "hybrid_packed_block_matvec", 4);
+        let guarded = safe_q6_grouped16_test_pipeline(false);
+        let bounded_only = safe_q6_grouped16_test_pipeline(true);
+        for columns in [256usize, 768, 4096, 8192] {
+            let mut codes = finite_packed_codes(14, rows * batches, columns, 41);
+            for (i, block) in codes.chunks_exact_mut(210).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                block[208..210].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            let parameters = [(rows * batches) as u32, columns as u32, 14, 256, 210, 0, rows as u32, 0];
+            let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            // The no-guard specialization is a diagnostic only. Its caller
+            // must verify this envelope before any dispatch using that code.
+            assert!(input.iter().all(|v| v.is_finite() && v.abs() <= 1e20));
+            let oracle = packed_f64_oracle(14, &codes, rows * batches, columns, &input, rows);
+            let reference = run_kquant_multirow_test(&original, &codes, &input, parameters, 2).unwrap();
+            let guarded_values = run_kquant_multirow_test(&guarded, &codes, &input, parameters, 4).unwrap();
+            let bounded_values = run_kquant_multirow_test(&bounded_only, &codes, &input, parameters, 4).unwrap();
+            assert!(
+                guarded_values.iter().zip(&bounded_values).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "Q6 grouped16 guard removal changed Safe arithmetic"
+            );
+            let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+            for actual in [&reference, &guarded_values, &bounded_values] {
+                for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                    assert!(
+                        (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                        "Q6 grouped16 F64 columns={columns}"
+                    );
+                }
+                let error: f64 =
+                    actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                assert!((error / squared_reference.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5, "Q6 grouped16 source RMS");
+            }
+            let large = (0..columns * batches)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        1e30
+                    } else {
+                        -1e30
+                    }
+                })
+                .collect::<Vec<_>>();
+            let reference = run_kquant_multirow_test(&original, &codes, &large, parameters, 2).unwrap();
+            let actual = run_kquant_multirow_test(&guarded, &codes, &large, parameters, 4).unwrap();
+            assert!(
+                actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "Q6 grouped16 fallback changed bits"
+            );
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                let invalid = vec![poison; columns * batches];
+                assert!(run_kquant_multirow_test(&original, &codes, &invalid, parameters, 2).is_err());
+                assert!(run_kquant_multirow_test(&guarded, &codes, &invalid, parameters, 4).is_err());
+            }
+        }
+        let mut zero = vec![0u8; 210];
+        zero[128..192].fill(0xaa);
+        zero[192..208].fill(1);
+        zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+        let parameters = [(rows * batches) as u32, 256, 14, 256, 210, 0, rows as u32, 0];
+        assert_eq!(
+            run_kquant_multirow_test(
+                &guarded,
+                &zero.repeat(rows * batches),
+                &vec![f32::MAX; 256 * batches],
+                parameters,
+                4
+            )
+            .unwrap(),
+            vec![0.0; rows * batches]
+        );
+    }
+
+    #[stark_test]
+    fn q5_grouped32_production_admission_preserves_safe_bits_and_legacy_indexed_geometry() {
+        let (rows, columns) = (13usize, 768usize);
+        let format = MatrixFormat::Packed(13);
+        let enabled = q5_grouped32_shape(format, columns);
+        assert_eq!(
+            indexed_name(format),
+            if factored_schedule(format) {
+                "hybrid_graph_packed_indexed_factored"
+            } else {
+                "hybrid_graph_packed_indexed_block"
+            }
+        );
+        assert_eq!(indexed_groups(format, rows), rows.div_ceil(2));
+        assert_eq!(indexed_threads(format), 64);
+        assert_eq!(matrix_groups(format, rows, columns), rows.div_ceil(2));
+        assert_eq!(matrix_threads(format, rows, columns), 64);
+        if enabled {
+            let codes = finite_packed_codes(13, rows, columns, 41);
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters = [rows as u32, columns as u32, 13, 256, 176, 0, 0, 0];
+            let safe = safe_iq_test_pipeline(13, "hybrid_q5_grouped32_matvec", 4);
+            let reference = run_kquant_multirow_test(&safe, &codes, &input, parameters, 2).unwrap();
+            let actual = executor()
+                .unwrap()
+                .run_inner(&codes, &input, parameters, None, TestMatrixSchedule::Production)
+                .unwrap();
+            assert!(
+                actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "Q5 production changed Safe grouped32 bits"
+            );
+        }
+    }
+
+    #[stark_test]
+    fn q5_multirow_and_pipeline_hints_preserve_safe_outputs_and_failures() {
+        let reference_pipeline = safe_q5_multirow_test_pipeline(1, false);
+        let mut candidates = Vec::new();
+        for rows_per_simd in [1u32, 2, 4] {
+            for hinted in [false, true] {
+                candidates.push((rows_per_simd, hinted, safe_q5_multirow_test_pipeline(rows_per_simd, hinted)));
+            }
+        }
+        // A shared 13-row tail, aligned 16-row batches ending in a 13-row
+        // tail, and deliberately unaligned 13-row batches exercise each path.
+        for (rows_per_batch, rows, batches, exact) in
+            [(0usize, 13usize, 1usize, true), (16, 45, 3, true), (13, 39, 3, false)]
+        {
+            for columns in [256usize, 768, 4096, 8192] {
+                let mut codes = finite_packed_codes(13, rows, columns, 41);
+                for (i, block) in codes.chunks_exact_mut(176).enumerate() {
+                    block[..2].copy_from_slice(
+                        &half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125).to_bits().to_le_bytes(),
+                    );
+                    block[2..4].copy_from_slice(
+                        &half::f16::from_f32(0.0004 + ((i * 29) % 131) as f32 * 0.000015625).to_bits().to_le_bytes(),
+                    );
+                }
+                let parameters = [rows as u32, columns as u32, 13, 256, 176, 0, rows_per_batch as u32, 0];
+                let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+                let oracle = packed_f64_oracle(13, &codes, rows, columns, &input, rows_per_batch);
+                let reference = run_kquant_multirow_test(&reference_pipeline, &codes, &input, parameters, 2).unwrap();
+                let scale: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                for &(r, hinted, ref candidate) in &candidates {
+                    let actual =
+                        run_kquant_multirow_test(candidate, &codes, &input, parameters, r as usize * 2).unwrap();
+                    if exact {
+                        assert!(
+                            actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "Q5 multirow Safe bits r={r} hinted={hinted}"
+                        );
+                    }
+                    for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                        assert!(
+                            (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                            "Q5 multirow F64"
+                        );
+                    }
+                    let error: f64 =
+                        actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    assert!((error / scale.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5, "Q5 multirow source RMS");
+                    let large = (0..columns * batches)
+                        .map(|i| {
+                            if i % 2 == 0 {
+                                1e30
+                            } else {
+                                -1e30
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let large_reference =
+                        run_kquant_multirow_test(&reference_pipeline, &codes, &large, parameters, 2).unwrap();
+                    let large_actual =
+                        run_kquant_multirow_test(candidate, &codes, &large, parameters, r as usize * 2).unwrap();
+                    assert!(
+                        large_actual.iter().zip(&large_reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "Q5 multirow fallback bits"
+                    );
+                    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                        assert!(
+                            run_kquant_multirow_test(
+                                candidate,
+                                &codes,
+                                &vec![poison; columns * batches],
+                                parameters,
+                                r as usize * 2
+                            )
+                            .is_err()
+                        );
+                    }
+                }
+            }
+        }
+        let mut zero = vec![0u8; 176];
+        zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+        zero[4..16].fill(1);
+        for (r, _, candidate) in &candidates {
+            assert_eq!(
+                run_kquant_multirow_test(
+                    candidate,
+                    &zero.repeat(13),
+                    &vec![f32::MAX; 256],
+                    [13, 256, 13, 256, 176, 0, 0, 0],
+                    *r as usize * 2
+                )
+                .unwrap(),
+                vec![0.0; 13]
+            );
+        }
+    }
+
+    fn safe_q5_multirow_test_pipeline(
+        rows_per_simd: u32,
+        hinted: bool,
+    ) -> PipelineState {
+        let executor = executor().unwrap();
+        let constants = MTLFunctionConstantValues::new();
+        for (index, value) in [(0, 13u32), (4, 256), (5, 176), (74, rows_per_simd)] {
+            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+        }
+        let name = if rows_per_simd == 1 {
+            "hybrid_q5_grouped32_matvec"
+        } else {
+            "hybrid_q5_multirow_matvec"
+        };
+        let function = executor.library.new_function_with_name_constant_values(name, &constants).unwrap();
+        if hinted {
+            // This descriptor is test-only and exclusively dispatched through
+            // run_kquant_multirow_test/components with exactly 64 threads.
+            let descriptor = metal::MTLComputePipelineDescriptor::new();
+            descriptor.set_compute_function(Some(&function));
+            descriptor.set_max_total_threads_per_threadgroup(64);
+            descriptor.set_thread_group_size_is_multiple_of_thread_execution_width(true);
+            let (pipeline, _) = executor
+                .device
+                .new_compute_pipeline_state_with_descriptor(&descriptor, metal::MTLPipelineOption::NONE)
+                .unwrap();
+            assert_eq!(pipeline.thread_execution_width(), 32);
+            assert_eq!(pipeline.max_total_threads_per_threadgroup(), 64);
+            pipeline
+        } else {
+            executor.device.new_compute_pipeline_state_with_function(&function).unwrap()
+        }
+    }
+
+    #[stark_test]
+    fn q5_grouped32_matches_f64_source_and_safe_fallback() {
+        let (rows, batches) = (13usize, 3usize);
+        let original = safe_iq_test_pipeline(13, "hybrid_packed_factored_matvec", 4);
+        let candidate = safe_iq_test_pipeline(13, "hybrid_q5_grouped32_matvec", 4);
+        for columns in [256usize, 768, 4096, 8192] {
+            let mut codes = finite_packed_codes(13, rows * batches, columns, 41);
+            for (i, block) in codes.chunks_exact_mut(176).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                let dmin = half::f16::from_f32(0.0004 + ((i * 29) % 131) as f32 * 0.000015625);
+                block[..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            let parameters = [(rows * batches) as u32, columns as u32, 13, 256, 176, 0, rows as u32, 0];
+            let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let oracle = packed_f64_oracle(13, &codes, rows * batches, columns, &input, rows);
+            let reference = run_kquant_multirow_test(&original, &codes, &input, parameters, 2).unwrap();
+            let actual = run_kquant_multirow_test(&candidate, &codes, &input, parameters, 2).unwrap();
+            for actual in [&reference, &actual] {
+                for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                    assert!(
+                        (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                        "Q5 grouped32 F64 columns={columns}"
+                    );
+                }
+                let error: f64 =
+                    actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                let scale: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                assert!((error / scale.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5, "Q5 grouped32 source RMS");
+            }
+            let large = (0..columns * batches)
+                .map(|i| {
+                    if i % 2 == 0 {
+                        1e30
+                    } else {
+                        -1e30
+                    }
+                })
+                .collect::<Vec<_>>();
+            let reference = run_kquant_multirow_test(&original, &codes, &large, parameters, 2).unwrap();
+            let actual = run_kquant_multirow_test(&candidate, &codes, &large, parameters, 2).unwrap();
+            assert!(
+                actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "Q5 grouped32 fallback changed bits"
+            );
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                let invalid = vec![poison; columns * batches];
+                assert!(run_kquant_multirow_test(&original, &codes, &invalid, parameters, 2).is_err());
+                assert!(run_kquant_multirow_test(&candidate, &codes, &invalid, parameters, 2).is_err());
+            }
+        }
+        let mut zero = vec![0u8; 176];
+        zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+        zero[4..16].fill(1);
+        let parameters = [(rows * batches) as u32, 256, 13, 256, 176, 0, rows as u32, 0];
+        assert_eq!(
+            run_kquant_multirow_test(
+                &candidate,
+                &zero.repeat(rows * batches),
+                &vec![f32::MAX; 256 * batches],
+                parameters,
+                2
+            )
+            .unwrap(),
+            vec![0.0; rows * batches]
+        );
+    }
+
+    #[stark_test]
+    fn q6_coalesced_factoring_matches_f64_and_preserves_extreme_input_failures() {
+        let (rows, batches) = (13usize, 3usize);
+        let original = safe_iq_test_pipeline(14, "hybrid_packed_block_matvec", 4);
+        let candidates = [2u32, 4].map(|chains| (chains, safe_q6_coalesced_test_pipeline(chains)));
+        for columns in [256usize, 768, 4096, 8192] {
+            let mut codes = finite_packed_codes(14, rows * batches, columns, 41);
+            // Include non-power-of-two half scales so moving d outside the
+            // block dot is qualified against actual decoded F32 weights.
+            for (i, block) in codes.chunks_exact_mut(210).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                block[208..210].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            let parameters = [(rows * batches) as u32, columns as u32, 14, 256, 210, 0, rows as u32, 0];
+            let input = (0..columns * batches).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let oracle = packed_f64_oracle(14, &codes, rows * batches, columns, &input, rows);
+            let reference = run_kquant_multirow_test(&original, &codes, &input, parameters, 2).unwrap();
+            for (chains, candidate) in &candidates {
+                let actual = run_kquant_multirow_test(candidate, &codes, &input, parameters, 2).unwrap();
+                for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                    let bound = 2e-6 * absolute.max(1.0);
+                    assert!(
+                        (f64::from(reference[row]) - expected).abs() <= bound,
+                        "Q6 old block F64 columns={columns}"
+                    );
+                    assert!(
+                        (f64::from(actual[row]) - expected).abs() <= bound,
+                        "Q6 coalesced factoring F64 chains={chains} columns={columns}"
+                    );
+                }
+                let large = (0..columns * batches)
+                    .map(|i| {
+                        if i % 2 == 0 {
+                            1e30
+                        } else {
+                            -1e30
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let reference = run_kquant_multirow_test(&original, &codes, &large, parameters, 2).unwrap();
+                let actual = run_kquant_multirow_test(candidate, &codes, &large, parameters, 2).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "Q6 coalesced factoring changed extreme-input fallback chains={chains}"
+                );
+                for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+                    let invalid = vec![poison; columns * batches];
+                    assert!(run_kquant_multirow_test(&original, &codes, &invalid, parameters, 2).is_err());
+                    assert!(run_kquant_multirow_test(candidate, &codes, &invalid, parameters, 2).is_err());
+                }
+            }
+        }
+        let mut zero = vec![0u8; 210];
+        zero[128..192].fill(0xaa);
+        zero[192..208].fill(1);
+        zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+        let codes = zero.repeat(rows * batches);
+        let input = vec![f32::MAX; 256 * batches];
+        let parameters = [(rows * batches) as u32, 256, 14, 256, 210, 0, rows as u32, 0];
+        for (_, candidate) in &candidates {
+            assert_eq!(
+                run_kquant_multirow_test(candidate, &codes, &input, parameters, 2).unwrap(),
+                vec![0.0; rows * batches]
+            );
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q6_coalesced_factoring_gpu_component_timings() {
+        let cases = [
+            ("glm_q6k_main", 8192usize, 4096usize),
+            ("glm_q6k_output", 4096, 8192),
+            ("glm_q6k_shared_down", 4096, 2048),
+        ];
+        let executor = executor().unwrap();
+        let pipelines = [
+            ("old_block", 0u32, safe_iq_test_pipeline(14, "hybrid_packed_block_matvec", 4)),
+            ("coalesced_factored2", 2, safe_q6_coalesced_test_pipeline(2)),
+            ("coalesced_factored4", 4, safe_q6_coalesced_test_pipeline(4)),
+        ];
+        for (label, rows, columns) in cases {
+            let matrix_bytes = rows * columns / 256 * 210;
+            let row_bytes = matrix_bytes / rows;
+            let banks = (160usize * 1024 * 1024).div_ceil(matrix_bytes);
+            let mut codes = vec![0u8; matrix_bytes * banks];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for (i, block) in codes.chunks_exact_mut(210).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                block[208..210].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let mut oracle = Vec::new();
+            for bank in 0..banks {
+                for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                    let at = bank * matrix_bytes + row * row_bytes;
+                    let expected = packed_f64_oracle(14, &codes[at..at + row_bytes], 1, columns, &input, 0)[0];
+                    oracle.push((bank * rows + row, expected));
+                }
+            }
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let parameters = [rows as u32, columns as u32, 14u32, 256, 210, 0, 0, 0];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            let mut maximum_f64_error_over_absolute_sum = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&input), 0, 1);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            let offsets = [0u32; 4];
+                            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                            for i in 0..banks {
+                                let bank = (i + replay) % banks;
+                                encoding.set_buffer(Some(&codes), bank * matrix_bytes, 0);
+                                encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(2),
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: 64,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: all owned shared output banks have completed writers.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                            }
+                            .to_vec();
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "Q6 coalesced component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                        for &(row, (expected, absolute)) in &oracle {
+                            maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                                .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                        }
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, chains, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": 14, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "schedule": schedule, "partial_chains": chains,
+                            "pair_candidate_partial_chains": (pair + 1) * 2,
+                            "rows_per_group": 2, "threads_per_group": 64,
+                            "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "rotating_banks": banks, "encoded_population_bytes": matrix_bytes * banks,
+                            "warm_samples": samples.len(), "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                            "f64_oracle_rows": oracle.len(),
+                            "timer_scope": "same_process_safe_ABBA_serial_rotating_banks_gpu_timestamps",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "Q6 coalesced component source relative RMS");
+                    assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "Q6 coalesced component F64 gate");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q5_grouped32_gpu_component_timings() {
+        let cases = [("glm_q5k_main", 8192usize, 4096usize), ("glm_q5k_output", 4096, 8192)];
+        let executor = executor().unwrap();
+        let pipelines = [
+            ("old_factored", 0u32, safe_iq_test_pipeline(13, "hybrid_packed_factored_matvec", 4)),
+            ("grouped32", 1, safe_iq_test_pipeline(13, "hybrid_q5_grouped32_matvec", 4)),
+        ];
+        for (label, rows, columns) in cases {
+            let matrix_bytes = rows * columns / 256 * 176;
+            let row_bytes = matrix_bytes / rows;
+            let banks = (160usize * 1024 * 1024).div_ceil(matrix_bytes);
+            let mut codes = vec![0u8; matrix_bytes * banks];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for (i, block) in codes.chunks_exact_mut(176).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                let dmin = half::f16::from_f32(0.0004 + ((i * 29) % 131) as f32 * 0.000015625);
+                block[..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let mut oracle = Vec::new();
+            for bank in 0..banks {
+                for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                    let at = bank * matrix_bytes + row * row_bytes;
+                    let expected = packed_f64_oracle(13, &codes[at..at + row_bytes], 1, columns, &input, 0)[0];
+                    oracle.push((bank * rows + row, expected));
+                }
+            }
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let parameters = [rows as u32, columns as u32, 13u32, 256, 176, 0, 0, 0];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 1];
+            let mut reference = Vec::<f32>::new();
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            let mut maximum_f64_error_over_absolute_sum = [0.0f64; 3];
+            for replay in 0..7 {
+                let candidate = 1usize;
+                for variant in if replay % 2 == 0 {
+                    [0, candidate, candidate, 0]
+                } else {
+                    [candidate, 0, 0, candidate]
+                } {
+                    let (_, _, pipeline) = &pipelines[variant];
+                    let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                        let command = executor.queue.command_buffer().unwrap();
+                        let encoding = command.compute_command_encoder().unwrap();
+                        encoding.set_compute_pipeline_state(pipeline);
+                        encoding.set_buffer(Some(&input), 0, 1);
+                        encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+                        let offsets = [0u32; 4];
+                        encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                        for i in 0..banks {
+                            let bank = (i + replay) % banks;
+                            encoding.set_buffer(Some(&codes), bank * matrix_bytes, 0);
+                            encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                            encoding.dispatch_threadgroups(
+                                MTLSize {
+                                    width: rows.div_ceil(2),
+                                    height: 1,
+                                    depth: 1,
+                                },
+                                MTLSize {
+                                    width: 64,
+                                    height: 1,
+                                    depth: 1,
+                                },
+                            );
+                        }
+                        encoding.end_encoding();
+                        command.commit();
+                        command.wait_until_completed();
+                        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                        // SAFETY: all owned shared output banks have completed writers.
+                        let values = unsafe {
+                            std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                        }
+                        .to_vec();
+                        (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                    });
+                    assert!(values.iter().all(|v| v.is_finite()), "Q5 grouped32 component nonfinite");
+                    if reference.is_empty() {
+                        reference = values.clone();
+                    }
+                    if replay > 0 {
+                        timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                    }
+                    maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                        values
+                            .iter()
+                            .zip(&reference)
+                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                            .fold(0.0, f64::max),
+                    );
+                    let squared_error: f64 =
+                        values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    relative_rms_error[variant] = relative_rms_error[variant]
+                        .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    for &(row, (expected, absolute)) in &oracle {
+                        maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                            .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, _, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": 13, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "schedule": schedule,
+                            "input_bound_policy": "per_value_guard_with_original_fallback",
+                            "rows_per_group": 2, "threads_per_group": 64,
+                            "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "rotating_banks": banks, "encoded_population_bytes": matrix_bytes * banks,
+                            "warm_samples": samples.len(), "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                            "f64_oracle_rows": oracle.len(),
+                            "timer_scope": "same_process_safe_ABBA_serial_rotating_banks_gpu_timestamps",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "Q5 grouped32 component source relative RMS");
+                    assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "Q5 grouped32 component F64 gate");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q5_multirow_pipeline_hints_gpu_component_timings() {
+        let cases = [("glm_q5k_main", 8192usize, 4096usize), ("glm_q5k_output", 4096, 8192)];
+        let executor = executor().unwrap();
+        let mut pipelines = Vec::new();
+        for r in [1u32, 2, 4] {
+            for hinted in [false, true] {
+                pipelines.push((
+                    format!(
+                        "r{r}_{}",
+                        if hinted {
+                            "hinted64"
+                        } else {
+                            "default"
+                        }
+                    ),
+                    r,
+                    hinted,
+                    safe_q5_multirow_test_pipeline(r, hinted),
+                ));
+            }
+        }
+        for (label, rows, columns) in cases {
+            let matrix_bytes = rows * columns / 256 * 176;
+            let row_bytes = matrix_bytes / rows;
+            let banks = (160usize * 1024 * 1024).div_ceil(matrix_bytes);
+            let mut codes = vec![0u8; matrix_bytes * banks];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for (i, block) in codes.chunks_exact_mut(176).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                let dmin = half::f16::from_f32(0.0004 + ((i * 29) % 131) as f32 * 0.000015625);
+                block[..2].copy_from_slice(&d.to_bits().to_le_bytes());
+                block[2..4].copy_from_slice(&dmin.to_bits().to_le_bytes());
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let mut oracle = Vec::new();
+            for bank in 0..banks {
+                for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                    let at = bank * matrix_bytes + row * row_bytes;
+                    let expected = packed_f64_oracle(13, &codes[at..at + row_bytes], 1, columns, &input, 0)[0];
+                    oracle.push((bank * rows + row, expected));
+                }
+            }
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let parameters = [rows as u32, columns as u32, 13u32, 256, 176, 0, 0, 0];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 5];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 6];
+            let mut maximum_absolute_error = [0.0f64; 6];
+            let mut relative_rms_error = [0.0f64; 6];
+            let mut maximum_f64_error_over_absolute_sum = [0.0f64; 6];
+            for replay in 0..7 {
+                for pair_step in 0..5 {
+                    let candidate = (pair_step + replay) % 5 + 1;
+                    for variant in if replay % 2 == 0 {
+                        [0, candidate, candidate, 0]
+                    } else {
+                        [candidate, 0, 0, candidate]
+                    } {
+                        let (_, rows_per_simd, _, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&input), 0, 1);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            let offsets = [0u32; 4];
+                            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                            for i in 0..banks {
+                                let bank = (i + replay) % banks;
+                                encoding.set_buffer(Some(&codes), bank * matrix_bytes, 0);
+                                encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_simd as usize * 2),
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: 64,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: all owned shared output banks have completed writers.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                            }
+                            .to_vec();
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "Q5 multirow/PSO component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                        for &(row, (expected, absolute)) in &oracle {
+                            maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                                .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                        }
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, hinted, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": 13, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "schedule": schedule,
+                            "input_bound_policy": "per_value_guard_with_original_fallback",
+                            "rows_per_simd": rows_per_simd, "descriptor_requested_max_threads": if *hinted {64} else {0},
+                            "descriptor_simd_multiple": hinted, "pair_candidate": pipelines[pair+1].0.as_str(),
+                            "rows_per_group": rows_per_simd*2, "threads_per_group": 64,
+                            "bitwise_equal_to_current_r1": bitwise_equal[variant],
+                            "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "rotating_banks": banks, "encoded_population_bytes": matrix_bytes * banks,
+                            "warm_samples": samples.len(), "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                            "f64_oracle_rows": oracle.len(),
+                            "timer_scope": "same_process_safe_ABBA_serial_rotating_banks_gpu_timestamps",
+                        })
+                    );
+                    assert!(bitwise_equal[variant], "Q5 multirow/PSO component changed aligned Safe bits");
+                    assert!(relative_rms_error[variant] <= 2e-5, "Q5 multirow/PSO component source relative RMS");
+                    assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "Q5 multirow/PSO component F64 gate");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q6_grouped16_gpu_component_timings() {
+        let cases = [
+            ("glm_q6k_main", 8192usize, 4096usize),
+            ("glm_q6k_output", 4096, 8192),
+            ("glm_q6k_shared_down", 4096, 2048),
+        ];
+        let executor = executor().unwrap();
+        let pipelines = [
+            ("old_block", "source", 2usize, safe_iq_test_pipeline(14, "hybrid_packed_block_matvec", 4)),
+            ("grouped16_guarded", "per_value_guard_with_original_fallback", 4, safe_q6_grouped16_test_pipeline(false)),
+            ("grouped16_bound_only", "host_verified_bounded_diagnostic_only", 4, safe_q6_grouped16_test_pipeline(true)),
+        ];
+        for (label, rows, columns) in cases {
+            let matrix_bytes = rows * columns / 256 * 210;
+            let row_bytes = matrix_bytes / rows;
+            let banks = (160usize * 1024 * 1024).div_ceil(matrix_bytes);
+            let mut codes = vec![0u8; matrix_bytes * banks];
+            let mut state = 0x9135_acedu32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for (i, block) in codes.chunks_exact_mut(210).enumerate() {
+                let d = half::f16::from_f32(0.001 + ((i * 17) % 257) as f32 * 0.00003125);
+                block[208..210].copy_from_slice(&d.to_bits().to_le_bytes());
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            assert!(input.iter().all(|v| v.is_finite() && v.abs() <= 1e20), "bounded-only diagnostic input envelope");
+            let mut oracle = Vec::new();
+            for bank in 0..banks {
+                for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                    let at = bank * matrix_bytes + row * row_bytes;
+                    let expected = packed_f64_oracle(14, &codes[at..at + row_bytes], 1, columns, &input, 0)[0];
+                    oracle.push((bank * rows + row, expected));
+                }
+            }
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let parameters = [rows as u32, columns as u32, 14u32, 256, 210, 0, 0, 0];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut grouped_reference = Vec::<f32>::new();
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            let mut maximum_f64_error_over_absolute_sum = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&input), 0, 1);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            let offsets = [0u32; 4];
+                            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                            for i in 0..banks {
+                                let bank = (i + replay) % banks;
+                                encoding.set_buffer(Some(&codes), bank * matrix_bytes, 0);
+                                encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: 64,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: all owned shared output banks have completed writers.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                            }
+                            .to_vec();
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "Q6 grouped16 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if variant == 1 && grouped_reference.is_empty() {
+                            grouped_reference = values.clone();
+                        }
+                        if variant == 2 {
+                            assert!(
+                                values.iter().zip(&grouped_reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                                "Q6 grouped16 guard removal changed component bits"
+                            );
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                        for &(row, (expected, absolute)) in &oracle {
+                            maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                                .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                        }
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, bound_policy, rows_per_group, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": 14, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "schedule": schedule, "input_bound_policy": bound_policy,
+                            "pair_candidate_input_bound_policy": pipelines[pair+1].1,
+                            "input_envelope_verified_on_host": true, "input_maximum_absolute_bound": 1e20,
+                            "rows_per_group": rows_per_group, "threads_per_group": 64,
+                            "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "rotating_banks": banks, "encoded_population_bytes": matrix_bytes * banks,
+                            "warm_samples": samples.len(), "median_gpu_microseconds_per_matrix": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": matrix_bytes as f64 / seconds / 1e9,
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                            "f64_oracle_rows": oracle.len(),
+                            "timer_scope": "same_process_safe_ABBA_serial_rotating_banks_gpu_timestamps",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "Q6 grouped16 component source relative RMS");
+                    assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "Q6 grouped16 component F64 gate");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn q8_block_gpu_component_timings() {
+        let cases =
+            [("glm_q8_mla_qb", 16_384usize, 1536usize), ("glm_q8_kda_fb", 8192, 128), ("glm_q8_kda_fa", 128, 4096)];
+        let executor = executor().unwrap();
+        for (label, rows, columns) in cases {
+            let code_bytes = rows * columns / 32 * 34;
+            // Rotate enough distinct source ranges to exceed cache capacity,
+            // including the small 128-row case that previously regressed.
+            let banks = (128 * 1024 * 1024usize).div_ceil(code_bytes).clamp(1, 256);
+            let mut codes = vec![0u8; code_bytes * banks];
+            let mut state = 0x874b_19d3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(34) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let output = executor.device.new_buffer(rows * banks * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let format = MatrixFormat::Packed(8);
+            let pipelines = [
+                executor.pipeline_with_tiling(format, false).unwrap(),
+                executor.cached_pipeline(format, "hybrid_packed_block_matvec", &executor.block_test_pipelines).unwrap(),
+            ];
+            let parameters = [rows as u32, columns as u32, 8, 32, 34, 0, 0, 0];
+            let offsets = [0u32; 4];
+            let mut timings = [Vec::new(), Vec::new()];
+            let mut maximum_absolute_error = [0.0f64; 2];
+            let mut relative_rms_error = [0.0f64; 2];
+            let mut reference = Vec::new();
+            for replay in 0..13 {
+                for schedule in if replay % 2 == 0 {
+                    [0, 1]
+                } else {
+                    [1, 0]
+                } {
+                    let (values, gpu_seconds) = objc2::rc::autoreleasepool(|_| {
+                        let command = executor.queue.command_buffer().unwrap();
+                        let encoding = command.compute_command_encoder().unwrap();
+                        encoding.set_compute_pipeline_state(&pipelines[schedule]);
+                        encoding.set_buffer(Some(&input), 0, 1);
+                        encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+                        encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+                        for bank in 0..banks {
+                            encoding.set_buffer(Some(&codes), bank * code_bytes, 0);
+                            encoding.set_buffer(Some(&output), bank * rows * 4, 2);
+                            encoding.dispatch_threadgroups(
+                                MTLSize {
+                                    width: if schedule == 0 {
+                                        rows
+                                    } else {
+                                        rows.div_ceil(2)
+                                    },
+                                    height: 1,
+                                    depth: 1,
+                                },
+                                MTLSize {
+                                    width: if schedule == 0 {
+                                        256
+                                    } else {
+                                        64
+                                    },
+                                    height: 1,
+                                    depth: 1,
+                                },
+                            );
+                        }
+                        encoding.end_encoding();
+                        command.commit();
+                        command.wait_until_completed();
+                        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                        // SAFETY: each completed matrix dispatch wrote a
+                        // disjoint rows-sized range of this owned buffer.
+                        let values = unsafe {
+                            std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * banks)
+                        }
+                        .to_vec();
+                        (values, (command.gpu_end_time() - command.gpu_start_time()) / banks as f64)
+                    });
+                    assert!(values.iter().all(|value| value.is_finite()), "Q8 component nonfinite case={label}");
+                    if replay > 0 {
+                        timings[schedule].push(gpu_seconds);
+                    }
+                    if schedule == 0 {
+                        reference = values;
+                    } else {
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[schedule] = relative_rms_error[schedule]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                        maximum_absolute_error[schedule] = maximum_absolute_error[schedule].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                    }
+                }
+            }
+            for (schedule, samples) in timings.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                let gpu_seconds = (samples[5] + samples[6]) * 0.5;
+                assert!(relative_rms_error[schedule] <= 2e-5, "Q8 component relative RMS case={label}");
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "component": label, "kind": 8, "rows": rows, "columns": columns,
+                        "encoded_bytes_per_matrix": code_bytes, "banks": banks,
+                        "encoded_population_bytes": code_bytes * banks, "warm_samples": samples.len(),
+                        "schedule": if schedule == 0 { "scalar" } else { "block2" },
+                        "median_gpu_microseconds_per_matrix": gpu_seconds * 1e6,
+                        "minimum_gpu_microseconds_per_matrix": samples[0] * 1e6,
+                        "maximum_gpu_microseconds_per_matrix": samples[samples.len() - 1] * 1e6,
+                        "encoded_gigabytes_per_second": code_bytes as f64 / gpu_seconds / 1e9,
+                        "maximum_absolute_error_vs_scalar": maximum_absolute_error[schedule],
+                        "relative_rms_error_vs_scalar": relative_rms_error[schedule],
+                        "timer_scope": "serial_rotating_banks_gpu_timestamps_uploads_excluded",
+                        "order": "alternating_two_variant_order_after_one_warmup_per_variant",
+                    })
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn q8_hot_shapes_match_f64_and_keep_small_projection_scalar() {
+        let format = MatrixFormat::Packed(8);
+        for (rows, columns) in [(16_384, 1536), (8192, 128), (128, 4096), (13, 128)] {
+            let codes = finite_packed_codes(8, rows, columns, 41);
+            let input = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+            let parameters = [rows as u32, columns as u32, 8, 32, 34, 0, 0, 0];
+            let run = |schedule| {
+                objc2::rc::autoreleasepool(|_| {
+                    executor().unwrap().run_inner(&codes, &input, parameters, None, schedule).unwrap()
+                })
+            };
+            let actual = run(TestMatrixSchedule::Production);
+            let scalar = run(TestMatrixSchedule::Scalar);
+            let blocked = run(TestMatrixSchedule::Block);
+            if q8_block_shape(format, rows, columns) {
+                assert_eq!(actual, blocked, "Q8 hot shape did not use the block schedule");
+            } else {
+                assert_eq!(actual, scalar, "Q8 non-admitted shape changed scalar bits");
+            }
+            let row_bytes = columns / 32 * 34;
+            for row in [0, 1, rows / 2, rows - 1] {
+                let (expected, absolute) =
+                    packed_f64_oracle(8, &codes[row * row_bytes..(row + 1) * row_bytes], 1, columns, &input, 0)[0];
+                let bound = 2e-6 * absolute.max(1.0);
+                assert!(
+                    (f64::from(actual[row]) - expected).abs() <= bound,
+                    "Q8 production F64 rows={rows} columns={columns}"
+                );
+                assert!(
+                    (f64::from(blocked[row]) - expected).abs() <= bound,
+                    "Q8 block F64 rows={rows} columns={columns}"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_geometry_gpu_component_timings() {
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        let fast =
+            executor.packed_fast_library.as_ref().expect("paired IQ component requires STARK_GLM53_PACKED_FAST_MATH=1");
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let indices = (0..experts as u32).collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&indices)).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let mut pipelines = Vec::new();
+            for (geometry, row_group, original) in [
+                ("original8", 8usize, true),
+                ("rows1", 1, false),
+                ("rows2", 2, false),
+                ("rows4", 4, false),
+                ("rows8", 8, false),
+            ] {
+                for (math, library) in [("safe", &executor.library), ("fast", fast)] {
+                    let constants = MTLFunctionConstantValues::new();
+                    for (index, value) in [(0, kind), (4, 256), (5, bytes as u32), (70, row_group as u32)] {
+                        constants.set_constant_value_type_at_index(
+                            NonNull::from(&value).cast(),
+                            MTLDataType::UInt,
+                            index,
+                        );
+                    }
+                    let name = if original {
+                        "hybrid_graph_iq_indexed_vector8"
+                    } else {
+                        "hybrid_graph_iq_indexed_rows"
+                    };
+                    let function = library.new_function_with_name_constant_values(name, &constants).unwrap();
+                    let pipeline = executor.device.new_compute_pipeline_state_with_function(&function).unwrap();
+                    pipelines.push((math, geometry, row_group, pipeline));
+                }
+            }
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let mut timings = vec![Vec::new(); pipelines.len()];
+            let mut maximum_absolute_error = vec![0.0f64; pipelines.len()];
+            let mut relative_rms_error = vec![0.0f64; pipelines.len()];
+            let mut bitwise_same_mode = vec![true; pipelines.len()];
+            let mut reference = [Vec::<f32>::new(), Vec::<f32>::new()];
+            for replay in 0..7 {
+                for pair_step in 0..5 {
+                    let pair = (pair_step + replay) % 5;
+                    for mode in if replay % 2 == 0 {
+                        [0, 1, 1, 0]
+                    } else {
+                        [1, 0, 0, 1]
+                    } {
+                        let variant = pair * 2 + mode;
+                        let (_, _, row_group, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*row_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: row_group * 32,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: both owned shared buffers have completed
+                            // GPU writers; output has rows*experts initialized slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|value| value.is_finite()), "IQ geometry nonfinite case={label}");
+                        if replay > 0 {
+                            timings[variant].push(seconds);
+                        }
+                        if pair == 0 {
+                            reference[mode] = values.clone();
+                        }
+                        bitwise_same_mode[variant] &=
+                            values.iter().zip(&reference[mode]).all(|(a, b)| a.to_bits() == b.to_bits());
+                        let squared_error: f64 = values
+                            .iter()
+                            .zip(&reference[0])
+                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                            .sum();
+                        let squared_reference: f64 = reference[0].iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference[0])
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                    }
+                }
+            }
+            for (variant, samples) in timings.iter_mut().enumerate() {
+                samples.sort_by(f64::total_cmp);
+                let seconds = (samples[5] + samples[6]) * 0.5;
+                let (math, geometry, row_group, pipeline) = &pipelines[variant];
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "component": label, "kind": kind, "rows": rows, "columns": columns,
+                        "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                        "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                        "math_mode": math, "geometry": geometry, "rows_per_group": row_group,
+                        "threads_per_group": row_group * 32,
+                        "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                        "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                        "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                        "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                        "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                        "maximum_absolute_error_vs_safe_original": maximum_absolute_error[variant],
+                        "relative_rms_error_vs_safe_original": relative_rms_error[variant],
+                        "bitwise_same_mode_as_original": bitwise_same_mode[variant],
+                        "timer_scope": "same_process_library_ABBA_serial_rotating_groups_gpu_timestamps",
+                    })
+                );
+                assert!(relative_rms_error[variant] <= 2e-5, "IQ geometry relative RMS case={label}");
+                if *math == "safe" {
+                    assert!(bitwise_same_mode[variant], "IQ safe geometry changed bits case={label}");
+                }
+            }
+        }
+    }
+
+    fn safe_iq_test_pipeline(
+        kind: u32,
+        name: &str,
+        rows_per_simd: u32,
+    ) -> PipelineState {
+        let executor = executor().unwrap();
+        let (_, bytes) = weights::block_layout(kind).unwrap();
+        let constants = MTLFunctionConstantValues::new();
+        for (index, value) in [(0, kind), (4, 256), (5, bytes as u32), (71, rows_per_simd)] {
+            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+        }
+        let function = executor.library.new_function_with_name_constant_values(name, &constants).unwrap();
+        executor.device.new_compute_pipeline_state_with_function(&function).unwrap()
+    }
+
+    fn safe_iq_checked_hint_pipeline(
+        kind: u32,
+        factor: bool,
+        hinted: bool,
+    ) -> PipelineState {
+        let format = MatrixFormat::Packed(kind);
+        let name = if factor {
+            iq_bound_factor_name(format).unwrap()
+        } else {
+            iq_bound_typed_name(format).unwrap()
+        };
+        if !hinted {
+            return safe_iq_test_pipeline(kind, name, 4);
+        }
+        let executor = executor().unwrap();
+        let (_, bytes) = weights::block_layout(kind).unwrap();
+        let constants = MTLFunctionConstantValues::new();
+        for (index, value) in [(0, kind), (4, 256), (5, bytes as u32), (71, 4)] {
+            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+        }
+        let function = executor.library.new_function_with_name_constant_values(name, &constants).unwrap();
+        let descriptor = metal::MTLComputePipelineDescriptor::new();
+        descriptor.set_compute_function(Some(&function));
+        descriptor.set_max_total_threads_per_threadgroup(64);
+        descriptor.set_thread_group_size_is_multiple_of_thread_execution_width(true);
+        let (pipeline, _) = executor
+            .device
+            .new_compute_pipeline_state_with_descriptor(&descriptor, metal::MTLPipelineOption::NONE)
+            .unwrap();
+        assert_eq!(pipeline.thread_execution_width(), 32);
+        assert_eq!(pipeline.max_total_threads_per_threadgroup(), 64);
+        pipeline
+    }
+
+    fn safe_staged_iq_test_pipeline(kind: u32) -> PipelineState {
+        safe_iq_test_pipeline(
+            kind,
+            match kind {
+                17 => "hybrid_graph_iq_indexed_staged_iq2xs",
+                18 => "hybrid_graph_iq_indexed_staged_iq3xxs",
+                _ => unreachable!("staged IQ test kind"),
+            },
+            4,
+        )
+    }
+
+    fn safe_grouped32_iq_test_pipeline(kind: u32) -> PipelineState {
+        safe_iq_test_pipeline(
+            kind,
+            match kind {
+                17 => "hybrid_graph_iq_indexed_grouped32_iq2xs",
+                18 => "hybrid_graph_iq_indexed_grouped32_iq3xxs",
+                _ => unreachable!("grouped32 IQ test kind"),
+            },
+            4,
+        )
+    }
+
+    fn safe_bound_grouped32_iq_test_pipeline(
+        kind: u32,
+        input: &[f32],
+    ) -> Result<PipelineState> {
+        // This predicate is deliberately host-only and test-only. It does not
+        // create a trusted DeviceVector or change any production precondition.
+        if input.is_empty() || input.iter().any(|value| !value.is_finite() || value.abs() > 1.0e20) {
+            return Err(Error::Invalid("bound IQ diagnostic requires finite bounded host input"));
+        }
+        Ok(safe_iq_test_pipeline(
+            kind,
+            match kind {
+                17 => "hybrid_graph_iq_indexed_grouped32_bound_iq2xs",
+                18 => "hybrid_graph_iq_indexed_grouped32_bound_iq3xxs",
+                _ => return Err(Error::Invalid("bound IQ diagnostic kind")),
+            },
+            4,
+        ))
+    }
+
+    fn safe_iq_sweep_pipeline(
+        kind: u32,
+        rows: usize,
+        typed16: bool,
+        input: &[f32],
+        code_offset: usize,
+    ) -> Result<PipelineState> {
+        if !matches!(rows, 1 | 2 | 4 | 8)
+            || !matches!(kind, 17 | 18)
+            || (typed16 && !code_offset.is_multiple_of(2))
+            || input.is_empty()
+            || input.iter().any(|x| !x.is_finite() || x.abs() > 1.0e20)
+        {
+            return Err(Error::Invalid("IQ sweep alignment or host input is not admitted"));
+        }
+        let name = format!(
+            "hybrid_iq_sweep_{}_r{rows}_{}",
+            if kind == 17 {
+                "iq2xs"
+            } else {
+                "iq3xxs"
+            },
+            if typed16 {
+                "typed16"
+            } else {
+                "byte"
+            }
+        );
+        Ok(safe_iq_test_pipeline(kind, &name, 4))
+    }
+
+    fn safe_iq_arithmetic_pipeline(
+        kind: u32,
+        mode: usize,
+        input: &[f32],
+        code_offset: usize,
+    ) -> Result<PipelineState> {
+        if !matches!(mode, 1 | 2)
+            || !matches!(kind, 17 | 18)
+            || !code_offset.is_multiple_of(2)
+            || input.is_empty()
+            || input.iter().any(|x| !x.is_finite() || x.abs() > 1.0e20)
+        {
+            return Err(Error::Invalid("IQ arithmetic diagnostic host input or alignment is not admitted"));
+        }
+        let name = format!(
+            "hybrid_iq_arithmetic_{}_{}",
+            if kind == 17 {
+                "iq2xs"
+            } else {
+                "iq3xxs"
+            },
+            if mode == 1 {
+                "factor"
+            } else {
+                "fma"
+            }
+        );
+        Ok(safe_iq_test_pipeline(kind, &name, 4))
+    }
+
+    fn safe_gpu_bound_iq_test_pipeline(kind: u32) -> PipelineState {
+        safe_iq_test_pipeline(kind, iq_bound_name(MatrixFormat::Packed(kind)).unwrap(), 4)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "test keeps indexed geometry and source buffers explicit")]
+    fn run_iq_indexed_test(
+        pipeline: &PipelineState,
+        codes: &[u8],
+        input: &[f32],
+        indices: &[u32],
+        parameters: [u32; 4],
+        rows_per_group: usize,
+        threads: usize,
+    ) -> Result<Vec<f32>> {
+        run_iq_indexed_test_with_bound(pipeline, codes, input, indices, parameters, rows_per_group, threads, false)
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "test keeps indexed geometry and source buffers explicit")]
+    fn run_iq_indexed_test_with_bound(
+        pipeline: &PipelineState,
+        codes: &[u8],
+        input: &[f32],
+        indices: &[u32],
+        parameters: [u32; 4],
+        rows_per_group: usize,
+        threads: usize,
+        gpu_bound: bool,
+    ) -> Result<Vec<f32>> {
+        run_iq_indexed_test_with_offsets(
+            pipeline,
+            codes,
+            input,
+            indices,
+            parameters,
+            rows_per_group,
+            threads,
+            gpu_bound,
+            if gpu_bound {
+                16
+            } else {
+                0
+            },
+        )
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "test keeps indexed geometry and source buffers explicit")]
+    fn run_iq_indexed_test_with_offsets(
+        pipeline: &PipelineState,
+        codes: &[u8],
+        input: &[f32],
+        indices: &[u32],
+        parameters: [u32; 4],
+        rows_per_group: usize,
+        threads: usize,
+        gpu_bound: bool,
+        code_offset: usize,
+    ) -> Result<Vec<f32>> {
+        objc2::rc::autoreleasepool(|_| {
+            let executor = executor()?;
+            let vector_offset = if gpu_bound {
+                4
+            } else {
+                0
+            };
+            let mut code_storage = vec![0x75u8; code_offset];
+            code_storage.extend_from_slice(codes);
+            let codes = buffer(executor, &code_storage)?;
+            let mut input_storage = if gpu_bound {
+                vec![7.25]
+            } else {
+                Vec::new()
+            };
+            input_storage.extend_from_slice(input);
+            let input = buffer(executor, bytemuck::cast_slice(&input_storage))?;
+            let mut index_storage = if gpu_bound {
+                vec![u32::MAX]
+            } else {
+                Vec::new()
+            };
+            index_storage.extend_from_slice(indices);
+            let indices_buffer = buffer(executor, bytemuck::cast_slice(&index_storage))?;
+            let batches = if parameters[3] != 0 {
+                indices.len()
+            } else {
+                1
+            };
+            let bounds = buffer(executor, bytemuck::cast_slice(&vec![12345u32; batches + 2]))?;
+            let count = parameters[0] as usize * indices.len();
+            let output = buffer(executor, bytemuck::cast_slice(&vec![7.25f32; count + 2]))?;
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32]))?;
+            let command = executor.queue.command_buffer().unwrap();
+            let encoding = command.compute_command_encoder().unwrap();
+            if gpu_bound {
+                let function = executor.library.new_function_with_name("hybrid_graph_iq_input_bound").unwrap();
+                let prepass = executor.device.new_compute_pipeline_state_with_function(&function).unwrap();
+                encoding.set_compute_pipeline_state(&prepass);
+                encoding.set_buffer(Some(&input), vector_offset, 0);
+                encoding.set_buffer(Some(&bounds), 4, 1);
+                encoding.set_buffer(Some(&failure), 0, 30);
+                let bound_parameters = [parameters[1], batches as u32];
+                encoding.set_bytes(
+                    NonNull::from(&bound_parameters).cast(),
+                    std::mem::size_of_val(&bound_parameters),
+                    2,
+                );
+                encoding.dispatch_threadgroups(
+                    MTLSize {
+                        width: batches,
+                        height: 1,
+                        depth: 1,
+                    },
+                    MTLSize {
+                        width: 256,
+                        height: 1,
+                        depth: 1,
+                    },
+                );
+                encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+            }
+            encoding.set_compute_pipeline_state(pipeline);
+            for (index, value) in [&codes, &input, &output].into_iter().enumerate() {
+                encoding.set_buffer(
+                    Some(value),
+                    match index {
+                        0 => code_offset,
+                        1 => vector_offset,
+                        _ => 4,
+                    },
+                    index,
+                );
+            }
+            encoding.set_buffer(Some(&indices_buffer), vector_offset, 6);
+            if gpu_bound {
+                encoding.set_buffer(Some(&bounds), 4, 7);
+            }
+            encoding.set_buffer(Some(&failure), 0, 30);
+            encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+            encoding.dispatch_threadgroups(
+                MTLSize {
+                    width: (parameters[0] as usize).div_ceil(rows_per_group),
+                    height: indices.len(),
+                    depth: 1,
+                },
+                MTLSize {
+                    width: threads,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoding.end_encoding();
+            command.commit();
+            command.wait_until_completed();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            // SAFETY: owned shared test buffers have completed GPU writers.
+            let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), count + 2) };
+            assert_eq!(values[0], 7.25, "IQ indexed prefix guard changed");
+            assert_eq!(values[count + 1], 7.25, "IQ indexed row tail guard changed");
+            if gpu_bound {
+                let flags =
+                    unsafe { std::slice::from_raw_parts(bounds.contents().as_ptr().cast::<u32>(), batches + 2) };
+                assert_eq!(flags[0], 12345, "IQ bound prefix guard changed");
+                assert_eq!(flags[batches + 1], 12345, "IQ bound suffix guard changed");
+                for batch in 0..batches {
+                    let start = batch * parameters[1] as usize;
+                    let end = start + parameters[1] as usize;
+                    let expected = u32::from(
+                        input_storage[usize::from(gpu_bound) + start..usize::from(gpu_bound) + end]
+                            .iter()
+                            .any(|x| !x.is_finite() || x.abs() > 1.0e20),
+                    );
+                    assert_eq!(flags[batch + 1], expected, "IQ GPU bound predicate or input offset changed");
+                }
+            }
+            if unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0 || values.iter().any(|x| !x.is_finite()) {
+                return Err(Error::Invalid("invalid IQ indexed test result"));
+            }
+            Ok(values[1..count + 1].to_vec())
+        })
+    }
+
+    fn run_safe_iq_selected_test(
+        kind: u32,
+        codes: &[u8],
+        input: &[f32],
+        rows: usize,
+        columns: usize,
+        batch_rows: usize,
+    ) -> Vec<f32> {
+        objc2::rc::autoreleasepool(|_| {
+            let executor = executor().unwrap();
+            let pipeline = safe_iq_test_pipeline(kind, "hybrid_iq_matvec_vector8", 4);
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let parameters = [rows as u32, columns as u32, kind, 256, bytes as u32, 0, batch_rows as u32, 0];
+            let codes = buffer(executor, codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(input)).unwrap();
+            let output = executor.device.new_buffer(rows * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let command = executor.queue.command_buffer().unwrap();
+            let encoding = command.compute_command_encoder().unwrap();
+            encoding.set_compute_pipeline_state(&pipeline);
+            for (index, value) in [&codes, &input, &output].into_iter().enumerate() {
+                encoding.set_buffer(Some(value), 0, index);
+            }
+            encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+            let offsets = [0u32; 4];
+            encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+            encoding.dispatch_threadgroups(
+                MTLSize {
+                    width: rows.div_ceil(8),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            );
+            encoding.end_encoding();
+            command.commit();
+            command.wait_until_completed();
+            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+            // SAFETY: the owned shared output has a completed GPU writer.
+            unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows) }.to_vec()
+        })
+    }
+
+    #[stark_test]
+    fn iq_indexed_multirow_preserves_safe_selected_bits_tails_and_failures() {
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17u32, 18] {
+            let original = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4);
+            let candidates = [
+                ("multirow2", 2usize, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 2)),
+                ("multirow4", 4, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4)),
+                ("staged4", 4, safe_staged_iq_test_pipeline(kind)),
+            ];
+            for columns in [256usize, 2048, 4096] {
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let matrix_bytes = codes.len() / experts;
+                let selected_codes = selected
+                    .iter()
+                    .flat_map(|&e| codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied())
+                    .collect::<Vec<_>>();
+                for batched in [false, true] {
+                    let input = (0..columns
+                        * if batched {
+                            selected.len()
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect::<Vec<_>>();
+                    let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let reference = run_safe_iq_selected_test(
+                        kind,
+                        &selected_codes,
+                        &input,
+                        rows * selected.len(),
+                        columns,
+                        if batched {
+                            rows
+                        } else {
+                            0
+                        },
+                    );
+                    let indexed =
+                        run_iq_indexed_test(&original, &codes, &input, &selected, parameters, 8, 256).unwrap();
+                    assert!(indexed.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    for (schedule, n, candidate) in &candidates {
+                        let actual =
+                            run_iq_indexed_test(candidate, &codes, &input, &selected, parameters, n * 2, 64).unwrap();
+                        assert!(
+                            actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                            "IQ changed Safe bits kind={kind} schedule={schedule} rows_per_simd={n} columns={columns} batched={batched}"
+                        );
+                        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                            let mut invalid = input.clone();
+                            invalid[if batched {
+                                columns + 17
+                            } else {
+                                17
+                            }] = poison;
+                            assert!(
+                                run_iq_indexed_test(candidate, &codes, &invalid, &selected, parameters, n * 2, 64)
+                                    .is_err()
+                            );
+                        }
+                        let parameters = [rows as u32, columns as u32, experts as u32, 0];
+                        assert!(
+                            run_iq_indexed_test(
+                                candidate,
+                                &codes,
+                                &input[..columns],
+                                &[experts as u32],
+                                parameters,
+                                n * 2,
+                                64
+                            )
+                            .is_err()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_multirow_gpu_component_timings() {
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let pipelines = [
+                (
+                    "original_vector8",
+                    1usize,
+                    8usize,
+                    256usize,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4),
+                ),
+                ("multirow2", 2, 4, 64, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 2)),
+                ("multirow4", 4, 8, 64, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4)),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 3];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ multirow component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "pair_candidate_rows_per_simd": (pair + 1) * 2,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_rotating_groups_gpu_timestamps",
+                        })
+                    );
+                    assert!(bitwise_equal[variant], "IQ multirow component changed Safe bits kind={kind}");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_staged_gpu_component_timings() {
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let pipelines = [
+                (
+                    "original_vector8",
+                    1usize,
+                    8usize,
+                    256usize,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4),
+                ),
+                ("multirow4", 4, 8, 64, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4)),
+                ("staged4", 4, 8, 64, safe_staged_iq_test_pipeline(kind)),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 3];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ staged component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_staged_tables_rotating_groups_gpu_timestamps",
+                        })
+                    );
+                    assert!(bitwise_equal[variant], "IQ staged component changed Safe bits kind={kind}");
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_grouped32_arithmetic_matches_f64_and_rejects_unproved_input() {
+        let selected = [3u32, 1, 3];
+        let (experts, rows) = (4usize, 13usize);
+        for kind in [17, 18] {
+            for mode in [1, 2] {
+                // Source-level sign factoring is a numerical candidate: Safe
+                // compilation may contract its shortened expression to FMA.
+                let mut bit_matches = 0usize;
+                let mut total_values = 0usize;
+                let mut maximum_absolute_error = 0.0f64;
+                let mut maximum_relative_rms = 0.0f64;
+                let mut factor_fma_bit_matches = 0usize;
+                let mut factor_fma_maximum_absolute_error = 0.0f64;
+                for invalid in
+                    [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX, f32::from_bits(1.0e20f32.to_bits() + 1)]
+                {
+                    assert!(safe_iq_arithmetic_pipeline(kind, mode, &[invalid], 0).is_err());
+                }
+                assert!(safe_iq_arithmetic_pipeline(kind, mode, &[1.0], 1).is_err());
+                for columns in [2048usize, 4096] {
+                    for batched in [false, true] {
+                        for magnitude in [1.0f32, 1.0e20] {
+                            let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                            let input: Vec<_> = (0..columns
+                                * if batched {
+                                    3
+                                } else {
+                                    1
+                                })
+                                .map(|i| (i as f32 * 0.019).sin() * magnitude)
+                                .collect();
+                            let original = safe_iq_sweep_pipeline(kind, 4, true, &input, 2).unwrap();
+                            let candidate = safe_iq_arithmetic_pipeline(kind, mode, &input, 2).unwrap();
+                            let p = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                            let reference = run_iq_indexed_test_with_offsets(
+                                &original, &codes, &input, &selected, p, 8, 64, false, 2,
+                            )
+                            .unwrap();
+                            let actual = run_iq_indexed_test_with_offsets(
+                                &candidate, &codes, &input, &selected, p, 8, 64, false, 2,
+                            )
+                            .unwrap();
+                            bit_matches +=
+                                actual.iter().zip(&reference).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+                            total_values += actual.len();
+                            maximum_absolute_error = maximum_absolute_error.max(
+                                actual
+                                    .iter()
+                                    .zip(&reference)
+                                    .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                    .fold(0.0, f64::max),
+                            );
+                            if mode == 1 {
+                                let fma = safe_iq_arithmetic_pipeline(kind, 2, &input, 2).unwrap();
+                                let fused = run_iq_indexed_test_with_offsets(
+                                    &fma, &codes, &input, &selected, p, 8, 64, false, 2,
+                                )
+                                .unwrap();
+                                factor_fma_bit_matches +=
+                                    actual.iter().zip(&fused).filter(|(a, b)| a.to_bits() == b.to_bits()).count();
+                                factor_fma_maximum_absolute_error = factor_fma_maximum_absolute_error.max(
+                                    actual
+                                        .iter()
+                                        .zip(&fused)
+                                        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                        .fold(0.0, f64::max),
+                                );
+                            }
+                            let matrix_bytes = codes.len() / experts;
+                            let selected_codes: Vec<_> = selected
+                                .iter()
+                                .flat_map(|&e| {
+                                    codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied()
+                                })
+                                .collect();
+                            let oracle = packed_f64_oracle(
+                                kind,
+                                &selected_codes,
+                                rows * 3,
+                                columns,
+                                &input,
+                                if batched {
+                                    rows
+                                } else {
+                                    0
+                                },
+                            );
+                            for (i, &(expected, absolute)) in oracle.iter().enumerate() {
+                                assert!(
+                                    (f64::from(actual[i]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                                    "IQ arithmetic F64 bound kind={kind} mode={mode}"
+                                );
+                            }
+                            let error: f64 = actual
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2))
+                                .sum();
+                            let norm: f64 = reference.iter().map(|&x| f64::from(x).powi(2)).sum();
+                            let relative_rms = (error / norm.max(f64::MIN_POSITIVE)).sqrt();
+                            maximum_relative_rms = maximum_relative_rms.max(relative_rms);
+                            assert!(relative_rms <= 2e-5, "IQ arithmetic relative RMS");
+                        }
+                    }
+                }
+                println!(
+                    "{}",
+                    serde_json::json!({"iq_arithmetic_numerical_trial":true,"kind":kind,"mode":mode,
+                    "bit_matches_vs_original":bit_matches,"total_values":total_values,
+                    "maximum_absolute_error_vs_original":maximum_absolute_error,"maximum_relative_rms_vs_original":maximum_relative_rms,
+                    "factor_fma_bit_matches":if mode==1 {Some(factor_fma_bit_matches)}else{None},
+                    "factor_fma_maximum_absolute_error":if mode==1 {Some(factor_fma_maximum_absolute_error)}else{None},
+                    "matching_fma_is_not_compiler_proof":true})
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_grouped32_rows_typed_preserve_bits_f64_and_alignment() {
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17, 18] {
+            for columns in [2048usize, 4096] {
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                for batched in [false, true] {
+                    let input: Vec<_> = (0..columns
+                        * if batched {
+                            3
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect();
+                    let p = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let baseline = safe_iq_sweep_pipeline(kind, 4, false, &input, 0).unwrap();
+                    let reference = run_iq_indexed_test(&baseline, &codes, &input, &selected, p, 8, 64).unwrap();
+                    let matrix_bytes = codes.len() / experts;
+                    let selected_codes: Vec<_> = selected
+                        .iter()
+                        .flat_map(|&e| {
+                            codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied()
+                        })
+                        .collect();
+                    let oracle = packed_f64_oracle(
+                        kind,
+                        &selected_codes,
+                        rows * 3,
+                        columns,
+                        &input,
+                        if batched {
+                            rows
+                        } else {
+                            0
+                        },
+                    );
+                    for count in [1, 2, 4, 8] {
+                        for typed in [false, true] {
+                            assert!(safe_iq_sweep_pipeline(kind, count, true, &input, 1).is_err());
+                            let pipeline = safe_iq_sweep_pipeline(kind, count, typed, &input, 2).unwrap();
+                            let actual = run_iq_indexed_test_with_offsets(
+                                &pipeline,
+                                &codes,
+                                &input,
+                                &selected,
+                                p,
+                                count * 2,
+                                64,
+                                false,
+                                2,
+                            )
+                            .unwrap();
+                            assert!(
+                                actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                                "IQ rows/typed changed grouped32 bits kind={kind} count={count} typed={typed}"
+                            );
+                            for (i, &(expected, absolute)) in oracle.iter().enumerate() {
+                                assert!(
+                                    (f64::from(actual[i]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                                    "IQ sweep F64 bound"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_grouped32_bound_diagnostic_checks_host_input_and_normal_bits() {
+        for kind in [17, 18] {
+            for invalid in
+                [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX, f32::from_bits(1.0e20f32.to_bits() + 1)]
+            {
+                assert!(safe_bound_grouped32_iq_test_pipeline(kind, &[invalid]).is_err());
+            }
+            assert!(safe_bound_grouped32_iq_test_pipeline(kind, &[]).is_err());
+            let guarded = safe_grouped32_iq_test_pipeline(kind);
+            for columns in [256usize, 2048, 4096] {
+                let (experts, rows) = (4usize, 13usize);
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                for batched in [false, true] {
+                    let input: Vec<_> = (0..columns
+                        * if batched {
+                            3
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect();
+                    let bound = safe_bound_grouped32_iq_test_pipeline(kind, &input).unwrap();
+                    let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let selected = [3u32, 1, 3];
+                    let reference =
+                        run_iq_indexed_test(&guarded, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    let actual = run_iq_indexed_test(&bound, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    assert!(
+                        actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "bound IQ diagnostic changed normal grouped32 bits kind={kind} columns={columns} batched={batched}"
+                    );
+                    let squared_error: f64 =
+                        actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    assert!((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5);
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_grouped32_matches_f64_tails_batches_and_extreme_fallback() {
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17u32, 18] {
+            let original = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4);
+            let multirow = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+            let grouped = safe_grouped32_iq_test_pipeline(kind);
+            for columns in [256usize, 2048, 4096] {
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let matrix_bytes = codes.len() / experts;
+                let selected_codes: Vec<_> = selected
+                    .iter()
+                    .flat_map(|&e| codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied())
+                    .collect();
+                for batched in [false, true] {
+                    let input: Vec<_> = (0..columns
+                        * if batched {
+                            selected.len()
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect();
+                    let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let reference =
+                        run_iq_indexed_test(&original, &codes, &input, &selected, parameters, 8, 256).unwrap();
+                    let current = run_iq_indexed_test(&multirow, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    assert!(current.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    let actual = run_iq_indexed_test(&grouped, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    let oracle = packed_f64_oracle(
+                        kind,
+                        &selected_codes,
+                        rows * selected.len(),
+                        columns,
+                        &input,
+                        if batched {
+                            rows
+                        } else {
+                            0
+                        },
+                    );
+                    for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                        assert!(
+                            (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                            "IQ grouped32 F64 bound kind={kind} columns={columns} batched={batched}"
+                        );
+                    }
+                    let squared_error: f64 =
+                        actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    assert!(
+                        (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5,
+                        "IQ grouped32 relative RMS kind={kind} columns={columns}"
+                    );
+                    let large: Vec<_> = input.iter().map(|value| value * 1.0e21f32).collect();
+                    let large_reference =
+                        run_iq_indexed_test(&original, &codes, &large, &selected, parameters, 8, 256).unwrap();
+                    let large_actual =
+                        run_iq_indexed_test(&grouped, &codes, &large, &selected, parameters, 8, 64).unwrap();
+                    assert!(
+                        large_actual.iter().zip(&large_reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "IQ grouped32 large finite fallback changed bits kind={kind}"
+                    );
+                    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                        let mut poisoned = input.clone();
+                        poisoned[columns - 1] = invalid;
+                        assert!(
+                            run_iq_indexed_test(&grouped, &codes, &poisoned, &selected, parameters, 8, 64).is_err()
+                        );
+                    }
+                    assert!(run_iq_indexed_test(&grouped, &codes, &input, &[u32::MAX], parameters, 8, 64).is_err());
+                    assert!(run_iq_indexed_test(&grouped, &codes, &input, &selected, parameters, 8, 64).is_ok());
+                }
+                let mut zeros = codes.clone();
+                for block in zeros.chunks_exact_mut(weights::block_layout(kind).unwrap().1) {
+                    block[..2].copy_from_slice(&half::f16::from_f32(0.0).to_bits().to_le_bytes());
+                }
+                let input = vec![f32::MAX; columns];
+                let p = [rows as u32, columns as u32, experts as u32, 0];
+                let reference = run_iq_indexed_test(&original, &zeros, &input, &selected, p, 8, 256).unwrap();
+                let actual = run_iq_indexed_test(&grouped, &zeros, &input, &selected, p, 8, 64).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "IQ grouped32 zero-times-MAX fallback changed bits kind={kind}"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_typed16_graph_admits_even_offsets_and_keeps_odd_byte_cache() {
+        assert!(
+            iq_typed16_schedule(MatrixFormat::Packed(17), 2048, 2),
+            "typed integration requires IQ_GPU_BOUND=1 and IQ_TYPED16=1 in a fresh process"
+        );
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17, 18] {
+            for columns in [2048usize, 4096] {
+                let bytes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let normal: Vec<_> = (0..columns).map(|i| (i as f32 * 0.019).sin()).collect();
+                let large: Vec<_> = normal.iter().map(|x| x * 1.0e21f32).collect();
+                let p = [rows as u32, columns as u32, experts as u32, 0];
+                let byte = safe_bound_grouped32_iq_test_pipeline(kind, &normal).unwrap();
+                let legacy = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+                let expected = run_iq_indexed_test(&byte, &bytes, &normal, &selected, p, 8, 64).unwrap();
+                let expected_large = run_iq_indexed_test(&legacy, &bytes, &large, &selected, p, 8, 64).unwrap();
+                for offset in [2usize, 1, 4, 3, 2] {
+                    assert_eq!(iq_typed16_schedule(MatrixFormat::Packed(kind), columns, offset), offset % 2 == 0);
+                    let mut padded = vec![0x75u8; offset];
+                    padded.extend_from_slice(&bytes);
+                    let matrix = MappedMatrix {
+                        codes: MappedSlice {
+                            buffer: buffer(executor().unwrap(), &padded).unwrap(),
+                            offset,
+                            length: bytes.len(),
+                            registered_length: padded.len(),
+                        },
+                        planes: None,
+                    };
+                    let mut graph = DecodeGraph::new().unwrap();
+                    let input = DecodeGraph::upload(&normal).unwrap();
+                    let large = DecodeGraph::upload(&large).unwrap();
+                    let indices = DecodeGraph::upload(&selected.map(f32::from_bits)).unwrap();
+                    let first = graph
+                        .indexed(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected.len(),
+                            &input,
+                            false,
+                        )
+                        .unwrap();
+                    graph.copy_into(&large, &input).unwrap();
+                    let second = graph
+                        .indexed(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected.len(),
+                            &input,
+                            false,
+                        )
+                        .unwrap();
+                    let results = graph.finish(&[first, second]).unwrap();
+                    assert!(
+                        results[0].iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "typed/byte cache admission changed normal bits offset={offset}"
+                    );
+                    assert!(
+                        results[1].iter().zip(&expected_large).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "typed alignment path changed legacy extreme fallback offset={offset}"
+                    );
+                }
+                let executor = executor().unwrap();
+                assert!(executor.iq_bound_indexed_pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(kind)));
+                assert!(
+                    executor.iq_bound_typed_indexed_pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(kind))
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_signed_factor_graph_admits_even_offsets_and_keeps_odd_byte_cache() {
+        assert!(
+            iq_signed_factor_schedule(MatrixFormat::Packed(17), 2048, 2),
+            "signed-factor integration requires IQ_GPU_BOUND=1, IQ_TYPED16=1, IQ_SIGNED_FACTOR=1 in a fresh process"
+        );
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17, 18] {
+            for columns in [2048usize, 4096] {
+                let bytes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let normal: Vec<_> = (0..columns).map(|i| (i as f32 * 0.019).sin()).collect();
+                let large: Vec<_> = normal.iter().map(|x| x * 1.0e21f32).collect();
+                let p = [rows as u32, columns as u32, experts as u32, 0];
+                let byte = safe_bound_grouped32_iq_test_pipeline(kind, &normal).unwrap();
+                let legacy = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+                let expected = run_iq_indexed_test(&byte, &bytes, &normal, &selected, p, 8, 64).unwrap();
+                let factor = safe_iq_arithmetic_pipeline(kind, 1, &normal, 2).unwrap();
+                let factor_expected = run_iq_indexed_test(&factor, &bytes, &normal, &selected, p, 8, 64).unwrap();
+                let expected_large = run_iq_indexed_test(&legacy, &bytes, &large, &selected, p, 8, 64).unwrap();
+                for offset in [2usize, 1, 4, 3, 2] {
+                    assert_eq!(iq_signed_factor_schedule(MatrixFormat::Packed(kind), columns, offset), offset % 2 == 0);
+                    let mut padded = vec![0x75u8; offset];
+                    padded.extend_from_slice(&bytes);
+                    let matrix = MappedMatrix {
+                        codes: MappedSlice {
+                            buffer: buffer(executor().unwrap(), &padded).unwrap(),
+                            offset,
+                            length: bytes.len(),
+                            registered_length: padded.len(),
+                        },
+                        planes: None,
+                    };
+                    let mut graph = DecodeGraph::new().unwrap();
+                    let input = DecodeGraph::upload(&normal).unwrap();
+                    let large = DecodeGraph::upload(&large).unwrap();
+                    let indices = DecodeGraph::upload(&selected.map(f32::from_bits)).unwrap();
+                    let first = graph
+                        .indexed(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected.len(),
+                            &input,
+                            false,
+                        )
+                        .unwrap();
+                    graph.copy_into(&large, &input).unwrap();
+                    let second = graph
+                        .indexed(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected.len(),
+                            &input,
+                            false,
+                        )
+                        .unwrap();
+                    let results = graph.finish(&[first, second]).unwrap();
+                    assert!(
+                        results[0]
+                            .iter()
+                            .zip(if offset % 2 == 0 {
+                                &factor_expected
+                            } else {
+                                &expected
+                            })
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "typed/byte cache admission changed normal bits offset={offset}"
+                    );
+                    assert!(
+                        results[1].iter().zip(&expected_large).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "typed alignment path changed legacy extreme fallback offset={offset}"
+                    );
+                }
+                let executor = executor().unwrap();
+                assert!(executor.iq_bound_indexed_pipelines.lock().unwrap().contains_key(&MatrixFormat::Packed(kind)));
+                assert!(
+                    executor
+                        .iq_bound_factor_indexed_pipelines
+                        .lock()
+                        .unwrap()
+                        .contains_key(&MatrixFormat::Packed(kind))
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_gpu_bound_graph_rechecks_mutated_input_across_projection_levels() {
+        assert!(
+            iq_bound_schedule(MatrixFormat::Packed(17), 2048),
+            "integration diagnostic requires STARK_GLM53_IQ_GPU_BOUND=1 in a fresh process"
+        );
+        let (experts, rows, columns) = (4usize, 13usize, 2048usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17, 18] {
+            let bytes = finite_packed_codes(kind, experts * rows, columns, 7);
+            let mut padded = vec![0x75u8; 16];
+            padded.extend_from_slice(&bytes);
+            let codes = buffer(executor().unwrap(), &padded).unwrap();
+            let matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: codes,
+                    offset: 16,
+                    length: bytes.len(),
+                    registered_length: padded.len(),
+                },
+                planes: None,
+            };
+            let normal: Vec<_> = (0..columns).map(|i| (i as f32 * 0.019).sin()).collect();
+            let large: Vec<_> = normal.iter().map(|x| x * 1.0e21f32).collect();
+            let reference = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+            let p = [rows as u32, columns as u32, experts as u32, 0];
+            let expected_normal = run_iq_indexed_test(&reference, &bytes, &normal, &selected, p, 8, 64).unwrap();
+            let expected_large = run_iq_indexed_test(&reference, &bytes, &large, &selected, p, 8, 64).unwrap();
+            for concurrent in [false, true] {
+                let mut graph = if concurrent {
+                    DecodeGraph::new_parallel()
+                } else {
+                    DecodeGraph::new()
+                }
+                .unwrap();
+                let mut padded = vec![7.25];
+                padded.extend_from_slice(&normal);
+                let input = DecodeGraph::upload(&padded).unwrap().slice(1, columns).unwrap();
+                let large = DecodeGraph::upload(&large).unwrap();
+                let mut ids = vec![f32::from_bits(999)];
+                ids.extend(selected.map(f32::from_bits));
+                let indices = DecodeGraph::upload(&ids).unwrap().slice(1, selected.len()).unwrap();
+                graph.begin_projection_level().unwrap();
+                let first = graph
+                    .indexed(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected.len(),
+                        &input,
+                        false,
+                    )
+                    .unwrap();
+                graph.end_projection_level().unwrap();
+                graph.copy_into(&large, &input).unwrap();
+                graph.begin_projection_level().unwrap();
+                let second = graph
+                    .indexed(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected.len(),
+                        &input,
+                        false,
+                    )
+                    .unwrap();
+                graph.end_projection_level().unwrap();
+                let results = graph.finish(&[first, second]).unwrap();
+                let error: f64 =
+                    results[0].iter().zip(&expected_normal).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                let magnitude: f64 = expected_normal.iter().map(|&x| f64::from(x).powi(2)).sum();
+                assert!((error / magnitude.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5);
+                assert!(
+                    results[1].iter().zip(&expected_large).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "GPU bounds reused after input overwrite or projection dependency failed"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_gpu_bound_prepass_preserves_f64_offsets_and_exact_extreme_fallback() {
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17u32, 18] {
+            let original = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4);
+            let multirow = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+            let grouped = safe_gpu_bound_iq_test_pipeline(kind);
+            for columns in [256usize, 2048, 4096] {
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let matrix_bytes = codes.len() / experts;
+                let selected_codes: Vec<_> = selected
+                    .iter()
+                    .flat_map(|&e| codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied())
+                    .collect();
+                for batched in [false, true] {
+                    let input: Vec<_> = (0..columns
+                        * if batched {
+                            selected.len()
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect();
+                    let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let reference =
+                        run_iq_indexed_test(&original, &codes, &input, &selected, parameters, 8, 256).unwrap();
+                    let current = run_iq_indexed_test(&multirow, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    assert!(current.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    let actual =
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &selected, parameters, 8, 64, true)
+                            .unwrap();
+                    let oracle = packed_f64_oracle(
+                        kind,
+                        &selected_codes,
+                        rows * selected.len(),
+                        columns,
+                        &input,
+                        if batched {
+                            rows
+                        } else {
+                            0
+                        },
+                    );
+                    for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                        assert!(
+                            (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                            "IQ GPU-bound grouped32 F64 bound kind={kind} columns={columns} batched={batched}"
+                        );
+                    }
+                    let squared_error: f64 =
+                        actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    assert!(
+                        (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5,
+                        "IQ GPU-bound grouped32 relative RMS kind={kind} columns={columns}"
+                    );
+                    let large: Vec<_> = input.iter().map(|value| value * 1.0e21f32).collect();
+                    let large_reference =
+                        run_iq_indexed_test(&original, &codes, &large, &selected, parameters, 8, 256).unwrap();
+                    let large_actual =
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &large, &selected, parameters, 8, 64, true)
+                            .unwrap();
+                    assert!(
+                        large_actual.iter().zip(&large_reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "IQ GPU-bound grouped32 large finite fallback changed bits kind={kind}"
+                    );
+                    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                        let mut poisoned = input.clone();
+                        poisoned[columns - 1] = invalid;
+                        assert!(
+                            run_iq_indexed_test_with_bound(
+                                &grouped, &codes, &poisoned, &selected, parameters, 8, 64, true
+                            )
+                            .is_err()
+                        );
+                    }
+                    assert!(
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &[u32::MAX], parameters, 8, 64, true)
+                            .is_err()
+                    );
+                    assert!(
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &selected, parameters, 8, 64, true)
+                            .is_ok()
+                    );
+                }
+                let mut zeros = codes.clone();
+                for block in zeros.chunks_exact_mut(weights::block_layout(kind).unwrap().1) {
+                    block[..2].copy_from_slice(&half::f16::from_f32(0.0).to_bits().to_le_bytes());
+                }
+                let input = vec![f32::MAX; columns];
+                let p = [rows as u32, columns as u32, experts as u32, 0];
+                let reference = run_iq_indexed_test(&original, &zeros, &input, &selected, p, 8, 256).unwrap();
+                let actual =
+                    run_iq_indexed_test_with_bound(&grouped, &zeros, &input, &selected, p, 8, 64, true).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "IQ GPU-bound grouped32 zero-times-MAX fallback changed bits kind={kind}"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_checked_pipeline_hints_preserve_bits_and_failure() {
+        for kind in [17, 18] {
+            let (rows, columns, experts) = (13usize, 2048usize, 4usize);
+            let codes = finite_packed_codes(kind, rows * experts, columns, 7);
+            let input = (0..columns).map(|i| (i as f32 * 0.019).sin()).collect::<Vec<_>>();
+            let p = [rows as u32, columns as u32, experts as u32, 0];
+            for factor in [false, true] {
+                let normal = safe_iq_checked_hint_pipeline(kind, factor, false);
+                let hinted = safe_iq_checked_hint_pipeline(kind, factor, true);
+                let reference =
+                    run_iq_indexed_test_with_bound(&normal, &codes, &input, &[3, 1, 3], p, 8, 64, true).unwrap();
+                let actual =
+                    run_iq_indexed_test_with_bound(&hinted, &codes, &input, &[3, 1, 3], p, 8, 64, true).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "IQ hint changed corresponding arithmetic bits"
+                );
+                for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    let mut invalid = input.clone();
+                    invalid[17] = poison;
+                    assert!(
+                        run_iq_indexed_test_with_bound(&hinted, &codes, &invalid, &[3, 1, 3], p, 8, 64, true).is_err()
+                    );
+                }
+                assert!(run_iq_indexed_test_with_bound(&hinted, &codes, &input, &[u32::MAX], p, 8, 64, true).is_err());
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq_signed_factor_prepass_preserves_f64_offsets_and_exact_extreme_fallback() {
+        let (experts, rows) = (4usize, 13usize);
+        let selected = [3u32, 1, 3];
+        for kind in [17u32, 18] {
+            let original = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4);
+            let multirow = safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4);
+            let grouped = safe_iq_checked_hint_pipeline(kind, true, false);
+            for columns in [256usize, 2048, 4096] {
+                let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+                let matrix_bytes = codes.len() / experts;
+                let selected_codes: Vec<_> = selected
+                    .iter()
+                    .flat_map(|&e| codes[e as usize * matrix_bytes..(e as usize + 1) * matrix_bytes].iter().copied())
+                    .collect();
+                for batched in [false, true] {
+                    let input: Vec<_> = (0..columns
+                        * if batched {
+                            selected.len()
+                        } else {
+                            1
+                        })
+                        .map(|i| (i as f32 * 0.019).sin())
+                        .collect();
+                    let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+                    let reference =
+                        run_iq_indexed_test(&original, &codes, &input, &selected, parameters, 8, 256).unwrap();
+                    let current = run_iq_indexed_test(&multirow, &codes, &input, &selected, parameters, 8, 64).unwrap();
+                    assert!(current.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()));
+                    let actual =
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &selected, parameters, 8, 64, true)
+                            .unwrap();
+                    let oracle = packed_f64_oracle(
+                        kind,
+                        &selected_codes,
+                        rows * selected.len(),
+                        columns,
+                        &input,
+                        if batched {
+                            rows
+                        } else {
+                            0
+                        },
+                    );
+                    for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                        assert!(
+                            (f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
+                            "IQ GPU-bound grouped32 F64 bound kind={kind} columns={columns} batched={batched}"
+                        );
+                    }
+                    let squared_error: f64 =
+                        actual.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                    let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                    assert!(
+                        (squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5,
+                        "IQ GPU-bound grouped32 relative RMS kind={kind} columns={columns}"
+                    );
+                    let large: Vec<_> = input.iter().map(|value| value * 1.0e21f32).collect();
+                    let large_reference =
+                        run_iq_indexed_test(&original, &codes, &large, &selected, parameters, 8, 256).unwrap();
+                    let large_actual =
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &large, &selected, parameters, 8, 64, true)
+                            .unwrap();
+                    assert!(
+                        large_actual.iter().zip(&large_reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "IQ GPU-bound grouped32 large finite fallback changed bits kind={kind}"
+                    );
+                    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                        let mut poisoned = input.clone();
+                        poisoned[columns - 1] = invalid;
+                        assert!(
+                            run_iq_indexed_test_with_bound(
+                                &grouped, &codes, &poisoned, &selected, parameters, 8, 64, true
+                            )
+                            .is_err()
+                        );
+                    }
+                    assert!(
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &[u32::MAX], parameters, 8, 64, true)
+                            .is_err()
+                    );
+                    assert!(
+                        run_iq_indexed_test_with_bound(&grouped, &codes, &input, &selected, parameters, 8, 64, true)
+                            .is_ok()
+                    );
+                }
+                let mut zeros = codes.clone();
+                for block in zeros.chunks_exact_mut(weights::block_layout(kind).unwrap().1) {
+                    block[..2].copy_from_slice(&half::f16::from_f32(0.0).to_bits().to_le_bytes());
+                }
+                let input = vec![f32::MAX; columns];
+                let p = [rows as u32, columns as u32, experts as u32, 0];
+                let reference = run_iq_indexed_test(&original, &zeros, &input, &selected, p, 8, 256).unwrap();
+                let actual =
+                    run_iq_indexed_test_with_bound(&grouped, &zeros, &input, &selected, p, 8, 64, true).unwrap();
+                assert!(
+                    actual.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "IQ GPU-bound grouped32 zero-times-MAX fallback changed bits kind={kind}"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_grouped32_gpu_component_timings() {
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let pipelines = [
+                (
+                    "original_vector8",
+                    1usize,
+                    8usize,
+                    256usize,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_vector8", 4),
+                ),
+                ("multirow4", 4, 8, 64, safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4)),
+                ("grouped32", 4, 8, 64, safe_grouped32_iq_test_pipeline(kind)),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 3];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_grouped32_rotating_groups_gpu_timestamps",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant != 2 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_grouped32_bound_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let bound = safe_bound_grouped32_iq_test_pipeline(kind, &input).unwrap();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let pipelines = [
+                (
+                    "multirow4",
+                    4usize,
+                    8usize,
+                    64usize,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4),
+                ),
+                ("guarded_grouped32", 4, 8, 64, safe_grouped32_iq_test_pipeline(kind)),
+                ("host_bound_grouped32", 4, 8, 64, bound),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 3];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "activity":true, "host_verified_finite_bound":1.0e20, "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_bound_grouped32_rotating_groups_gpu_timestamps",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant == 0 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_grouped32_rows_typed_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let mut pipelines = vec![
+                (
+                    "r4_byte".to_owned(),
+                    4usize,
+                    8usize,
+                    64usize,
+                    safe_iq_sweep_pipeline(kind, 4, false, &input, 0).unwrap(),
+                ),
+                (
+                    "old_multirow4".to_owned(),
+                    4,
+                    8,
+                    64,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4),
+                ),
+            ];
+            for rows in [1, 2, 4, 8] {
+                for typed in [false, true] {
+                    pipelines.push((
+                        format!(
+                            "r{rows}_{}",
+                            if typed {
+                                "typed16"
+                            } else {
+                                "byte"
+                            }
+                        ),
+                        rows,
+                        rows * 2,
+                        64,
+                        safe_iq_sweep_pipeline(kind, rows, typed, &input, 0).unwrap(),
+                    ));
+                }
+            }
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; pipelines.len() - 1];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = vec![true; pipelines.len()];
+            let mut maximum_absolute_error = vec![0.0f64; pipelines.len()];
+            let mut relative_rms_error = vec![0.0f64; pipelines.len()];
+            for replay in 0..7 {
+                let mut order: Vec<_> = (1..pipelines.len()).collect();
+                if replay % 2 != 0 {
+                    order.reverse();
+                }
+                for candidate in order {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "activity":true, "host_verified_finite_bound":1.0e20, "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_rows_typed_iq",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant != 1 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_grouped32_arithmetic_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let pipelines = vec![
+                (
+                    "typed_r4_original".to_owned(),
+                    4usize,
+                    8usize,
+                    64usize,
+                    safe_iq_sweep_pipeline(kind, 4, true, &input, 0).unwrap(),
+                ),
+                (
+                    "typed_r4_signed_factor".to_owned(),
+                    4,
+                    8,
+                    64,
+                    safe_iq_arithmetic_pipeline(kind, 1, &input, 0).unwrap(),
+                ),
+                (
+                    "typed_r4_explicit_fma".to_owned(),
+                    4,
+                    8,
+                    64,
+                    safe_iq_arithmetic_pipeline(kind, 2, &input, 0).unwrap(),
+                ),
+            ];
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; pipelines.len() - 1];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = vec![true; pipelines.len()];
+            let mut maximum_absolute_error = vec![0.0f64; pipelines.len()];
+            let mut relative_rms_error = vec![0.0f64; pipelines.len()];
+            for replay in 0..7 {
+                let mut order: Vec<_> = (1..pipelines.len()).collect();
+                if replay % 2 != 0 {
+                    order.reverse();
+                }
+                for candidate in order {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "activity":true, "host_verified_finite_bound":1.0e20, "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_explicit_iq_arithmetic",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant == 0 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_indexed_gpu_bound_prepass_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let bound = safe_bound_grouped32_iq_test_pipeline(kind, &input).unwrap();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let bounds = buffer(executor, bytemuck::cast_slice(&vec![0u32; selected])).unwrap();
+            let function = executor.library.new_function_with_name("hybrid_graph_iq_input_bound").unwrap();
+            let prepass = executor.device.new_compute_pipeline_state_with_function(&function).unwrap();
+            let pipelines = [
+                (
+                    "multirow4",
+                    4usize,
+                    8usize,
+                    64usize,
+                    safe_iq_test_pipeline(kind, "hybrid_graph_iq_indexed_multirow", 4),
+                ),
+                ("gpu_checked_grouped32", 4, 8, 64, safe_gpu_bound_iq_test_pipeline(kind)),
+                ("host_bound_grouped32", 4, 8, 64, bound),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; 2];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 3];
+            let mut maximum_absolute_error = [0.0f64; 3];
+            let mut relative_rms_error = [0.0f64; 3];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2]
+                } else {
+                    [2usize, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                if variant == 1 {
+                                    encoding.set_compute_pipeline_state(&prepass);
+                                    encoding.set_buffer(
+                                        Some(&input),
+                                        if batched {
+                                            group * selected * columns * 4
+                                        } else {
+                                            0
+                                        },
+                                        0,
+                                    );
+                                    encoding.set_buffer(Some(&bounds), 0, 1);
+                                    let bound_parameters = [
+                                        columns as u32,
+                                        if batched {
+                                            selected as u32
+                                        } else {
+                                            1
+                                        },
+                                    ];
+                                    encoding.set_bytes(
+                                        NonNull::from(&bound_parameters).cast(),
+                                        std::mem::size_of_val(&bound_parameters),
+                                        2,
+                                    );
+                                    encoding.dispatch_threadgroups(
+                                        MTLSize {
+                                            width: bound_parameters[1] as usize,
+                                            height: 1,
+                                            depth: 1,
+                                        },
+                                        MTLSize {
+                                            width: 256,
+                                            height: 1,
+                                            depth: 1,
+                                        },
+                                    );
+                                    encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+                                    encoding.set_compute_pipeline_state(pipeline);
+                                    encoding.set_buffer(Some(&codes), 0, 0);
+                                    encoding.set_buffer(Some(&bounds), 0, 7);
+                                }
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "gpu_prepass_included":variant == 1, "activity":true, "host_verified_finite_bound":1.0e20, "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_gpu_prepass_plus_iq_matvec",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant == 0 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq_signed_factor_and_hints_prepass_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let cases = [("glm_iq2xs_gate", 17, 2048usize, 4096usize, false), ("glm_iq3xxs_down", 18, 4096, 2048, true)];
+        let (experts, selected) = (64usize, 8usize);
+        let groups = experts / selected;
+        let executor = executor().unwrap();
+        for (label, kind, rows, columns, batched) in cases {
+            let (_, bytes) = weights::block_layout(kind).unwrap();
+            let matrix_bytes = rows * columns / 256 * bytes;
+            let mut codes = vec![0u8; matrix_bytes * experts];
+            let mut state = 0x1b7a_95e3u32;
+            for byte in &mut codes {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                *byte = (state >> 24) as u8;
+            }
+            for encoded in codes.chunks_exact_mut(bytes) {
+                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+            let input = (0..columns
+                * if batched {
+                    experts
+                } else {
+                    1
+                })
+                .map(|i| (i as f32 * 0.017).sin())
+                .collect::<Vec<_>>();
+            let codes = buffer(executor, &codes).unwrap();
+            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+            let indices = buffer(executor, bytemuck::cast_slice(&(0..experts as u32).collect::<Vec<_>>())).unwrap();
+            let output =
+                executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
+            let bounds = buffer(executor, bytemuck::cast_slice(&vec![0u32; selected])).unwrap();
+            let function = executor.library.new_function_with_name("hybrid_graph_iq_input_bound").unwrap();
+            let prepass = executor.device.new_compute_pipeline_state_with_function(&function).unwrap();
+            let pipelines = [
+                ("typed_r4", 4usize, 8usize, 64usize, safe_iq_checked_hint_pipeline(kind, false, false)),
+                ("typed_r4_hinted", 4, 8, 64, safe_iq_checked_hint_pipeline(kind, false, true)),
+                ("factor_r4", 4, 8, 64, safe_iq_checked_hint_pipeline(kind, true, false)),
+                ("factor_r4_hinted", 4, 8, 64, safe_iq_checked_hint_pipeline(kind, true, true)),
+            ];
+            let mut timings = vec![vec![Vec::<f64>::new(); 2]; pipelines.len() - 1];
+            let mut reference = Vec::<f32>::new();
+            let mut bitwise_equal = [true; 4];
+            let mut maximum_absolute_error = [0.0f64; 4];
+            let mut relative_rms_error = [0.0f64; 4];
+            for replay in 0..7 {
+                for candidate in if replay % 2 == 0 {
+                    [1usize, 2, 3]
+                } else {
+                    [3usize, 2, 1]
+                } {
+                    for variant in [0, candidate, candidate, 0] {
+                        let (_, _, rows_per_group, threads, pipeline) = &pipelines[variant];
+                        let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                            let command = executor.queue.command_buffer().unwrap();
+                            let encoding = command.compute_command_encoder().unwrap();
+                            encoding.set_compute_pipeline_state(pipeline);
+                            encoding.set_buffer(Some(&codes), 0, 0);
+                            encoding.set_buffer(Some(&failure), 0, 30);
+                            encoding.set_bytes(
+                                NonNull::from(&parameters).cast(),
+                                std::mem::size_of_val(&parameters),
+                                3,
+                            );
+                            for group in 0..groups {
+                                {
+                                    encoding.set_compute_pipeline_state(&prepass);
+                                    encoding.set_buffer(
+                                        Some(&input),
+                                        if batched {
+                                            group * selected * columns * 4
+                                        } else {
+                                            0
+                                        },
+                                        0,
+                                    );
+                                    encoding.set_buffer(Some(&bounds), 0, 1);
+                                    let bound_parameters = [
+                                        columns as u32,
+                                        if batched {
+                                            selected as u32
+                                        } else {
+                                            1
+                                        },
+                                    ];
+                                    encoding.set_bytes(
+                                        NonNull::from(&bound_parameters).cast(),
+                                        std::mem::size_of_val(&bound_parameters),
+                                        2,
+                                    );
+                                    encoding.dispatch_threadgroups(
+                                        MTLSize {
+                                            width: bound_parameters[1] as usize,
+                                            height: 1,
+                                            depth: 1,
+                                        },
+                                        MTLSize {
+                                            width: 256,
+                                            height: 1,
+                                            depth: 1,
+                                        },
+                                    );
+                                    encoding.memory_barrier_with_scope(MTLBarrierScope::Buffers);
+                                    encoding.set_compute_pipeline_state(pipeline);
+                                    encoding.set_buffer(Some(&codes), 0, 0);
+                                    encoding.set_buffer(Some(&bounds), 0, 7);
+                                }
+                                encoding.set_buffer(
+                                    Some(&input),
+                                    if batched {
+                                        group * selected * columns * 4
+                                    } else {
+                                        0
+                                    },
+                                    1,
+                                );
+                                encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                                encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                                encoding.dispatch_threadgroups(
+                                    MTLSize {
+                                        width: rows.div_ceil(*rows_per_group),
+                                        height: selected,
+                                        depth: 1,
+                                    },
+                                    MTLSize {
+                                        width: *threads,
+                                        height: 1,
+                                        depth: 1,
+                                    },
+                                );
+                            }
+                            encoding.end_encoding();
+                            command.commit();
+                            command.wait_until_completed();
+                            assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                            // SAFETY: owned shared buffers have completed GPU
+                            // writers covering all rows*experts output slots.
+                            let values = unsafe {
+                                std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts)
+                            }
+                            .to_vec();
+                            assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                            (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                        });
+                        assert!(values.iter().all(|v| v.is_finite()), "IQ grouped32 component nonfinite");
+                        if reference.is_empty() {
+                            reference = values.clone();
+                        }
+                        if replay > 0 {
+                            timings[candidate - 1][usize::from(variant != 0)].push(seconds);
+                        }
+                        bitwise_equal[variant] &=
+                            values.iter().zip(&reference).all(|(a, b)| a.to_bits() == b.to_bits());
+                        maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                            values
+                                .iter()
+                                .zip(&reference)
+                                .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                                .fold(0.0, f64::max),
+                        );
+                        let squared_error: f64 =
+                            values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                        relative_rms_error[variant] = relative_rms_error[variant]
+                            .max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                    }
+                }
+            }
+            for (pair, schedules) in timings.iter_mut().enumerate() {
+                for (which, samples) in schedules.iter_mut().enumerate() {
+                    samples.sort_by(f64::total_cmp);
+                    let seconds = (samples[5] + samples[6]) * 0.5;
+                    let variant = if which == 0 {
+                        0
+                    } else {
+                        pair + 1
+                    };
+                    let (schedule, rows_per_simd, rows_per_group, threads, pipeline) = &pipelines[variant];
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "component": label, "kind": kind, "rows": rows, "columns": columns,
+                            "math_mode": "safe", "gpu_prepass_included":true, "pso_hint":variant == 1 || variant == 3, "signed_factor":variant >= 2, "activity":true, "host_verified_finite_bound":1.0e20, "pair_candidate_schedule": pipelines[pair + 1].0,
+                            "schedule": schedule, "rows_per_simd": rows_per_simd, "rows_per_group": rows_per_group,
+                            "threads_per_group": threads, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                            "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                            "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                            "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                            "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                            "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                            "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                            "bitwise_equal_to_original": bitwise_equal[variant],
+                            "maximum_absolute_error_vs_original": maximum_absolute_error[variant],
+                            "relative_rms_error_vs_original": relative_rms_error[variant],
+                            "timer_scope": "same_process_safe_ABBA_serial_checked_typed_factor_and_hint_iq_matvec",
+                        })
+                    );
+                    assert!(relative_rms_error[variant] <= 2e-5, "IQ grouped32 component relative RMS kind={kind}");
+                    if variant == 0 {
+                        assert!(bitwise_equal[variant], "IQ control component changed Safe bits kind={kind}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn iq4_vector_matches_f64_and_rejects_nonfinite_inputs() {
+        let (rows, batches) = (13usize, 3usize);
+        for columns in [256usize, 768, 2048, 4096] {
+            let codes = finite_packed_codes(23, rows * batches, columns, 41);
+            let input = (0..columns * batches).map(|i| (i as f32 * 0.019).sin()).collect::<Vec<_>>();
+            let parameters = [(rows * batches) as u32, columns as u32, 23, 256, 136, 0, rows as u32, 0];
+            let run = |input: &[f32], schedule| {
+                objc2::rc::autoreleasepool(|_| executor().unwrap().run_inner(&codes, input, parameters, None, schedule))
+            };
+            let scalar = run(&input, TestMatrixSchedule::Scalar).unwrap();
+            let vector = run(&input, TestMatrixSchedule::IQ4Vector).unwrap();
+            let oracle = packed_f64_oracle(23, &codes, rows * batches, columns, &input, rows);
+            for (row, &(expected, absolute)) in oracle.iter().enumerate() {
+                let bound = 2e-6 * absolute.max(1.0);
+                assert!((f64::from(scalar[row]) - expected).abs() <= bound, "IQ4 scalar F64 columns={columns}");
+                assert!((f64::from(vector[row]) - expected).abs() <= bound, "IQ4 vector F64 columns={columns}");
+            }
+            for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut invalid = input.clone();
+                invalid[columns + 17] = value;
+                assert!(run(&invalid, TestMatrixSchedule::Scalar).is_err());
+                assert!(run(&invalid, TestMatrixSchedule::IQ4Vector).is_err());
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn iq4_indexed_gpu_component_timings() {
+        let (kind, rows, columns, experts, selected) = (23u32, 4096usize, 2048usize, 64usize, 8usize);
+        let groups = experts / selected;
+        let (_, bytes) = weights::block_layout(kind).unwrap();
+        let matrix_bytes = rows * columns / 256 * bytes;
+        let executor = executor().unwrap();
+        let fast = executor
+            .packed_fast_library
+            .as_ref()
+            .expect("paired IQ4 component requires STARK_GLM53_PACKED_FAST_MATH=1");
+        let mut codes = vec![0u8; matrix_bytes * experts];
+        let mut state = 0x1b7a_95e3u32;
+        for byte in &mut codes {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *byte = (state >> 24) as u8;
+        }
+        for encoded in codes.chunks_exact_mut(bytes) {
+            encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+        }
+        let input = (0..columns * experts).map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
+        // Four spread rows from every rotating expert independently check the
+        // F64 dot of the existing F32 decoded weights. No oracle work is timed.
+        let mut oracle = Vec::new();
+        for expert in 0..experts {
+            for row in [0, rows / 3, rows * 2 / 3, rows - 1] {
+                let at = expert * matrix_bytes + row * matrix_bytes / rows;
+                let expected = packed_f64_oracle(
+                    kind,
+                    &codes[at..at + matrix_bytes / rows],
+                    1,
+                    columns,
+                    &input[expert * columns..(expert + 1) * columns],
+                    0,
+                )[0];
+                oracle.push((expert * rows + row, expected));
+            }
+        }
+        let indices = (0..experts as u32).collect::<Vec<_>>();
+        let codes = buffer(executor, &codes).unwrap();
+        let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
+        let indices = buffer(executor, bytemuck::cast_slice(&indices)).unwrap();
+        let output = executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
+        let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
+        let parameters = [rows as u32, columns as u32, experts as u32, 1u32];
+        let mut pipelines = Vec::new();
+        for (math, library) in [("safe", &executor.library), ("fast", fast)] {
+            for (schedule, row_group, name) in
+                [("generic", 1usize, "hybrid_graph_packed_indexed"), ("vector8", 8, "hybrid_graph_iq4_indexed_vector8")]
+            {
+                let constants = MTLFunctionConstantValues::new();
+                for (index, value) in [(0, kind), (4, 256), (5, bytes as u32)] {
+                    constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+                }
+                let function = library.new_function_with_name_constant_values(name, &constants).unwrap();
+                let pipeline = executor.device.new_compute_pipeline_state_with_function(&function).unwrap();
+                pipelines.push((math, schedule, row_group, pipeline));
+            }
+        }
+        let mut timings = vec![Vec::new(); pipelines.len()];
+        let mut maximum_absolute_error = vec![0.0f64; pipelines.len()];
+        let mut relative_rms_error = vec![0.0f64; pipelines.len()];
+        let mut maximum_f64_error_over_absolute_sum = vec![0.0f64; pipelines.len()];
+        let mut reference = Vec::<f32>::new();
+        for replay in 0..7 {
+            // Alternate both math-mode order and generic/vector order; the
+            // first Safe generic dispatch establishes the shared reference.
+            let order = if replay % 2 == 0 {
+                [0usize, 1, 1, 0, 2, 3, 3, 2]
+            } else {
+                [3usize, 2, 2, 3, 1, 0, 0, 1]
+            };
+            for variant in order {
+                let (_, _, row_group, pipeline) = &pipelines[variant];
+                let (values, seconds) = objc2::rc::autoreleasepool(|_| {
+                    let command = executor.queue.command_buffer().unwrap();
+                    let encoding = command.compute_command_encoder().unwrap();
+                    encoding.set_compute_pipeline_state(pipeline);
+                    encoding.set_buffer(Some(&codes), 0, 0);
+                    encoding.set_buffer(Some(&failure), 0, 30);
+                    encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
+                    for group in 0..groups {
+                        encoding.set_buffer(Some(&input), group * selected * columns * 4, 1);
+                        encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
+                        encoding.set_buffer(Some(&indices), group * selected * 4, 6);
+                        encoding.dispatch_threadgroups(
+                            MTLSize {
+                                width: rows.div_ceil(*row_group),
+                                height: selected,
+                                depth: 1,
+                            },
+                            MTLSize {
+                                width: 256,
+                                height: 1,
+                                depth: 1,
+                            },
+                        );
+                    }
+                    encoding.end_encoding();
+                    command.commit();
+                    command.wait_until_completed();
+                    assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
+                    // SAFETY: the owned shared output has a completed writer
+                    // covering all rows*experts slots; failure is initialized.
+                    let values =
+                        unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts) }
+                            .to_vec();
+                    assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
+                    (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
+                });
+                assert!(values.iter().all(|value| value.is_finite()), "IQ4 component nonfinite");
+                if reference.is_empty() {
+                    reference = values.clone();
+                }
+                if replay > 0 {
+                    timings[variant].push(seconds);
+                }
+                let squared_error: f64 =
+                    values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
+                relative_rms_error[variant] =
+                    relative_rms_error[variant].max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
+                maximum_absolute_error[variant] = maximum_absolute_error[variant].max(
+                    values
+                        .iter()
+                        .zip(&reference)
+                        .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs())
+                        .fold(0.0, f64::max),
+                );
+                for &(row, (expected, absolute)) in &oracle {
+                    maximum_f64_error_over_absolute_sum[variant] = maximum_f64_error_over_absolute_sum[variant]
+                        .max((f64::from(values[row]) - expected).abs() / absolute.max(1.0));
+                }
+            }
+        }
+        for (variant, samples) in timings.iter_mut().enumerate() {
+            samples.sort_by(f64::total_cmp);
+            let seconds = (samples[5] + samples[6]) * 0.5;
+            let (math, schedule, row_group, pipeline) = &pipelines[variant];
+            println!(
+                "{}",
+                serde_json::json!({
+                    "component": "glm_iq4xs_down", "kind": kind, "rows": rows, "columns": columns,
+                    "selected_experts": selected, "experts": experts, "rotating_groups": groups,
+                    "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
+                    "math_mode": math, "schedule": schedule, "rows_per_group": row_group,
+                    "threads_per_group": 256, "pipeline_max_threads": pipeline.max_total_threads_per_threadgroup(),
+                    "median_gpu_microseconds_per_8_experts": seconds * 1e6,
+                    "minimum_gpu_microseconds_per_8_experts": samples[0] * 1e6,
+                    "maximum_gpu_microseconds_per_8_experts": samples[samples.len() - 1] * 1e6,
+                    "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
+                    "maximum_absolute_error_vs_safe_generic": maximum_absolute_error[variant],
+                    "relative_rms_error_vs_safe_generic": relative_rms_error[variant],
+                    "maximum_f64_error_over_absolute_sum": maximum_f64_error_over_absolute_sum[variant],
+                    "f64_oracle_rows": oracle.len(),
+                    "timer_scope": "same_process_schedule_ABBA_serial_rotating_groups_gpu_timestamps",
+                })
+            );
+            assert!(relative_rms_error[variant] <= 2e-5, "IQ4 component relative RMS");
+            assert!(maximum_f64_error_over_absolute_sum[variant] <= 2e-6, "IQ4 component F64 reference");
+        }
+    }
+
+    #[stark_test]
+    fn packed_indexed_schedules_match_selected_views_and_reject_bad_experts() {
+        let (experts, rows, columns) = (4usize, 13usize, 4096usize);
+        let selected = [3usize, 1, 3];
+        for kind in [12, 13, 14, 17, 18, 23] {
+            let codes = finite_packed_codes(kind, experts * rows, columns, 7);
+            let matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &codes).unwrap(),
+                    offset: 0,
+                    length: codes.len(),
+                    registered_length: codes.len(),
+                },
+                planes: None,
+            };
+            for batched in [false, true] {
+                let input = (0..columns
+                    * if batched {
+                        selected.len()
+                    } else {
+                        1
+                    })
+                    .map(|i| (i as f32 * 0.019).sin())
+                    .collect::<Vec<_>>();
+                let mut graph = DecodeGraph::new().unwrap();
+                let indices = DecodeGraph::upload(&selected.map(|id| f32::from_bits(id as u32))).unwrap();
+                let output = graph
+                    .indexed(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected.len(),
+                        &DecodeGraph::upload(&input).unwrap(),
+                        batched,
+                    )
+                    .unwrap();
+                let actual = graph.finish(&[output]).unwrap().remove(0);
+                let expert_bytes = codes.len() / experts;
+                for (slot, expert) in selected.into_iter().enumerate() {
+                    let input_start = if batched {
+                        slot * columns
+                    } else {
+                        0
+                    };
+                    let expected = if kind == 13 {
+                        // Indexed Q5 keeps the legacy selected-view helper,
+                        // independently of the dense grouped32 experiment.
+                        let executor = executor().unwrap();
+                        let format = MatrixFormat::Packed(kind);
+                        let factored = factored_schedule(format);
+                        let original = executor
+                            .cached_pipeline(
+                                format,
+                                if factored {
+                                    "hybrid_packed_factored_matvec"
+                                } else {
+                                    "hybrid_packed_block_matvec"
+                                },
+                                if factored {
+                                    &executor.factored_test_pipelines
+                                } else {
+                                    &executor.block_test_pipelines
+                                },
+                            )
+                            .unwrap();
+                        run_kquant_multirow_test(
+                            &original,
+                            &codes[expert * expert_bytes..(expert + 1) * expert_bytes],
+                            &input[input_start..input_start + columns],
+                            [rows as u32, columns as u32, kind, 256, 176, 0, 0, 0],
+                            2,
+                        )
+                        .unwrap()
+                    } else if kind == 14 {
+                        // Indexed Q6 retains the original block chronology.
+                        // Its selected-view production policy can independently
+                        // choose the reassociated grouped16 schedule.
+                        let original = executor()
+                            .unwrap()
+                            .cached_pipeline(
+                                MatrixFormat::Packed(kind),
+                                "hybrid_packed_block_matvec",
+                                &executor().unwrap().block_test_pipelines,
+                            )
+                            .unwrap();
+                        run_kquant_multirow_test(
+                            &original,
+                            &codes[expert * expert_bytes..(expert + 1) * expert_bytes],
+                            &input[input_start..input_start + columns],
+                            [rows as u32, columns as u32, kind, 256, 210, 0, 0, 0],
+                            2,
+                        )
+                        .unwrap()
+                    } else {
+                        matvec(
+                            &codes[expert * expert_bytes..(expert + 1) * expert_bytes],
+                            kind,
+                            rows,
+                            columns,
+                            &input[input_start..input_start + columns],
+                        )
+                        .unwrap()
+                    };
+                    assert!(
+                        actual[slot * rows..(slot + 1) * rows]
+                            .iter()
+                            .zip(expected)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "indexed packed arithmetic changed kind={kind} batched={batched}"
+                    );
+                }
+            }
+            let mut invalid = DecodeGraph::new().unwrap();
+            let indices = DecodeGraph::upload(&[f32::from_bits(experts as u32)]).unwrap();
+            let input = DecodeGraph::upload(&vec![0.0; columns]).unwrap();
+            let output = invalid
+                .indexed(&matrix, MatrixFormat::Packed(kind), [experts, rows, columns], &indices, 1, &input, false)
+                .unwrap();
+            assert!(invalid.finish(&[output]).is_err(), "indexed packed out-of-range expert kind={kind}");
         }
     }
 

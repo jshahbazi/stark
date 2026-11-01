@@ -22,6 +22,7 @@ pub(crate) struct HybridBackend {
     model: Model,
     cancellation: Option<CancelSignal>,
     profile_output: Option<ProfileOutput>,
+    profile_mode: Option<AggregateProfileMode>,
     probability_mapper: ProbabilityMapper,
     nucleus_sampler: nucleus::NucleusSampler,
     last_mtp: Option<serde_json::Value>,
@@ -100,6 +101,37 @@ struct AggregateProfile {
     counters: BTreeMap<&'static str, profile::Counter>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AggregateProfileMode {
+    Qwen38Bf16,
+    NativeHybrid,
+}
+
+impl AggregateProfileMode {
+    fn scope(self) -> &'static str {
+        match self {
+            Self::Qwen38Bf16 => "qwen38_bf16_aggregate_profile",
+            Self::NativeHybrid => "native_hybrid_aggregate_profile",
+        }
+    }
+
+    fn enables_bf16_stage_profile(self) -> bool {
+        matches!(self, Self::Qwen38Bf16)
+    }
+}
+
+fn aggregate_profile_mode(
+    qwen_configured: bool,
+    native_configured: bool,
+) -> Result<Option<AggregateProfileMode>, &'static str> {
+    match (qwen_configured, native_configured) {
+        (true, true) => Err("native_profile_configuration_conflict"),
+        (true, false) => Ok(Some(AggregateProfileMode::Qwen38Bf16)),
+        (false, true) => Ok(Some(AggregateProfileMode::NativeHybrid)),
+        (false, false) => Ok(None),
+    }
+}
+
 /// Explicit diagnostic output contains only aggregate numeric counters. A new
 /// private file is required; an existing file or symlink is never overwritten.
 struct ProfileOutput {
@@ -161,18 +193,23 @@ impl HybridBackend {
         path: &Path,
         cancellation: Option<CancelSignal>,
     ) -> Result<Self, &'static str> {
-        let profile_output = std::env::var_os("STARK_QWEN38_PROFILE_OUTPUT")
-            .map(|path| ProfileOutput::open(Path::new(&path)))
-            .transpose()?;
+        let qwen_profile_path = std::env::var_os("STARK_QWEN38_PROFILE_OUTPUT");
+        let native_profile_path = std::env::var_os("STARK_NATIVE_PROFILE_OUTPUT");
+        let profile_mode = aggregate_profile_mode(qwen_profile_path.is_some(), native_profile_path.is_some())?;
+        let profile_path = qwen_profile_path.or(native_profile_path);
+        let profile_output = profile_path.map(|path| ProfileOutput::open(Path::new(&path))).transpose()?;
         let mut model = Model::load_with_mtp(path, true).map_err(|_| "hybrid_model_load_failed")?;
-        if profile_output.is_some() {
+        if profile_mode.is_some_and(AggregateProfileMode::enables_bf16_stage_profile) {
             model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
+        }
+        if profile_output.is_some() {
             profile::enable(true);
         }
         Ok(Self {
             model,
             cancellation,
             profile_output,
+            profile_mode,
             probability_mapper: ProbabilityMapper::default(),
             nucleus_sampler: nucleus::NucleusSampler::default(),
             last_mtp: None,
@@ -379,7 +416,7 @@ impl GenerationBackend for HybridBackend {
         if let Some(output) = self.profile_output.as_mut() {
             output.write(&AggregateProfile {
                 schema_version: 1,
-                scope: "qwen38_bf16_aggregate_profile",
+                scope: self.profile_mode.expect("profile output has mode").scope(),
                 success: result.is_ok(),
                 input_tokens: input.len(),
                 sampled_tokens: result.as_ref().ok().map(|tokens| tokens.sampled_tokens),
@@ -694,6 +731,18 @@ mod tests {
                 },
             )]),
         }
+    }
+
+    #[test]
+    fn aggregate_profile_mode_keeps_scopes_distinct_and_rejects_conflict() {
+        assert_eq!(aggregate_profile_mode(false, false), Ok(None));
+        assert_eq!(aggregate_profile_mode(true, false), Ok(Some(AggregateProfileMode::Qwen38Bf16)));
+        assert_eq!(aggregate_profile_mode(false, true), Ok(Some(AggregateProfileMode::NativeHybrid)));
+        assert_eq!(aggregate_profile_mode(true, true), Err("native_profile_configuration_conflict"));
+        assert_eq!(AggregateProfileMode::Qwen38Bf16.scope(), "qwen38_bf16_aggregate_profile");
+        assert_eq!(AggregateProfileMode::NativeHybrid.scope(), "native_hybrid_aggregate_profile");
+        assert!(AggregateProfileMode::Qwen38Bf16.enables_bf16_stage_profile());
+        assert!(!AggregateProfileMode::NativeHybrid.enables_bf16_stage_profile());
     }
 
     #[cfg(unix)]

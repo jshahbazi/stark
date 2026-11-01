@@ -6,7 +6,13 @@
 //! Scalar decoding supplies the reference for the native Metal matvec path.
 
 #[cfg(feature = "metal")]
-use std::{collections::VecDeque, sync::Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(feature = "metal")]
+use std::{
+    cell::RefCell,
+    collections::{HashSet, VecDeque},
+    sync::Mutex,
+};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, File},
@@ -18,6 +24,15 @@ use std::{
 };
 
 use half::{bf16, f16};
+#[cfg(feature = "metal")]
+use metal::{
+    MTLBlitCommandEncoderExt, MTLDevice, MTLDeviceExt, MTLResidencySet, MTLResidencySetDescriptor, MTLResource,
+};
+#[cfg(feature = "metal")]
+use objc2::{
+    rc::Retained,
+    runtime::{NSObjectProtocol, ProtocolObject},
+};
 use serde_json::Value;
 
 use super::{Error, Result};
@@ -30,6 +45,51 @@ const MAX_SELECTED_BYTES: usize = 256 * 1024 * 1024;
 const MAX_BATCH_WEIGHT_BYTES: usize = 2 * 1024 * 1024 * 1024;
 #[cfg(feature = "metal")]
 const MAX_STATIC_VIEW_BYTES: usize = 8 * 1024 * 1024 * 1024;
+#[cfg(feature = "metal")]
+fn require_wide_encoder_flags(
+    encoder: bool,
+    resident: bool,
+    wide: bool,
+) -> Result<()> {
+    if encoder && resident && wide {
+        Ok(())
+    } else {
+        Err(Error::Invalid("wide encoder requires encoder banks and residency opt-ins"))
+    }
+}
+
+#[cfg(feature = "metal")]
+fn resident_encoder_bank_budget(
+    cap: usize,
+    statics: usize,
+    dynamic: usize,
+) -> Result<usize> {
+    cap.checked_sub(statics)
+        .and_then(|n| n.checked_sub(dynamic))
+        .filter(|&n| n > 0)
+        .ok_or(Error::Invalid("wide encoder reserves exceed residency cap"))
+}
+
+#[cfg(feature = "metal")]
+fn admit_wide_encoder_names(
+    names: &[String],
+    budget: usize,
+    whitelist: &HashSet<String>,
+    cap: usize,
+    statics: usize,
+    dynamic: usize,
+    failed: bool,
+) -> Result<()> {
+    if failed || names.is_empty() || names.iter().any(|name| !whitelist.contains(name)) {
+        return Err(Error::Invalid("wide encoder banks are outside configured residency"));
+    }
+    if budget > resident_encoder_bank_budget(cap, statics, dynamic)? {
+        return Err(Error::Invalid("wide encoder bank budget exceeds configured residency"));
+    }
+    Ok(())
+}
+#[cfg(feature = "metal")]
+static BOUNDED_REGISTERED_BYTES: AtomicUsize = AtomicUsize::new(0);
 const U32_KIND: u32 = 101;
 const I64_KIND: u32 = 102;
 const I32_KIND: u32 = 103;
@@ -41,6 +101,20 @@ struct Mapping {
     _file: File,
     pointer: NonNull<u8>,
     length: usize,
+}
+
+#[cfg(feature = "metal")]
+struct BoundedBufferOwner {
+    _mapping: Arc<Mapping>,
+    bytes: usize,
+}
+
+#[cfg(feature = "metal")]
+impl Drop for BoundedBufferOwner {
+    fn drop(&mut self) {
+        let remaining = BOUNDED_REGISTERED_BYTES.fetch_sub(self.bytes, Ordering::AcqRel) - self.bytes;
+        super::profile::record("native.metal.bounded_bank.live_bytes", 0.0, remaining);
+    }
 }
 
 impl Mapping {
@@ -138,6 +212,37 @@ impl Mapping {
             )
         })
     }
+
+    #[cfg(feature = "metal")]
+    fn bounded_metal_slice(
+        self: &Arc<Self>,
+        offset: usize,
+        size: usize,
+        budget: usize,
+    ) -> Result<super::weight_metal::MappedSlice> {
+        let (start, registered_length) = self.metal_span(offset, size)?;
+        let previous = BOUNDED_REGISTERED_BYTES
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(registered_length).filter(|&total| total <= budget)
+            })
+            .map_err(|_| Error::Invalid("bounded Metal registrations exceed working-set budget"))?;
+        super::profile::record("native.metal.bounded_bank.live_bytes", 0.0, previous + registered_length);
+        let owner = Arc::new(BoundedBufferOwner {
+            _mapping: Arc::clone(self),
+            bytes: registered_length,
+        });
+        // The counter belongs to Metal's deallocator owner, not the Rust view.
+        // It therefore observes command/autorelease retention as well.
+        objc2::rc::autoreleasepool(|_| unsafe {
+            super::weight_metal::mapped_slice(
+                self.pointer.add(start).cast(),
+                registered_length,
+                offset - start,
+                size,
+                owner,
+            )
+        })
+    }
 }
 
 impl Drop for Mapping {
@@ -185,6 +290,287 @@ struct StaticViewCache {
     order: VecDeque<StaticViewKey>,
 }
 
+/// Virtual wrappers are retained across tokens only for the encoder-scoped
+/// GLM experiment. Their total is not a resident-memory measurement. Every
+/// encoder still needs a separately admitted bounded group capability.
+#[cfg(feature = "metal")]
+#[derive(Default)]
+struct EncoderBankViews {
+    matrices: HashMap<String, super::weight_metal::MappedMatrix>,
+    virtual_bytes: usize,
+}
+
+#[cfg(feature = "metal")]
+type ResidentBuffer = Retained<ProtocolObject<dyn metal::MTLBuffer>>;
+
+#[cfg(feature = "metal")]
+struct ResidencyDriver {
+    set: Retained<ProtocolObject<dyn metal::MTLResidencySet>>,
+    last_active: std::time::Instant,
+    #[cfg(test)]
+    requests: usize,
+    #[cfg(test)]
+    parks: usize,
+}
+
+/// Separately admitted whole-model residency experiment. Unlike virtual bank
+/// wrappers, these requests can wire pages. The default and per-encoder caps
+/// remain unchanged. Buffer ownership includes statics evicted from the FIFO.
+#[cfg(feature = "metal")]
+struct EncoderResidency {
+    driver: Arc<Mutex<ResidencyDriver>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    keepalive: Option<std::thread::JoinHandle<()>>,
+    names: HashSet<String>,
+    buffers: HashMap<usize, ResidentBuffer>,
+    bank_bytes: usize,
+    static_bytes: usize,
+    static_reserve: usize,
+    dynamic_allowance: usize,
+    cap: usize,
+    device_id: u64,
+    failed: bool,
+}
+
+#[cfg(feature = "metal")]
+impl EncoderResidency {
+    fn new(
+        names: HashSet<String>,
+        dynamic_allowance: usize,
+        cap: usize,
+        static_reserve: usize,
+    ) -> Result<Self> {
+        let device =
+            <dyn MTLDevice>::system_default().ok_or(Error::Unsupported("Metal residency device unavailable"))?;
+        if !device.respondsToSelector(objc2::sel!(newResidencySetWithDescriptor:error:)) {
+            return Err(Error::Unsupported("Metal residency sets unavailable"));
+        }
+        Self::prime_residency_release(&device)?;
+        let descriptor = MTLResidencySetDescriptor::new();
+        descriptor.set_initial_capacity(names.len().saturating_mul(3).saturating_add(1024));
+        let set = device
+            .new_residency_set_with_descriptor(&descriptor)
+            .map_err(|_| Error::Invalid("Metal encoder residency set creation failed"))?;
+        let driver = Arc::new(Mutex::new(ResidencyDriver {
+            set,
+            last_active: std::time::Instant::now(),
+            #[cfg(test)]
+            requests: 0,
+            #[cfg(test)]
+            parks: 0,
+        }));
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let thread_driver = Arc::clone(&driver);
+        let thread_stop = Arc::clone(&stop);
+        // Matches llama.cpp b11429 (d81235049384534c167caea52b85a694f6103d14),
+        // ggml/src/ggml-metal/ggml-metal-device.m residency collection:
+        // repeat requests every 5 ms for three minutes after model activity.
+        let keepalive = std::thread::Builder::new().name("glm-bank-residency".to_owned()).spawn(move || {
+            while !thread_stop.load(Ordering::Acquire) {
+                let active = if let Ok(driver) = thread_driver.lock() {
+                    #[cfg(test)]
+                    let mut driver = driver;
+                    if driver.last_active.elapsed() < std::time::Duration::from_secs(180) {
+                        objc2::rc::autoreleasepool(|_| driver.set.request_residency());
+                        #[cfg(test)]
+                        {
+                            driver.requests += 1;
+                        }
+                        true
+                    } else {
+                        #[cfg(test)]
+                        {
+                            driver.parks += 1;
+                        }
+                        false
+                    }
+                } else {
+                    break;
+                };
+                if active {
+                    std::thread::park_timeout(std::time::Duration::from_millis(5));
+                } else {
+                    // Unpark tokens survive a refresh racing this park.
+                    std::thread::park();
+                }
+            }
+        })?;
+        Ok(Self {
+            driver,
+            stop,
+            keepalive: Some(keepalive),
+            names,
+            buffers: HashMap::new(),
+            bank_bytes: 0,
+            static_bytes: 0,
+            static_reserve,
+            dynamic_allowance,
+            cap,
+            device_id: device.registry_id(),
+            failed: false,
+        })
+    }
+
+    fn prime_residency_release(device: &ProtocolObject<dyn MTLDevice>) -> Result<()> {
+        // llama.cpp b11429 performs dummy GPU work when creating residency
+        // collections to avoid retained wired memory after resource release:
+        // https://developer.apple.com/forums/thread/839089
+        // https://github.com/ggml-org/llama.cpp/issues/25937
+        // Keep the tiny buffer, queue, encoder and command explicitly owned
+        // until completion, then drain all autoreleased temporary references.
+        objc2::rc::autoreleasepool(|_| {
+            let queue = device.new_command_queue().ok_or(Error::Invalid("Metal residency warmup queue failed"))?;
+            let buffer = device
+                .new_buffer(1, metal::MTLResourceOptions::STORAGE_MODE_PRIVATE)
+                .ok_or(Error::Invalid("Metal residency warmup buffer failed"))?;
+            let command = metal::MTLCommandQueue::command_buffer(&*queue)
+                .ok_or(Error::Invalid("Metal residency warmup command failed"))?;
+            let encoder = metal::MTLCommandBuffer::blit_command_encoder(&*command)
+                .ok_or(Error::Invalid("Metal residency warmup encoder failed"))?;
+            encoder.fill_buffer_range_value(&buffer, 0..1, 0);
+            metal::MTLCommandEncoder::end_encoding(&*encoder);
+            metal::MTLCommandBuffer::commit(&*command);
+            metal::MTLCommandBuffer::wait_until_completed(&*command);
+            if metal::MTLCommandBuffer::status(&*command) != metal::MTLCommandBufferStatus::Completed {
+                return Err(Error::Invalid("Metal residency warmup command failed"));
+            }
+            Ok(())
+        })
+    }
+
+    fn required(
+        &self,
+        bank: usize,
+        static_bytes: usize,
+        allocated: usize,
+    ) -> Result<usize> {
+        if static_bytes > self.static_reserve {
+            return Err(Error::Invalid("resident static allocations exceed reserved budget"));
+        }
+        bank.checked_add(static_bytes)
+            .map(|bytes| bytes.max(allocated))
+            .and_then(|bytes| bytes.checked_add(self.static_reserve - static_bytes))
+            .and_then(|bytes| bytes.checked_add(self.dynamic_allowance))
+            .filter(|&bytes| bytes <= self.cap)
+            .ok_or(Error::Invalid("Metal encoder residency exceeds admitted budget"))
+    }
+
+    fn add(
+        &mut self,
+        views: &[&super::weight_metal::MappedSlice],
+        bank: bool,
+    ) -> Result<()> {
+        if self.failed {
+            return Err(Error::Invalid("Metal encoder residency was invalidated"));
+        }
+        let mut unique = HashSet::new();
+        let mut pending = Vec::new();
+        let mut bytes = 0usize;
+        for view in views {
+            let id = Retained::as_ptr(view.buffer()) as usize;
+            if self.buffers.contains_key(&id) || !unique.insert(id) {
+                continue;
+            }
+            if view.buffer().device().registry_id() != self.device_id {
+                return Err(Error::Invalid("Metal residency device does not match weight allocation"));
+            }
+            let allocated = metal::MTLResource::allocated_size(&**view.buffer()).max(view.registered_bytes());
+            bytes = bytes.checked_add(allocated).ok_or(Error::Invalid("resident allocation size overflow"))?;
+            pending.push((id, view.buffer().clone()));
+        }
+        let bank_bytes = if bank {
+            self.bank_bytes.checked_add(bytes)
+        } else {
+            Some(self.bank_bytes)
+        }
+        .ok_or(Error::Invalid("resident bank inventory overflow"))?;
+        let static_bytes = if bank {
+            Some(self.static_bytes)
+        } else {
+            self.static_bytes.checked_add(bytes)
+        }
+        .ok_or(Error::Invalid("resident static inventory overflow"))?;
+        let mut driver = self.driver.lock().map_err(|_| Error::Invalid("Metal residency driver failed"))?;
+        if pending.is_empty() {
+            self.refresh_activity(&mut driver);
+            return Ok(());
+        }
+        let old_allocated = usize::try_from(driver.set.allocated_size())
+            .map_err(|_| Error::Invalid("Metal residency allocation size overflow"))?;
+        self.required(
+            bank_bytes,
+            static_bytes,
+            old_allocated.checked_add(bytes).ok_or(Error::Invalid("Metal residency allocation size overflow"))?,
+        )?;
+        for (_, buffer) in &pending {
+            driver.set.add_allocation(ProtocolObject::<dyn metal::MTLAllocation>::from_ref(&**buffer));
+        }
+        if !pending.is_empty() {
+            driver.set.commit();
+        }
+        let allocated = usize::try_from(driver.set.allocated_size())
+            .map_err(|_| Error::Invalid("Metal residency allocation size overflow"))?;
+        if self.required(bank_bytes, static_bytes, allocated).is_err() {
+            // Driver-internal overhead can only be observed after commit.
+            // Fail closed, release the complete request, and forbid reuse.
+            self.stop.store(true, Ordering::Release);
+            self.unpark_keepalive();
+            driver.set.end_residency();
+            driver.set.remove_all_allocations();
+            driver.set.commit();
+            self.buffers.clear();
+            self.bank_bytes = 0;
+            self.static_bytes = 0;
+            self.failed = true;
+            return Err(Error::Invalid("Metal residency committed allocation exceeds budget"));
+        }
+        self.refresh_activity(&mut driver);
+        driver.set.request_residency();
+        self.buffers.extend(pending);
+        self.bank_bytes = bank_bytes;
+        self.static_bytes = static_bytes;
+        super::profile::record("native.metal.encoder_bank.resident_bank_bytes", 0.0, bank_bytes);
+        super::profile::record("native.metal.encoder_bank.resident_static_bytes", 0.0, static_bytes);
+        super::profile::record("native.metal.encoder_bank.residency_allocated_bytes", 0.0, allocated);
+        Ok(())
+    }
+
+    fn refresh_activity(
+        &self,
+        driver: &mut ResidencyDriver,
+    ) {
+        let expired = driver.last_active.elapsed() >= std::time::Duration::from_secs(180);
+        driver.last_active = std::time::Instant::now();
+        if expired {
+            self.unpark_keepalive();
+        }
+    }
+
+    fn unpark_keepalive(&self) {
+        if let Some(worker) = &self.keepalive {
+            worker.thread().unpark();
+        }
+    }
+}
+
+#[cfg(feature = "metal")]
+impl Drop for EncoderResidency {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.unpark_keepalive();
+        if let Some(worker) = self.keepalive.take() {
+            let _ = worker.join();
+        }
+        // Stop refreshes before ending/removing requests; explicit buffer refs
+        // remain alive through this sequence and are then released with self.
+        if let Ok(driver) = self.driver.lock() {
+            driver.set.end_residency();
+            driver.set.remove_all_allocations();
+            driver.set.commit();
+        }
+    }
+}
+
 #[cfg(feature = "metal")]
 impl StaticViewCache {
     fn new(limit: usize) -> Self {
@@ -219,10 +605,76 @@ pub struct Weights {
     static_views: Mutex<StaticViewCache>,
     #[cfg(feature = "metal")]
     bank_views: Mutex<StaticViewCache>,
+    #[cfg(feature = "metal")]
+    encoder_bank_views: Mutex<EncoderBankViews>,
+    #[cfg(feature = "metal")]
+    encoder_residency: Mutex<Option<EncoderResidency>>,
+    #[cfg(feature = "metal")]
+    encoder_residency_enabled: std::sync::atomic::AtomicBool,
     // Tensor geometry is immutable after open; avoid rescanning every bank
     // for each routed projection. Memory-budget admission remains live below.
     #[cfg(feature = "metal")]
     indexed_bank_geometry_admitted: bool,
+}
+
+/// A checked bank whitelist for one command or encoder. The original bounded
+/// command policy releases wrappers after completion. The separate encoder
+/// policy retains virtual wrappers, with a fresh budget check for each encoder.
+#[cfg(feature = "metal")]
+pub(super) struct BoundedBankGroup<'a> {
+    weights: &'a Weights,
+    names: HashSet<String>,
+    matrices: RefCell<HashMap<String, super::weight_metal::MappedMatrix>>,
+    registered_bytes: usize,
+    budget: usize,
+    encoder_registry: bool,
+}
+
+#[cfg(feature = "metal")]
+impl BoundedBankGroup<'_> {
+    pub(super) fn registered_bytes(&self) -> usize {
+        self.registered_bytes
+    }
+
+    pub(super) fn encode_indexed_matvec(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        indices: &super::weight_metal::DeviceVector,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+        input_batched: bool,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        if !self.names.contains(name) {
+            return Err(Error::Invalid("bank is outside bounded command group"));
+        }
+        let (tensor, shape) = self.weights.indexed_geometry(name, selected)?;
+        let matrix = if self.encoder_registry {
+            self.weights.encoder_bank_matrix(name, tensor)?
+        } else {
+            let mut matrices = self.matrices.borrow_mut();
+            if let std::collections::hash_map::Entry::Vacant(entry) = matrices.entry(name.to_owned()) {
+                let codes =
+                    self.weights.files[tensor.file].bounded_metal_slice(tensor.offset, tensor.size, self.budget)?;
+                let planes = if let Some(affine) = &tensor.affine {
+                    let scales = self.weights.tensor(&affine.scales)?;
+                    let biases = self.weights.tensor(&affine.biases)?;
+                    Some((
+                        self.weights.files[scales.file].bounded_metal_slice(scales.offset, scales.size, self.budget)?,
+                        self.weights.files[biases.file].bounded_metal_slice(biases.offset, biases.size, self.budget)?,
+                    ))
+                } else {
+                    None
+                };
+                entry.insert(super::weight_metal::MappedMatrix {
+                    codes,
+                    planes,
+                });
+            }
+            matrices.get(name).ok_or(Error::Invalid("bounded bank registration failed"))?.clone()
+        };
+        graph.indexed(&matrix, self.weights.matrix_format(tensor)?, shape, indices, selected, input, input_batched)
+    }
 }
 
 impl Weights {
@@ -249,6 +701,12 @@ impl Weights {
             static_views: Mutex::new(StaticViewCache::new(MAX_STATIC_VIEW_BYTES)),
             #[cfg(feature = "metal")]
             bank_views: Mutex::new(StaticViewCache::new(0)),
+            #[cfg(feature = "metal")]
+            encoder_bank_views: Mutex::new(EncoderBankViews::default()),
+            #[cfg(feature = "metal")]
+            encoder_residency: Mutex::new(None),
+            #[cfg(feature = "metal")]
+            encoder_residency_enabled: std::sync::atomic::AtomicBool::new(false),
             #[cfg(feature = "metal")]
             indexed_bank_geometry_admitted: false,
         };
@@ -650,6 +1108,7 @@ impl Weights {
         let mut cache = self.static_views.lock().map_err(|_| Error::Invalid("static Metal view cache failed"))?;
         if let Some(view) = cache.entries.get(&key) {
             let result = view.clone();
+            self.register_resident_static(&result)?;
             super::profile::record("native.metal.static_cache.hit", 0.0, result.registered_bytes());
             super::profile::record("native.metal.static_cache.registered_bytes", 0.0, cache.registered_bytes);
             return Ok(result);
@@ -658,12 +1117,15 @@ impl Weights {
         super::profile::record("native.metal.static_cache.miss", 0.0, registered);
         if registered > cache.limit {
             drop(cache);
-            return mapping.metal_slice(offset, length);
+            let view = mapping.metal_slice(offset, length)?;
+            self.register_resident_static(&view)?;
+            return Ok(view);
         }
         // Evict before allocation; creating while holding the mutex also
         // prevents duplicate FIFO keys and accounting races across callers.
         cache.reserve(registered, "native.metal.static_cache.eviction");
         let view = mapping.metal_slice(offset, length)?;
+        self.register_resident_static(&view)?;
         cache.registered_bytes += view.registered_bytes();
         cache.order.push_back(key);
         cache.entries.insert(key, view.clone());
@@ -919,6 +1381,367 @@ impl Weights {
     #[cfg(feature = "metal")]
     pub(super) fn indexed_banks_admitted(&self) -> bool {
         self.bank_views.lock().is_ok_and(|cache| cache.limit > 0) && self.indexed_bank_geometry_admitted
+    }
+
+    /// Keep the original complete-inventory admission rule unchanged. A GLM
+    /// command group may separately admit only its own immutable bank spans,
+    /// reserving the same static allowance and three-quarter working-set cap.
+    #[cfg(feature = "metal")]
+    pub(super) fn bounded_indexed_budget(&self) -> Result<usize> {
+        Ok((super::weight_metal::recommended_working_set()? / 4 * 3).saturating_sub(MAX_STATIC_VIEW_BYTES))
+    }
+
+    /// Prospective budget only. The plan subtracts its state allowance; group
+    /// admission later requires the actual configured resident whitelist/cap.
+    #[cfg(feature = "metal")]
+    pub(super) fn wide_encoder_bank_budget(&self) -> Result<usize> {
+        let enabled = |name| std::env::var_os(name).is_some_and(|value| value == "1");
+        require_wide_encoder_flags(
+            enabled("STARK_GLM53_ENCODER_BANKS"),
+            enabled("STARK_GLM53_RESIDENT_BANKS"),
+            enabled("STARK_GLM53_WIDE_ENCODER"),
+        )?;
+        let cap = super::weight_metal::recommended_working_set()? / 100 * 95;
+        resident_encoder_bank_budget(cap, MAX_STATIC_VIEW_BYTES, 0)
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn bounded_bank_bytes(
+        &self,
+        names: &[String],
+    ) -> Result<usize> {
+        let maximum = super::weight_metal::max_buffer_length()?.min(u32::MAX as usize);
+        let mut spans = HashMap::new();
+        for name in names {
+            let (tensor, _) = self.indexed_geometry(name, 1)?;
+            let mut planes = vec![tensor];
+            if let Some(affine) = &tensor.affine {
+                planes.push(self.tensor(&affine.scales)?);
+                planes.push(self.tensor(&affine.biases)?);
+            }
+            for plane in planes {
+                let bytes = self.files[plane.file].metal_span(plane.offset, plane.size)?.1;
+                if bytes > maximum {
+                    return Err(Error::Invalid("bounded bank exceeds Metal buffer span"));
+                }
+                spans.insert(
+                    StaticViewKey {
+                        file: plane.file,
+                        offset: plane.offset,
+                        length: plane.size,
+                    },
+                    bytes,
+                );
+            }
+        }
+        spans
+            .values()
+            .try_fold(0usize, |sum, &bytes| sum.checked_add(bytes))
+            .ok_or(Error::Invalid("bounded bank inventory overflow"))
+    }
+
+    #[cfg(feature = "metal")]
+    pub(super) fn bounded_indexed_group(
+        &self,
+        names: &[String],
+    ) -> Result<BoundedBankGroup<'_>> {
+        self.indexed_group_with_budget(names, self.bounded_indexed_budget()?, false)
+    }
+
+    #[cfg(all(feature = "metal", test))]
+    fn bounded_indexed_group_with_budget(
+        &self,
+        names: &[String],
+        budget: usize,
+    ) -> Result<BoundedBankGroup<'_>> {
+        self.indexed_group_with_budget(names, budget, false)
+    }
+
+    /// Apple documents recommendedMaxWorkingSetSize as a per-command-encoder
+    /// resource limit, while total virtual allocations may exceed it when
+    /// usage is split across encoders (Tech Talk 10580, 7:20-8:10). This opt-in
+    /// registry changes wrapper lifetime only by default. The separate wide
+    /// opt-in can reuse the configured 95% residency allowance after reserves.
+    #[cfg(feature = "metal")]
+    pub(super) fn encoder_indexed_group(
+        &self,
+        names: &[String],
+        budget: usize,
+    ) -> Result<BoundedBankGroup<'_>> {
+        self.indexed_group_with_budget(names, budget, true)
+    }
+
+    /// Explicit whole-model residency experiment, separate from the default
+    /// virtual-wrapper policy. The caller supplies only validated main-trunk
+    /// expert names and the conservative state allowance for its context cap.
+    #[cfg(feature = "metal")]
+    pub(super) fn configure_encoder_residency(
+        &self,
+        names: &[String],
+        dynamic_allowance: usize,
+    ) -> Result<()> {
+        if !std::env::var_os("STARK_GLM53_RESIDENT_BANKS").is_some_and(|value| value == "1") {
+            return Ok(());
+        }
+        if !std::env::var_os("STARK_GLM53_ENCODER_BANKS").is_some_and(|value| value == "1") {
+            return Err(Error::Invalid("resident banks require encoder-bank execution"));
+        }
+        // This 95% global residency experiment does not alter the separate
+        // default 75% per-encoder admission rule or any OS wired-memory setting.
+        let cap = super::weight_metal::recommended_working_set()? / 100 * 95;
+        self.configure_encoder_residency_with_budget(names, dynamic_allowance, cap, MAX_STATIC_VIEW_BYTES)
+    }
+
+    #[cfg(feature = "metal")]
+    fn configure_encoder_residency_with_budget(
+        &self,
+        names: &[String],
+        dynamic_allowance: usize,
+        cap: usize,
+        static_reserve: usize,
+    ) -> Result<()> {
+        let banks = self.bounded_bank_bytes(names)?;
+        let required = banks
+            .checked_add(static_reserve)
+            .and_then(|n| n.checked_add(dynamic_allowance))
+            .filter(|&n| n <= cap)
+            .ok_or(Error::Invalid("complete resident bank inventory is not admitted"))?;
+        if names.is_empty()
+            || self.bank_views.lock().map_err(|_| Error::Invalid("Metal bank view cache failed"))?.registered_bytes != 0
+        {
+            return Err(Error::Invalid("resident banks overlap legacy expert registrations"));
+        }
+        let names: HashSet<_> = names.iter().cloned().collect();
+        // Collect before taking the residency lock, preserving cache->residency
+        // lock order used by lazy registrations during normal decode.
+        let statics: Vec<_> = self
+            .static_views
+            .lock()
+            .map_err(|_| Error::Invalid("static Metal view cache failed"))?
+            .entries
+            .values()
+            .cloned()
+            .collect();
+        let existing: Vec<_> = self
+            .encoder_bank_views
+            .lock()
+            .map_err(|_| Error::Invalid("Metal encoder bank registry failed"))?
+            .matrices
+            .iter()
+            .map(|(name, matrix)| (name.clone(), matrix.clone()))
+            .collect();
+        if existing.iter().any(|(name, _)| !names.contains(name)) {
+            return Err(Error::Invalid("resident inventory excludes an existing encoder bank"));
+        }
+        let mut configured =
+            self.encoder_residency.lock().map_err(|_| Error::Invalid("Metal bank residency failed"))?;
+        if configured.is_some() {
+            return Err(Error::Invalid("Metal bank residency is already configured"));
+        }
+        let mut residency = EncoderResidency::new(names, dynamic_allowance, cap, static_reserve)?;
+        residency.add(&statics.iter().collect::<Vec<_>>(), false)?;
+        for (_, matrix) in existing {
+            let mut views = vec![&matrix.codes];
+            if let Some((scales, biases)) = &matrix.planes {
+                views.extend([scales, biases]);
+            }
+            residency.add(&views, true)?;
+        }
+        *configured = Some(residency);
+        self.encoder_residency_enabled.store(true, Ordering::Release);
+        super::profile::record("native.metal.encoder_bank.resident_prospective_bytes", 0.0, required);
+        super::profile::record("native.metal.encoder_bank.resident_policy_cap", 0.0, cap);
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    fn register_resident_static(
+        &self,
+        view: &super::weight_metal::MappedSlice,
+    ) -> Result<()> {
+        if !self.encoder_residency_enabled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut guard = self.encoder_residency.lock().map_err(|_| Error::Invalid("Metal bank residency failed"))?;
+        if let Some(residency) = guard.as_mut() {
+            residency.add(&[view], false)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    fn register_resident_bank(
+        &self,
+        name: &str,
+        matrix: &super::weight_metal::MappedMatrix,
+    ) -> Result<()> {
+        if !self.encoder_residency_enabled.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut guard = self.encoder_residency.lock().map_err(|_| Error::Invalid("Metal bank residency failed"))?;
+        if let Some(residency) = guard.as_mut() {
+            if !residency.names.contains(name) {
+                return Err(Error::Invalid("bank is outside resident trunk inventory"));
+            }
+            let mut views = vec![&matrix.codes];
+            if let Some((scales, biases)) = &matrix.planes {
+                views.extend([scales, biases]);
+            }
+            residency.add(&views, true)?;
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    fn indexed_group_with_budget(
+        &self,
+        names: &[String],
+        budget: usize,
+        encoder_registry: bool,
+    ) -> Result<BoundedBankGroup<'_>> {
+        let bytes = self.bounded_bank_bytes(names)?;
+        if budget > self.bounded_indexed_budget()? {
+            if !encoder_registry {
+                return Err(Error::Invalid("bounded bank budget cannot exceed working-set policy"));
+            }
+            if budget > self.wide_encoder_bank_budget()? {
+                return Err(Error::Invalid("wide encoder bank budget exceeds prospective residency cap"));
+            }
+            let configured =
+                self.encoder_residency.lock().map_err(|_| Error::Invalid("Metal bank residency failed"))?;
+            let residency = configured.as_ref().ok_or(Error::Invalid("wide encoder requires configured residency"))?;
+            admit_wide_encoder_names(
+                names,
+                budget,
+                &residency.names,
+                residency.cap,
+                residency.static_reserve,
+                residency.dynamic_allowance,
+                residency.failed,
+            )?;
+        }
+        if self.bank_views.lock().map_err(|_| Error::Invalid("Metal bank view cache failed"))?.registered_bytes != 0 {
+            return Err(Error::Invalid("bounded command overlaps retained expert inventory"));
+        }
+        if !encoder_registry
+            && !self
+                .encoder_bank_views
+                .lock()
+                .map_err(|_| Error::Invalid("Metal encoder bank registry failed"))?
+                .matrices
+                .is_empty()
+        {
+            return Err(Error::Invalid("bounded command overlaps encoder-bank registry"));
+        }
+        let previous = BOUNDED_REGISTERED_BYTES.load(Ordering::Acquire);
+        super::profile::record(
+            if encoder_registry {
+                "native.metal.encoder_bank.command_owned_overlap"
+            } else {
+                "native.metal.bounded_bank.live_before_group"
+            },
+            0.0,
+            previous,
+        );
+        if previous != 0 {
+            return Err(Error::Invalid("previous bounded bank buffers are still retained"));
+        }
+        if names.is_empty() || bytes > budget {
+            return Err(Error::Invalid("bounded bank command inventory is not admitted"));
+        }
+        super::profile::record(
+            if encoder_registry {
+                "native.metal.encoder_bank.admitted_bytes"
+            } else {
+                "native.metal.bounded_bank.admitted_bytes"
+            },
+            0.0,
+            bytes,
+        );
+        Ok(BoundedBankGroup {
+            weights: self,
+            names: names.iter().cloned().collect(),
+            matrices: RefCell::new(HashMap::new()),
+            registered_bytes: bytes,
+            budget,
+            encoder_registry,
+        })
+    }
+
+    #[cfg(feature = "metal")]
+    fn encoder_bank_matrix(
+        &self,
+        name: &str,
+        tensor: &Tensor,
+    ) -> Result<super::weight_metal::MappedMatrix> {
+        let mut cache =
+            self.encoder_bank_views.lock().map_err(|_| Error::Invalid("Metal encoder bank registry failed"))?;
+        if let Some(matrix) = cache.matrices.get(name) {
+            self.register_resident_bank(name, matrix)?;
+            super::profile::record("native.metal.encoder_bank.hit", 0.0, 0);
+            return Ok(matrix.clone());
+        }
+        let codes = self.files[tensor.file].metal_slice(tensor.offset, tensor.size)?;
+        let planes = if let Some(affine) = &tensor.affine {
+            let scales = self.tensor(&affine.scales)?;
+            let biases = self.tensor(&affine.biases)?;
+            Some((
+                self.files[scales.file].metal_slice(scales.offset, scales.size)?,
+                self.files[biases.file].metal_slice(biases.offset, biases.size)?,
+            ))
+        } else {
+            None
+        };
+        let matrix = super::weight_metal::MappedMatrix {
+            codes,
+            planes,
+        };
+        self.register_resident_bank(name, &matrix)?;
+        let bytes = matrix.codes.registered_bytes()
+            + matrix
+                .planes
+                .as_ref()
+                .map_or(0, |(scales, biases)| scales.registered_bytes() + biases.registered_bytes());
+        cache.virtual_bytes =
+            cache.virtual_bytes.checked_add(bytes).ok_or(Error::Invalid("encoder-bank virtual inventory overflow"))?;
+        super::profile::record("native.metal.encoder_bank.miss", 0.0, bytes);
+        super::profile::record("native.metal.encoder_bank.virtual_bytes", 0.0, cache.virtual_bytes);
+        cache.matrices.insert(name.to_owned(), matrix.clone());
+        Ok(matrix)
+    }
+
+    #[cfg(all(feature = "metal", test))]
+    fn bounded_registered_bytes() -> usize {
+        BOUNDED_REGISTERED_BYTES.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "metal")]
+    fn indexed_geometry(
+        &self,
+        name: &str,
+        selected: usize,
+    ) -> Result<(&Tensor, [usize; 3])> {
+        let t = self.tensor(name)?;
+        if t.shape.len() != 3 || t.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR) {
+            return Err(Error::Invalid("decode indexed matrix requires rank three"));
+        }
+        let planes = if let Some(a) = &t.affine {
+            self.tensor(&a.scales)?.size.checked_add(self.tensor(&a.biases)?.size)
+        } else {
+            Some(0)
+        };
+        if planes
+            .and_then(|n| n.checked_add(t.size))
+            .map(|n| n / t.shape[0])
+            .and_then(|n| n.checked_mul(selected))
+            .is_none_or(|n| n > MAX_SELECTED_BYTES)
+        {
+            return Err(Error::Invalid("decode indexed selected weight bound exceeded"));
+        }
+        if t.shape[0].checked_mul(t.shape[1]).is_none_or(|rows| rows > MAX_VECTOR) {
+            return Err(Error::Invalid("decode indexed bank shape bound"));
+        }
+        Ok((t, [t.shape[0], t.shape[1], t.shape[2]]))
     }
 
     #[cfg(feature = "metal")]
@@ -2229,6 +3052,204 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(weak.upgrade().is_none(), "whole-bank views retained their source mapping after drop");
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn bounded_indexed_groups_release_actual_metal_buffers_between_commands() {
+        let fixture = Fixture::new();
+        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[("experts", "F32", vec![4, 2, 32], data.clone()), ("outside", "F32", vec![4, 2, 32], data)],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let names = vec!["experts".to_owned()];
+        let bytes = weights.bounded_bank_bytes(&names).unwrap();
+        assert!(weights.bounded_indexed_group_with_budget(&names, bytes - 1).is_err());
+        assert!(weights.bounded_indexed_group(&[]).is_err());
+        assert_eq!(Weights::bounded_registered_bytes(), 0);
+        for _ in 0..3 {
+            let values = objc2::rc::autoreleasepool(|_| {
+                let group = weights.bounded_indexed_group_with_budget(&names, bytes).unwrap();
+                let indices =
+                    super::super::weight_metal::DecodeGraph::upload(&[f32::from_bits(3), f32::from_bits(1)]).unwrap();
+                let input = super::super::weight_metal::DecodeGraph::upload(&[1.0; 32]).unwrap();
+                let mut graph = super::super::weight_metal::DecodeGraph::new().unwrap();
+                assert!(group.encode_indexed_matvec(&mut graph, "outside", &indices, 2, &input, false).is_err());
+                let output = group.encode_indexed_matvec(&mut graph, "experts", &indices, 2, &input, false).unwrap();
+                assert_eq!(Weights::bounded_registered_bytes(), bytes);
+                let values = graph.finish(&[output]).unwrap();
+                drop(group);
+                values
+            });
+            assert!(values[0] == [128.0, 128.0, 64.0, 64.0], "bounded indexed projection changed");
+            assert_eq!(Weights::bounded_registered_bytes(), 0, "completed group retained a Metal bank owner");
+        }
+        assert!(weights.bank_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn encoder_bank_wrappers_reuse_virtual_allocations_across_bounded_encoders() {
+        let fixture = Fixture::new();
+        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[("first", "F32", vec![4, 2, 32], data.clone()), ("second", "F32", vec![4, 2, 32], data)],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let weights = Weights::open(&fixture.0).unwrap();
+        let names = [vec!["first".to_owned()], vec!["second".to_owned()]];
+        let budget = names.iter().map(|group| weights.bounded_bank_bytes(group).unwrap()).max().unwrap();
+        assert!(weights.indexed_group_with_budget(&["first".to_owned(), "second".to_owned()], budget, true).is_err());
+        for _ in 0..2 {
+            objc2::rc::autoreleasepool(|_| {
+                let mut graph = super::super::weight_metal::DecodeGraph::new().unwrap();
+                let indices =
+                    super::super::weight_metal::DecodeGraph::upload(&[f32::from_bits(3), f32::from_bits(1)]).unwrap();
+                let input = super::super::weight_metal::DecodeGraph::upload(&[1.0; 32]).unwrap();
+                let mut outputs = Vec::new();
+                for (index, group_names) in names.iter().enumerate() {
+                    if index > 0 {
+                        graph.resource_boundary().unwrap();
+                    }
+                    let group = weights.indexed_group_with_budget(group_names, budget, true).unwrap();
+                    outputs.push(
+                        group.encode_indexed_matvec(&mut graph, &group_names[0], &indices, 2, &input, false).unwrap(),
+                    );
+                    drop(group);
+                }
+                let result = graph.finish(&outputs).unwrap();
+                assert!(result.iter().all(|row| row == &[128.0, 128.0, 64.0, 64.0]), "encoder-bank result changed");
+            });
+            let cache = weights.encoder_bank_views.lock().unwrap();
+            assert_eq!(cache.matrices.len(), 2);
+            assert_eq!(cache.virtual_bytes, budget * 2);
+            assert_eq!(Weights::bounded_registered_bytes(), 0);
+        }
+        assert!(weights.bounded_indexed_group(&names[0]).is_err());
+        assert!(weights.bank_views.lock().unwrap().entries.is_empty());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn wide_encoder_budget_requires_all_flags_and_exact_reserves_whitelist() {
+        for bits in 0..8 {
+            assert_eq!(require_wide_encoder_flags(bits & 1 != 0, bits & 2 != 0, bits & 4 != 0).is_ok(), bits == 7);
+        }
+        // The prospective method uses the exact existing truncated 95% cap.
+        assert_eq!(resident_encoder_bank_budget(1000 / 100 * 95, 80, 0).unwrap(), 870);
+        assert_eq!(resident_encoder_bank_budget(1000, 80, 20).unwrap(), 900);
+        assert!(resident_encoder_bank_budget(99, 80, 20).is_err());
+        assert!(resident_encoder_bank_budget(100, 80, 20).is_err());
+        assert!(resident_encoder_bank_budget(100, 101, 0).is_err());
+        assert!(resident_encoder_bank_budget(usize::MAX, 1, usize::MAX).is_err());
+        let whitelist = HashSet::from(["main".to_owned(), "other".to_owned()]);
+        let names = ["main".to_owned()];
+        assert!(admit_wide_encoder_names(&names, 900, &whitelist, 1000, 80, 20, false).is_ok());
+        assert!(admit_wide_encoder_names(&names, 901, &whitelist, 1000, 80, 20, false).is_err());
+        assert!(admit_wide_encoder_names(&names, usize::MAX, &whitelist, 1000, 80, 20, false).is_err());
+        assert!(admit_wide_encoder_names(&["mtp".to_owned()], 1, &whitelist, 1000, 80, 20, false).is_err());
+        assert!(admit_wide_encoder_names(&[], 1, &whitelist, 1000, 80, 20, false).is_err());
+        assert!(admit_wide_encoder_names(&names, 1, &whitelist, 1000, 80, 20, true).is_err());
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn resident_encoder_banks_bound_inventory_deduplicate_and_release_owners() {
+        let device = <dyn MTLDevice>::system_default().unwrap();
+        if !device.respondsToSelector(objc2::sel!(newResidencySetWithDescriptor:error:)) {
+            return;
+        }
+        let fixture = Fixture::new();
+        let data: Vec<_> = (1..=4).flat_map(|expert| (expert as f32).to_le_bytes().repeat(64)).collect();
+        safetensors(
+            &fixture.0.join("model.safetensors"),
+            &[
+                ("first", "F32", vec![4, 2, 32], data.clone()),
+                ("outside", "F32", vec![4, 2, 32], data),
+                ("dense", "F32", vec![1, 32], 1.0f32.to_le_bytes().repeat(32)),
+                ("evict", "F32", vec![1, 32], 2.0f32.to_le_bytes().repeat(32)),
+            ],
+        );
+        fs::write(fixture.0.join("config.json"), b"{}").unwrap();
+        let (mapping, driver) = objc2::rc::autoreleasepool(|_| {
+            let weights = Weights::open(&fixture.0).unwrap();
+            *weights.bank_views.lock().unwrap() = StaticViewCache::new(0);
+            let mapping = Arc::downgrade(&weights.files[0]);
+            let names = vec!["first".to_owned()];
+            let banks = weights.bounded_bank_bytes(&names).unwrap();
+            let static_reserve = 1024 * 1024;
+            let dynamic = 4096;
+            assert!(
+                weights
+                    .configure_encoder_residency_with_budget(
+                        &names,
+                        dynamic,
+                        banks + static_reserve + dynamic - 1,
+                        static_reserve
+                    )
+                    .is_err()
+            );
+            assert!(weights.encoder_residency.lock().unwrap().is_none());
+            assert!(!weights.encoder_residency_enabled.load(Ordering::Acquire));
+            weights.configure_encoder_residency_with_budget(&names, dynamic, 4 * 1024 * 1024, static_reserve).unwrap();
+            let matrix = weights.encoder_bank_matrix("first", weights.tensor("first").unwrap()).unwrap();
+            let again = weights.encoder_bank_matrix("first", weights.tensor("first").unwrap()).unwrap();
+            assert_eq!(Retained::as_ptr(matrix.codes.buffer()), Retained::as_ptr(again.codes.buffer()));
+            assert!(weights.encoder_bank_matrix("outside", weights.tensor("outside").unwrap()).is_err());
+            assert!(!weights.encoder_bank_views.lock().unwrap().matrices.contains_key("outside"));
+            let dense = weights.tensor("dense").unwrap();
+            let span = weights.files[dense.file].metal_span(dense.offset, dense.size).unwrap().1;
+            *weights.static_views.lock().unwrap() = StaticViewCache::new(span);
+            let first = weights.metal_view(dense.file, dense.offset, dense.size, true).unwrap();
+            let repeated = weights.metal_view(dense.file, dense.offset, dense.size, true).unwrap();
+            assert_eq!(Retained::as_ptr(first.buffer()), Retained::as_ptr(repeated.buffer()));
+            let evict = weights.tensor("evict").unwrap();
+            let second = weights.metal_view(evict.file, evict.offset, evict.size, true).unwrap();
+            assert_eq!(weights.static_views.lock().unwrap().entries.len(), 1);
+            let guard = weights.encoder_residency.lock().unwrap();
+            let resident = guard.as_ref().unwrap();
+            assert_eq!(resident.buffers.len(), 3, "resident object identity deduplication changed");
+            assert!(resident.bank_bytes >= matrix.codes.registered_bytes());
+            assert!(
+                resident.static_bytes >= first.registered_bytes() + second.registered_bytes(),
+                "evicted static allocation escaped resident ownership accounting"
+            );
+            assert!(resident.static_bytes <= static_reserve);
+            let driver = Arc::downgrade(&resident.driver);
+            assert_eq!(resident.driver.lock().unwrap().set.allocation_count(), resident.buffers.len());
+            let lease = Arc::clone(&resident.driver);
+            drop(guard);
+            let wait_for = |ready: &dyn Fn() -> bool| {
+                let started = std::time::Instant::now();
+                while !ready() {
+                    assert!(
+                        started.elapsed() < std::time::Duration::from_secs(1),
+                        "residency keepalive wake timed out"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            };
+            let expire = || {
+                let mut driver = lease.lock().unwrap();
+                driver.last_active = std::time::Instant::now() - std::time::Duration::from_secs(181);
+                driver.parks
+            };
+            let parked = expire();
+            wait_for(&|| lease.lock().unwrap().parks > parked);
+            let requests = lease.lock().unwrap().requests;
+            let _ = weights.encoder_bank_matrix("first", weights.tensor("first").unwrap()).unwrap();
+            wait_for(&|| lease.lock().unwrap().requests > requests);
+            // Drop must also unpark an expired worker before joining it.
+            let parked = expire();
+            wait_for(&|| lease.lock().unwrap().parks > parked);
+            (mapping, driver)
+        });
+        assert!(driver.upgrade().is_none(), "residency keepalive retained its set after model drop");
+        assert!(mapping.upgrade().is_none(), "resident resources retained their source mapping after model drop");
     }
 
     #[cfg(feature = "metal")]

@@ -1,0 +1,344 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -55,12 +55,22 @@
+     block_test_pipelines: PipelineCache,
+     #[cfg(test)]
+     factored_test_pipelines: PipelineCache,
++    #[cfg(test)]
++    iq_factored_test_pipelines: PipelineCache,
++    #[cfg(test)]
++    iq_reference_test_pipelines: PipelineCache,
+ }
+ 
+ static EXECUTOR: OnceLock<std::result::Result<Executor, &'static str>> = OnceLock::new();
+ static Q4K_BLOCK: OnceLock<bool> = OnceLock::new();
+ static KQUANT_FACTORED: OnceLock<bool> = OnceLock::new();
+ static Q8_SHAPES: OnceLock<bool> = OnceLock::new();
++static IQ_FACTORED: OnceLock<bool> = OnceLock::new();
++
++fn iq_factored_schedule(format: MatrixFormat) -> bool {
++    matches!(format, MatrixFormat::Packed(17 | 18))
++        && *IQ_FACTORED.get_or_init(|| std::env::var_os("STARK_GLM53_IQ_FACTORED").is_some_and(|value| value == "1"))
++}
+ 
+ fn q8_block_shape(
+     format: MatrixFormat,
+@@ -97,6 +107,8 @@
+     Tiled,
+     Block,
+     Factored,
++    IqFactored,
++    IqReference,
+ }
+ 
+ /// A byte span backed by a Metal buffer whose deallocator retains the source
+@@ -514,6 +526,7 @@
+             source.push_str("};\n");
+             source.push_str(include_str!("packed_matvec.metal"));
+             source.push_str(include_str!("packed_vector_matvec.metal"));
++            source.push_str(include_str!("packed_iq_factored_matvec.metal"));
+             source.push_str(include_str!("packed_block_matvec.metal"));
+             source.push_str(include_str!("packed_factored_matvec.metal"));
+             source.push_str(include_str!("feed_forward.metal"));
+@@ -577,6 +590,10 @@
+                 block_test_pipelines: Mutex::new(HashMap::new()),
+                 #[cfg(test)]
+                 factored_test_pipelines: Mutex::new(HashMap::new()),
++                #[cfg(test)]
++                iq_factored_test_pipelines: Mutex::new(HashMap::new()),
++                #[cfg(test)]
++                iq_reference_test_pipelines: Mutex::new(HashMap::new()),
+             })
+         })
+         .as_ref()
+@@ -627,7 +644,7 @@
+ /// Affine typed dispatch is selected separately by DecodeGraph.
+ pub(super) fn indexed_name(format: MatrixFormat) -> &'static str {
+     match format {
+-
++        format if iq_factored_schedule(format) => "hybrid_graph_iq_indexed_factored_vector8",
+         format if factored_schedule(format) => "hybrid_graph_packed_indexed_factored",
+         format if block_schedule(format) => "hybrid_graph_packed_indexed_block",
+         MatrixFormat::Packed(17 | 18) => "hybrid_graph_iq_indexed_vector8",
+@@ -1241,7 +1258,7 @@
+         format: MatrixFormat,
+     ) -> Result<PipelineState> {
+         let name = match format {
+-
++            format if iq_factored_schedule(format) => "hybrid_iq_factored_matvec_vector8",
+             format if factored_schedule(format) => "hybrid_packed_factored_matvec",
+             format if block_schedule(format) => "hybrid_packed_block_matvec",
+             MatrixFormat::Packed(17 | 18) => "hybrid_iq_matvec_vector8",
+@@ -1500,8 +1517,14 @@
+         let production = matches!(schedule, TestMatrixSchedule::Production);
+         let tiled = matches!(schedule, TestMatrixSchedule::Tiled);
+         let factored = matches!(schedule, TestMatrixSchedule::Factored);
++        let iq_factored = matches!(schedule, TestMatrixSchedule::IqFactored);
++        let iq_reference = matches!(schedule, TestMatrixSchedule::IqReference);
+         let block = matches!(schedule, TestMatrixSchedule::Block | TestMatrixSchedule::Factored);
+-        let pipeline = if factored {
++        let pipeline = if iq_reference {
++            self.cached_pipeline(format, "hybrid_iq_matvec_vector8", &self.iq_reference_test_pipelines)?
++        } else if iq_factored {
++            self.cached_pipeline(format, "hybrid_iq_factored_matvec_vector8", &self.iq_factored_test_pipelines)?
++        } else if factored {
+             self.cached_pipeline(format, "hybrid_packed_factored_matvec", &self.factored_test_pipelines)?
+         } else if block {
+             self.cached_pipeline(format, "hybrid_packed_block_matvec", &self.block_test_pipelines)?
+@@ -1525,7 +1548,9 @@
+         encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
+         encoding.dispatch_threadgroups(
+             MTLSize {
+-                width: if block {
++                width: if iq_factored || iq_reference {
++                    (parameters[0] as usize).div_ceil(8)
++                } else if block {
+                     (parameters[0] as usize).div_ceil(2)
+                 } else if production {
+                     matrix_groups(format, parameters[0] as usize, parameters[1] as usize)
+@@ -2519,6 +2544,152 @@
+                     "Q8 production F64 rows={rows} columns={columns}");
+                 assert!((f64::from(blocked[row]) - expected).abs() <= bound,
+                     "Q8 block F64 rows={rows} columns={columns}");
++            }
++        }
++    }
++
++    #[stark_test]
++    fn iq_factoring_matches_f64_and_preserves_extreme_input_failures() {
++        let (rows, batches) = (13, 3);
++        for kind in [17, 18] {
++            let (block, bytes) = weights::block_layout(kind).unwrap();
++            for columns in [256, 768, 2048, 4096] {
++                let codes = finite_packed_codes(kind, rows * batches, columns, 83);
++                let input = (0..columns * batches).map(|i| (i as f32 * 0.019).sin()).collect::<Vec<_>>();
++                let parameters = [(rows * batches) as u32, columns as u32, kind, block as u32, bytes as u32, 0, rows as u32, 0];
++                let actual = objc2::rc::autoreleasepool(|_| {
++                    executor().unwrap().run_inner(&codes, &input, parameters, None, TestMatrixSchedule::IqFactored).unwrap()
++                });
++                for (row, (expected, absolute)) in packed_f64_oracle(kind, &codes, rows * batches, columns, &input, rows).into_iter().enumerate() {
++                    assert!((f64::from(actual[row]) - expected).abs() <= 2e-6 * absolute.max(1.0),
++                        "IQ factored F64 kind={kind} columns={columns} row={row}");
++                }
++            }
++            let columns = 256;
++            let codes = finite_packed_codes(kind, 3, columns, 83);
++            let parameters = [3, columns as u32, kind, block as u32, bytes as u32, 0, 0, 0];
++            let run = |codes: &[u8], input: &[f32], schedule| objc2::rc::autoreleasepool(|_| {
++                executor().unwrap().run_inner(codes, input, parameters, None, schedule)
++            });
++            let large = (0..columns).map(|i| if i % 2 == 0 { 1e30 } else { -1e30 }).collect::<Vec<_>>();
++            let reference = run(&codes, &large, TestMatrixSchedule::IqReference).unwrap();
++            assert_eq!(run(&codes, &large, TestMatrixSchedule::IqFactored).unwrap(), reference,
++                "IQ large-input reference fallback kind={kind}");
++            for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
++                let invalid = vec![invalid; columns];
++                assert!(run(&codes, &invalid, TestMatrixSchedule::IqReference).is_err());
++                assert!(run(&codes, &invalid, TestMatrixSchedule::IqFactored).is_err());
++            }
++            let mut zero = codes;
++            for encoded in zero.chunks_exact_mut(bytes) {
++                encoded[..2].fill(0);
++            }
++            let input = vec![f32::MAX; columns];
++            assert_eq!(run(&zero, &input, TestMatrixSchedule::IqFactored).unwrap(), vec![0.0; 3]);
++        }
++    }
++
++    #[stark_test]
++    #[ignore]
++    fn iq_indexed_factoring_gpu_component_timings() {
++        let cases = [
++            ("glm_iq2xs_gate", 17, 2048usize, 4096usize, false),
++            ("glm_iq3xxs_down", 18, 4096, 2048, true),
++        ];
++        let (experts, selected) = (64usize, 8usize);
++        let groups = experts / selected;
++        let executor = executor().unwrap();
++        for (label, kind, rows, columns, batched) in cases {
++            let (_, bytes) = weights::block_layout(kind).unwrap();
++            let matrix_bytes = rows * columns / 256 * bytes;
++            let mut codes = vec![0u8; matrix_bytes * experts];
++            let mut state = 0x1b7a_95e3u32;
++            for byte in &mut codes {
++                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
++                *byte = (state >> 24) as u8;
++            }
++            for encoded in codes.chunks_exact_mut(bytes) {
++                encoded[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
++            }
++            let input = (0..columns * if batched { experts } else { 1 })
++                .map(|i| (i as f32 * 0.017).sin()).collect::<Vec<_>>();
++            let indices = (0..experts as u32).collect::<Vec<_>>();
++            let codes = buffer(executor, &codes).unwrap();
++            let input = buffer(executor, bytemuck::cast_slice(&input)).unwrap();
++            let indices = buffer(executor, bytemuck::cast_slice(&indices)).unwrap();
++            let output = executor.device.new_buffer(rows * experts * 4, MTLResourceOptions::STORAGE_MODE_SHARED).unwrap();
++            let library = executor.packed_fast_library.as_ref().unwrap_or(&executor.library);
++            let pipelines = ["hybrid_graph_iq_indexed_vector8", "hybrid_graph_iq_indexed_factored_vector8"].map(|name| {
++                let constants = MTLFunctionConstantValues::new();
++                for (index, value) in [(0, kind), (4, 256), (5, bytes as u32)] {
++                    constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
++                }
++                let function = library.new_function_with_name_constant_values(name, &constants).unwrap();
++                executor.device.new_compute_pipeline_state_with_function(&function).unwrap()
++            });
++            let parameters = [rows as u32, columns as u32, experts as u32, u32::from(batched)];
++            let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
++            let mut timings = [Vec::new(), Vec::new()];
++            let mut maximum_absolute_error = [0.0f64; 2];
++            let mut relative_rms_error = [0.0f64; 2];
++            let mut reference = Vec::new();
++            for replay in 0..13 {
++                for schedule in if replay % 2 == 0 { [0, 1] } else { [1, 0] } {
++                    let (values, seconds) = objc2::rc::autoreleasepool(|_| {
++                        let command = executor.queue.command_buffer().unwrap();
++                        let encoding = command.compute_command_encoder().unwrap();
++                        encoding.set_compute_pipeline_state(&pipelines[schedule]);
++                        encoding.set_buffer(Some(&codes), 0, 0);
++                        encoding.set_buffer(Some(&failure), 0, 30);
++                        encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
++                        for group in 0..groups {
++                            encoding.set_buffer(Some(&input), if batched { group * selected * columns * 4 } else { 0 }, 1);
++                            encoding.set_buffer(Some(&output), group * selected * rows * 4, 2);
++                            encoding.set_buffer(Some(&indices), group * selected * 4, 6);
++                            encoding.dispatch_threadgroups(
++                                MTLSize { width: rows.div_ceil(8), height: selected, depth: 1 },
++                                MTLSize { width: 256, height: 1, depth: 1 },
++                            );
++                        }
++                        encoding.end_encoding();
++                        command.commit();
++                        command.wait_until_completed();
++                        assert_eq!(command.status(), MTLCommandBufferStatus::Completed);
++                        // SAFETY: each completed dispatch writes one disjoint
++                        // selected-expert range of this owned shared buffer.
++                        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), rows * experts) }.to_vec();
++                        assert_eq!(unsafe { *failure.contents().as_ptr().cast::<u32>() }, 0);
++                        (values, (command.gpu_end_time() - command.gpu_start_time()) / groups as f64)
++                    });
++                    assert!(values.iter().all(|value| value.is_finite()), "IQ component nonfinite case={label}");
++                    if replay > 0 { timings[schedule].push(seconds); }
++                    if schedule == 0 {
++                        reference = values;
++                    } else {
++                        let squared_error: f64 = values.iter().zip(&reference).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
++                        let squared_reference: f64 = reference.iter().map(|&v| f64::from(v).powi(2)).sum();
++                        relative_rms_error[schedule] = relative_rms_error[schedule].max((squared_error / squared_reference.max(f64::MIN_POSITIVE)).sqrt());
++                        maximum_absolute_error[schedule] = maximum_absolute_error[schedule].max(values.iter().zip(&reference)
++                            .map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs()).fold(0.0, f64::max));
++                    }
++                }
++            }
++            for (schedule, samples) in timings.iter_mut().enumerate() {
++                samples.sort_by(f64::total_cmp);
++                let seconds = (samples[5] + samples[6]) * 0.5;
++                assert!(relative_rms_error[schedule] <= 2e-5, "IQ component relative RMS case={label}");
++                println!("{}", serde_json::json!({
++                    "component": label, "kind": kind, "rows": rows, "columns": columns,
++                    "selected_experts": selected, "experts": experts, "rotating_groups": groups,
++                    "encoded_population_bytes": matrix_bytes * experts, "warm_samples": samples.len(),
++                    "packed_fast_math": executor.packed_fast_library.is_some(),
++                    "schedule": if schedule == 0 { "vector8" } else { "vector8_factored_float4" },
++                    "median_gpu_microseconds_per_8_experts": seconds * 1e6,
++                    "encoded_gigabytes_per_second": (matrix_bytes * selected) as f64 / seconds / 1e9,
++                    "maximum_absolute_error_vs_reference": maximum_absolute_error[schedule],
++                    "relative_rms_error_vs_reference": relative_rms_error[schedule],
++                    "timer_scope": "serial_rotating_8_expert_groups_gpu_timestamps_uploads_excluded",
++                }));
+             }
+         }
+     }
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_iq_factored_matvec.metal b/crates/stark-engine/src/engine/hybrid/packed_iq_factored_matvec.metal
+new file mode 100644
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/packed_iq_factored_matvec.metal
+@@ -0,0 +1,87 @@
++// Original Stark vector-factored IQ2_XS/IQ3_XXS dot. Source layout and tables
++// retain packed_matvec.metal/LICENSE.ggml-hybrid provenance. Stored weights
++// are unchanged; the local dot and scale association are separately qualified.
++
++inline float hybrid_iq_factored_dot_vector8(device const uchar *codes, device const float *input,
++    ulong row_offset, ulong input_offset, uint columns, uint lane) {
++    const uint kind = hybrid_packed_kind;
++    float sum = 0.0f;
++    bool reference_required = false;
++    for (uint col = lane * 8; col < columns; col += 256) {
++        device const uchar *block = codes + row_offset + ulong(col >> 8) * hybrid_packed_block_bytes;
++        const uint part = (col & 255) >> 5;
++        const uint l = (col & 31) >> 3;
++        uint signs;
++        uint2 grid;
++        float scale;
++        if (kind == 17) {
++            const uint q = hybrid_u16(block + 2 + part * 8 + l * 2);
++            const uint scales = block[66 + part];
++            const ulong packed = iq2xs_grid[q & 511];
++            grid = uint2(uint(packed), uint(packed >> 32));
++            signs = ksigns[q >> 9];
++            scale = hybrid_half(block) * (0.5f + float((scales >> (l < 2 ? 0 : 4)) & 15)) * 0.25f;
++        } else {
++            const uint ss = hybrid_u32(block + 66 + part * 4);
++            signs = ksigns[(ss >> (7 * l)) & 127];
++            const uint at = 2 + part * 8 + 2 * l;
++            grid = uint2(iq3xxs_grid[block[at]], iq3xxs_grid[block[at + 1]]);
++            scale = hybrid_half(block) * (0.5f + float(ss >> 28)) * 0.5f;
++        }
++        const float4 x0 = float4(input[input_offset + col], input[input_offset + col + 1],
++            input[input_offset + col + 2], input[input_offset + col + 3]);
++        const float4 x1 = float4(input[input_offset + col + 4], input[input_offset + col + 5],
++            input[input_offset + col + 6], input[input_offset + col + 7]);
++        reference_required = reference_required || any(abs(x0) > float4(1e20f)) || any(abs(x1) > float4(1e20f));
++        const uint4 mask0 = ((uint4(signs) >> uint4(0, 1, 2, 3)) & 1u) << 31;
++        const uint4 mask1 = ((uint4(signs) >> uint4(4, 5, 6, 7)) & 1u) << 31;
++        const float4 signed0 = as_type<float4>(as_type<uint4>(x0) ^ mask0);
++        const float4 signed1 = as_type<float4>(as_type<uint4>(x1) ^ mask1);
++        const float4 code0 = float4(as_type<uchar4>(grid.x));
++        const float4 code1 = float4(as_type<uchar4>(grid.y));
++        sum += scale * (dot(code0, signed0) + dot(code1, signed1));
++    }
++    // Finite encoded scales bound decoded magnitudes below 2.7e8. At bounded
++    // inputs all admitted absolute product sums stay below F32 overflow. Larger
++    // inputs use the old row so factoring cannot mask an overflowing product.
++    if (simd_any(reference_required)) {
++        return hybrid_iq_dot_vector8(codes, input, row_offset, input_offset, columns, lane);
++    }
++    return simd_sum(sum);
++}
++
++kernel void hybrid_iq_factored_matvec_vector8(
++    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
++    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint row = tile * 8 + simd_group;
++    if (row >= p.rows) return;
++    const ulong row_offset = ulong(row) * (p.columns >> 8) * hybrid_packed_block_bytes;
++    const ulong input_offset = p.group ? ulong(row / p.group) * p.columns : 0;
++    const float total = hybrid_iq_factored_dot_vector8(codes_base + offsets.x, input, row_offset, input_offset, p.columns, lane);
++    if (lane == 0) output[row] = total;
++}
++
++kernel void hybrid_graph_iq_indexed_factored_vector8(
++    device const uchar *codes [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant uint *p [[buffer(3)]],
++    device const uint *indices [[buffer(6)]], device atomic_uint *failure [[buffer(30)]],
++    uint2 grid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
++    uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint row = grid.x * 8 + simd_group;
++    if (row >= p[0]) return;
++    const uint batch = grid.y;
++    const uint expert = indices[batch];
++    if (expert >= p[2]) {
++        if (lane == 0) {
++            output[batch * p[0] + row] = 0.0f;
++            atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        }
++        return;
++    }
++    const ulong at = (ulong(expert) * p[0] + row) * (p[1] >> 8) * hybrid_packed_block_bytes;
++    const ulong input_offset = p[3] ? ulong(batch) * p[1] : 0;
++    const float total = hybrid_iq_factored_dot_vector8(codes, input, at, input_offset, p[1], lane);
++    if (lane == 0) output[batch * p[0] + row] = total;
++}

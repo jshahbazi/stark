@@ -1,14 +1,154 @@
 // SPDX-License-Identifier: Apache-2.0
 // Original Stark GLM KDA decode, matching the scalar contract in glm.rs.
-// The recurrence retains [head, value, key] F32 state.
+// The reference retains [head, value, key] F32 state. The optional transposed
+// backing layout coalesces adjacent value lanes without changing key order.
 // Each lane owns one value row; reductions retain the scalar reference order.
 #include <metal_stdlib>
 using namespace metal;
+
+#ifndef STARK_GLM_KDA_TRANSPOSED
+#define STARK_GLM_KDA_TRANSPOSED 0
+#endif
+#ifndef STARK_GLM_KDA_FUSED_STATE
+#define STARK_GLM_KDA_FUSED_STATE 0
+#endif
 
 static float glm_sigmoid(float x) {
     if (x >= 0.0f) return 1.0f / (1.0f + exp(-x));
     float e = exp(x);
     return e / (1.0f + e);
+}
+
+// Ascending IEEE total-order key, including the -0/+0 distinction. Router
+// NaNs are rejected before selection; equal keys retain ascending expert IDs.
+static uint glm_ordered_key(float value) {
+    const uint bits = as_type<uint>(value);
+    return (bits & 0x80000000u) ? ~bits : (bits ^ 0x80000000u);
+}
+
+kernel void glm_router_scores(
+    device const float *logits [[buffer(0)]], device const float *bias [[buffer(1)]],
+    device float *probabilities [[buffer(2)]], device float *choices [[buffer(3)]],
+    constant uint *p [[buffer(4)]], device atomic_uint *failure [[buffer(5)]],
+    uint expert [[thread_position_in_grid]]) {
+    if (expert >= p[0]) return;
+    float probability = glm_sigmoid(logits[expert]);
+    float choice = probability + bias[expert];
+    if (!isfinite(logits[expert]) || !isfinite(probability) || isnan(choice)) {
+        atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+        probability = 0.0f;
+        choice = -INFINITY;
+    }
+    probabilities[expert] = probability;
+    choices[expert] = choice;
+}
+
+kernel void glm_router_select(
+    device const float *probabilities [[buffer(0)]], device const float *choices [[buffer(1)]],
+    device uint *indices [[buffer(2)]], device float *mixture [[buffer(3)]],
+    constant uint *p [[buffer(4)]], device atomic_uint *failure [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]]) {
+    if (tid != 0) return;
+    for (uint rank = 0; rank < p[1]; ++rank) {
+        bool found = false;
+        uint best = 0;
+        uint key = 0;
+        for (uint expert = 0; expert < p[0]; ++expert) {
+            bool used = false;
+            for (uint previous = 0; previous < rank; ++previous) used |= indices[previous] == expert;
+            if (used) continue;
+            const uint candidate = glm_ordered_key(choices[expert]);
+            if (!found || candidate > key) { found = true; best = expert; key = candidate; }
+        }
+        if (!found) atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+        indices[rank] = best;
+    }
+    float denominator = 0.0f;
+    for (uint rank = 0; rank < p[1]; ++rank) denominator += probabilities[indices[rank]];
+    denominator += 1e-20f;
+    const float scale = as_type<float>(p[2]);
+    for (uint rank = 0; rank < p[1]; ++rank) {
+        const float value = probabilities[indices[rank]] / denominator * scale;
+        if (!isfinite(value) || value < 0.0f) atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+        mixture[rank] = value;
+    }
+}
+
+// One block computes probabilities and repeatedly reduces the stable top-k.
+// Keep the selected-order normalization on one lane, matching glm_router_select.
+// This replaces its serial expert scans with SIMD reductions and threadgroup
+// storage; no probability arithmetic or comparison key is changed.
+kernel void glm_router_parallel(
+    device const float *logits [[buffer(0)]], device const float *bias [[buffer(1)]],
+    device uint *indices [[buffer(2)]], device float *mixture [[buffer(3)]],
+    constant uint *p [[buffer(4)]], device atomic_uint *failure [[buffer(5)]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    threadgroup float probabilities[2048];
+    threadgroup uint keys[2048];
+    threadgroup uint group_keys[8];
+    threadgroup uint group_ids[8];
+    threadgroup uint selected[64];
+    for (uint expert = tid; expert < p[0]; expert += 256) {
+        float probability = glm_sigmoid(logits[expert]);
+        float choice = probability + bias[expert];
+        if (!isfinite(logits[expert]) || !isfinite(probability) || isnan(choice)) {
+            atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+            probability = 0.0f;
+            choice = -INFINITY;
+        }
+        probabilities[expert] = probability;
+        keys[expert] = glm_ordered_key(choice);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint rank = 0; rank < p[1]; ++rank) {
+        uint best_key = 0;
+        uint best_id = 0xffffffffu;
+        for (uint expert = tid; expert < p[0]; expert += 256) {
+            const uint key = keys[expert];
+            if (key != 0 && (key > best_key || (key == best_key && expert < best_id))) {
+                best_key = key;
+                best_id = expert;
+            }
+        }
+        const uint simd_key = simd_max(best_key);
+        const uint simd_id = simd_min(best_key == simd_key ? best_id : 0xffffffffu);
+        if (lane == 0) { group_keys[simd_group] = simd_key; group_ids[simd_group] = simd_id; }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (tid == 0) {
+            uint winner_key = 0;
+            uint winner = 0xffffffffu;
+            for (uint group = 0; group < 8; ++group) {
+                const uint key = group_keys[group];
+                const uint id = group_ids[group];
+                if (key > winner_key || (key == winner_key && id < winner)) {
+                    winner_key = key;
+                    winner = id;
+                }
+            }
+            if (winner >= p[0]) {
+                atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+                winner = 0;
+            }
+            selected[rank] = winner;
+            indices[rank] = winner;
+            // Every non-NaN IEEE comparison key, including -infinity, is
+            // positive; zero is an unambiguous already-selected sentinel.
+            keys[winner] = 0;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    if (tid == 0) {
+        float denominator = 0.0f;
+        for (uint rank = 0; rank < p[1]; ++rank) denominator += probabilities[selected[rank]];
+        denominator += 1e-20f;
+        const float scale = as_type<float>(p[2]);
+        for (uint rank = 0; rank < p[1]; ++rank) {
+            const float value = probabilities[selected[rank]] / denominator * scale;
+            if (!isfinite(value) || value < 0.0f) atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
+            mixture[rank] = value;
+        }
+    }
 }
 
 struct GlmKdaParameters {
@@ -82,15 +222,33 @@ kernel void glm_kda_decode(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (lane < p.dim) {
-        device float *row = state + 3 * history_length + (head * p.dim + lane) * p.dim;
-        for (uint i = 0; i < p.dim; ++i) row[i] *= decay[i];
+        const uint stride = STARK_GLM_KDA_TRANSPOSED ? p.dim : 1;
+        device float *row = state + 3 * history_length + head * p.dim * p.dim
+            + (STARK_GLM_KDA_TRANSPOSED ? lane : lane * p.dim);
         float prediction = 0.0f;
-        for (uint i = 0; i < p.dim; ++i) prediction += row[i] * k[i];
+        #if STARK_GLM_KDA_FUSED_STATE
+        for (uint i = 0; i < p.dim; ++i) {
+            const float decayed = row[i * stride] * decay[i];
+            row[i * stride] = decayed;
+            prediction += decayed * k[i];
+        }
+        #else
+        for (uint i = 0; i < p.dim; ++i) row[i * stride] *= decay[i];
+        for (uint i = 0; i < p.dim; ++i) prediction += row[i * stride] * k[i];
+        #endif
         float beta = glm_sigmoid(input[5 * p.inner + head]);
         float delta = (v[lane] - prediction) * beta;
-        for (uint i = 0; i < p.dim; ++i) row[i] += k[i] * delta;
         float sum = 0.0f;
-        for (uint i = 0; i < p.dim; ++i) sum += row[i] * q[i];
+        #if STARK_GLM_KDA_FUSED_STATE
+        for (uint i = 0; i < p.dim; ++i) {
+            const float updated = row[i * stride] + k[i] * delta;
+            row[i * stride] = updated;
+            sum += updated * q[i];
+        }
+        #else
+        for (uint i = 0; i < p.dim; ++i) row[i * stride] += k[i] * delta;
+        for (uint i = 0; i < p.dim; ++i) sum += row[i * stride] * q[i];
+        #endif
         values[lane] = sum * (1.0f / sqrt(float(p.dim)));
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

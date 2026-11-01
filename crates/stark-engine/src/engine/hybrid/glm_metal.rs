@@ -25,6 +25,7 @@ struct Executor {
     #[cfg(test)]
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    transposed_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     graph_pipelines: HashMap<&'static str, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
@@ -38,8 +39,14 @@ fn executor() -> Result<&'static Executor> {
             let queue = device.new_command_queue().ok_or("Metal KDA queue unavailable")?;
             let options = metal::MTLCompileOptions::new();
             options.set_math_mode(metal::MTLMathMode::Safe);
+            let source = [
+                include_str!("glm_metal.metal"),
+                include_str!("glm_control_split.metal"),
+                include_str!("glm_control_fused_parallel.metal"),
+            ]
+            .concat();
             let library = device
-                .new_library_with_source(include_str!("glm_metal.metal"), Some(&options))
+                .new_library_with_source(&source, Some(&options))
                 .map_err(|_| "Metal KDA kernel compilation failed")?;
             let function = library.new_function_with_name("glm_kda_decode").ok_or("Metal KDA function unavailable")?;
             let pipeline =
@@ -47,13 +54,36 @@ fn executor() -> Result<&'static Executor> {
             if pipeline.max_total_threads_per_threadgroup() < 256 {
                 return Err("Metal KDA execution width is unsupported");
             }
+            let fused = usize::from(std::env::var_os("STARK_GLM53_KDA_FUSED_STATE").is_some_and(|value| value == "1"));
+            let transposed_source =
+                format!("#define STARK_GLM_KDA_TRANSPOSED 1\n#define STARK_GLM_KDA_FUSED_STATE {fused}\n{source}");
+            let transposed_library = device
+                .new_library_with_source(&transposed_source, Some(&options))
+                .map_err(|_| "Metal transposed KDA compilation failed")?;
+            let transposed_function = transposed_library
+                .new_function_with_name("glm_kda_decode")
+                .ok_or("Metal transposed KDA function unavailable")?;
+            let transposed_pipeline = device
+                .new_compute_pipeline_state_with_function(&transposed_function)
+                .map_err(|_| "Metal transposed KDA pipeline failed")?;
+            if transposed_pipeline.max_total_threads_per_threadgroup() < 256 {
+                return Err("Metal transposed KDA execution width is unsupported");
+            }
             let mut graph_pipelines = HashMap::new();
             for name in [
                 "glm_control_project",
                 "glm_control_project_unprefetched",
                 "glm_control_project_scalar",
+                "glm_control_project_split",
+                "glm_control_project_split16",
+                "glm_control_project_split32",
+                "glm_control_rms_project_split32",
                 "glm_control_mix",
                 "glm_control_mix_scalar",
+                "glm_control_mix_simd",
+                "glm_control_mix_split_simd",
+                "glm_control_mix_split16_simd",
+                "glm_control_mix_split32_simd",
                 "glm_control_input",
                 "glm_control_post",
                 "glm_index_pool",
@@ -66,6 +96,9 @@ fn executor() -> Result<&'static Executor> {
                 "glm_index_layer_norm",
                 "glm_stream_mean",
                 "glm_kda_graph_status",
+                "glm_router_scores",
+                "glm_router_select",
+                "glm_router_parallel",
             ] {
                 let function = library.new_function_with_name(name).ok_or("Metal GLM graph function unavailable")?;
                 let pipeline = device
@@ -74,16 +107,28 @@ fn executor() -> Result<&'static Executor> {
                 if pipeline.max_total_threads_per_threadgroup() < 256 {
                     return Err("Metal GLM graph execution width is unsupported");
                 }
-                if name == "glm_control_project" && pipeline.thread_execution_width() != 32 {
+                if matches!(name, "glm_control_project" | "glm_router_parallel")
+                    && pipeline.thread_execution_width() != 32
+                {
                     return Err("Metal GLM control SIMD width is unsupported");
                 }
                 graph_pipelines.insert(name, pipeline);
+            }
+            // The optional 768-thread control schedule never rejects hardware
+            // whose per-pipeline limit is smaller; that hardware uses the old route.
+            if let Some(function) = library.new_function_with_name("glm_control_fused_parallel")
+                && let Ok(candidate) = device.new_compute_pipeline_state_with_function(&function)
+                && candidate.thread_execution_width() == 32
+                && candidate.max_total_threads_per_threadgroup() >= 768
+            {
+                graph_pipelines.insert("glm_control_fused_parallel", candidate);
             }
             Ok(Executor {
                 device,
                 #[cfg(test)]
                 queue,
                 pipeline,
+                transposed_pipeline,
                 graph_pipelines,
             })
         })
@@ -101,6 +146,7 @@ pub(super) struct Kda {
     inner: usize,
     heads: usize,
     state_values: usize,
+    transposed_state: bool,
 }
 
 pub(super) struct Geometry {
@@ -176,6 +222,7 @@ impl Kda {
             inner,
             heads,
             state_values,
+            transposed_state: std::env::var_os("STARK_GLM53_KDA_TRANSPOSED").is_some_and(|value| value == "1"),
         };
         result.reset();
         Ok(result)
@@ -208,7 +255,13 @@ impl Kda {
         &mut self,
         graph: &mut DecodeGraph,
     ) -> Result<()> {
-        self.encode(graph.encoder())?;
+        // Graph status is sticky until model reset. Encoding a future command
+        // may overlap an earlier GPU pass, so it must never clear shared status
+        // from the CPU while that pass can still write it.
+        for buffer in [&self.input, &self.weights, &self.state, &self.output, &self.failure] {
+            graph.retain_external_buffer(buffer);
+        }
+        self.encode_inner(graph.encoder(), false)?;
         let status = DeviceVector {
             buffer: self.failure.clone(),
             offset: 0,
@@ -223,10 +276,25 @@ impl Kda {
         &mut self,
         encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     ) -> Result<()> {
-        // The model serializes steps and awaits each command before reusing
-        // these buffers. This status is initialized before this command runs.
-        unsafe { self.failure.contents().as_ptr().cast::<u32>().write(0) };
-        encoding.set_compute_pipeline_state(&executor()?.pipeline);
+        self.encode_inner(encoding, true)
+    }
+
+    fn encode_inner(
+        &mut self,
+        encoding: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+        clear_status: bool,
+    ) -> Result<()> {
+        // Standalone callers await each pass before this CPU write. Deferred
+        // graphs retain the initialized sticky status until exclusive reset.
+        if clear_status {
+            unsafe { self.failure.contents().as_ptr().cast::<u32>().write(0) };
+        }
+        let executor = executor()?;
+        encoding.set_compute_pipeline_state(if self.transposed_state {
+            &executor.transposed_pipeline
+        } else {
+            &executor.pipeline
+        });
         for (index, buffer) in [&self.input, &self.weights, &self.state, &self.output].into_iter().enumerate() {
             encoding.set_buffer(Some(buffer), 0, index);
         }
@@ -329,6 +397,9 @@ fn dispatch_with_threads(
     if count == 0 || parameters.is_empty() {
         return Err(Error::Invalid("Metal GLM graph dispatch geometry"));
     }
+    for value in buffers {
+        graph.retain_external_buffer(&value.buffer);
+    }
     let encoding = graph.encoder();
     encoding.set_compute_pipeline_state(
         executor()?.graph_pipelines.get(name).ok_or(Error::Invalid("Metal GLM graph pipeline"))?,
@@ -373,6 +444,11 @@ pub(super) struct Control {
     input: DeviceVector,
     parameters: [u32; 5],
     rms_eps: f32,
+    projection_chunks: usize,
+    simd_mix: bool,
+    rms_project: bool,
+    fused_parallel: bool,
+    ordered_rms: bool,
 }
 
 pub(super) struct ControlGeometry {
@@ -420,16 +496,43 @@ impl Control {
         }
         let mut coefficients = base.to_vec();
         coefficients.extend(scale);
+        let split =
+            streams * streams <= 32 && std::env::var_os("STARK_GLM53_CONTROL_SPLIT").is_some_and(|value| value == "1");
+        let simd_mix = streams * streams <= 32
+            && (split || std::env::var_os("STARK_GLM53_CONTROL_SIMD").is_some_and(|value| value == "1"));
+        let projection_chunks = if split {
+            match std::env::var_os("STARK_GLM53_CONTROL_CHUNKS").as_deref().and_then(|v| v.to_str()) {
+                Some("16") => 16,
+                Some("32") => 32,
+                Some("8") | None => 8,
+                Some(_) => return Err(Error::Invalid("Metal GLM control projection chunks")),
+            }
+        } else {
+            1
+        };
+        let ordered_rms = std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1");
+        let rms_project = hidden == 4096
+            && streams == 4
+            && projection_chunks == 32
+            && std::env::var_os("STARK_GLM53_CONTROL_RMS_PROJECT").is_some_and(|value| value == "1")
+            && !ordered_rms;
+        let fused_parallel =
+            rms_project && std::env::var_os("STARK_GLM53_CONTROL_FUSED_PARALLEL").is_some_and(|value| value == "1");
         Ok(Self {
             weights: DecodeGraph::upload(weights)?,
             coefficients: DecodeGraph::upload(&coefficients)?,
             ones: DecodeGraph::upload(&vec![1.0; columns])?,
             normalization: DecodeGraph::upload(normalization)?,
-            projection: DecodeGraph::zeros(rows)?,
+            projection: DecodeGraph::zeros(rows * projection_chunks)?,
             mix: DecodeGraph::zeros(rows)?,
             input: DecodeGraph::zeros(hidden)?,
             parameters: [hidden as u32, streams as u32, iterations as u32, columns as u32, eps.to_bits()],
             rms_eps,
+            projection_chunks,
+            simd_mix,
+            rms_project,
+            fused_parallel,
+            ordered_rms,
         })
     }
 
@@ -438,27 +541,144 @@ impl Control {
         graph: &mut DecodeGraph,
         residual: &DeviceVector,
     ) -> Result<DeviceVector> {
+        self.pre_mode(graph, residual, self.rms_project)
+    }
+
+    fn pre_mode(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+        rms_project: bool,
+    ) -> Result<DeviceVector> {
         if residual.len != self.parameters[3] as usize {
             return Err(Error::Invalid("Metal GLM control residual dimensions"));
         }
-        let normalized = graph.rms_norm(residual, &self.ones, residual.len, self.rms_eps)?;
+        self.project_mode(graph, residual, rms_project)?;
+        if self.fused_parallel && rms_project {
+            self.pre_projected_fused_parallel(graph, residual)
+        } else {
+            self.pre_projected(graph, residual)
+        }
+    }
+
+    fn project_mode(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+        rms_project: bool,
+    ) -> Result<()> {
+        if rms_project && self.parameters[0] == 4096 && self.parameters[1] == 4 && self.projection_chunks == 32 {
+            let partials = self.rms_partials(graph, residual)?;
+            let p = self.parameters;
+            dispatch_with_threads(
+                graph,
+                "glm_control_rms_project_split32",
+                &[residual, &self.weights, &partials, &self.projection],
+                &[p[0], p[1], p[2], p[3], p[4], self.rms_eps.to_bits()],
+                self.projection.len * 32,
+                false,
+                32,
+            )?;
+        } else {
+            let normalized = graph.rms_norm(residual, &self.ones, residual.len, self.rms_eps)?;
+            dispatch_with_threads(
+                graph,
+                match self.projection_chunks {
+                    8 => "glm_control_project_split",
+                    16 => "glm_control_project_split16",
+                    32 => "glm_control_project_split32",
+                    _ => "glm_control_project",
+                },
+                &[&normalized, &self.weights, &self.projection],
+                &self.parameters,
+                self.projection.len * 32,
+                false,
+                32,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn rms_partials(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        let partials = graph.scratch(16)?;
+        graph.kernel(
+            "hybrid_graph_rms_partials",
+            &[residual, &partials],
+            &[1, 16384, self.rms_eps.to_bits(), 16384, 16],
+            16 * 256,
+            256,
+        )?;
+        Ok(partials)
+    }
+
+    #[cfg(test)]
+    fn pre_parallel_reference(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        self.project_parallel_reference(graph, residual)?;
+        self.pre_projected(graph, residual)
+    }
+
+    #[cfg(test)]
+    fn project_parallel_reference(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<()> {
+        let partials = self.rms_partials(graph, residual)?;
+        let normalized = graph.scratch(16384)?;
+        graph.kernel(
+            "hybrid_graph_rms_apply",
+            &[residual, &self.ones, &partials, &normalized],
+            &[1, 16384, self.rms_eps.to_bits(), 16384, 16],
+            64 * 256,
+            256,
+        )?;
         dispatch_with_threads(
             graph,
-            "glm_control_project",
+            "glm_control_project_split32",
             &[&normalized, &self.weights, &self.projection],
             &self.parameters,
             self.projection.len * 32,
             false,
             32,
         )?;
+        Ok(())
+    }
+
+    fn pre_projected(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
         dispatch_with_threads(
             graph,
-            "glm_control_mix",
+            match self.projection_chunks {
+                8 => "glm_control_mix_split_simd",
+                16 => "glm_control_mix_split16_simd",
+                32 => "glm_control_mix_split32_simd",
+                _ if self.simd_mix => "glm_control_mix_simd",
+                _ => "glm_control_mix",
+            },
             &[&self.projection, &self.coefficients, &self.mix],
             &self.parameters,
-            64,
+            if self.simd_mix {
+                32
+            } else {
+                64
+            },
             false,
-            64,
+            if self.simd_mix {
+                32
+            } else {
+                64
+            },
         )?;
         dispatch(
             graph,
@@ -469,6 +689,62 @@ impl Control {
             false,
         )?;
         graph.rms_norm(&self.input, &self.normalization, self.input.len, self.rms_eps)
+    }
+
+    fn fused_parallel_admitted(&self) -> bool {
+        self.parameters[0] == 4096
+            && self.parameters[1] == 4
+            && self.projection_chunks == 32
+            && !self.ordered_rms
+            && executor().is_ok_and(|e| e.graph_pipelines.contains_key("glm_control_fused_parallel"))
+    }
+
+    fn pre_projected_fused_parallel(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        if !self.fused_parallel_admitted() {
+            return self.pre_projected(graph, residual);
+        }
+        let output = graph.scratch(4096)?;
+        let p = self.parameters;
+        dispatch_with_threads(
+            graph,
+            "glm_control_fused_parallel",
+            &[&self.projection, &self.coefficients, residual, &self.normalization, &self.mix, &self.input, &output],
+            &[p[0], p[1], p[2], p[3], p[4], self.rms_eps.to_bits()],
+            768,
+            false,
+            768,
+        )?;
+        Ok(output)
+    }
+
+    #[cfg(test)]
+    fn pre_unfused(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        self.project_mode(graph, residual, self.rms_project)?;
+        self.pre_projected(graph, residual)
+    }
+
+    #[cfg(test)]
+    fn pre_fused_parallel(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        if residual.len != self.parameters[3] as usize {
+            return Err(Error::Invalid("Metal GLM fused control residual dimensions"));
+        }
+        if !self.fused_parallel_admitted() {
+            return self.pre(graph, residual);
+        }
+        self.project_mode(graph, residual, self.rms_project)?;
+        self.pre_projected_fused_parallel(graph, residual)
     }
 
     pub(super) fn post(
@@ -505,6 +781,60 @@ pub(super) fn stream_mean(
         false,
     )?;
     Ok(output)
+}
+
+/// Correction-biased stable top-k stays on the GPU. Mixture coefficients use
+/// the original sigmoid probabilities and selected-order F32 normalization.
+pub(super) fn route(
+    graph: &mut DecodeGraph,
+    logits: &DeviceVector,
+    bias: &DeviceVector,
+    active: usize,
+    scale: f32,
+) -> Result<(DeviceVector, DeviceVector)> {
+    static SERIAL_ROUTER: OnceLock<bool> = OnceLock::new();
+    let serial =
+        *SERIAL_ROUTER.get_or_init(|| std::env::var_os("STARK_GLM53_SERIAL_ROUTER").is_some_and(|value| value == "1"));
+    route_mode(graph, logits, bias, active, scale, !serial)
+}
+
+fn route_mode(
+    graph: &mut DecodeGraph,
+    logits: &DeviceVector,
+    bias: &DeviceVector,
+    active: usize,
+    scale: f32,
+    parallel: bool,
+) -> Result<(DeviceVector, DeviceVector)> {
+    if logits.len == 0
+        || logits.len > 2048
+        || logits.len != bias.len
+        || active == 0
+        || active > 64
+        || active > logits.len
+        || !scale.is_finite()
+    {
+        return Err(Error::Invalid("Metal GLM router geometry"));
+    }
+    let indices = graph.scratch(active)?;
+    let mixture = graph.scratch(active)?;
+    let parameters = [logits.len as u32, active as u32, scale.to_bits()];
+    if parallel {
+        dispatch(graph, "glm_router_parallel", &[logits, bias, &indices, &mixture], &parameters, 1, true)?;
+    } else {
+        let probabilities = graph.scratch(logits.len)?;
+        let choices = graph.scratch(logits.len)?;
+        dispatch(
+            graph,
+            "glm_router_scores",
+            &[logits, bias, &probabilities, &choices],
+            &parameters,
+            logits.len,
+            false,
+        )?;
+        dispatch(graph, "glm_router_select", &[&probabilities, &choices, &indices, &mixture], &parameters, 1, true)?;
+    }
+    Ok((indices, mixture))
 }
 
 pub(super) fn index_layer_norm(
@@ -717,6 +1047,290 @@ mod tests {
     use super::*;
 
     #[stark_test]
+    fn transposed_kda_state_preserves_output_and_logical_state_bits() {
+        for dim in [7, 128] {
+            let heads = 2;
+            let inner = heads * dim;
+            let kernel = 4;
+            let values = |n: usize, seed: usize| -> Vec<f32> {
+                (0..n).map(|i| (((i * 13 + seed * 7) % 43) as f32 - 21.0) * 0.013).collect()
+            };
+            let convolutions = [values(inner * kernel, 1), values(inner * kernel, 2), values(inner * kernel, 3)];
+            let create = || {
+                Kda::new(
+                    Geometry {
+                        heads,
+                        dim,
+                        kernel,
+                        rms_eps: 1e-5,
+                        lower_bound: -5.0,
+                    },
+                    [&convolutions[0], &convolutions[1], &convolutions[2]],
+                    &values(inner, 4),
+                    &vec![1.0; dim],
+                    &vec![-1.25; heads],
+                )
+                .unwrap()
+            };
+            let mut legacy = create();
+            legacy.transposed_state = false;
+            let mut transposed = create();
+            transposed.transposed_state = true;
+            for _ in 0..2 {
+                legacy.reset();
+                transposed.reset();
+                for step in 0..17 {
+                    let inputs = [
+                        values(inner, step + 5),
+                        values(inner, step + 8),
+                        values(inner, step + 11),
+                        values(inner, step + 14),
+                        values(inner, step + 17),
+                    ];
+                    let beta = values(heads, step + 20);
+                    let first =
+                        legacy.step([&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4]], &beta).unwrap();
+                    let second =
+                        transposed.step([&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4]], &beta).unwrap();
+                    assert!(first.iter().zip(&second).all(|(a, b)| a.to_bits() == b.to_bits()));
+                }
+                let first = unsafe {
+                    std::slice::from_raw_parts(legacy.state.contents().as_ptr().cast::<f32>(), legacy.state_values)
+                };
+                let second = unsafe {
+                    std::slice::from_raw_parts(
+                        transposed.state.contents().as_ptr().cast::<f32>(),
+                        transposed.state_values,
+                    )
+                };
+                let history = 3 * inner * (kernel - 1);
+                assert!(first[..history].iter().zip(&second[..history]).all(|(a, b)| a.to_bits() == b.to_bits()));
+                for head in 0..heads {
+                    for value in 0..dim {
+                        for key in 0..dim {
+                            assert_eq!(
+                                first[history + head * dim * dim + value * dim + key].to_bits(),
+                                second[history + head * dim * dim + key * dim + value].to_bits()
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn simd_control_mixing_preserves_chronological_sinkhorn_bits_and_failures() {
+        for streams in 1..=5 {
+            let rows = (2 + streams) * streams;
+            for iterations in [1, 3, 20] {
+                let parameters = [7, streams as u32, iterations, (7 * streams) as u32, 1e-6f32.to_bits()];
+                let projection: Vec<f32> = (0..rows).map(|i| (i as f32 * 1.13).sin() * 7.0).collect();
+                let mut coefficients: Vec<f32> = (0..rows).map(|i| (i as f32 * 0.37).cos() * 0.7).collect();
+                coefficients.extend([0.4, 0.7, 1.2]);
+                let projected = DecodeGraph::upload(&projection).unwrap();
+                let weights = DecodeGraph::upload(&coefficients).unwrap();
+                let legacy = DecodeGraph::zeros(rows).unwrap();
+                let simd = DecodeGraph::zeros(rows).unwrap();
+                let graph = DecodeGraph::new().unwrap();
+                dispatch_with_threads(
+                    &graph,
+                    "glm_control_mix",
+                    &[&projected, &weights, &legacy],
+                    &parameters,
+                    64,
+                    false,
+                    64,
+                )
+                .unwrap();
+                dispatch_with_threads(
+                    &graph,
+                    "glm_control_mix_simd",
+                    &[&projected, &weights, &simd],
+                    &parameters,
+                    32,
+                    false,
+                    32,
+                )
+                .unwrap();
+                let values = graph.finish(&[legacy, simd]).unwrap();
+                assert!(values[0].iter().zip(&values[1]).all(|(a, b)| a.to_bits() == b.to_bits()));
+
+                // An infinite projection must remain a failure even when a
+                // sigmoid or a later clipping operator produces finite values.
+                unsafe { projected.buffer.contents().as_ptr().cast::<f32>().write(f32::INFINITY) };
+                let graph = DecodeGraph::new().unwrap();
+                let output = DecodeGraph::zeros(rows).unwrap();
+                dispatch_with_threads(
+                    &graph,
+                    "glm_control_mix_simd",
+                    &[&projected, &weights, &output],
+                    &parameters,
+                    32,
+                    false,
+                    32,
+                )
+                .unwrap();
+                assert!(graph.finish(&[output]).is_err());
+            }
+        }
+    }
+
+    #[stark_test]
+    fn split_control_projection_matches_wide_oracle_with_tails() {
+        for (hidden, streams) in [(7, 4), (65, 4), (4096, 4), (13, 1), (13, 5)] {
+            let columns = hidden * streams;
+            let rows = (2 + streams) * streams;
+            let input: Vec<f32> = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect();
+            let weights: Vec<f32> = (0..rows * columns).map(|i| (((i * 17) % 97) as f32 - 48.0) * 0.0005).collect();
+            let source = DecodeGraph::upload(&input).unwrap();
+            let matrix = DecodeGraph::upload(&weights).unwrap();
+            for (chunks, name) in [
+                (8, "glm_control_project_split"),
+                (16, "glm_control_project_split16"),
+                (32, "glm_control_project_split32"),
+            ] {
+                let partials = DecodeGraph::zeros(rows * chunks).unwrap();
+                let graph = DecodeGraph::new().unwrap();
+                let parameters = [hidden as u32, streams as u32, 20, columns as u32, 1e-6f32.to_bits()];
+                dispatch_with_threads(
+                    &graph,
+                    name,
+                    &[&source, &matrix, &partials],
+                    &parameters,
+                    rows * chunks * 32,
+                    false,
+                    32,
+                )
+                .unwrap();
+                let actual = graph.finish(&[partials]).unwrap().remove(0);
+                for row in 0..rows {
+                    let mut total = 0.0f32;
+                    for value in &actual[row * chunks..(row + 1) * chunks] {
+                        total += value;
+                    }
+                    let oracle: f64 = weights[row * columns..(row + 1) * columns]
+                        .iter()
+                        .zip(&input)
+                        .map(|(&w, &x)| f64::from(w) * f64::from(x))
+                        .sum();
+                    let magnitude: f64 = weights[row * columns..(row + 1) * columns]
+                        .iter()
+                        .zip(&input)
+                        .map(|(&w, &x)| (f64::from(w) * f64::from(x)).abs())
+                        .sum();
+                    assert!((f64::from(total) - oracle).abs() <= 5e-7 * magnitude.max(1.0));
+                }
+            }
+        }
+    }
+
+    #[stark_test]
+    fn graph_parallel_router_matches_serial_gpu_bits() {
+        for (experts, active) in [(1, 1), (7, 3), (288, 8), (288, 64), (2048, 8), (2048, 64)] {
+            for tied in [true, false] {
+                let logits: Vec<_> = (0..experts)
+                    .map(|i| {
+                        if tied {
+                            0.0
+                        } else {
+                            (i as f32 * 0.37).sin() * 9.0
+                        }
+                    })
+                    .collect();
+                let bias: Vec<_> = (0..experts)
+                    .map(|i| {
+                        if tied {
+                            0.0
+                        } else {
+                            (i as f32 * 0.13).cos() * 0.2
+                        }
+                    })
+                    .collect();
+                let input = DecodeGraph::upload(&logits).unwrap();
+                let correction = DecodeGraph::upload(&bias).unwrap();
+                let mut graph = DecodeGraph::new().unwrap();
+                let (indices, mixture) = route_mode(&mut graph, &input, &correction, active, 2.5, false).unwrap();
+                let serial = graph.finish(&[indices, mixture]).unwrap();
+                let mut graph = DecodeGraph::new().unwrap();
+                let (indices, mixture) = route_mode(&mut graph, &input, &correction, active, 2.5, true).unwrap();
+                let parallel = graph.finish(&[indices, mixture]).unwrap();
+                assert!(
+                    serial.iter().flatten().zip(parallel.iter().flatten()).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "parallel router changed selected IDs or coefficient bits"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn graph_router_preserves_corrected_selection_and_probability_contract() {
+        let cases = [
+            (vec![0.0; 7], vec![0.0, 0.0, 0.0, f32::EPSILON, -f32::EPSILON, 0.0, 0.0], 3),
+            (
+                (0..288).map(|i| (i as f32 * 0.37).sin() * 9.0).collect(),
+                (0..288).map(|i| (i as f32 * 0.13).cos() * 0.2).collect(),
+                8,
+            ),
+            (vec![-1000.0, -80.0, 80.0, 1000.0, 0.0, 0.0, 0.0], vec![0.0, 0.0, 0.0, 0.0, 0.1, 0.1, 0.1], 4),
+        ];
+        for (logits, bias, active) in cases {
+            let probabilities: Vec<_> = logits.iter().map(|&v| super::super::math::sigmoid(v)).collect();
+            let choices: Vec<_> = probabilities.iter().zip(&bias).map(|(&a, &b)| a + b).collect();
+            let expected = super::super::math::topk(&choices, active).unwrap();
+            let denominator = expected.iter().map(|&i| probabilities[i]).sum::<f32>() + 1e-20;
+            let mut graph = DecodeGraph::new().unwrap();
+            let input = DecodeGraph::upload(&logits).unwrap();
+            let correction = DecodeGraph::upload(&bias).unwrap();
+            let (indices, mixture) = route(&mut graph, &input, &correction, active, 2.5).unwrap();
+            let output = graph.finish(&[indices, mixture]).unwrap();
+            let actual: Vec<_> = output[0].iter().map(|v| v.to_bits() as usize).collect();
+            assert!(actual == expected, "GPU router selection/order changed");
+            assert!(
+                output[1]
+                    .iter()
+                    .zip(&expected)
+                    .all(|(&actual, &i)| (actual - probabilities[i] / denominator * 2.5).abs() <= 3e-7),
+                "GPU router mixture coefficients exceeded the F32 comparison bound"
+            );
+        }
+        let mut graph = DecodeGraph::new().unwrap();
+        let probabilities = DecodeGraph::upload(&[0.5; 5]).unwrap();
+        let choices = DecodeGraph::upload(&[-0.0, 0.0, 0.0, -1.0, 1.0]).unwrap();
+        let indices = graph.scratch(4).unwrap();
+        let mixture = graph.scratch(4).unwrap();
+        dispatch(
+            &graph,
+            "glm_router_select",
+            &[&probabilities, &choices, &indices, &mixture],
+            &[5, 4, 1.0f32.to_bits()],
+            1,
+            true,
+        )
+        .unwrap();
+        let output = graph.finish(&[indices]).unwrap();
+        assert!(output[0].iter().map(|v| v.to_bits()).eq([4, 1, 2, 0]), "router IEEE tie order changed");
+
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            for parallel in [false, true] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let logits = DecodeGraph::zeros(7).unwrap();
+                unsafe {
+                    logits.buffer.contents().as_ptr().cast::<f32>().add(3).write(poison);
+                }
+                let bias = DecodeGraph::upload(&[0.0; 7]).unwrap();
+                let (indices, mixture) = route_mode(&mut graph, &logits, &bias, 3, 1.0, parallel).unwrap();
+                assert!(graph.finish(&[indices, mixture]).is_err(), "router accepted nonfinite logits");
+            }
+        }
+        let mut graph = DecodeGraph::new().unwrap();
+        let logits = DecodeGraph::upload(&[0.0; 7]).unwrap();
+        let bias = DecodeGraph::upload(&[0.0; 7]).unwrap();
+        let (indices, mixture) = route(&mut graph, &logits, &bias, 3, 1.0).unwrap();
+        assert!(graph.finish(&[indices, mixture]).is_ok(), "router failed to recover on a new graph");
+    }
+
+    #[stark_test]
     fn graph_parallel_sinkhorn_preserves_original_normalization_bits() {
         for streams in [2, 4, 8] {
             for iterations in [1, 2, 20, 128] {
@@ -758,6 +1372,351 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn synthetic_control_split32(part: usize) -> Control {
+        let (hidden, streams) = (4096, 4);
+        let rows = (2 + streams) * streams;
+        let weights: Vec<_> =
+            (0..rows * hidden * streams).map(|i| (((i * 13 + part * 17) % 127) as f32 - 63.0) * 0.0001).collect();
+        let mut control = Control::new(
+            ControlGeometry {
+                hidden,
+                streams,
+                iterations: 20,
+                eps: 1e-6,
+                rms_eps: 1e-5,
+            },
+            &weights,
+            &vec![0.0; rows],
+            &[0.01, 0.01, 0.01],
+            &vec![1.0; hidden],
+        )
+        .unwrap();
+        control.projection_chunks = 32;
+        control.projection = DecodeGraph::zeros(rows * 32).unwrap();
+        control.simd_mix = true;
+        control
+    }
+
+    #[stark_test]
+    fn control_rms_project_matches_parallel_reference_bits_and_failures() {
+        let control = synthetic_control_split32(0);
+        let branch = DecodeGraph::upload(&vec![0.001; 4096]).unwrap();
+        let run = |fused: bool, input: &DeviceVector| {
+            let mut graph = DecodeGraph::new().unwrap();
+            let normalized = if fused {
+                control.pre_mode(&mut graph, input, true)
+            } else {
+                control.pre_parallel_reference(&mut graph, input)
+            }
+            .unwrap();
+            let post = control.post(&mut graph, input, &branch).unwrap();
+            graph.finish(&[normalized, control.projection.clone(), control.mix.clone(), control.input.clone(), post])
+        };
+        for magnitude in [0.0f32, 1.0, 1.0e15] {
+            let values: Vec<_> = (0..16384).map(|i| (i as f32 * 0.017).sin() * magnitude).collect();
+            let input = DecodeGraph::upload(&values).unwrap();
+            let reference = run(false, &input).unwrap();
+            let actual = run(true, &input).unwrap();
+            assert!(
+                reference.iter().zip(&actual).all(|(a, b)| a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())),
+                "control RMS/project fusion changed pre/project/mix/input/post bits"
+            );
+            if magnitude == 1.0 {
+                for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                    let poisoned = DecodeGraph::upload(&values).unwrap();
+                    unsafe {
+                        poisoned
+                            .buffer
+                            .contents()
+                            .as_ptr()
+                            .cast::<u8>()
+                            .add(poisoned.offset)
+                            .cast::<f32>()
+                            .add(16383)
+                            .write(invalid);
+                    }
+                    assert!(run(false, &poisoned).is_err());
+                    assert!(run(true, &poisoned).is_err());
+                    let recovered = run(true, &input).unwrap();
+                    assert!(
+                        reference
+                            .iter()
+                            .zip(&recovered)
+                            .all(|(a, b)| a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()))
+                    );
+                }
+            }
+        }
+        // The reference permits finite MAX input to overflow its sum of
+        // squares: scale becomes zero and the normalized projection is zero.
+        let input = DecodeGraph::upload(&vec![f32::MAX; 16384]).unwrap();
+        let mut expected = None;
+        for fused in [false, true] {
+            let mut graph = DecodeGraph::new().unwrap();
+            if fused {
+                control.project_mode(&mut graph, &input, true).unwrap();
+            } else {
+                control.project_parallel_reference(&mut graph, &input).unwrap();
+            }
+            let actual = graph.finish(&[control.projection.clone()]).unwrap().remove(0);
+            assert!(actual.iter().all(|&value| value == 0.0));
+            if let Some(reference) = &expected {
+                assert!(actual.iter().zip(reference).all(|(a, b): (&f32, &f32)| a.to_bits() == b.to_bits()));
+            } else {
+                expected = Some(actual);
+            }
+        }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn control_rms_project_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let controls: Vec<_> = (0..10).map(synthetic_control_split32).collect();
+        let input =
+            DecodeGraph::upload(&(0..16384).map(|i| ((i % 127) as f32 - 63.0) * 0.001).collect::<Vec<_>>()).unwrap();
+        let branch = DecodeGraph::upload(&vec![0.001; 4096]).unwrap();
+        profile::enable(true);
+        let mut samples = [Vec::new(), Vec::new()];
+        for replay in 0..7 {
+            for fused in [false, true, true, false] {
+                profile::reset();
+                let mut graph = DecodeGraph::new().unwrap();
+                let mut residual = input.clone();
+                for control in &controls {
+                    let _ = if fused {
+                        control.pre_mode(&mut graph, &residual, true)
+                    } else {
+                        control.pre_parallel_reference(&mut graph, &residual)
+                    }
+                    .unwrap();
+                    residual = control.post(&mut graph, &residual, &branch).unwrap();
+                }
+                graph.finish(&[]).unwrap();
+                if replay > 0 {
+                    samples[usize::from(fused)].push(profile::snapshot()["native.metal.gpu"].seconds / 10.0);
+                }
+            }
+        }
+        profile::enable(false);
+        for (fused, mut values) in samples.into_iter().enumerate() {
+            values.sort_by(f64::total_cmp);
+            println!(
+                "{}",
+                serde_json::json!({"component":"control_rms_project_pre_post",
+                "fused":fused == 1,"activity":true,"parallel_first_rms":true,"chunks":32,
+                "hidden":4096,"streams":4,"controls_per_command":10,"warm_samples":values.len(),
+                "median_gpu_microseconds_per_control":(values[5]+values[6])*0.5e6,
+                "minimum_gpu_microseconds_per_control":values[0]*1e6,
+                "maximum_gpu_microseconds_per_control":values[11]*1e6,"paired_abba":true})
+            );
+        }
+    }
+
+    #[stark_test]
+    fn control_fused_parallel_preserves_source_tolerance_and_failures() {
+        let control = synthetic_control_split32(0);
+        let branch = DecodeGraph::upload(&vec![0.001; 4096]).unwrap();
+        let run = |values: &[f32], fused: bool| -> Result<Vec<Vec<f32>>> {
+            let input = DecodeGraph::upload(values)?;
+            let mut graph = DecodeGraph::new()?;
+            let normalized = if fused {
+                control.pre_fused_parallel(&mut graph, &input)?
+            } else {
+                control.pre_unfused(&mut graph, &input)?
+            };
+            let post = control.post(&mut graph, &input, &branch)?;
+            graph.finish(&[normalized, control.mix.clone(), control.input.clone(), post])
+        };
+        for magnitude in [0.0f32, 1.0, 1.0e15, 1.0e21] {
+            let values = (0..16384).map(|i| ((i % 127) as f32 - 63.0) * 0.001 * magnitude).collect::<Vec<_>>();
+            let reference = run(&values, false).unwrap();
+            let candidate = run(&values, true).unwrap();
+            for (a, b) in candidate.iter().zip(&reference) {
+                let error: f64 = a.iter().zip(b).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum();
+                let power: f64 = b.iter().map(|&v| f64::from(v).powi(2)).sum();
+                assert!((error / power.max(f64::MIN_POSITIVE)).sqrt() <= 2e-5, "parallel fused control source RMS");
+            }
+            // Independent F64 normalization of the candidate's F32 weighted input.
+            let square: f64 = candidate[2].iter().map(|&v| f64::from(v).powi(2)).sum();
+            let scale = 1.0 / (square / 4096.0 + f64::from(control.rms_eps)).sqrt();
+            if magnitude <= 1.0 {
+                for (&actual, &weighted) in candidate[0].iter().zip(&candidate[2]) {
+                    let expected = f64::from(weighted) * scale;
+                    assert!(
+                        (f64::from(actual) - expected).abs() <= 2e-6 * expected.abs().max(1.0),
+                        "parallel fused RMS F64 bound"
+                    );
+                }
+            }
+        }
+        // Poison after allocation because upload correctly rejects nonfinite data.
+        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let input = DecodeGraph::zeros(16384).unwrap();
+            unsafe {
+                *input.buffer.contents().as_ptr().cast::<f32>() = poison;
+            }
+            let mut graph = DecodeGraph::new().unwrap();
+            let output = control.pre_fused_parallel(&mut graph, &input).unwrap();
+            assert!(graph.finish(&[output]).is_err(), "parallel fused residual poison escaped");
+            let projection = vec![0.0f32; 24 * 32];
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    projection.as_ptr(),
+                    control.projection.buffer.contents().as_ptr().cast::<f32>(),
+                    projection.len(),
+                );
+                *control.projection.buffer.contents().as_ptr().cast::<f32>() = poison;
+            }
+            let mut graph = DecodeGraph::new().unwrap();
+            let clean = DecodeGraph::zeros(16384).unwrap();
+            let output = control.pre_projected_fused_parallel(&mut graph, &clean).unwrap();
+            assert!(graph.finish(&[output]).is_err(), "parallel fused projection poison escaped");
+            assert!(run(&vec![0.0; 16384], true).is_ok(), "parallel fused fresh-command recovery failed");
+        }
+        // Exercise both ordered fallbacks without the initial residual RMS.
+        for magnitude in [1e16f32, f32::MAX] {
+            let mut risk_input = vec![0.0f32; 16384];
+            risk_input[..4096].fill(magnitude);
+            let input = DecodeGraph::upload(&risk_input).unwrap();
+            let mut parts = vec![0.0f32; 24 * 32];
+            parts[0] = 1e21;
+            parts[1] = -1e21;
+            parts[2] = 1.0;
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    parts.as_ptr(),
+                    control.projection.buffer.contents().as_ptr().cast::<f32>(),
+                    parts.len(),
+                );
+            }
+            let mut baseline = DecodeGraph::new().unwrap();
+            let _ = control.pre_projected(&mut baseline, &input).unwrap();
+            let expected = baseline.scratch(4096).unwrap();
+            baseline
+                .kernel(
+                    "hybrid_graph_rms",
+                    &[&control.input, &control.normalization, &expected],
+                    &[1, 4096, control.rms_eps.to_bits(), 4096],
+                    256,
+                    256,
+                )
+                .unwrap();
+            let expected = baseline.finish(&[expected]).unwrap().remove(0);
+            let mut graph = DecodeGraph::new().unwrap();
+            let output = control.pre_projected_fused_parallel(&mut graph, &input).unwrap();
+            let actual = graph.finish(&[output]).unwrap().remove(0);
+            assert!(
+                actual.iter().zip(&expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+                "parallel fused risk fallback changed RMS bits"
+            );
+        }
+        let mut other = synthetic_control_split32(1);
+        other.projection_chunks = 16;
+        assert!(!other.fused_parallel_admitted(), "unsupported chunks admitted");
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn control_fused_parallel_production_flag_matches_qualified_schedule() {
+        let control = synthetic_control_split32(0);
+        assert!(
+            control.fused_parallel,
+            "fresh process requires CONTROL_FUSED_PARALLEL1, CONTROL_RMS_PROJECT1, CONTROL_SPLIT1, CONTROL_CHUNKS32 and ordered RMS disabled"
+        );
+        let branch = DecodeGraph::upload(&vec![0.001; 4096]).unwrap();
+        for magnitude in [0.0f32, 1.0, 1e15, 1e21] {
+            let input = DecodeGraph::upload(
+                &(0..16384).map(|i| ((i % 127) as f32 - 63.0) * 0.001 * magnitude).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let run = |production: bool| {
+                let mut graph = DecodeGraph::new().unwrap();
+                let normalized = if production {
+                    control.pre(&mut graph, &input)
+                } else if control.fused_parallel_admitted() {
+                    control.pre_fused_parallel(&mut graph, &input)
+                } else {
+                    control.pre_unfused(&mut graph, &input)
+                }
+                .unwrap();
+                let post = control.post(&mut graph, &input, &branch).unwrap();
+                graph.finish(&[normalized, control.mix.clone(), control.input.clone(), post]).unwrap()
+            };
+            let reference = run(false);
+            let actual = run(true);
+            for (a, b) in actual.iter().zip(&reference) {
+                assert!(
+                    a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "production fused control diverged from qualified schedule"
+                );
+            }
+        }
+        let mut unsupported = synthetic_control_split32(1);
+        unsupported.projection_chunks = 16;
+        unsupported.projection = DecodeGraph::zeros(24 * 16).unwrap();
+        assert!(!unsupported.fused_parallel_admitted());
+        let input = DecodeGraph::zeros(16384).unwrap();
+        let mut graph = DecodeGraph::new().unwrap();
+        let output = unsupported.pre(&mut graph, &input).unwrap();
+        assert!(graph.finish(&[output]).is_ok(), "unsupported geometry fallback failed");
+        unsupported.projection_chunks = 32;
+        unsupported.projection = DecodeGraph::zeros(24 * 32).unwrap();
+        unsupported.ordered_rms = true;
+        assert!(!unsupported.fused_parallel_admitted(), "ordered diagnostic admitted fused control");
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn control_fused_parallel_serial_concurrent_gpu_component_timings() {
+        let _activity = super::super::activity::InferenceActivity::begin().unwrap();
+        let controls: Vec<_> = (0..10).map(synthetic_control_split32).collect();
+        let input =
+            DecodeGraph::upload(&(0..16384).map(|i| ((i % 127) as f32 - 63.0) * 0.001).collect::<Vec<_>>()).unwrap();
+        let branch = DecodeGraph::upload(&vec![0.001; 4096]).unwrap();
+        profile::enable(true);
+        for concurrent in [false, true] {
+            let mut samples = [Vec::new(), Vec::new()];
+            for replay in 0..7 {
+                for fused in [false, true, true, false] {
+                    profile::reset();
+                    let mut graph = if concurrent {
+                        DecodeGraph::new_parallel()
+                    } else {
+                        DecodeGraph::new()
+                    }
+                    .unwrap();
+                    let mut residual = input.clone();
+                    for control in &controls {
+                        let _ = if fused {
+                            control.pre_fused_parallel(&mut graph, &residual)
+                        } else {
+                            control.pre_unfused(&mut graph, &residual)
+                        }
+                        .unwrap();
+                        residual = control.post(&mut graph, &residual, &branch).unwrap();
+                    }
+                    graph.finish(&[]).unwrap();
+                    if replay > 0 {
+                        samples[usize::from(fused)].push(profile::snapshot()["native.metal.gpu"].seconds / 10.0);
+                    }
+                }
+            }
+            for (fused, mut times) in samples.into_iter().enumerate() {
+                times.sort_by(f64::total_cmp);
+                println!(
+                    "{}",
+                    serde_json::json!({"component":"control_fused_parallel_pre_post","activity":true,
+                    "fused":fused==1,"admitted":controls[0].fused_parallel_admitted(),"concurrent_encoder":concurrent,
+                    "hidden":4096,"streams":4,"chunks":32,"threads":768,"controls_per_command":10,"paired_abba":true,
+                    "warm_samples":times.len(),"median_gpu_microseconds_per_control":(times[5]+times[6])*0.5e6,
+                    "minimum_gpu_microseconds_per_control":times[0]*1e6,"maximum_gpu_microseconds_per_control":times[11]*1e6})
+                );
+            }
+        }
+        profile::enable(false);
     }
 
     /// Synthetic component timing, excluded from the normal validation suite.
@@ -889,6 +1848,168 @@ mod tests {
             serde_json::json!({"glm_synthetic_control_experiment":true,"hidden":hidden,
             "streams":streams,"controls_per_command":count,"measured_replays":3,
             "ordered_rms_requested":std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|v| v == "1"),"cases":cases})
+        );
+    }
+
+    /// Isolated commands expose the five pre stages and projection occupancy
+    /// choices without enabling encoder sampling or loading model weights.
+    #[stark_test]
+    #[ignore]
+    fn glm_control_stage_gpu_component_timings() {
+        use std::time::Instant;
+        let hidden = 4096;
+        let streams = 4;
+        let columns = hidden * streams;
+        let rows = (2 + streams) * streams;
+        let count = 10;
+        let chunks = [8, 16, 32];
+        let controls: Vec<Vec<_>> = chunks
+            .iter()
+            .map(|&parts| {
+                (0..count)
+                    .map(|part| {
+                        let weights: Vec<_> = (0..rows * columns)
+                            .map(|i| (((i * 13 + part * 17) % 127) as f32 - 63.0) * 0.0001)
+                            .collect();
+                        let mut control = Control::new(
+                            ControlGeometry {
+                                hidden,
+                                streams,
+                                iterations: 20,
+                                eps: 1e-6,
+                                rms_eps: 1e-5,
+                            },
+                            &weights,
+                            &vec![0.0; rows],
+                            &[0.01, 0.01, 0.01],
+                            &vec![1.0; hidden],
+                        )
+                        .unwrap();
+                        control.projection_chunks = parts;
+                        control.projection = DecodeGraph::zeros(rows * parts).unwrap();
+                        control.simd_mix = true;
+                        control
+                    })
+                    .collect()
+            })
+            .collect();
+        let input =
+            DecodeGraph::upload(&(0..columns).map(|i| ((i % 127) as f32 - 63.0) * 0.001).collect::<Vec<_>>()).unwrap();
+        let branch = DecodeGraph::upload(&vec![0.001; hidden]).unwrap();
+        let cases = [
+            ("rms_16384", 0, 0),
+            ("projection_split8", 1, 0),
+            ("projection_split16", 1, 1),
+            ("projection_split32", 1, 2),
+            ("mix_split8", 2, 0),
+            ("mix_split16", 2, 1),
+            ("mix_split32", 2, 2),
+            ("weighted_input_4096", 3, 0),
+            ("rms_4096", 4, 0),
+            ("pre_post_split8", 5, 0),
+            ("pre_post_split16", 5, 1),
+            ("pre_post_split32", 5, 2),
+        ];
+        let mut measurements = vec![Vec::new(); cases.len()];
+        let concurrent = std::env::var_os("STARK_GLM53_CONCURRENT_ENCODER").is_some_and(|v| v == "1");
+        let new_graph = || {
+            if concurrent {
+                DecodeGraph::new_parallel().unwrap()
+            } else {
+                DecodeGraph::new().unwrap()
+            }
+        };
+        // Prepare nonzero projection, mixing, and weighted-input intermediates.
+        for group in &controls {
+            let mut graph = new_graph();
+            for control in group {
+                let _ = control.pre(&mut graph, &input).unwrap();
+            }
+            graph.finish(&[]).unwrap();
+        }
+        profile::enable(true);
+        for replay in 0..5 {
+            for (case, &(_, stage, group)) in cases.iter().enumerate() {
+                profile::reset();
+                let started = Instant::now();
+                let mut graph = new_graph();
+                let mut residual = input.clone();
+                for control in &controls[group] {
+                    match stage {
+                        0 => {
+                            let _ = graph.rms_norm(&input, &control.ones, columns, 1e-5).unwrap();
+                        },
+                        1 => dispatch_with_threads(
+                            &graph,
+                            ["glm_control_project_split", "glm_control_project_split16", "glm_control_project_split32"]
+                                [group],
+                            &[&input, &control.weights, &control.projection],
+                            &control.parameters,
+                            rows * chunks[group] * 32,
+                            false,
+                            32,
+                        )
+                        .unwrap(),
+                        2 => dispatch_with_threads(
+                            &graph,
+                            [
+                                "glm_control_mix_split_simd",
+                                "glm_control_mix_split16_simd",
+                                "glm_control_mix_split32_simd",
+                            ][group],
+                            &[&control.projection, &control.coefficients, &control.mix],
+                            &control.parameters,
+                            32,
+                            false,
+                            32,
+                        )
+                        .unwrap(),
+                        3 => dispatch(
+                            &graph,
+                            "glm_control_input",
+                            &[&input, &control.mix, &control.input],
+                            &control.parameters,
+                            hidden,
+                            false,
+                        )
+                        .unwrap(),
+                        4 => {
+                            let _ = graph.rms_norm(&control.input, &control.normalization, hidden, 1e-5).unwrap();
+                        },
+                        5 => {
+                            let _ = control.pre(&mut graph, &residual).unwrap();
+                            residual = control.post(&mut graph, &residual, &branch).unwrap();
+                        },
+                        _ => unreachable!(),
+                    }
+                }
+                graph.finish(&[]).unwrap();
+                let wall_seconds = started.elapsed().as_secs_f64();
+                let gpu_seconds = profile::snapshot().get("native.metal.gpu").unwrap().seconds;
+                if replay > 0 {
+                    measurements[case].push((gpu_seconds, wall_seconds));
+                }
+            }
+        }
+        profile::enable(false);
+        let results: Vec<_> = cases
+            .iter()
+            .zip(measurements)
+            .map(|(&(name, _, _), values)| {
+                let mut gpu: Vec<_> = values.iter().map(|v| v.0).collect();
+                let mut wall: Vec<_> = values.iter().map(|v| v.1).collect();
+                gpu.sort_by(f64::total_cmp);
+                wall.sort_by(f64::total_cmp);
+                let median = (gpu[1] + gpu[2]) * 0.5;
+                serde_json::json!({"case":name,"gpu_seconds":gpu,"wall_seconds":wall,
+                "gpu_microseconds_per_control":median * 1e6 / count as f64})
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({"glm_synthetic_control_stages":true,
+            "hidden":hidden,"streams":streams,"controls_per_command":count,
+            "measured_replays":4,"concurrent_encoder":concurrent,"cases":results})
         );
     }
 

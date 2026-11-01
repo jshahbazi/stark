@@ -34,6 +34,16 @@ host screens after quiet admission. The packed finite-check fusion trial
 passed numerical checks and did not establish a performance benefit; the
 production kernels remain unchanged. See the [baseline and trial report](GLM53_MLX_BASELINE_2026_11_01.md).
 
+**Native GLM-5.3-Flash optimization progress (2026-11-01).** The screened v39
+build measures **34.800 useful tok/s** against **34.382** for the refreshed
+same-GGUF MLX-Serve control, a 1.216% warm-decode gain. Native prefill remains
+slower, so the short full request takes longer. The narrow scorer and focused
+validation pass; broad answer quality and whole-model equivalence remain open.
+The [source-bound progress report](GLM53_NATIVE_OPTIMIZATION_2026_11_01.md)
+and [aggregate JSON](data/glm53-native-optimization-2026-11-01.json) retain
+the measurement scope and source identity. This supplements the
+[matched MLX baseline](GLM53_MLX_BASELINE_2026_11_01.md).
+
 **Native GLM-5.3-Flash and Qwen3.8-Flash-Next integration (2026-10-28).**
 Qwen's initial mixed-precision Lily-format path measures 77.18 tok/s warm decode at 4K
 input and 256 outputs, with speculation disabled. The original Pipe checkpoint

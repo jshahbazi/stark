@@ -1,0 +1,270 @@
+--- a/crates/stark-engine/src/engine/hybrid/glm_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_metal.rs
+@@ -78,6 +78,7 @@
+                 "glm_control_mix_split_simd",
+                 "glm_control_mix_split16_simd",
+                 "glm_control_mix_split32_simd",
++                "glm_control_mix_input_rms",
+                 "glm_control_input",
+                 "glm_control_post",
+                 "glm_index_pool",
+@@ -101,7 +102,7 @@
+                 if pipeline.max_total_threads_per_threadgroup() < 256 {
+                     return Err("Metal GLM graph execution width is unsupported");
+                 }
+-                if matches!(name, "glm_control_project" | "glm_router_parallel")
++                if matches!(name, "glm_control_project" | "glm_control_mix_input_rms" | "glm_router_parallel")
+                     && pipeline.thread_execution_width() != 32
+                 {
+                     return Err("Metal GLM control SIMD width is unsupported");
+@@ -412,6 +413,8 @@
+     rms_eps: f32,
+     projection_chunks: usize,
+     simd_mix: bool,
++    fused: bool,
++    ordered_rms: bool,
+ }
+ 
+ pub(super) struct ControlGeometry {
+@@ -461,8 +464,12 @@
+         coefficients.extend(scale);
+         let split =
+             streams * streams <= 32 && std::env::var_os("STARK_GLM53_CONTROL_SPLIT").is_some_and(|value| value == "1");
++        let ordered_rms = std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1");
++        let fused = streams * streams <= 32
++            && !ordered_rms
++            && std::env::var_os("STARK_GLM53_CONTROL_FUSED").is_some_and(|value| value == "1");
+         let simd_mix = streams * streams <= 32
+-            && (split || std::env::var_os("STARK_GLM53_CONTROL_SIMD").is_some_and(|value| value == "1"));
++            && (split || fused || std::env::var_os("STARK_GLM53_CONTROL_SIMD").is_some_and(|value| value == "1"));
+         let projection_chunks = if split {
+             match std::env::var_os("STARK_GLM53_CONTROL_CHUNKS").as_deref().and_then(|v| v.to_str()) {
+                 Some("16") => 16,
+@@ -485,6 +492,8 @@
+             rms_eps,
+             projection_chunks,
+             simd_mix,
++            fused,
++            ordered_rms,
+         })
+     }
+ 
+@@ -492,6 +501,15 @@
+         &self,
+         graph: &mut DecodeGraph,
+         residual: &DeviceVector,
++    ) -> Result<DeviceVector> {
++        self.pre_mode(graph, residual, self.fused)
++    }
++
++    fn pre_mode(
++        &self,
++        graph: &mut DecodeGraph,
++        residual: &DeviceVector,
++        fused: bool,
+     ) -> Result<DeviceVector> {
+         if residual.len != self.parameters[3] as usize {
+             return Err(Error::Invalid("Metal GLM control residual dimensions"));
+@@ -511,6 +529,19 @@
+             false,
+             32,
+         )?;
++        if fused && self.simd_mix && !self.ordered_rms {
++            let output = graph.scratch(self.input.len)?;
++            let p = self.parameters;
++            dispatch(
++                graph,
++                "glm_control_mix_input_rms",
++                &[&self.projection, &self.coefficients, residual, &self.normalization, &self.mix, &self.input, &output],
++                &[p[0], p[1], p[2], p[3], p[4], self.rms_eps.to_bits(), self.projection_chunks as u32],
++                256,
++                true,
++            )?;
++            return Ok(output);
++        }
+         dispatch_with_threads(
+             graph,
+             match self.projection_chunks {
+@@ -1019,6 +1050,109 @@
+                         .sum();
+                     assert!((f64::from(total) - oracle).abs() <= 5e-7 * magnitude.max(1.0));
+                 }
++            }
++        }
++    }
++
++    #[stark_test]
++    fn fused_control_preserves_pre_post_bits_and_nonfinite_recovery() {
++        for (hidden, streams) in [(13, 1), (65, 4), (4096, 4), (31, 5)] {
++            let rows = (2 + streams) * streams;
++            let columns = hidden * streams;
++            let weights: Vec<_> = (0..rows * columns).map(|i| (((i * 17) % 97) as f32 - 48.0) * 0.0005).collect();
++            let source: Vec<_> = (0..columns).map(|i| (i as f32 * 0.017).sin()).collect();
++            let residual = DecodeGraph::upload(&source).unwrap();
++            let branch = DecodeGraph::upload(&vec![0.001; hidden]).unwrap();
++            for chunks in [1, 8, 16, 32] {
++                let mut control = Control::new(
++                    ControlGeometry {
++                        hidden,
++                        streams,
++                        iterations: 20,
++                        eps: 1e-6,
++                        rms_eps: 1e-5,
++                    },
++                    &weights,
++                    &vec![0.1; rows],
++                    &[0.1, 0.2, 0.3],
++                    &(0..hidden).map(|i| 0.9 + (i % 11) as f32 * 0.02).collect::<Vec<_>>(),
++                )
++                .unwrap();
++                control.projection_chunks = chunks;
++                control.projection = DecodeGraph::zeros(rows * chunks).unwrap();
++                control.simd_mix = true;
++                let run = |fused: bool, input: &DeviceVector| {
++                    let mut graph = DecodeGraph::new().unwrap();
++                    let normalized = control.pre_mode(&mut graph, input, fused).unwrap();
++                    let post = control.post(&mut graph, input, &branch).unwrap();
++                    graph.finish(&[normalized, control.mix.clone(), control.input.clone(), post])
++                };
++                let plain = run(false, &residual).unwrap();
++                let fused = run(true, &residual).unwrap();
++                for (index, (a, b)) in plain.iter().zip(&fused).enumerate() {
++                    assert!(
++                        a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()),
++                        "fused control changed bits at output {index}, hidden={hidden}, streams={streams}, chunks={chunks}"
++                    );
++                }
++                for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++                    let poisoned = DecodeGraph::upload(&source).unwrap();
++                    unsafe {
++                        poisoned
++                            .buffer
++                            .contents()
++                            .as_ptr()
++                            .cast::<u8>()
++                            .add(poisoned.offset)
++                            .cast::<f32>()
++                            .add(columns / 2)
++                            .write(invalid);
++                    }
++                    assert!(run(true, &poisoned).is_err());
++                    let recovered = run(true, &residual).unwrap();
++                    assert!(
++                        plain
++                            .iter()
++                            .zip(&recovered)
++                            .all(|(a, b)| a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()))
++                    );
++                }
++
++                // An infinite projection can be hidden by a finite sigmoid;
++                // the fused helper must retain its earlier failure signal.
++                let projection = DecodeGraph::zeros(rows * chunks).unwrap();
++                unsafe {
++                    projection
++                        .buffer
++                        .contents()
++                        .as_ptr()
++                        .cast::<u8>()
++                        .add(projection.offset)
++                        .cast::<f32>()
++                        .write(f32::INFINITY);
++                }
++                let output = DecodeGraph::zeros(hidden).unwrap();
++                let graph = DecodeGraph::new().unwrap();
++                let p = control.parameters;
++                dispatch(
++                    &graph,
++                    "glm_control_mix_input_rms",
++                    &[
++                        &projection,
++                        &control.coefficients,
++                        &residual,
++                        &control.normalization,
++                        &control.mix,
++                        &control.input,
++                        &output,
++                    ],
++                    &[p[0], p[1], p[2], p[3], p[4], control.rms_eps.to_bits(), chunks as u32],
++                    256,
++                    true,
++                )
++                .unwrap();
++                assert!(graph.finish(&[output]).is_err());
++                assert!(run(true, &residual).is_ok());
+             }
+         }
+     }
+@@ -1362,6 +1496,9 @@
+             ("pre_post_split8", 5, 0),
+             ("pre_post_split16", 5, 1),
+             ("pre_post_split32", 5, 2),
++            ("pre_post_fused_split8", 6, 0),
++            ("pre_post_fused_split16", 6, 1),
++            ("pre_post_fused_split32", 6, 2),
+         ];
+         let mut measurements = vec![Vec::new(); cases.len()];
+         let concurrent = std::env::var_os("STARK_GLM53_CONCURRENT_ENCODER").is_some_and(|v| v == "1");
+@@ -1429,8 +1566,8 @@
+                         4 => {
+                             let _ = graph.rms_norm(&control.input, &control.normalization, hidden, 1e-5).unwrap();
+                         },
+-                        5 => {
+-                            let _ = control.pre(&mut graph, &residual).unwrap();
++                        5 | 6 => {
++                            let _ = control.pre_mode(&mut graph, &residual, stage == 6).unwrap();
+                             residual = control.post(&mut graph, &residual, &branch).unwrap();
+                         },
+                         _ => unreachable!(),
+--- a/crates/stark-engine/src/engine/hybrid/glm_control_split.metal
++++ b/crates/stark-engine/src/engine/hybrid/glm_control_split.metal
+@@ -111,3 +111,49 @@
+ 
+ GLM_CONTROL_MIX_PARTS(glm_control_mix_split16_simd, 16)
+ GLM_CONTROL_MIX_PARTS(glm_control_mix_split32_simd, 32)
++
++struct GlmFusedControlParameters {
++    GlmControlParameters control;
++    float rms_epsilon;
++    uint chunks;
++};
++
++// The first SIMD group retains the existing Sinkhorn chronology. After its
++// device writes become visible, all eight groups retain the ordinary RMS
++// lane, SIMD, and group reduction order. No cross-group scheduling is needed.
++kernel void glm_control_mix_input_rms(
++    device const float *projection [[buffer(0)]], device const float *coefficients [[buffer(1)]],
++    device const float *residual [[buffer(2)]], device const float *normalization [[buffer(3)]],
++    device float *mix [[buffer(4)]], device float *input [[buffer(5)]],
++    device float *output [[buffer(6)]], constant GlmFusedControlParameters &p [[buffer(7)]],
++    device atomic_uint *failure [[buffer(8)]], uint tid [[thread_index_in_threadgroup]],
++    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
++    if (sg == 0)
++        glm_control_mix_one_simd(projection, coefficients, mix, p.control, failure, lane, p.chunks);
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    float sum = 0.0f;
++    for (uint d = tid; d < p.control.hidden; d += 256) {
++        float value = 0.0f;
++        for (uint stream = 0; stream < p.control.streams; ++stream)
++            value += mix[stream] * residual[stream * p.control.hidden + d];
++        input[d] = value;
++        if (!isfinite(value)) atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
++        sum += value * value;
++    }
++    threadgroup float partial[8];
++    threadgroup float scale;
++    float total = simd_sum(sum);
++    if (lane == 0) partial[sg] = total;
++    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);
++    if (sg == 0) {
++        total = simd_sum(lane < 8 ? partial[lane] : 0.0f);
++        if (lane == 0) scale = 1.0f / sqrt(total / float(p.control.hidden) + p.rms_epsilon);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (uint d = tid; d < p.control.hidden; d += 256) {
++        float weight = normalization[d];
++        float value = input[d] * scale * weight;
++        if (!isfinite(weight) || !isfinite(value)) atomic_fetch_or_explicit(failure, 1u, memory_order_relaxed);
++        output[d] = value;
++    }
++}
