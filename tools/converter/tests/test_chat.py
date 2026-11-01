@@ -379,3 +379,139 @@ def test_worker_cooperative_cancel_before_first_token_keeps_process(tmp_path):
         assert worker.request({"operation": "generate"}) == {"text": "next response"}
     finally:
         worker.close()
+
+
+def mtp_descriptor(**changes):
+    value = {
+        "supported": True,
+        "max_drafts": 6,
+        "recommended_drafts": 4,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": "model-specific-exact-v1",
+        "operations": ["generate"],
+    }
+    value.update(changes)
+    return value
+
+
+class MtpWorker(FakeWorker):
+    def read(self):
+        return {**super().read(), "mtp": mtp_descriptor()}
+
+
+@pytest.mark.parametrize("enabled, expected", [(False, 0), (True, 4)])
+@pytest.mark.parametrize("context_limit", [8192, 0xFFFFFFFF])
+def test_cli_toggle_resolves_loaded_model_depth_and_forwards_legacy_wire_field(
+    model, enabled, expected, context_limit
+):
+    worker = MtpWorker(context_limit=context_limit)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, mtp=enabled), worker) == 0
+    generated = [r for r in worker.requests if r["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["mtp_drafts"] == expected
+    assert "mtp" not in generated[0]
+    assert generated[0]["context_tokens"] == (1024 if context_limit != 0xFFFFFFFF else 20 + 32)
+
+
+def test_cli_default_off_keeps_older_unsupported_worker_requests_compatible(model):
+    worker = FakeWorker()
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model), worker) == 0
+    assert all("mtp_drafts" not in request and "mtp" not in request for request in worker.requests)
+
+
+def test_cli_rejects_unsupported_toggle_before_reading_input_or_tokenizing(model):
+    worker = FakeWorker()
+    with patch("builtins.input", side_effect=AssertionError("input must not be read")):
+        with pytest.raises(ChatError, match="MTP is unavailable"):
+            run_chat(options(model, mtp=True), worker)
+    assert worker.requests == []
+
+
+def test_cli_rejects_image_mtp_before_reading_image_file_or_input(model):
+    worker = MtpWorker()
+    with (
+        patch("stark_convert.chat._read_image_file", side_effect=AssertionError("image must not be read")),
+        patch("builtins.input", side_effect=AssertionError("input must not be read")),
+    ):
+        with pytest.raises(ChatError, match="MTP is unavailable for image requests"):
+            run_chat(options(model, mtp=True, image=model / "private-name.png"), worker)
+    assert worker.requests == []
+
+
+@pytest.mark.parametrize("flags, enabled", [([], False), (["--mtp"], True), (["--no-mtp"], False)])
+def test_main_parses_explicit_mtp_toggle_without_enabling_it_by_default(model, flags, enabled):
+    worker = FakeWorker()
+    worker.close = lambda: None
+    with (
+        patch("stark_convert.chat.Worker", return_value=worker),
+        patch("stark_convert.chat.run_chat", return_value=0) as run,
+    ):
+        assert main(["--model-path", str(model), *flags]) == 0
+    assert run.call_args.args[0].mtp is enabled
+
+
+def test_main_rejects_conflicting_mtp_flags_before_launch(model):
+    with patch("stark_convert.chat.Worker") as launch:
+        with pytest.raises(SystemExit) as error:
+            main(["--model-path", str(model), "--mtp", "--no-mtp"])
+    assert error.value.code == 2
+    launch.assert_not_called()
+
+
+def test_worker_mtp_capabilities_clear_on_timeout_and_close(tmp_path):
+    executable = tmp_path / "mtp worker"
+    ready = {"ready": True, "mtp": mtp_descriptor()}
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys, time\n"
+        f"print(json.dumps({ready!r}), flush=True)\n"
+        "for line in sys.stdin: time.sleep(10)\n"
+    )
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 2)
+    try:
+        assert worker.mtp["supported"] is False
+        worker.read()
+        assert worker.mtp == mtp_descriptor()
+        worker.timeout = 0.1
+        with pytest.raises(ChatError, match="timed out"):
+            worker.request({"operation": "generate"})
+        assert worker.mtp["supported"] is False
+        worker.mtp = mtp_descriptor()
+    finally:
+        worker.close()
+    assert worker.mtp["supported"] is False
+
+
+@pytest.mark.parametrize("failure", [{"ready": False, "error": "model_load_failed"}, ["invalid"]])
+def test_worker_failed_readiness_clears_any_prior_mtp_metadata(tmp_path, failure):
+    executable = tmp_path / "failed mtp worker"
+    executable.write_text(f"#!{sys.executable}\nimport json\nprint(json.dumps({failure!r}),flush=True)\n")
+    executable.chmod(0o755)
+    worker = Worker(executable, tmp_path, 2)
+    worker.mtp = mtp_descriptor()
+    try:
+        if isinstance(failure, list):
+            with pytest.raises(ChatError):
+                worker.read()
+        else:
+            worker.read()
+        assert worker.mtp["supported"] is False
+    finally:
+        worker.close()
+
+
+def test_worker_transport_keeps_explicit_mtp_fields_and_does_not_inject_a_preference():
+    from types import SimpleNamespace
+
+    worker = Worker.__new__(Worker)
+    worker.process = SimpleNamespace(stdin=io.BytesIO())
+    worker.read = lambda: {"accepted": True}
+    worker.mtp = mtp_descriptor()
+    for payload in [{"operation": "generate"}, {"operation": "generate", "mtp": False}]:
+        assert worker.request(payload) == {"accepted": True}
+    sent = [json.loads(line) for line in worker.process.stdin.getvalue().splitlines()]
+    assert sent == [{"operation": "generate"}, {"operation": "generate", "mtp": False}]

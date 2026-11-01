@@ -224,8 +224,26 @@ Hybrid generation and scoring hold a macOS user-initiated, latency-critical
 process activity through request execution and GPU cleanup, then release it
 between requests. This expresses the request's activity lifetime; it does not
 reserve GPU resources or establish a fixed clock or throughput.
+The generation worker can also load the checkpoint's existing MTP head and
+enable one to three draft tokens per request through `mtp_drafts`. It is off
+by default. The generic `mtp: true` request option chooses the loaded model's
+recommended count; readiness exposes per-model MTP support and limits.
+Draft and target distributions use Stark's complete-logit CPU
+sampler with exact probability-ratio rejection and residual correction;
+quantization is unchanged. Lily batched verification retains ordinary decode arithmetic,
+captures GDN and convolution state, and rejection restores the committed
+prefix and n-gram history. The
+head and its speculative state add memory. See the
+[generation protocol](GENERATION.md#qwen38-multi-token-prediction) for settings,
+aggregate counters and sampling semantics. Scoring keeps MTP disabled.
+The official mixed-affine checkpoint's existing one-layer head is also
+supported, using `batched-affine-decode-exact-v1` verification to preserve its
+ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
+Lily weights retain `batched-decode-exact-v1`. The official verifier uses
+its own short-row kernels and physical ValueKey rollback captures; both
+policies retain their ordinary target arithmetic.
 This path requires macOS 26 and Metal 4, uses the checkpoint's declared context
-maximum, and executes neither MTP nor vision. Initial K/V and decode scratch
+maximum, and does not execute vision. Initial K/V and decode scratch
 reserve at most 16,384 tokens and grow as needed; that reserve is not a token
 limit. Prefill scratch follows the current state capacity. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
@@ -361,6 +379,18 @@ chmod 700 runtime/qwen38-profile
 STARK_QWEN38_PROFILE_OUTPUT="$PWD/runtime/qwen38-profile/stages.jsonl" uv run --project tools/converter --locked --python 3.13.13 python scripts/benchmark_hybrid_context.py --model models/qwen38-lily-q4-xl --worker target/release/stark-generate --corpus vendor/lily-core/src/qwen4exp/model.rs --input-tokens 4096 --tokens 64 --replays 3 --sampling stochastic --temperature 1 --top-k 20 --top-p 0.95 --seed 42 --output runtime/qwen38-profile/run.json
 ```
 
+For a worker request with `mtp_drafts: 1` through `3`, the same opt-in output
+also records `qwen.mtp.draft`, `qwen.mtp.verify`,
+`qwen.mtp.target_sampling` and `qwen.mtp.finish` elapsed scopes. Verification
+GPU categories use `qwen.mtp.verify.gpu.*`; MoE setup,
+`moe_gate_up_shared_down` and `moe_down` are separate categories. Host scopes
+include synchronous GPU waits and are not CPU-active measurements. The
+paired MTP throughput harness deliberately removes this environment variable;
+use a separate diagnostic worker session to collect MTP profiles. A build
+with profiling disabled remains valid uninstrumented throughput evidence for
+its named executable. The [MTP optimization study](benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md)
+records the profile and longer on/off measurements at fixed quantization.
+
 The context benchmark supports greedy and stochastic generation; `--top-k 0`
 omits top-k filtering. It emits counts, hashes and timing aggregates. The
 benchmark study records the separate pinned corpus used for its exact workload.
@@ -392,8 +422,10 @@ and [GLM research review](archive/runs/2026-10-28-glm53-performance-literature-r
 record the remaining graph, kernel and prefill opportunities with source and
 license boundaries.
 
-These paths are text-only. The native loader does not execute vision, video,
-audio, MTP or DFlash. The workers enforce the loaded model's configured context
+These paths are text-only. They do not execute vision, video, audio or DFlash.
+MTP is available through the native Lily and official mixed-affine generation
+paths described above when the checkpoint contains its trained head.
+The workers enforce the loaded model's configured context
 maximum and retain the 4,096-output-token cap; the upstream advertised maximum
 context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.

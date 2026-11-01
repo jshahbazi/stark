@@ -687,3 +687,95 @@ HC_READ_UP_MIX_CACHED_KERNEL(5)
 HC_READ_UP_MIX_CACHED_KERNEL(6)
 HC_READ_UP_MIX_CACHED_KERNEL(7)
 HC_READ_UP_MIX_CACHED_KERNEL(8)
+
+// Modified by Stark: each row reuses the original cached decode body,
+// preserving its floating-point operation order. Row is the fast grid axis.
+#define STARK_HC_UP_CACHED_ROWS(GG)                                                    \
+    kernel void stark_hc_up_cached_rows_g##GG(                                             \
+                     device const uint*   u_codes  [[buffer(0)]],  /* [G*H, R/4] */  \
+                     device const bfloat* u_scales [[buffer(1)]],  /* [G*H, R/GS] */ \
+                     device const bfloat* u_biases [[buffer(2)]],                    \
+                     device const bfloat* down     [[buffer(3)]],  /* [R] */         \
+                     device const bfloat* hyper    [[buffer(4)]],  /* [G*H] */       \
+                     device const bfloat* norm_w   [[buffer(5)]],  /* [G*H] */       \
+                     device const float*  inv_rms  [[buffer(6)]],  /* [G] */         \
+                     device bfloat*       mixed    [[buffer(7)]],  /* [H] */         \
+                     constant uint&       H        [[buffer(8)]],                    \
+                     constant uint&       R        [[buffer(9)]],                    \
+                     constant uint&       GS       [[buffer(10)]],                   \
+                     constant float&      inv_g    [[buffer(11)]],                   \
+                     constant float&      w_bias   [[buffer(12)]],                   \
+                     uint3 tg    [[threadgroup_position_in_grid]],                   \
+                     uint3 tgsize [[threads_per_threadgroup]],                        \
+                     uint sg     [[simdgroup_index_in_threadgroup]],                 \
+                     uint lane   [[thread_index_in_simdgroup]]) {                    \
+        const uint col = tg.y * (tgsize.x / 32) + sg;                                    \
+        if (col >= H) {                                                              \
+            return;  /* whole simdgroup */                                           \
+        }                                                                            \
+        hc_read_up_mix_q8_cached_body<GG>(u_codes, u_scales, u_biases, down + (ulong)tg.x * R, hyper + (ulong)tg.x * GG * H, norm_w, \
+                                   inv_rms + (ulong)tg.x * GG, mixed + (ulong)tg.x * H, H, R, GS, inv_g, w_bias, col,     \
+                                   lane);                                            \
+    }
+
+STARK_HC_UP_CACHED_ROWS(1)
+STARK_HC_UP_CACHED_ROWS(2)
+STARK_HC_UP_CACHED_ROWS(3)
+STARK_HC_UP_CACHED_ROWS(4)
+STARK_HC_UP_CACHED_ROWS(5)
+STARK_HC_UP_CACHED_ROWS(6)
+STARK_HC_UP_CACHED_ROWS(7)
+STARK_HC_UP_CACHED_ROWS(8)
+
+// Modified by Stark: row-axis variant of the original MB=1 read-down body.
+#define STARK_HC_DOWN_DECODE_ROWS()                                                 \
+    kernel void stark_hc_down_decode_rows(                                               \
+                     device const bfloat* hyper    [[buffer(0)]],  /* [MB, G*H] */   \
+                     device const bfloat* norm_w   [[buffer(1)]],  /* [G*H] */       \
+                     device const uint*   d_codes  [[buffer(2)]],  /* [R, G*H/4] */  \
+                     device const bfloat* d_scales [[buffer(3)]],  /* [R, G*H/GS] */ \
+                     device const bfloat* d_biases [[buffer(4)]],                    \
+                     device const uint*   i_codes  [[buffer(5)]],  /* [NI, G*H/4] */ \
+                     device const bfloat* i_scales [[buffer(6)]],                    \
+                     device const bfloat* i_biases [[buffer(7)]],                    \
+                     device bfloat*       down     [[buffer(8)]],  /* [MB, R] */     \
+                     device bfloat*       inj      [[buffer(9)]],  /* [MB, NI] */    \
+                     device float*        inv_rms  [[buffer(10)]], /* [MB, G] */     \
+                     device bfloat*       act      [[buffer(11)]], /* [MB, R] */     \
+                     constant uint&       H        [[buffer(12)]],                   \
+                     constant uint&       G        [[buffer(13)]],                   \
+                     constant uint&       R        [[buffer(14)]],                   \
+                     constant uint&       NI       [[buffer(15)]],                   \
+                     constant uint&       GS       [[buffer(16)]],                   \
+                     constant float&      eps      [[buffer(17)]],                   \
+                     constant float&      w_bias   [[buffer(18)]],                   \
+                     constant float&      inv_g    [[buffer(19)]],                   \
+                     uint3 tg  [[threadgroup_position_in_grid]],                     \
+                     uint tid  [[thread_index_in_threadgroup]],                      \
+                     uint g    [[simdgroup_index_in_threadgroup]],                   \
+                     uint lane [[thread_index_in_simdgroup]]) {                      \
+        const uint row = tg.y; \
+        hyper += (ulong)tg.x * G * H; \
+        down += (ulong)tg.x * R; \
+        inj += (ulong)tg.x * NI; \
+        inv_rms += (ulong)tg.x * G; \
+        act += (ulong)tg.x * R; \
+        threadgroup float part[HC_MAX_G];                                       \
+        threadgroup float rms[HC_MAX_G];                                        \
+        if (row >= R + NI) {                                                         \
+            return;  /* whole threadgroup */                                         \
+        }                                                                            \
+        if (row >= R) {                                                              \
+            hc_read_down_q8_rows_body<1>(hyper, norm_w, i_codes, i_scales, i_biases, \
+                                          inj, act, inv_rms, H, G, NI, GS, eps,      \
+                                          w_bias, inv_g, row - R, false, tid, g,     \
+                                          lane, part, rms);                          \
+        } else {                                                                     \
+            hc_read_down_q8_rows_body<1>(hyper, norm_w, d_codes, d_scales, d_biases, \
+                                          down, act, inv_rms, H, G, R, GS, eps,      \
+                                          w_bias, inv_g, row, true, tid, g, lane,    \
+                                          part, rms);                                \
+        }                                                                            \
+    }
+
+STARK_HC_DOWN_DECODE_ROWS()

@@ -5,6 +5,149 @@
 use super::*;
 use crate::sha256::{Sha256, hex};
 
+#[test]
+#[ignore = "requires a physical Apple Silicon Metal device"]
+fn verifier_cached_rows_match_ordinary_hc_bytes() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let mut state = 0x55a7_11f9u32;
+    let mut cases = 0usize;
+    let mut checked = 0usize;
+    for (h, g, r, gs) in
+        [(2560, 4, 320, 64), (208, 4, 192, 64), (176, 1, 80, 16), (64, 8, 64, 64)]
+    {
+        let k = h * g;
+        let down = q8_weight(&ctx, &mut state, r, k, gs)?;
+        let up = q8_weight(&ctx, &mut state, k, r, gs)?;
+        let inject = q8_weight(&ctx, &mut state, g, k, gs)?;
+        let norm = Tensor::from_f32_as_bf16(
+            &ctx,
+            &random_values(&mut state, k, 1.0, -0.5),
+            &[k],
+        )?;
+        for m in 1..=4 {
+            for style in 0..4 {
+                let mut x = random_values(&mut state, m * k, 6.0, -3.0);
+                for (i, v) in x.iter_mut().enumerate() {
+                    match style {
+                        1 => *v = 0.0,
+                        2 => *v = if i % 2 == 0 { 32.0 } else { -32.0 },
+                        3 => {
+                            *v = half::bf16::from_bits(
+                                [0, 0x8000, 1, 0x8001, 0x3f80, 0xbf80][i % 6],
+                            )
+                            .to_f32()
+                        }
+                        _ => {}
+                    }
+                }
+                let hyper = Tensor::from_f32_as_bf16(&ctx, &x, &[m, k])?;
+                for with_inject in [true, false] {
+                    let inject = with_inject.then_some(&inject);
+                    let alloc = |rows| -> Result<[Tensor; 5]> {
+                        Ok([
+                            Tensor::zeros(&ctx, &[rows, r], DType::BF16)?,
+                            Tensor::zeros(&ctx, &[rows, g], DType::BF16)?,
+                            Tensor::zeros(&ctx, &[rows, g], DType::F32)?,
+                            Tensor::zeros(&ctx, &[rows, r], DType::BF16)?,
+                            Tensor::zeros(&ctx, &[rows, h], DType::BF16)?,
+                        ])
+                    };
+                    let reference: Vec<_> =
+                        (0..m).map(|_| alloc(1)).collect::<Result<_>>()?;
+                    let candidate = alloc(m)?;
+                    let pass = ctx.begin_concurrent()?;
+                    for row in 0..m {
+                        hc_read_down_q8_rows(
+                            &ctx,
+                            &pass,
+                            &hyper.view(row * k, &[1, k])?,
+                            &norm,
+                            &down,
+                            inject,
+                            &reference[row][0],
+                            &reference[row][1],
+                            &reference[row][2],
+                            &reference[row][3],
+                            h,
+                            g,
+                            1e-6,
+                            1.0,
+                        )?;
+                    }
+                    hc_read_down_q8_decode_rows(
+                        &ctx,
+                        &pass,
+                        &hyper,
+                        &norm,
+                        &down,
+                        inject,
+                        &candidate[0],
+                        &candidate[1],
+                        &candidate[2],
+                        &candidate[3],
+                        h,
+                        g,
+                        1e-6,
+                        1.0,
+                    )?;
+                    let ready: Vec<_> = reference
+                        .iter()
+                        .flat_map(|row| row[..4].iter())
+                        .chain(candidate[..4].iter())
+                        .collect();
+                    pass.level_barrier(&ready)?;
+                    for row in 0..m {
+                        hc_read_up_mix_q8_cached(
+                            &ctx,
+                            &pass,
+                            &up,
+                            &reference[row][3],
+                            &hyper.view(row * k, &[1, k])?,
+                            &norm,
+                            &reference[row][2],
+                            &reference[row][4],
+                            h,
+                            g,
+                            1.0,
+                        )?;
+                    }
+                    hc_read_up_mix_q8_cached_rows(
+                        &ctx,
+                        &pass,
+                        &up,
+                        &candidate[3],
+                        &hyper,
+                        &norm,
+                        &candidate[2],
+                        &candidate[4],
+                        h,
+                        g,
+                        1.0,
+                    )?;
+                    pass.end()?.commit()?.wait()?;
+                    for (index, b) in candidate.iter().enumerate() {
+                        let bytes = b.raw_bytes();
+                        let stride = b.byte_len() / m;
+                        for (row, a) in reference.iter().enumerate() {
+                            ensure!(
+                                a[index].raw_bytes()
+                                    == &bytes[row * stride..(row + 1) * stride],
+                                "HC verifier field {index} differs"
+                            );
+                        }
+                        checked += b.byte_len();
+                    }
+                    cases += 1;
+                }
+            }
+        }
+    }
+    println!(
+        "{{\"hc_verifier_cases\":{cases},\"compared_bytes\":{checked},\"unequal_bytes\":0}}"
+    );
+    Ok(())
+}
+
 fn next_word(state: &mut u32) -> u32 {
     *state ^= *state << 13;
     *state ^= *state >> 17;

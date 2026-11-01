@@ -431,6 +431,122 @@ fn official_stock_gate_write_preserves_frames_and_raw_logit_fallback() -> Result
 }
 
 #[test]
+fn official_stock_verifier_rows_match_decode_and_finished_gate_write() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let f = fixture(&ctx, 0x48435631)?;
+    let base = f.x.to_f32()?;
+    let mut compared_rows = 0;
+    for inject in [false, true] {
+        let prepared = OfficialHcReadWeights::prepare(
+            &ctx,
+            &f.norm,
+            &f.down,
+            &f.up,
+            inject.then_some(&f.inject),
+            H,
+            G,
+            1e-6,
+            true,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("verifier stock HC descriptor declined"))?;
+        for rows in 1..=4 {
+            let input: Vec<f32> = (0..rows * K)
+                .map(|i| {
+                    let row = i / K;
+                    base[i % K] * (1.0 + row as f32 * 0.125)
+                        + ((i * 7 % 17) as f32 - 8.0) / 64.0
+                })
+                .collect();
+            let hyper = Tensor::from_f32_as_bf16(&ctx, &input, &[rows, K])?;
+            let reference_hyper = Tensor::from_f32_as_bf16(&ctx, &input, &[rows, K])?;
+            let branch_values: Vec<f32> = (0..rows * H)
+                .map(|i| (((i * 11 + i / H * 31) % 101) as i32 - 50) as f32 / 32.0)
+                .collect();
+            let branch = Tensor::from_f32_as_bf16(&ctx, &branch_values, &[rows, H])?;
+            let normalized = Guarded::new(&ctx, rows * K, DType::BF16)?;
+            let parts = Guarded::new(&ctx, rows * PARTS, DType::F32)?;
+            let mixed = Guarded::new(&ctx, rows * H, DType::BF16)?;
+            let gate = Guarded::new(&ctx, rows * G, DType::BF16)?;
+            for value in [&normalized.value, &parts.value, &mixed.value, &gate.value] {
+                value.write_bytes(&vec![0; value.byte_len()])?;
+            }
+            let rn = Tensor::zeros(&ctx, &[rows, K], DType::BF16)?;
+            let rp = Tensor::zeros(&ctx, &[rows, PARTS], DType::F32)?;
+            let rm = Tensor::zeros(&ctx, &[rows, H], DType::BF16)?;
+            let rg = Tensor::zeros(&ctx, &[rows, G], DType::BF16)?;
+            let pass = ctx.begin_concurrent()?;
+            prepared.read_rows(
+                &ctx,
+                &pass,
+                &hyper,
+                &f.norm,
+                &normalized.value,
+                &parts.value,
+                &mixed.value,
+                &gate.value,
+            )?;
+            for row in 0..rows {
+                prepared.read(
+                    &ctx,
+                    &pass,
+                    &reference_hyper.view(row * K, &[1, K])?,
+                    &f.norm,
+                    &rn.view(row * K, &[1, K])?,
+                    &rp.view(row * PARTS, &[1, PARTS])?,
+                    &rm.view(row * H, &[1, H])?,
+                    &rg.view(row * G, &[1, G])?,
+                )?;
+            }
+            pass.level_barrier(&[&mixed.value, &gate.value, &rm, &rg])?;
+            inject_after_read(
+                &ctx,
+                &pass,
+                &hyper,
+                &branch,
+                &gate.value,
+                H,
+                G,
+                true,
+                false,
+                InjectionInputKind::PrecomputedGate,
+            )?;
+            for row in 0..rows {
+                inject_after_read(
+                    &ctx,
+                    &pass,
+                    &reference_hyper.view(row * K, &[1, K])?,
+                    &branch.view(row * H, &[1, H])?,
+                    &rg.view(row * G, &[1, G])?,
+                    H,
+                    G,
+                    true,
+                    false,
+                    InjectionInputKind::PrecomputedGate,
+                )?;
+            }
+            pass.commit()?.wait()?;
+            for (candidate, reference, label) in [
+                (&normalized.value, &rn, "verifier normalized rows"),
+                (&parts.value, &rp, "verifier HC partial rows"),
+                (&mixed.value, &rm, "verifier HC mixed rows"),
+                (&gate.value, &rg, "verifier HC finished gate rows"),
+                (&hyper, &reference_hyper, "verifier finished-gate row write"),
+            ] {
+                equal(candidate.raw_bytes(), reference.raw_bytes(), label)?;
+            }
+            for guarded in [&normalized, &parts, &mixed, &gate] {
+                guarded.check()?;
+            }
+            compared_rows += rows;
+        }
+    }
+    println!(
+        "official_hc_exact_verifier compared_rows={compared_rows} differing_bytes=0"
+    );
+    Ok(())
+}
+
+#[test]
 fn official_stock_read_declines_other_descriptors_and_rejects_multirow_buffers()
 -> Result<()> {
     let ctx = MetalContext::new()?;
@@ -518,7 +634,7 @@ fn official_stock_read_declines_other_descriptors_and_rejects_multirow_buffers()
             InjectionInputKind::PrecomputedGate
         )
         .is_err(),
-        "multirow prepared-gate write was accepted"
+        "mismatched prepared-gate write rows were accepted"
     );
     pass.commit()?.wait()?;
     Ok(())

@@ -41,6 +41,7 @@ from .media import MAX_IMAGE_BYTES, MediaError
 from .model_inventory import model_display
 from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
+from .mtp import mtp_capabilities, resolve_mtp
 from .registry import get_model
 from .sources import huggingface_repository
 from .vision_runtime import supported_image_family
@@ -254,6 +255,7 @@ class Desktop:
                     or not all(isinstance(model.get(k), str) and model[k] for k in ("id", "name", "path", "source"))
                     or not Path(model["path"]).is_absolute()
                     or model["id"] in ids
+                    or ("mtp_enabled" in model and type(model["mtp_enabled"]) is not bool)
                 ):
                     raise DesktopError("Cannot read the model library.")
                 ids.add(model["id"])
@@ -1258,6 +1260,7 @@ class Desktop:
                 return
             worker.streaming = ready.get("streaming") == "text-delta-v1"
             worker.stop_sequences = ready.get("stop_sequences") is True
+            worker.mtp = mtp_capabilities(ready)
             self.codec, self.template = codec, template
             self.context_limit = ready["max_context_tokens"]
             # The worker uses this integer as its wire ceiling when the model
@@ -1276,7 +1279,8 @@ class Desktop:
             self.status("ready", "Ready", epoch)
 
     def settings_summary(self):
-        # The system prompt stays in memory; acknowledgements contain only limits.
+        # Prompts stay in memory; acknowledgements contain limits and capabilities.
+        capability, enabled = self.mtp_settings()
         return {
             "context_tokens": self.context,
             "max_new_tokens": self.maximum,
@@ -1291,6 +1295,8 @@ class Desktop:
             ),
             "image_attachment_transport": "private-file-v1",
             "max_image_bytes": MAX_IMAGE_BYTES,
+            "mtp": capability,
+            "mtp_enabled": enabled,
             "image_verification": (
                 getattr(self.worker, "image_verification", "unverified")
                 if self.context_capacity_known
@@ -1299,6 +1305,50 @@ class Desktop:
             "tools": bool(self.active_mode == "chat" and tool_parser_for(self.codec)),
             "tool_parser": tool_parser_for(self.codec) if self.active_mode == "chat" else None,
         }
+
+    def mtp_settings(self):
+        """Return fresh live capabilities and this model's effective default."""
+        with self.lock:
+            active = self.active_mode == "chat" and self.worker is not None
+            capability = mtp_capabilities({"mtp": getattr(self.worker, "mtp", None)} if active else {})
+            model = next((m for m in self.models if m["id"] == self.active_model), None)
+            enabled = bool(capability["supported"] and model and model.get("mtp_enabled") is True)
+            return capability, enabled
+
+    def configure_mtp(self, payload):
+        """Persist a model-scoped preference without restarting its worker."""
+        with self.lock:
+            if (
+                set(payload) != {"command", "model_id", "enabled"}
+                or type(payload.get("enabled")) is not bool
+                or not isinstance(payload.get("model_id"), str)
+                or not payload["model_id"]
+            ):
+                raise DesktopError("Invalid MTP options.")
+            if self.worker is None or self.active_model is None:
+                raise DesktopError("Run a model before changing MTP options.")
+            if self.active_mode != "chat":
+                raise DesktopError("MTP options are available in Chat mode.")
+            if payload["model_id"] != self.active_model:
+                raise DesktopError("Model changed. Refresh its MTP options.")
+            if self.job is not None or self.api_queue:
+                raise DesktopError("Wait for the current operation or choose Stop.")
+            capability, _ = self.mtp_settings()
+            enabled = payload["enabled"]
+            try:
+                resolve_mtp(enabled, capability)
+            except ValueError:
+                raise DesktopError("MTP is not supported by this model and worker.") from None
+            model = next(m for m in self.models if m["id"] == self.active_model)
+            previous = dict(model)
+            model["mtp_enabled"] = enabled
+            try:
+                self.persist()
+            except (OSError, ValueError, TypeError):
+                model.clear()
+                model.update(previous)
+                raise DesktopError("Cannot save MTP options. Try again.") from None
+            self.emit("mtp_configured", model_id=self.active_model, mtp=capability, mtp_enabled=enabled)
 
     def configure(self, payload):
         with self.lock:
@@ -1396,6 +1446,7 @@ class Desktop:
         epoch=None,
         thinking=False,
         image=None,
+        mtp=None,
         tools=None,
     ):
         with self.lock:
@@ -1404,9 +1455,12 @@ class Desktop:
             worker, template, codec = self.worker, self.template, self.codec
             dispatch_epoch, identifier = self.epoch, self.active_model
             context = context or self.context
+            capability, default_mtp = self.mtp_settings()
+            enabled_mtp = (default_mtp and image is None) if mtp is None else mtp
             context_capacity_known = self.context_capacity_known
         if worker is None or template is None:
             raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
+        drafts = self.resolve_request_mtp(enabled_mtp, capability, image)
         if on_delta is not None and not worker.streaming:
             raise APIError(
                 503, "This worker needs an update for streaming. Rebuild or reinstall Stark.", "streaming_unavailable"
@@ -1485,6 +1539,8 @@ class Desktop:
             "sampling": sampling or {"mode": "greedy"},
             "seed": seed,
         }
+        if capability["supported"]:
+            request["mtp_drafts"] = drafts
         if stop:
             request["stop"] = stop
         if on_delta is not None:
@@ -1494,7 +1550,33 @@ class Desktop:
             reply = worker.request(request, cancelled=cancelled)
         if not isinstance(reply.get("text"), str) or "error" in reply:
             raise ValueError
+        if capability["supported"]:
+            self.validate_mtp_reply(reply, capability, drafts)
         return reply
+
+    @staticmethod
+    def resolve_request_mtp(enabled, capability, image):
+        if type(enabled) is not bool:
+            raise APIError(400, "mtp must be a boolean.", "invalid_request")
+        if enabled is True and image is not None:
+            raise APIError(400, "MTP is not supported for image requests.", "mtp_not_supported")
+        try:
+            return resolve_mtp(enabled, capability)
+        except ValueError:
+            raise APIError(400, "MTP is not supported by the loaded model and worker.", "mtp_not_supported") from None
+
+    @staticmethod
+    def validate_mtp_reply(reply, capability, drafts):
+        ack = reply.get("mtp")
+        if (
+            not isinstance(ack, dict)
+            or ack.get("enabled") is not (drafts > 0)
+            or type(ack.get("drafts")) is not int
+            or ack["drafts"] != drafts
+            or ack.get("sampling") != capability["sampling"]
+            or ack.get("verification") != capability["verification"]
+        ):
+            raise ValueError("invalid_mtp_acknowledgement")
 
     def configure_api(self, payload):
         key, port = payload.get("api_key"), payload.get("port")
@@ -1549,6 +1631,7 @@ class Desktop:
             if self.active_model is None or self.active_mode != "chat":
                 return []
             model = next(m for m in self.models if m["id"] == self.active_model)
+            capability, enabled = self.mtp_settings()
             return [
                 {
                     "id": api_model_id(model),
@@ -1559,12 +1642,15 @@ class Desktop:
                     "context_length": self.api_context if self.context_capacity_known else None,
                     "context_capacity_known": self.context_capacity_known,
                     "max_output_tokens": self.api_maximum,
+                    "capabilities": {"mtp": capability},
+                    "defaults": {"mtp": enabled},
                     "tool_calling": bool(tool_parser_for(self.codec)),
                 }
             ]
 
     def api_status(self):
         with self.lock:
+            capability, enabled = self.mtp_settings()
             return {
                 "status": "ok",
                 "model_loaded": self.active_model is not None and self.active_mode == "chat",
@@ -1573,6 +1659,7 @@ class Desktop:
                 "queue_limit": self.api_queue_limit,
                 "queue_timeout_seconds": self.api_queue_timeout,
                 "models": self.api_models(),
+                "defaults": {"mtp": enabled},
                 "image_verification": (
                     getattr(self.worker, "image_verification", "unverified")
                     if self.context_capacity_known
@@ -1601,6 +1688,7 @@ class Desktop:
                     ),
                     "embeddings": False,
                     "responses": False,
+                    "mtp": capability,
                 },
             }
 
@@ -1649,6 +1737,9 @@ class Desktop:
                 raise APIError(
                     404, "Select the running model ID from Connection Details or /v1/models.", "model_not_found"
                 )
+            capability, default_mtp = self.mtp_settings()
+            enabled_mtp = (default_mtp and request["image"] is None) if request["mtp"] is None else request["mtp"]
+            self.resolve_request_mtp(enabled_mtp, capability, request["image"])
             epoch, identifier, worker = self.epoch, self.active_model, self.worker
             if len(self.api_queue) >= self.api_queue_limit:
                 raise APIError(429, "Stark's request queue is full. Retry shortly.", "queue_full")
@@ -1690,6 +1781,7 @@ class Desktop:
                 cancelled=cancelled,
                 epoch=epoch,
                 image=request["image"],
+                mtp=enabled_mtp,
                 tools=render_tools(request),
             )
             with self.lock:
@@ -1900,6 +1992,8 @@ class Desktop:
                 self.reset()
         elif command == "configure":
             self.configure(payload)
+        elif command == "configure_mtp":
+            self.configure_mtp(payload)
         else:
             raise DesktopError("Invalid app command.")
         return True

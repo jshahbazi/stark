@@ -33,6 +33,7 @@ _FIELDS = {
     "response_format",
     "user",
     "metadata",
+    "mtp",
     "tools",
     "tool_choice",
     "parallel_tool_calls",
@@ -163,6 +164,8 @@ def parse_chat_request(
     stream = payload.get("stream", False)
     if not isinstance(stream, bool):
         raise _bad("stream must be a boolean.")
+    if "mtp" in payload and type(payload["mtp"]) is not bool:
+        raise _bad("mtp must be a boolean.")
     options = payload.get("stream_options")
     if options is not None and (
         not stream
@@ -276,6 +279,7 @@ def parse_chat_request(
         "seed": seed,
         "stop": stop,
         "image": images[0] if images else None,
+        "mtp": payload.get("mtp"),
         "has_tool_history": has_tool_history,
         **tool_options,
     }

@@ -10,6 +10,11 @@ use crate::tensor::{DType, Tensor};
 use crate::weights::QuantWeights;
 
 const SOURCE: &str = include_str!("metal/official_hc_stock.metal");
+const ROWS_SOURCE: &str = concat!(
+    include_str!("metal/official_hc_stock.metal"),
+    "\n",
+    include_str!("metal/official_hc_stock_rows.metal"),
+);
 const H: usize = 2560;
 const G: usize = 4;
 const R: usize = 320;
@@ -194,6 +199,115 @@ impl OfficialHcReadWeights {
             Grid::Threadgroups { groups: (80, 1, 1), threadgroup: (512, 1, 1) },
         )
     }
+
+    /// Exact short verifier rows. ND already has an independent row axis;
+    /// the U2V specialization shares its loaded weights over those rows.
+    /// The ordinary one-row entrypoints retain their original source.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn read_rows(
+        &self,
+        ctx: &MetalContext,
+        pass: &ComputePass<'_>,
+        hyper: &Tensor,
+        norm: &Tensor,
+        normalized: &Tensor,
+        parts: &Tensor,
+        mixed: &Tensor,
+        inject_gate: &Tensor,
+    ) -> Result<()> {
+        ensure!(hyper.numel().is_multiple_of(K), "stock HC row width");
+        let rows = hyper.numel() / K;
+        ensure!(
+            (1..=4).contains(&rows)
+                && hyper.dtype() == DType::BF16
+                && norm.dtype() == DType::BF16
+                && norm.numel() == K
+                && normalized.dtype() == DType::BF16
+                && normalized.numel() == rows * K
+                && parts.dtype() == DType::F32
+                && parts.numel() == rows * PARTS
+                && mixed.dtype() == DType::BF16
+                && mixed.numel() == rows * H
+                && inject_gate.dtype() == DType::BF16
+                && inject_gate.numel() == rows * G,
+            "official stock HC verifier row geometry"
+        );
+        if rows == 1 {
+            return self.read(
+                ctx,
+                pass,
+                hyper,
+                norm,
+                normalized,
+                parts,
+                mixed,
+                inject_gate,
+            );
+        }
+        let (nd_name, nd_groups) = if self.has_inject() {
+            ("official_hc_stock_nd_inject", 164)
+        } else {
+            ("official_hc_stock_nd_noinject", 160)
+        };
+        let nd = ctx.pipeline_with_math_mode(
+            nd_name,
+            SOURCE,
+            MslVersion::V3_1,
+            MslMathMode::Safe,
+        )?;
+        pass.dispatch_at(
+            &nd,
+            &[
+                hyper.binding(),
+                norm.binding(),
+                self.inject.as_ref().unwrap_or(norm).binding(),
+                self.epsilon.binding(),
+                norm.binding(),
+                norm.binding(),
+                self.down.codes.binding(),
+                self.down.scales.binding(),
+                self.down.biases.binding(),
+                normalized.binding(),
+                parts.binding(),
+                normalized.binding(),
+            ],
+            &[],
+            Grid::Threadgroups {
+                groups: (1, nd_groups, rows),
+                threadgroup: (256, 1, 1),
+            },
+        )?;
+        pass.level_barrier(&[normalized, parts])?;
+        let up_name = match (rows, self.has_inject()) {
+            (2, false) => "official_hc_stock_u2v_rows2_noinject",
+            (2, true) => "official_hc_stock_u2v_rows2_inject",
+            (3, false) => "official_hc_stock_u2v_rows3_noinject",
+            (3, true) => "official_hc_stock_u2v_rows3_inject",
+            (4, false) => "official_hc_stock_u2v_rows4_noinject",
+            (4, true) => "official_hc_stock_u2v_rows4_inject",
+            _ => unreachable!(),
+        };
+        let up = ctx.pipeline_with_math_mode(
+            up_name,
+            ROWS_SOURCE,
+            MslVersion::V3_1,
+            MslMathMode::Safe,
+        )?;
+        pass.dispatch_at(
+            &up,
+            &[
+                normalized.binding(),
+                parts.binding(),
+                self.up.codes.binding(),
+                self.up.scales.binding(),
+                self.up.biases.binding(),
+                mixed.binding(),
+                inject_gate.binding(),
+            ],
+            &[],
+            Grid::Threadgroups { groups: (80, 1, 1), threadgroup: (512, 1, 1) },
+        )
+    }
 }
 
 /// Pure route decision shared by the production descriptor and CPU regression
@@ -247,26 +361,32 @@ pub(crate) fn inject_after_read(
             primitive_sigmoid,
         ),
         InjectionInputKind::PrecomputedGate => {
+            ensure!(hyper.numel().is_multiple_of(K), "stock HC gate write row width");
+            let rows = hyper.numel() / K;
             ensure!(
                 official
                     && !primitive_sigmoid
                     && h == H
                     && groups == G
+                    && (1..=4).contains(&rows)
                     && hyper.dtype() == DType::BF16
-                    && hyper.numel() == K
                     && branch.dtype() == DType::BF16
-                    && branch.numel() == H
+                    && branch.numel() == rows * H
                     && injection.dtype() == DType::BF16
-                    && injection.numel() == G,
-                "stock HC gate write requires its matching admitted one-row read"
+                    && injection.numel() == rows * G,
+                "stock HC gate write requires matching admitted rows"
             );
-            let pipeline =
-                ctx.pipeline("official_hc_write_gate_m1", SOURCE, MslVersion::V3_1)?;
+            let (name, source) = if rows == 1 {
+                ("official_hc_write_gate_m1", SOURCE)
+            } else {
+                ("official_hc_write_gate_exact_rows", ROWS_SOURCE)
+            };
+            let pipeline = ctx.pipeline(name, source, MslVersion::V3_1)?;
             pass.dispatch_at(
                 &pipeline,
                 &[hyper.binding(), branch.binding(), injection.binding()],
                 &[],
-                Grid::Threads { grid: (K, 1, 1), threadgroup: (256, 1, 1) },
+                Grid::Threads { grid: (K, rows, 1), threadgroup: (256, 1, 1) },
             )
         }
     }

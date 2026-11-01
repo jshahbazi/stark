@@ -43,6 +43,8 @@ pub enum Phase {
     MoeRouteSharedActivation,
     MoeExpertGateUpSharedDown,
     MoeExpertDownCombine,
+    MoeGateUp,
+    MoeDown,
     Head,
     Draw,
 }
@@ -61,7 +63,9 @@ impl Phase {
             Self::MoeInputProjections
             | Self::MoeRouteSharedActivation
             | Self::MoeExpertGateUpSharedDown
-            | Self::MoeExpertDownCombine => Self::Moe,
+            | Self::MoeExpertDownCombine
+            | Self::MoeGateUp
+            | Self::MoeDown => Self::Moe,
             other => other,
         }
     }
