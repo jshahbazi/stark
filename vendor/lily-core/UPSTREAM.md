@@ -7,18 +7,41 @@
 
 ## Extraction and local changes
 
-Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. This load path does not support MTP or vision.
+Stark extracts the minimum in-process Qwen4Exp model and native Metal 4 execution path into the `stark_lily_core` package, whose Rust library crate is `stark_lily_core`. The extraction is a modified subset, not an unmodified mirror. Stark removes server and command-line integration, dashboard and HTTP code, tools, session persistence, probes, and ablation controls. It supports resident experts only and excludes the disk-backed expert cache. The checkpoint-backed n-gram table may be paged read-only. The optional checkpoint MTP head can be loaded without changing its stored precision; vision execution remains excluded.
+
+Stark adds `src/qwen4exp/host_spec.rs` and optional copies in the ordinary single-token decode graph. The bridge returns complete F32 vocabulary readouts to Stark's caller-owned exact sampler, without the upstream GPU sampler's 1,024-candidate cap or probability arithmetic. Draft distributions and acceptance stay request-local; head catch-up is disabled for ordinary non-MTP requests. Verification evaluates up to four positions in one layer-major graph with the ordinary decode's affine dot expressions, reductions, normalization and rounding boundaries. Recurrent state and pre-convolution inputs are retained for exact prefix rollback. The original serial verifier remains a reference. The engine adapter restores partially consumed groups when a stream stops early, without sampling during cleanup. Checkpoint quantization and the ordinary target's activation, state, cache and weight arithmetic are preserved. Numerical and performance qualification is recorded separately.
+
+`src/qwen4exp/numerical_trace.rs` provides explicit in-memory stage comparisons in debug builds. Only aggregate mismatch counts, errors and named non-cryptographic fingerprints leave the scope. It has no file or environment interface, and release builds omit the capture fields and probes.
+
+The official mixed-affine adapter also admits the checkpoint's declared
+single-layer hybrid MTP head. Existing collision-checked aliases expose its
+72 tensor planes without changing storage or quantization; the head shares
+the trunk vocabulary projection. Its host verifier batches up to four target
+rows using a separate official policy, including F32 ValueKey GDN captures
+and exact prefix rollback. The adapter reports
+`batched-affine-decode-exact-v1`; the ordinary serial verifier remains a
+reference. Enabling MTP does not itself establish a speedup.
+
+Host verification retains an owned flat F32 readout and lends complete rows
+to the caller, eliminating the second per-row allocation and copy. The
+buffer remains owned through sampling and prefix rollback. The original
+Stark chunked finite guard in `src/finite_guard.rs` validates these and draft
+readouts without changing any values; exact shape checks remain separate.
+These host changes alter no GPU arithmetic or checkpoint precision.
 
 Upstream environment-variable selection and diagnostics are disabled in the Stark integration. Precision is selected per operation: BF16 inputs and activations, F32 reductions, F32 logit buffers and F32 GDN recurrent state, plus explicitly selected Q8 attention K/V. Official head values are rounded to BF16 before widening into the F32 buffer. This policy description does not itself establish numerical equivalence or answer quality; source-bound component and model controls are recorded separately.
 
-The upstream Metal shaders originate at the pinned revision. Stark modifies four of those files:
+The upstream Metal shaders originate at the pinned revision. Stark modifies five of those files:
 
-- `src/kernels/metal/hc.metal` adds a cached-activation up/mix entry point copied from the original single-row body, preserving its weight staging and dot/reduction expressions. Decode pairs it with the existing one-row down/activation kernel and reuses the existing activation scratch.
-- `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value, removing a shared-memory store, own-element read and redundant barrier. The F32 recurrent-state helper and norm reduction remain unchanged.
+- `src/kernels/metal/hc.metal` adds cached-activation up/mix and row-axis verifier entry points reusing the original single-row bodies. These preserve weight staging, dot/reduction expressions and the BF16 activation boundary. Ordinary decode keeps its original dispatches.
+- `src/kernels/metal/gdn.metal` keeps the gated output's explicit BF16 round in a thread-local value. Its verifier scan retains one F32 state column per thread across up to four positions, preserving the decode expression order and recording F32 states for rollback. The ordinary recurrent-state helper and norm reduction remain unchanged.
+- `src/kernels/metal/attention.metal` adds row-axis query/key preparation copied from the decode bodies, preserving the norm reduction, BF16 rotary rounding and existing BF16/Q8 cache formats. Verifier attention retains the decode SDPA/QSA reductions.
 - `src/kernels/metal/quant.metal` adds GDN Q4 two-row input projection with a convolution epilogue. It calls the existing packed dot helper, preserves the BF16 projection boundary and copies the original convolution expression, tap order and window update. Other layouts retain separate projection and convolution.
 - `src/kernels/metal/moe.metal` adds a decode down/combine entry point whose row owner also performs the following hyperconnection injection. It copies the original dot and slot-ordered combine, retains the BF16 branch output, and applies the original F32 injection expression to that rounded branch. Decode orders both the branch output and residual streams before their next consumers. The original down/combine and injection kernels remain available for reference controls.
 
-The other ten upstream shader files retain their pinned source bytes. The original HC and generic projection/convolution entry points remain available for reference controls. These patches change scheduling and reuse without changing checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
+The other nine upstream shader files retain their pinned source bytes. `stark_decode_rows.metal` and `stark_moe_decode_rows.metal` add verifier entry points compiled after the unchanged generic projection and expert shader bodies. Batch row is the fast grid axis, exposing parallel work and weight-cache reuse while retaining each row's original arithmetic. The original HC and generic projection/convolution entry points remain available for reference controls. These patches do not change checkpoint quantization or the selected precision policy. Numerical and performance qualification is recorded separately in the [kernel study](../../docs/benchmarks/QWEN38_KERNELS_2026_10_29.md) and [injection fusion study](../../docs/benchmarks/QWEN38_FUSION_2026_10_29.md).
+
+`stark_packed_rows.metal` extends the pinned Q4 packed-dot expression to independent short token rows while sharing raw weight loads. `stark_gdn_projection_rows.metal` adds the guarded verifier projection/convolution/scatter entry points. They preserve the 16-lane reduction, BF16 projection boundary and runtime convolution tap order, retain the original window, write its alternate, and capture projected inputs for rollback. Ordinary decode and unsupported layouts keep their existing routes. These original Stark extensions retain Apache-2.0 licensing; `quant.metal` is unchanged by this addition. The host verifier also batches up to four sparse queries through the existing QSA split kernels, using independent query scratch and per-query visibility; dense queries retain ordinary decode. Source-bound qualification is in the [MTP optimization study](../../docs/benchmarks/QWEN38_MTP_OPTIMIZATION_2026_10_30.md).
 
 Stark adds `src/kernels/metal/stark_finite_readout.metal`, an original integer-bit validation kernel. After an ordinary GPU draw, it marks the output ID invalid if any F32 logit has exponent 255 (NaN or infinity). Stark's adapter rejects that sentinel before accepting a decision. This check covers both prefill and decode through the shared sampling helper and does not change the upstream model arithmetic. `src/kernels/metal/stark_gdn_step_reference.metal` is a test-only copy of the original gated-output wrapper, with a distinct entry-point name; it retains the shared-memory round trip for differential controls and is not included in production shader sources. Kernel controls adapted from upstream tests identify the pinned revision in their source headers.
 
@@ -34,6 +57,12 @@ allocator reserves the integer ceiling. The adapter reports the checkpoint's
 published context, starts with at most 16,384 reserved tokens and grows K/V and
 decode scratch as needed between completed GPU operations. These changes do
 not establish numerical or performance qualification at full context length.
+
+Stark's host-sampled MTP bridge sizes draft and verifier prefill scratch from
+the active state's reserved context capacity. The adapter reserves the admitted
+MTP stream's full span before borrowing scratch; context growth preserves the
+committed recurrent, n-gram, MTP hidden and K/V state. This integrates MTP with
+the model-specific context capacity policy without changing target arithmetic.
 
 Stark adds a canonical Uzu storage admission path in `src/safetensors/uzu.rs`
 and refactors Qwen weight/model loading so native-source and typed Uzu inputs
@@ -56,6 +85,7 @@ their numerical and performance validation is recorded separately in the
 Stark adds an explicit, disabled-by-default Metal 4 stage profiler in `src/metal_stage_profile.rs`. Fixed phase markers use a bounded per-pass timestamp heap, retain the existing concurrent dispatch and dependency barriers, and require one command buffer per profiled decode. The heap remains owned through verified completion and fault draining. Resolution checks entry sizes, timestamp order, device-reported frequency and agreement with independent command feedback. Only aggregate phase durations leave the profiler; no model values or request payloads are captured. Precise timestamps can still change scheduling, so instrumented rates are diagnostic and separate from ordinary throughput runs. Upstream diagnostic environment controls remain disabled.
 
 `MslMathMode::Safe` in `src/metal.rs` is an explicit per-library and per-pipeline compile policy matching the pinned MLX `64ea011cb65f14d9ce2737e60db9a4ae91ed7441` `CompileOptions::Safe` behavior. It requests `MTLMathMode::Safe` when the selector is available and uses the legacy `fastMathEnabled = false` equivalent otherwise. Pipeline cache keys include the math mode. Existing `pipeline` and `compile_library` calls retain `PlatformDefault`; this API does not change their compiler policy. Safe mode is selected only by wrappers whose source and rounding policy require it.
+The same bounded profiler covers host-sampled MTP verification, with separate MoE setup, gate/up/shared-down and down/combine categories. The adapter records fixed aggregate draft, verification, target-sampling and finish scopes. The terminal verifier timestamp precedes the completion signal so profiling retains one command buffer. Disabled profiling adds no timestamp or counter-heap work; failures report fixed diagnostic categories without framework messages or model data.
 
 Every successful pass wait also awaits all asynchronous completion feedback before accepting outputs, then checks the context's sticky fault. A signaled GPU fence alone is insufficient: framework error feedback can arrive afterward. Command resources remain held until these checks succeed, and failed checks retain the fault-safe cleanup drain.
 
@@ -303,6 +333,48 @@ explicit official rounding policy, Q8/group64 rank-2 weights, BF16 activation,
 output and affine metadata, and `(N,K)=(16480,2560)` or `(2560,6144)`. It also
 requires a 32-wide execution pipeline and is compiled as Safe MSL4.0.
 Non-admitted shapes and widths delegate to the original GEMV; pipeline
-compilation errors remain errors. Prefill and batch callers are unchanged.
+compilation errors remain errors. Prefill callers are unchanged. The exact
+official verifier exposes the helper's existing vector-grid axis for one
+to four rows; each row retains the same stock loop and BF16 boundary.
 Stock hashes and native qualification are recorded separately; this provenance
 is not a model result.
+
+## Official short-row MTP verification
+
+The official verifier adds independent short-row execution to the policies
+above without changing checkpoint tensors. `official_moe_rows.metal` copies
+the qualified MLX-Serve router/expert arithmetic from the pinned local
+`official_moe.metal` port and adds token-row addressing. It retains the
+expert-order down accumulation, BF16 router/activation boundaries and the
+folded shared gate. The original shader bytes remain unchanged. Copyright
+(c) 2026 David Dalcu and the MIT license in `LICENSE.mlx-serve` apply.
+
+`official_hc_stock_rows.metal` adapts the pinned HC U2V body with a compile-time
+row count and shared up-weight loads. The original ND body already has a
+row-grid dimension. Per-row partial storage is bounded to four rows. A
+separate finished-gate write preserves the two BF16 product/add boundaries.
+The original one-row kernels remain selected for ordinary decode. The new
+file retains the MLX-Serve revision, copyright and MIT attribution.
+
+The stock-order Q4 vocabulary-head helper in `official_head.metal` shares
+packed weight loads across two to four rows while preserving each row's
+affine dot and SIMD sum. The existing MLX revision and MIT attribution above
+apply. Non-admitted head formats execute ordinary projection per row.
+
+The mixed-4-8bit checkpoint's actual vocabulary projection is Q8/group64;
+its global Q4 default does not describe the `head` storage group. The new
+`official_head_q8_rows.metal` adapts Lily's `quant.metal` `GEMV_Q8_BODY`,
+retaining `dot_word_q8`, per-lane accumulation, SIMD sum and PlatformDefault
+compiler policy. It shares packed weights across two to four verifier inputs
+and fuses the existing integer round-to-nearest-even BF16 value store into
+the F32 output. Ordinary one-row decode remains unchanged. Lily's Apache-2.0
+notice and the MLX-derived dot attribution in `NOTICE` remain applicable.
+Its complete-readout component controls include actual full-vocabulary
+geometry, aligned nonzero offsets and output guards.
+
+The ValueKey verification additions in `gdn.metal` retain the existing
+MLX-Serve-derived K1 convolution, recurrence and norm/gate expressions. They
+scan at most four positions with F32 physical state captures after each
+rollback prefix, retaining the ordinary BF16 activation boundaries. Each
+path has component comparisons against ordinary decode. Full-model
+readout/rollback and sampled performance records are maintained separately.

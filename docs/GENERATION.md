@@ -34,9 +34,10 @@ When a backend has no declared finite context maximum, the CLI treats its unsign
 | `--context-tokens N` | loaded model's maximum context | Context budget for prompt plus reply |
 | `--max-new-tokens N` | 512 | Reply budget |
 | `--thinking` | off | Enable reasoning for templates that support `enable_thinking` |
+| `--mtp`, `--no-mtp` | off | Enable or disable exact MTP for this terminal session; enabling uses the loaded model's recommended draft count |
 | `--timeout SECONDS` | 300 | Startup or text-reply wait; one total budget for each image transaction |
 
-Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes the same settings through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)).
+Generation is greedy. A turn whose rendered prompt plus reply budget exceeds the context budget is refused without changing the history; use `/reset` or a larger `--context-tokens`. The menu bar app exposes generation limits and thinking through **Advanced Options** ([menu bar guide](../apps/menu-bar/README.md#models-and-requests)). MTP configuration is available through the backend; its UI control is pending.
 
 With `--image`, the CLI reads one regular local file with a 4 MiB limit and accepts PNG or JPEG signatures. The first user turn contains an image placeholder followed by its text. Later turns keep that placeholder in the conversation and resubmit the same owned image bytes for each fresh request; `/reset` clears the conversation and attaches the image to the next first turn. The image stays in process memory between turns. Each request uses the [private staging and transaction lifecycle](#prepared-image-operations). A worker without passing image evidence and an invalid image produce fixed, path-free errors. See the [CLI implementation](../tools/converter/stark_convert/chat.py) and [private image staging](../tools/converter/stark_convert/media.py).
 
@@ -56,10 +57,11 @@ Start the worker with `--model-path PATH`, where `PATH` is a converted model dir
 
 ### Readiness
 
-On success the first line is:
+On success the first line is a readiness object. This example's vocabulary,
+context limit, EOS IDs and MTP support vary by loaded model:
 
 ```json
-{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":262144,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1"}
+{"ready":true,"engine":"stark","version":"0.1.0","mode":"text-generation-v1","operations":["tokenize","decode","generate"],"state_policy":"fresh-per-request","vocab_size":151936,"max_context_tokens":262144,"max_new_tokens":4096,"eos_token_ids":[151645,151643],"sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1","stop_sequences":true,"cancellation":"pipe-v1","mtp":{"supported":false,"max_drafts":0,"recommended_drafts":0,"default_drafts":0,"operations":[]}}
 ```
 
 | Field | Meaning |
@@ -72,6 +74,7 @@ On success the first line is:
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
 | `eos_token_ids` | Stop IDs from the model's generation metadata, always honoured |
 | `streaming`, `stop_sequences`, `cancellation` | Capability tags for the features below |
+| `mtp` | Loaded-model MTP support, recommended/maximum draft counts, supported operations and exact-sampling policy; see [MTP](#multi-token-prediction) |
 
 The configured context is a token admission boundary. Available memory and the 1 MiB request-line limit still apply; accepting a model's published maximum does not qualify full-length numerical accuracy or performance.
 
@@ -115,6 +118,8 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `max_new_tokens` | Required, 1 through 4,096. |
 | `seed` | Optional unsigned 64-bit integer, default 0. Only stochastic sampling uses it. |
 | `sampling` | Optional, default `{"mode":"greedy"}`. See [Sampling](#sampling). |
+| `mtp` | Optional boolean, default `false`. `true` uses this model's `recommended_drafts`; `false` disables MTP. Unsupported models reject `true` with `mtp_not_supported`. Applies to text `generate` only. |
+| `mtp_drafts` | Optional explicit draft count, default 0. Nonzero values must fit the loaded model's `max_drafts`. Retained for advanced callers and benchmarks. Supply either `mtp` or `mtp_drafts`; supplying both, including `false` and `0`, is invalid. |
 | `stop_token_ids` | Optional, at most 256 distinct token IDs below `vocab_size`. Added to the model's EOS IDs; a model EOS cannot be removed. |
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
@@ -139,6 +144,7 @@ The terminal reply:
 | `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
+| `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters when available. |
 
 The prefill figure is a wall-clock proxy that includes native state allocation, command encoding, GPU waiting and any lookahead decode the engine schedules before returning its first token. The output rate counts sampling steps after the first token, including a terminal stop token. Prompt tokenization is excluded from all timings. The prompt plus sampled tokens never exceed `context_tokens`; there is no silent truncation.
 
@@ -154,7 +160,88 @@ Greedy decoding is the default. Stochastic sampling supplies a temperature and o
 
 `temperature` must be finite, positive and at most 100. `top_k` is 1 through `vocab_size`. `top_p` is greater than 0 and at most 1. `min_p` is 0 through 1. Omitted filters are disabled. Repetition, frequency and presence penalties are not part of this interface.
 
-The sampler applies temperature before filtering and evaluates top-k and top-p against the same full-vocabulary distribution, so its output differs from samplers that apply top-k and then renormalise before top-p. Seeded requests are reproducible on the same build and hardware; they are not expected to match another engine token for token.
+The converted-model sampler applies temperature before filtering and evaluates
+top-k and top-p against the same full-vocabulary distribution. The native hybrid
+sampler retains top-k candidates first, then computes the mass used by top-p
+over those candidates; omitting top-k uses the full vocabulary. Seeded requests
+are reproducible on the same build and hardware; they are not expected to match
+another engine token for token.
+
+<a id="qwen38-multi-token-prediction"></a>
+
+### Multi-token prediction
+
+Every worker reports `mtp` capabilities from its loaded backend. Unsupported
+models report `supported: false`, zero draft counts and an empty `operations`
+list. Supported models report their own recommendation and maximum:
+
+```json
+{"supported":true,"max_drafts":3,"recommended_drafts":2,"default_drafts":0,"sampling":"exact-rejection-v1","verification":"batched-affine-decode-exact-v1","operations":["generate"]}
+```
+
+The contract supports additional model backends without a global draft limit
+or model-name check in callers. A backend advertises support only after it
+has loaded and admitted its MTP implementation. A checkpoint's declared head
+alone does not establish runtime support. Capabilities stay fixed for the
+worker lifetime; a contradictory backend capability or completion
+acknowledgement fences the worker.
+
+Use `"mtp": true` for the recommendation, `"mtp": false` to disable it, or
+`"mtp_drafts": N` for an explicit supported depth. Omission disables MTP in
+the native protocol. `mtp` requires a boolean and `mtp_drafts` an unsigned
+integer; `null` and conflicting selectors are rejected. Completion metadata
+reports the resolved `enabled` state and `drafts` limit,
+`sampling` and `verification`, plus backend counters when available.
+Selection is request-local, so changing it requires no model reload and does
+not carry a mode into later native requests. Current operations are text-only.
+
+Native Lily and official mixed-affine Qwen3.8 checkpoints with their trained
+head currently implement this capability. They recommend two drafts with a
+maximum of three. Lily-format weights report
+`verification: "batched-decode-exact-v1"`; official mixed-affine weights
+report `verification: "batched-affine-decode-exact-v1"`.
+Responses retain the same route label. The generation worker loads
+the head with the checkpoint's existing quantization, including its memory
+cost when drafting is disabled. Set `mtp_drafts` to 1,
+2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
+Requests on one worker remain serialized and start with fresh state.
+
+The desktop backend remembers an opt-in preference per registered model;
+its API can inherit or override that preference. See
+[the backend configuration contract](LOCAL_API.md#mtp-capabilities-and-per-model-preferences).
+Terminal `--mtp` applies only to that terminal session and does not modify the
+model library. Older exact-MTP workers without a recommendation remain
+compatible: the Python host uses at most two drafts, bounded by their
+advertised maximum. Missing or malformed capabilities keep MTP unavailable.
+
+Both target and draft use complete F32 readouts and the existing temperature,
+top-k, top-p and min-p filtering policy. The host accepts a proposed token with
+probability `min(1, p/q)` and samples a rejection from normalized `max(p-q, 0)`.
+The bonus token uses the target distribution. This is exact rejection sampling;
+there is no candidate cap or approximate acceptance threshold. Target
+verification retains ordinary decode arithmetic and its precision boundaries. Exact sampling preserves the target
+distribution, rather than requiring identical token sequences at the same seed
+with MTP on and off. Each route is reproducible on matching builds and hardware.
+
+Draft randomness is separate from target randomness. Draft distributions remain
+in request memory only. Rejected suffixes rewind GDN recurrent state,
+convolution windows, n-gram history and the draft head's committed history.
+Early termination drains work and rewinds a partly delivered group without
+calling the sampler during cleanup. MTP adds memory and verification work, so
+its benefit depends on acceptance and the workload. The Lily verifier evaluates
+up to four positions in one graph, reusing weights while retaining each
+position's decode arithmetic and recurrent-state update order.
+The official mixed-affine path batches up to four positions with separate
+decode-order HC, MoE and vocabulary-head kernels, affine-64 cache writes and
+ValueKey GDN recurrence/captures. Each row retains ordinary decode's
+precision boundaries and reduction order. The serial verifier remains a
+reference control. Uzu text conversions omit the head.
+
+Unbounded nucleus requests can reuse a proved prefix for both draft and
+target distributions. Retained IDs, probability terms, cumulative totals
+and RNG consumption match the full-order sampler; uncertain boundaries
+fall back to that reference. Top-k requests retain their existing route.
+It is disabled by default.
 
 ### Streaming
 
@@ -174,6 +261,10 @@ The concatenated deltas equal the terminal `text`. Incremental decoding buffers 
 
 The desktop playground uses progress events to update a time-to-first-token estimate and a remaining-completion range. Calibration uses bounded, in-memory timing and count history from successful comparable requests; it stores no conversation content. With no matching history, the first-token estimate is unavailable and live decode measurements can establish a completion range after generation starts. The range estimates an unknown response length within the output budget and can change as generation continues. It is not a deadline or a statistical coverage guarantee. Loading, queueing, prompt tokenization and CPU image decoding/preprocessing are outside the generation timing; vision-tower and decoder inference are included. Failed, cancelled and stale requests do not train the estimator.
 
+Calibration profiles distinguish the effective MTP draft count. Turning MTP on
+or off, or overriding it for an API request, uses the matching profile without
+mixing measurements from the other mode.
+
 ### Stop sequences
 
 `stop` strings are matched against the decoded text as it is produced, including across token boundaries. Text from the first matching sequence onward is withheld from both deltas and the terminal `text`, and `finish_reason` is `stop_sequence`. `generated_token_ids` and the token counts still include the token that completed the match, so decoding that vector yourself can reveal the withheld text. No extra token is generated after a match.
@@ -188,7 +279,7 @@ Errors are replies of the form `{"error":CODE}`. Codes are fixed strings; see [e
 
 | Class | Codes |
 | --- | --- |
-| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
+| Recoverable (worker continues) | `invalid_request` (unparseable JSON, unknown operation or field, wrong type), `invalid_generation_request`, `invalid_sampling_request`, `invalid_decoding_request`, `tokenization_failed`, `context_overflow` (context above the model maximum, or input not shorter than `context_tokens`), `request_too_large` (line over 1 MiB; the rest of the line is discarded), `generation_cancelled`, `mtp_not_supported`, `images_not_supported`, `invalid_image_reference`, `image_read_failed`, `invalid_image_request`, `invalid_prepared_image`, `image_request_setup_failed` |
 | Fencing (error reply, then `{"ready":false,"error":"native_operation_failed"}` and exit 1) | `native_generation_failed`, `invalid_generation_output`, `invalid_tokenization_output`, `invalid_image_preparation_output`, `decoding_failed`, `cancel_channel_failed` |
 | Startup (`{"ready":false,"error":CODE}` and exit 1) | `invalid_arguments`, `output_setup_failed`, `invalid_cancel_channel`, `invalid_vision_staging_root`, `model_config_unavailable`, `invalid_model_config`, `speculator_not_supported`, `metal_initialization_failed`, `model_load_failed`, `native_backend_unavailable` (a build without the `metal` feature), `native_operation_failed` (panic during startup) |
 

@@ -229,13 +229,13 @@ class LocalAPI:
             self._validate_key(api_key)
         except ValueError:
             raise APIError(400, "Invalid API client grant.", "invalid_api_client_command") from None
-        digest = hmac.digest(
-            self._api_session.encode("ascii"),
-            ("Bearer " + api_key).encode("ascii"),
-            "sha256",
-        )
         with self._lock:
             self._require_session_locked(api_session)
+            digest = hmac.digest(
+                self._api_session.encode("ascii"),
+                ("Bearer " + api_key).encode("ascii"),
+                "sha256",
+            )
             if hmac.compare_digest(api_key, self._api_key) or any(
                 other != client_id and hmac.compare_digest(digest, grant.digest)
                 for other, grant in self._clients.items()
@@ -389,7 +389,7 @@ class LocalAPI:
                     expected = api._api_key
                     if expected and hmac.compare_digest(encoded, ("Bearer " + expected).encode("ascii")):
                         return None
-                    digest = hashlib.sha256(encoded).digest()
+                    digest = hmac.digest(api._api_session.encode("ascii"), encoded, "sha256")
                     now = api._clock()
                     for client_id, grant in api._clients.items():
                         if hmac.compare_digest(digest, grant.digest) and now < grant.expires:

@@ -39,7 +39,7 @@ Responses carry `Cache-Control: no-store` and an `X-Request-Id` header, except t
 | `GET /v1/models/{id}` | The matching running model, or 404 |
 | `POST /v1/chat/completions` | One completion, buffered or streamed; one inline PNG/JPEG image when `capabilities.images` is true |
 
-Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens` and `tool_calling`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
+Each model entry has `id`, `object`, `created`, `owned_by`, `name`, `context_length`, `context_capacity_known`, `max_output_tokens`, `tool_calling`, `capabilities.mtp` and `defaults.mtp`. Embeddings, the Responses API, structured output and batching are not available. Function tools require the supported template/parser below.
 
 Public model IDs use the full Hugging Face repository ID (`owner/model`) for models installed from Hugging Face, or the installed model name for local folders. The connection modal, model listing, completion responses and streamed chunks use these readable IDs. Model detail routes accept percent-encoded IDs, including encoded slashes and spaces. Private library IDs and managed model paths remain stable; existing installations require no registry migration. Only the running model is exposed, so installations sharing a public name refer to whichever copy is running.
 
@@ -59,7 +59,7 @@ The [reference catalog](../tools/converter/stark_convert/vision_runtime_qualific
 
 ## Chat completions
 
-Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
+Accepted request fields: `model`, `messages`, `stream`, `stream_options`, `max_tokens`, `max_completion_tokens`, `temperature`, `top_p`, `top_k`, `min_p`, `seed`, `stop`, `n`, `presence_penalty`, `frequency_penalty`, `logprobs`, `top_logprobs`, `response_format`, `user`, `metadata`, `mtp`, `tools`, `tool_choice`, `parallel_tool_calls` and `store`. Unknown fields are rejected.
 
 **Storage.** Omit `store` or use `false`/`null`. Stark does not store completions. `store: true` and non-boolean values return `unsupported_parameter`; they do not enable retention.
 
@@ -76,6 +76,59 @@ The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. 
 **Stop sequences.** `stop` is one string or up to four non-empty strings of at most 1,024 characters. The worker matches them against decoded text, including across chunks, and withholds the match and everything after it. Usage counts still include the token that completed the match.
 
 **Streaming.** With `stream: true` the response is Server-Sent Events of `chat.completion.chunk` objects followed by `data: [DONE]`. The first chunk carries the assistant role. `stream_options: {"include_usage": true}` adds a final usage-only chunk. Validation errors keep their HTTP status because they occur before streaming starts; a failure during streaming emits an error object in the stream and closes without `[DONE]`.
+
+## MTP capabilities and per-model preferences
+
+The live worker supplies `capabilities.mtp` in `/v1/capabilities` and each
+running `/v1/models` entry. `supported` determines whether a caller can offer
+an MTP toggle. Support is established by the loaded backend, including its
+admitted head and implementation. Model names and saved preferences do not
+enable support.
+
+```json
+{"supported":true,"max_drafts":3,"recommended_drafts":2,"default_drafts":0,"sampling":"exact-rejection-v1","verification":"batched-affine-decode-exact-v1","operations":["generate"]}
+```
+
+Each backend chooses its maximum and recommended draft count. Unsupported or
+missing worker capabilities produce `supported: false`, zero counts and an
+empty operation list. Capabilities are cleared when the worker stops or the
+model changes; Decision mode does not expose MTP. These fields prepare the
+backend for a UI toggle; no new UI control is implemented here.
+
+`defaults.mtp` is the active model's effective saved choice. Registered models
+start off, and each model remembers its own boolean preference in the private
+model registry across stops, switches and application restarts. The preference
+becomes inactive when the loaded worker lacks support and is retained for a
+later supported worker. Saving it does not reload the model or clear the chat.
+
+A completion may send `"mtp": true` or `"mtp": false` to override that default
+for one request. `true` selects the model's recommended count. Omission
+inherits the saved choice; overrides do not change it. `null` and non-booleans
+return 400 `invalid_request`. Unsupported enable requests return 400
+`mtp_not_supported` before worker dispatch and keep the model loaded. This
+also applies to streaming. Selection is snapshotted when a request joins the
+queue, and model changes still fence queued requests.
+
+Current MTP operations are text-only. Image requests default to MTP off,
+preserving the model's text preference; an explicit `mtp: true` with an image
+returns 400 `mtp_not_supported`. Exact sampling and stored quantization remain
+unchanged. A supported worker's completion acknowledgement must match its
+selected mode, depth and policy; a contradiction closes that worker.
+
+The desktop's private JSON-lines backend accepts the following command for
+the future UI, using the internal `model_id` from its `ready` event:
+
+```json
+{"command":"configure_mtp","model_id":"registered-model-id","enabled":true}
+```
+
+It requires the same loaded model in idle Chat mode, validates live support,
+and atomically persists only its preference. Stale model IDs, malformed
+options, running/queued operations and save failures leave the setting
+unchanged. The `mtp_configured` acknowledgement includes `model_id`, `mtp`
+capabilities and `mtp_enabled`. Desktop `ready` events expose those settings
+alongside the existing limits. These private commands use library IDs;
+HTTP completions continue using the public IDs described above.
 
 ## Function tools
 
@@ -120,6 +173,7 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 | 400 | `length_required` | `Content-Length` missing (411 with the same code when `Transfer-Encoding` is present) |
 | 400 | `invalid_json` | Malformed JSON, duplicate keys, `NaN` or infinity |
 | 400 | `unsupported_parameter` | Penalties, log probabilities or response formats the API does not implement |
+| 400 | `mtp_not_supported` | Explicit MTP enable request on an unsupported model/worker or an image request |
 | 400 | `invalid_messages` | The chat template rejected the messages |
 | 400 | `images_unsupported`, `too_many_images`, `invalid_image_url`, `invalid_image_detail`, `invalid_image` | No active passing image evidence, multiple images, remote or malformed data URL, unsupported detail, invalid or mismatched image bytes |
 | 400 | `context_length_exceeded` | Prompt plus output limit exceeds the context budget |

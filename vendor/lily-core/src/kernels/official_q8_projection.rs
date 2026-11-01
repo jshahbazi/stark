@@ -76,6 +76,70 @@ pub(crate) fn gemv_gdn_decode(
     )
 }
 
+/// A short set of independent ordinary-decode projections. The stock helper
+/// already addresses the vector by `tid.x`; exposing that dimension retains
+/// its per-vector reduction and BF16 boundary without a GEMM substitution.
+pub(crate) fn gemv_gdn_decode_rows(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    w: &QuantWeights,
+    x: &Tensor,
+    y: &Tensor,
+    official_mlx_rounding: bool,
+) -> Result<()> {
+    let (n, k) = (w.out_features(), w.in_features());
+    ensure!(x.numel().is_multiple_of(k), "GDN projection row width");
+    let rows = x.numel() / k;
+    ensure!((1..=4).contains(&rows) && y.numel() == rows * n, "GDN projection rows");
+    let stock = official_mlx_rounding
+        && w.bits == 8
+        && w.group_size == 64
+        && w.codes.shape().len() == 2
+        && x.dtype() == DType::BF16
+        && y.dtype() == DType::BF16
+        && w.scales.dtype() == DType::BF16
+        && w.biases.dtype() == DType::BF16
+        && matches!((n, k), (16480, 2560) | (2560, 6144))
+        && stock_signed_offsets_fit(n, k);
+    if stock {
+        quant::check_quant(w)?;
+        let pipeline = ctx.pipeline_with_math_mode(
+            "official_q8_gdn_decode_qmv_fast_g64_bf16",
+            SOURCE,
+            MslVersion::V4_0,
+            MslMathMode::Safe,
+        )?;
+        if pipeline.thread_execution_width() == 32 {
+            return pass.dispatch_at(
+                &pipeline,
+                &[
+                    w.codes.binding(),
+                    w.scales.binding(),
+                    w.biases.binding(),
+                    x.binding(),
+                    y.binding(),
+                ],
+                &[&u32_bytes(k), &u32_bytes(n)],
+                Grid::Threadgroups {
+                    groups: (rows, n / 8, 1),
+                    threadgroup: (32, 2, 1),
+                },
+            );
+        }
+    }
+    for row in 0..rows {
+        gemv_gdn_decode(
+            ctx,
+            pass,
+            w,
+            &x.view(row * k, &[k])?,
+            &y.view(row * n, &[n])?,
+            official_mlx_rounding,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[path = "official_q8_projection_tests.rs"]
 mod tests;

@@ -213,10 +213,16 @@ def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, mode
             return previous(payload, **options)
         desktop.epoch += 1
         with pytest.raises(OSError, match="no longer belongs"):
-            options["on_progress"]({
-                "event": "progress", "input_tokens": 20, "sampled_tokens": 0,
-                "output_token_budget": 512, "elapsed_seconds": 0.0, "prefill_seconds": None,
-            })
+            options["on_progress"](
+                {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": 512,
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+            )
         raise APIError(503, "Request stopped.", "request_stopped")
 
     monkeypatch.setattr(desktop.worker, "request", request)
@@ -230,6 +236,7 @@ def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, mode
 def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
     with pytest.raises(DesktopError, match="Invalid app command"):
         desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
+
 
 @pytest.fixture
 def tool_desktop(desktop, model, monkeypatch):
@@ -1391,6 +1398,393 @@ def test_advanced_context_budget_rejection_leaves_history_unchanged(desktop, mod
         finish(desktop)
         assert [c.args[0]["operation"] for c in request.call_args_list] == ["tokenize"]
     assert desktop.messages == before
+
+
+@pytest.fixture
+def mtp_executable(tmp_path):
+    path = tmp_path / "MTP fixture worker"
+    path.write_text(
+        f"#!{sys.executable}\n"
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "model=Path(sys.argv[sys.argv.index('--model-path')+1])\n"
+        "config=json.loads((model/'config.json').read_text())\n"
+        "mtp=config.get('fixture_mtp',{'supported':True,'max_drafts':3,'recommended_drafts':2,"
+        "'default_drafts':0,'sampling':'exact-rejection-v1','verification':'fixture-exact-v1',"
+        "'operations':['generate']})\n"
+        "print(json.dumps({'ready':True,'mode':'text-generation-v1','vocab_size':32000,"
+        "'max_context_tokens':8192,'max_new_tokens':4096,'streaming':'text-delta-v1',"
+        "'stop_sequences':True,'mtp':mtp}),flush=True)\n"
+        "for line in sys.stdin:\n"
+        "    request=json.loads(line)\n"
+        "    if request['operation']=='tokenize':\n"
+        "        reply={'token_count':20,'token_ids':[2]*20}\n"
+        "    else:\n"
+        "        drafts=request.get('mtp_drafts',0)\n"
+        "        reply={'text':'synthetic answer','input_tokens':20,'output_tokens':4,"
+        "'finish_reason':'length','mtp':{'enabled':drafts>0,'drafts':drafts,"
+        "'sampling':'exact-rejection-v1','verification':mtp.get('verification')}}\n"
+        "        if request.get('stream'): print(json.dumps({'event':'delta','text':'synthetic answer'}),flush=True)\n"
+        "    print(json.dumps(reply),flush=True)\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def set_mtp(desktop, identifier, enabled):
+    desktop.dispatch({"command": "configure_mtp", "model_id": identifier, "enabled": enabled})
+
+
+@pytest.fixture
+def timed_mtp_requests(desktop, model, mtp_executable, monkeypatch):
+    """Give the real worker bridge distinct, deterministic MTP stage timings."""
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    request = desktop.worker.request
+    drafts_seen = []
+
+    def timed_request(payload, **options):
+        reply = request(payload, **options)
+        if payload["operation"] == "generate":
+            drafts = payload.get("mtp_drafts", 0)
+            drafts_seen.append(drafts)
+            prefill, decode = (0.6, 0.03) if drafts else (0.2, 0.06)
+            reply.update(sampled_tokens=4, prefill_seconds=prefill, decode_seconds=decode)
+            if options.get("on_progress") is not None:
+                frame = {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": payload["max_new_tokens"],
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+                for value in (
+                    frame,
+                    {**frame, "sampled_tokens": 1, "elapsed_seconds": prefill, "prefill_seconds": prefill},
+                    {**frame, "sampled_tokens": 4, "elapsed_seconds": prefill + decode, "prefill_seconds": prefill},
+                ):
+                    options["on_progress"](value)
+        return reply
+
+    monkeypatch.setattr(desktop.worker, "request", timed_request)
+    return identifier, drafts_seen
+
+
+def test_playground_eta_profiles_follow_mtp_toggle_and_infer_selection(desktop, timed_mtp_requests):
+    identifier, drafts_seen = timed_mtp_requests
+
+    def generate(request_id):
+        desktop.output.seek(0)
+        desktop.output.truncate()
+        desktop.dispatch({"command": "generate", "text": "MTP timing fixture", "request_id": request_id})
+        finish(desktop)
+        progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+        assert [event["sampled_tokens"] for event in progress] == [0, 1, 4]
+        return progress[0]
+
+    assert not generate("off-first")["calibrated"]
+    assert generate("off-second")["calibrated"]
+    set_mtp(desktop, identifier, True)
+    assert not generate("on-first")["calibrated"]
+    on = generate("on-second")
+    assert on["calibrated"]
+    assert on["ttft_lower_seconds"] <= 0.6 <= on["ttft_upper_seconds"]
+    set_mtp(desktop, identifier, False)
+    off = generate("off-again")
+    assert off["calibrated"]
+    assert off["ttft_lower_seconds"] <= 0.2 <= off["ttft_upper_seconds"] < 0.6
+    assert drafts_seen == [0, 0, 2, 2, 0]
+    assert len(desktop.generation_estimates.history) == 2
+
+    progress = []
+    desktop.infer(
+        [{"role": "user", "content": "Direct MTP timing fixture"}],
+        16,
+        mtp=True,
+        on_progress=progress.append,
+    )
+    assert progress[0]["calibrated"]
+    assert progress[0]["ttft_lower_seconds"] <= 0.6 <= progress[0]["ttft_upper_seconds"]
+    assert drafts_seen[-1] == 2
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_eta_profiles_follow_request_local_mtp_override(desktop, timed_mtp_requests, stream):
+    identifier, drafts_seen = timed_mtp_requests
+    set_mtp(desktop, identifier, True)
+    payload = {"messages": [{"role": "user", "content": "API MTP timing fixture"}], "temperature": 0}
+    for override in (False, True, False, None, False):
+        request = {**payload, **({"mtp": override} if override is not None else {})}
+        desktop.api_complete(request, on_delta=(lambda _: None) if stream else None)
+    profiles = list(desktop.generation_estimates.history.values())
+    assert len(profiles) == 2
+    assert sorted(len(profile) for profile in profiles) == [2, 3]
+    assert {tuple(sample.prefill_seconds for sample in profile) for profile in profiles} == {
+        (0.2, 0.2, 0.2),
+        (0.6, 0.6),
+    }
+    assert drafts_seen == [0, 2, 0, 2, 0]
+    assert desktop.settings_summary()["mtp_enabled"] is True
+
+
+@pytest.mark.parametrize("override, expected", [(None, 2), (True, 2), (False, 0)])
+@pytest.mark.parametrize("stream", [False, True])
+def test_tool_requests_preserve_mtp_selection_and_tool_rendering(tool_desktop, override, expected, stream):
+    desktop, payload, seen, reply = tool_desktop
+    capability = {
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 2,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": "fixture-exact-v1",
+        "operations": ["generate"],
+    }
+    desktop.worker.mtp = capability
+    set_mtp(desktop, desktop.active_model, True)
+    reply["mtp"] = {
+        "enabled": expected > 0,
+        "drafts": expected,
+        "sampling": capability["sampling"],
+        "verification": capability["verification"],
+    }
+    payload["stream"] = stream
+    if override is not None:
+        payload["mtp"] = override
+    response = desktop.api_complete(payload, on_delta=(lambda _: None) if stream else None)
+    assert response["choices"][0]["finish_reason"] == "tool_calls"
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    assert seen[-1]["mtp_drafts"] == expected
+    assert desktop.api_models()[0]["tool_calling"] is True
+    assert desktop.api_models()[0]["defaults"]["mtp"] is True
+    assert desktop.worker is not None
+    assert desktop.job is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_unknown_context_mtp_requests_reserve_only_request_capacity(desktop, model, mtp_executable, enabled, stream):
+    from stark_convert.chat import Worker
+
+    desktop.executable = mtp_executable
+    read = Worker.read
+
+    def ready(worker):
+        result = read(worker)
+        result["max_context_tokens"] = 0xFFFFFFFF
+        return result
+
+    with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=ready):
+        identifier = running(desktop, model)
+    set_mtp(desktop, identifier, enabled)
+    worker = desktop.worker
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "Synthetic MTP context request"}], "max_tokens": 32},
+            on_delta=(lambda _: None) if stream else None,
+        )
+    generated = request.call_args_list[-1].args[0]
+    assert generated["context_tokens"] == 20 + 32
+    assert generated["mtp_drafts"] == (2 if enabled else 0)
+    assert desktop.api_models()[0]["context_length"] is None
+    assert desktop.api_models()[0]["defaults"]["mtp"] is enabled
+    assert desktop.worker is worker
+    assert desktop.job is None
+
+
+def test_mtp_preference_is_per_model_persistent_and_does_not_reset_chat(desktop, model, mtp_executable, tmp_path):
+    import shutil
+
+    desktop.executable = mtp_executable
+    first = running(desktop, model)
+    process = desktop.worker.process
+    before = list(desktop.messages)
+    assert desktop.settings_summary()["mtp_enabled"] is False
+    set_mtp(desktop, first, True)
+    assert desktop.worker.process is process and desktop.messages == before
+    assert desktop.settings_summary()["mtp_enabled"] is True
+    assert json.loads(desktop.registry.read_text())[0]["mtp_enabled"] is True
+    assert desktop.registry.stat().st_mode & 0o777 == 0o600
+    assert events(desktop)[-1]["event"] == "mtp_configured"
+
+    second_model = tmp_path / "second model"
+    shutil.copytree(model, second_model)
+    config = json.loads((second_model / "config.json").read_text())
+    config["fixture_mtp"] = {
+        "supported": True,
+        "max_drafts": 6,
+        "recommended_drafts": 4,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": "second-exact-v1",
+        "operations": ["generate"],
+    }
+    (second_model / "config.json").write_text(json.dumps(config))
+    desktop.dispatch({"command": "install", "kind": "local", "source": str(second_model)})
+    finish(desktop)
+    second = next(m["id"] for m in desktop.models if m["id"] != first)
+    desktop.dispatch({"command": "run", "model_id": second})
+    finish(desktop)
+    assert desktop.settings_summary()["mtp_enabled"] is False
+    assert desktop.settings_summary()["mtp"]["recommended_drafts"] == 4
+    set_mtp(desktop, second, True)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}]})
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 4
+    set_mtp(desktop, second, False)
+    desktop.stop(quiet=True)
+    assert desktop.api_status()["capabilities"]["mtp"]["supported"] is False
+
+    replacement = Desktop(mtp_executable, desktop.data_dir, io.StringIO(), timeout=2)
+    try:
+        for identifier, expected in ((second, False), (first, True)):
+            replacement.dispatch({"command": "run", "model_id": identifier})
+            finish(replacement)
+            assert replacement.settings_summary()["mtp_enabled"] is expected
+        assert replacement.api_models()[0]["defaults"]["mtp"] is True
+        assert replacement.api_models()[0]["capabilities"]["mtp"]["recommended_drafts"] == 2
+    finally:
+        replacement.stop(quiet=True)
+
+
+def test_mtp_api_overrides_are_request_local_and_streaming_uses_same_selection(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    set_mtp(desktop, identifier, True)
+    payload = {"messages": [{"role": "user", "content": "fixture"}]}
+    for override, expected in ((None, 2), (False, 0), (True, 2), (None, 2)):
+        request_body = {**payload, **({"mtp": override} if override is not None else {})}
+        with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+            desktop.api_complete(request_body, on_delta=lambda _: None)
+            assert request.call_args_list[-1].args[0]["mtp_drafts"] == expected
+    assert desktop.models[0]["mtp_enabled"] is True
+    assert desktop.api_status()["defaults"]["mtp"] is True
+    set_mtp(desktop, identifier, False)
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "fixture"})
+        finish(desktop)
+        assert request.call_args_list[-1].args[0]["mtp_drafts"] == 0
+
+
+def test_unsupported_mtp_is_rejected_without_touching_worker_and_false_is_compatible(desktop, model):
+    from stark_convert.local_api import APIError
+
+    identifier = running(desktop, model)
+    process = desktop.worker.process
+    before = desktop.registry.read_bytes()
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        with pytest.raises(DesktopError, match="not supported"):
+            set_mtp(desktop, identifier, True)
+        with pytest.raises(APIError) as error:
+            desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}], "mtp": True})
+        assert error.value.code == "mtp_not_supported"
+        assert request.call_count == 0
+    assert desktop.registry.read_bytes() == before
+    assert desktop.worker.process is process
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}], "mtp": False})
+        assert "mtp_drafts" not in request.call_args_list[-1].args[0]
+
+
+def test_mtp_preference_write_failure_stale_model_and_busy_changes_are_atomic(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    before = desktop.registry.read_bytes()
+    with patch.object(desktop, "persist", side_effect=OSError("synthetic private failure")):
+        with pytest.raises(DesktopError, match="Cannot save"):
+            set_mtp(desktop, identifier, True)
+    assert "mtp_enabled" not in desktop.models[0]
+    assert desktop.registry.read_bytes() == before
+    with pytest.raises(DesktopError, match="Model changed"):
+        set_mtp(desktop, "stale-model", True)
+    desktop.job = object()
+    try:
+        with pytest.raises(DesktopError, match="Wait for"):
+            set_mtp(desktop, identifier, True)
+    finally:
+        desktop.job = None
+    desktop.api_queue.append(object())
+    try:
+        with pytest.raises(DesktopError, match="Wait for"):
+            set_mtp(desktop, identifier, True)
+    finally:
+        desktop.api_queue.clear()
+    assert desktop.settings_summary()["mtp_enabled"] is False
+
+
+@pytest.mark.parametrize("invalid", [None, 0, 1, "true", [], {}])
+def test_mtp_configuration_requires_a_boolean(desktop, model, mtp_executable, invalid):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    with pytest.raises(DesktopError, match="Invalid MTP"):
+        set_mtp(desktop, identifier, invalid)
+    assert "mtp_enabled" not in desktop.models[0]
+
+
+def test_saved_mtp_preference_is_inactive_when_replacement_worker_lacks_support(desktop, model, mtp_executable):
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    set_mtp(desktop, identifier, True)
+    config = json.loads((model / "config.json").read_text())
+    config["fixture_mtp"] = {"supported": False}
+    (model / "config.json").write_text(json.dumps(config))
+    desktop.dispatch({"command": "run", "model_id": identifier})
+    finish(desktop)
+    assert desktop.models[0]["mtp_enabled"] is True
+    assert desktop.settings_summary()["mtp_enabled"] is False
+    assert desktop.api_status()["defaults"]["mtp"] is False
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}]})
+        assert "mtp_drafts" not in request.call_args_list[-1].args[0]
+
+
+def test_image_requests_keep_text_preference_and_reject_explicit_mtp_before_dispatch(desktop, model, mtp_executable):
+    import base64
+
+    from stark_convert.local_api import APIError
+
+    desktop.executable = mtp_executable
+    identifier = running(desktop, model)
+    set_mtp(desktop, identifier, True)
+    desktop.worker.images = True
+    image_url = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\nsynthetic").decode()
+    payload = {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}]}
+    with patch.object(
+        desktop.worker, "request_image", return_value={"text": "fixture", "finish_reason": "length"}
+    ) as image:
+        desktop.api_complete(payload)
+        assert "mtp_drafts" not in image.call_args.args[2]
+        with pytest.raises(APIError) as error:
+            desktop.api_complete({**payload, "mtp": True})
+        assert error.value.code == "mtp_not_supported"
+        assert image.call_count == 1
+    assert desktop.models[0]["mtp_enabled"] is True
+    assert desktop.api_status()["defaults"]["mtp"] is True
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_mtp_acknowledgement_mismatch_fences_worker(desktop, model, mtp_executable, enabled):
+    from stark_convert.local_api import APIError
+
+    desktop.executable = mtp_executable
+    running(desktop, model)
+    original = desktop.worker.request
+    process = desktop.worker.process
+
+    def mismatch(payload, **options):
+        reply = original(payload, **options)
+        if payload["operation"] == "generate":
+            reply["mtp"]["enabled"] = not enabled
+        return reply
+
+    with patch.object(desktop.worker, "request", side_effect=mismatch):
+        with pytest.raises(APIError) as error:
+            desktop.api_complete({"messages": [{"role": "user", "content": "fixture"}], "mtp": enabled})
+    assert error.value.code == "generation_failed"
+    assert process.poll() is not None
+    assert desktop.api_models() == []
+    assert desktop.api_status()["capabilities"]["mtp"]["supported"] is False
 
 
 def test_local_registration_is_private_atomic_persistent_and_deduplicated(desktop, model):

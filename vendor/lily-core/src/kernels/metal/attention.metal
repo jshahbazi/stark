@@ -1282,3 +1282,184 @@ kernel void sdpa_decode_combine(device const float* partials [[buffer(0)]],  // 
         out[hq * D + d] = bfloat(acc * inv_l);
     }
 }
+
+// Modified by Stark: row-axis variants retain the decode norm, BF16 and
+// Q8 cache rounding boundaries. The original single-row kernels are unchanged.
+kernel void q_norm_rope_split_decode_bf16_rows(
+    device const bfloat* qg_rows   [[buffer(0)]],
+    device const bfloat* w    [[buffer(1)]],
+    device bfloat*       q_rows    [[buffer(2)]],
+    device bfloat*       gate_rows [[buffer(3)]],
+    constant uint&       D    [[buffer(4)]],
+    constant uint&       rot  [[buffer(5)]],
+    constant uint&       base_pos [[buffer(6)]],
+    constant float&      theta [[buffer(7)]],
+    constant float&      eps   [[buffer(8)]],
+    constant int&        rope_delta [[buffer(9)]],
+    constant uint&       heads [[buffer(10)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint tid  [[thread_index_in_threadgroup]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint head = tg.x;
+    const uint pos = base_pos + tg.y;
+    device const bfloat* qg = qg_rows + (ulong)tg.y * heads * 2 * D;
+    device bfloat* q = q_rows + (ulong)tg.y * heads * D;
+    device bfloat* gate = gate_rows + (ulong)tg.y * heads * D;
+
+    threadgroup float partial[8];
+    threadgroup float inv_rms = 0.0f;
+    threadgroup bfloat normed[256];
+    const ulong src = (ulong)head * 2 * D;
+    const ulong dst = (ulong)head * D;
+    const float value = float(qg[src + tid]);
+    float acc = value * value;
+    gate[dst + tid] = qg[src + D + tid];
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) {
+            total += partial[i];
+        }
+        inv_rms = rsqrt(total / float(D) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    normed[tid] = bfloat(value * inv_rms * (1.0f + float(w[tid])));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint half_rot = rot / 2;
+    if (tid < half_rot) {
+        const float inv_freq = pow(theta, -2.0f * float(tid) / float(rot));
+        const float angle = rope_position(pos, rope_delta) * inv_freq;
+        const float c = cos(angle);
+        const float s = sin(angle);
+        const float lo = float(normed[tid]);
+        const float hi = float(normed[half_rot + tid]);
+        q[dst + tid] = bfloat(lo * c - hi * s);
+        q[dst + half_rot + tid] = bfloat(hi * c + lo * s);
+    } else if (tid >= rot) {
+        q[dst + tid] = normed[tid];
+    }
+}
+
+kernel void k_norm_rope_scatter_decode_bf16_rows(
+    device const bfloat* k_rows     [[buffer(0)]],
+    device const bfloat* w     [[buffer(1)]],
+    device bfloat*       cache [[buffer(2)]],
+    constant uint&       D     [[buffer(3)]],
+    constant uint&       rot   [[buffer(4)]],
+    constant uint&       base_pos [[buffer(5)]],
+    constant float&      theta [[buffer(6)]],
+    constant float&      eps   [[buffer(7)]],
+    constant uint&       max_seq [[buffer(8)]],
+    constant int&        rope_delta [[buffer(9)]],
+    constant uint&       heads [[buffer(10)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint tid  [[thread_index_in_threadgroup]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint head = tg.x;
+    const uint pos = base_pos + tg.y;
+    device const bfloat* k = k_rows + (ulong)tg.y * heads * D;
+
+    threadgroup float partial[8];
+    threadgroup float inv_rms = 0.0f;
+    threadgroup bfloat normed[256];
+    const ulong src = (ulong)head * D;
+    const ulong dst = ((ulong)head * max_seq + pos) * D;
+    const float value = float(k[src + tid]);
+    float acc = value * value;
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) {
+            total += partial[i];
+        }
+        inv_rms = rsqrt(total / float(D) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    normed[tid] = bfloat(value * inv_rms * (1.0f + float(w[tid])));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint half_rot = rot / 2;
+    if (tid < half_rot) {
+        const float inv_freq = pow(theta, -2.0f * float(tid) / float(rot));
+        const float angle = rope_position(pos, rope_delta) * inv_freq;
+        const float c = cos(angle);
+        const float s = sin(angle);
+        const float lo = float(normed[tid]);
+        const float hi = float(normed[half_rot + tid]);
+        cache[dst + tid] = bfloat(lo * c - hi * s);
+        cache[dst + half_rot + tid] = bfloat(hi * c + lo * s);
+    } else if (tid >= rot) {
+        cache[dst + tid] = normed[tid];
+    }
+}
+
+kernel void k_norm_rope_scatter_decode_q8_rows(
+    device const bfloat* k_rows      [[buffer(0)]],
+    device const bfloat* w      [[buffer(1)]],
+    device char*         cache  [[buffer(2)]],
+    device half*         scales [[buffer(3)]],
+    constant uint&       D      [[buffer(4)]],
+    constant uint&       rot    [[buffer(5)]],
+    constant uint&       base_pos [[buffer(6)]],
+    constant float&      theta  [[buffer(7)]],
+    constant float&      eps    [[buffer(8)]],
+    constant uint&       max_seq [[buffer(9)]],
+    constant int&        rope_delta [[buffer(10)]],
+    constant uint&       heads [[buffer(11)]],
+    uint3 tg [[threadgroup_position_in_grid]],
+    uint tid  [[thread_index_in_threadgroup]],
+    uint sg   [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]) {
+    const uint head = tg.x;
+    const uint pos = base_pos + tg.y;
+    device const bfloat* k = k_rows + (ulong)tg.y * heads * D;
+
+    threadgroup float partial[8];
+    threadgroup float inv_rms = 0.0f;
+    threadgroup bfloat normed[256];
+    threadgroup bfloat roped[256];
+    const ulong src = (ulong)head * D;
+    const ulong row = (ulong)head * max_seq + pos;
+    const float value = float(k[src + tid]);
+    float acc = value * value;
+    acc = simd_sum(acc);
+    if (lane == 0) {
+        partial[sg] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid == 0) {
+        float total = 0.0f;
+        for (uint i = 0; i < 8; ++i) {
+            total += partial[i];
+        }
+        inv_rms = rsqrt(total / float(D) + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    normed[tid] = bfloat(value * inv_rms * (1.0f + float(w[tid])));
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint half_rot = rot / 2;
+    if (tid < half_rot) {
+        const float inv_freq = pow(theta, -2.0f * float(tid) / float(rot));
+        const float angle = rope_position(pos, rope_delta) * inv_freq;
+        const float c = cos(angle);
+        const float s = sin(angle);
+        const float lo = float(normed[tid]);
+        const float hi = float(normed[half_rot + tid]);
+        roped[tid] = bfloat(lo * c - hi * s);
+        roped[half_rot + tid] = bfloat(hi * c + lo * s);
+    } else if (tid >= rot) {
+        roped[tid] = normed[tid];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    kv_q8_store(float(roped[tid]), cache + row * D + tid,
+                scales + row * (D / KV_Q8_GROUP) + tid / KV_Q8_GROUP, lane);
+}

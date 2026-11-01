@@ -19,6 +19,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
+from .mtp import mtp_capabilities, resolve_mtp
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     family_image_input_contract,
@@ -198,6 +199,7 @@ class Worker:
         self.timeout = timeout
         self.pending = b""
         self.cancellation = False
+        self.mtp = mtp_capabilities(None)
         self.request_sequence = 0
         self._transaction_lock = threading.RLock()
         self.cancelled_id = None
@@ -351,6 +353,16 @@ class Worker:
             raise ChatError("Cannot cancel worker; restart the model.") from None
 
     def read(self, cancelled=None, request_id=None):
+        try:
+            reply = self._read_reply(cancelled, request_id)
+            if reply.get("ready") is False:
+                self.mtp = mtp_capabilities(None)
+            return reply
+        except BaseException:
+            self.mtp = mtp_capabilities(None)
+            raise
+
+    def _read_reply(self, cancelled=None, request_id=None):
         deadline = getattr(self, "_image_deadline", None)
         if deadline is None:
             deadline = time.monotonic() + self.timeout
@@ -381,6 +393,7 @@ class Worker:
                 if getattr(self, "_ready_seen", False):
                     raise ChatError("Unexpected worker readiness reply; restart the model.")
                 self._ready_seen = True
+                self.mtp = mtp_capabilities(reply)
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
@@ -437,6 +450,7 @@ class Worker:
             except (ChatImageError, ChatCancelled, ChatRequestTooLarge):
                 raise
             except BaseException:
+                self.mtp = mtp_capabilities(None)
                 try:
                     self.invalidate_image_checks()
                 except BaseException:
@@ -445,8 +459,10 @@ class Worker:
 
     def _request(self, payload, on_delta=None, cancelled=None, *, on_progress=None):
         if on_progress is not None and on_delta is None and payload.get("stream") is True:
+
             def on_delta(_text):
                 pass
+
         if cancelled is not None and cancelled.is_set():
             raise ChatCancelled("Request cancelled.")
         cancellable_operation = payload.get("operation") in {"generate", "prepare_image", "generate_image"}
@@ -665,6 +681,7 @@ class Worker:
         invalidate_checks(self)
 
     def close(self):
+        self.mtp = mtp_capabilities(None)
         was_closed = getattr(self, "_closed", False)
         self._closed = True
         self._close_gpu_memory_reader()
@@ -753,12 +770,22 @@ def run_chat(args, worker):
     ready = worker.read()
     if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
         raise ChatError("Generation worker could not load this model.")
+    image_path = getattr(args, "image", None)
+    mtp_enabled = getattr(args, "mtp", False)
+    if mtp_enabled and image_path is not None:
+        raise ChatError("MTP is unavailable for image requests.")
+    capabilities = mtp_capabilities(ready)
+    try:
+        drafts = resolve_mtp(mtp_enabled, capabilities)
+    except ValueError as error:
+        if str(error) == "mtp_not_supported":
+            raise ChatError("MTP is unavailable for this model and worker.") from None
+        raise ChatError("The MTP option must be a boolean.") from None
     codec, template = load_template(args.model_path, expected_hashes=getattr(worker, "image_input", None))
     context_capacity_known = ready["max_context_tokens"] != 0xFFFFFFFF
     context = args.context_tokens if args.context_tokens is not None else ready["max_context_tokens"]
     if context > ready["max_context_tokens"] or args.max_new_tokens > ready["max_new_tokens"]:
         raise ChatError("Requested token limits exceed this worker's limits.")
-    image_path = getattr(args, "image", None)
     image = None
     if image_path is not None:
         if not context_capacity_known:
@@ -820,15 +847,16 @@ def run_chat(args, worker):
                 if count + args.max_new_tokens > context:
                     print("Conversation exceeds the context budget; use /reset or a larger --context-tokens.")
                     continue
-                reply = worker.request(
-                    {
-                        "operation": "generate",
-                        "rendered_prompt": prompt,
-                        "context_tokens": context if context_capacity_known else count + args.max_new_tokens,
-                        "max_new_tokens": args.max_new_tokens,
-                        "sampling": {"mode": "greedy"},
-                    }
-                )
+                request = {
+                    "operation": "generate",
+                    "rendered_prompt": prompt,
+                    "context_tokens": context if context_capacity_known else count + args.max_new_tokens,
+                    "max_new_tokens": args.max_new_tokens,
+                    "sampling": {"mode": "greedy"},
+                }
+                if capabilities["supported"]:
+                    request["mtp_drafts"] = drafts
+                reply = worker.request(request)
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")
         except ChatError as error:
@@ -851,6 +879,12 @@ def main(argv=None):
     parser.add_argument("--context-tokens", type=int, help="Context budget (default: loaded model's maximum)")
     parser.add_argument("--max-new-tokens", type=int, default=512, help="Reply budget (default: 512)")
     parser.add_argument("--thinking", action="store_true", help="Enable reasoning for templates that support it")
+    mtp = parser.add_mutually_exclusive_group()
+    mtp.add_argument(
+        "--mtp", dest="mtp", action="store_true", help="Enable exact MTP when the loaded model supports it"
+    )
+    mtp.add_argument("--no-mtp", dest="mtp", action="store_false", help="Disable MTP (default)")
+    parser.set_defaults(mtp=False)
     parser.add_argument("--timeout", type=float, default=300, help="Worker reply timeout in seconds (default: 300)")
     args = parser.parse_args(argv)
     if (

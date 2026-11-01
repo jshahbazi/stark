@@ -65,6 +65,62 @@ fn stock_fixture(ctx: &MetalContext, n: usize) -> Result<(QuantWeights, Tensor)>
 }
 
 #[test]
+fn official_head_verifier_rows_match_ordinary_bytes() -> Result<()> {
+    let ctx = MetalContext::new()?;
+    let k = 2560;
+    let mut checked = 0;
+    // The odd output width exercises the ordinary per-row fallback. The
+    // aligned widths use the fused weight-reuse kernel for M2 through M4.
+    for n in [128, 256, 129] {
+        let (w, _) = stock_fixture(&ctx, n)?;
+        for m in 1..=4 {
+            let values: Vec<f32> = (0..m * k)
+                .map(|i| {
+                    let row = i / k;
+                    bf((((i * 23 + row * 37 + 17) % 131) as i32 - 65) as f32 / 29.0)
+                })
+                .collect();
+            let mut padded = vec![bf(19.0); k];
+            padded.extend_from_slice(&values);
+            padded.extend_from_slice(&vec![bf(19.0); k]);
+            let x_storage = Tensor::from_f32_as_bf16(&ctx, &padded, &[m + 2, k])?;
+            let x = x_storage.view(k, &[m, k])?;
+            let storage = Tensor::from_f32(&ctx, &vec![17.0; m * n + 8], &[m * n + 8])?;
+            let out = storage.view(4, &[m, n])?;
+            let reference = Tensor::zeros(&ctx, &[m, n], DType::F32)?;
+            let pass = ctx.begin_concurrent()?;
+            gemv_quant_logits_rows_decode_exact(&ctx, &pass, &w, &x, &out, true)?;
+            for row in 0..m {
+                gemv_quant_logits(
+                    &ctx,
+                    &pass,
+                    &w,
+                    &x.view(row * k, &[k])?,
+                    &reference.view(row * n, &[n])?,
+                    true,
+                )?;
+            }
+            pass.commit()?.wait()?;
+            exact(
+                &out.to_f32()?,
+                &reference.to_f32()?,
+                "official verifier head versus ordinary decode",
+            )?;
+            let guarded = storage.to_f32()?;
+            ensure!(
+                guarded[..4].iter().chain(&guarded[4 + m * n..]).all(|v| *v == 17.0),
+                "official verifier head changed output guards"
+            );
+            checked += m * n;
+        }
+    }
+    println!(
+        "official_head_exact_verifier_rows compared_f32_values={checked} differing_bits=0"
+    );
+    Ok(())
+}
+
+#[test]
 fn official_head_fused_precision_and_strict_stock_q4_hash_controls() -> Result<()> {
     // Actual stock CAPI report8da8c196e2cbd772300c290563aa5841fb3840548a3b05c4b278795639bb8616.
     // These are strict hash gates, not a relaxed numerical comparison. A

@@ -15,6 +15,10 @@ pub const CONV1D_PREFILL_TILE: usize = 64;
 
 const SOURCE: &str = include_str!("metal/gdn.metal");
 
+#[cfg(test)]
+#[path = "gdn_value_key_verify_tests.rs"]
+mod value_key_verify_tests;
+
 /// Recurrent state is F32 because rounding compounds across tokens.
 pub const GDN_STATE_DTYPE: DType = DType::F32;
 
@@ -132,6 +136,150 @@ pub fn gdn_step_gated_named(
             &u32_bytes(gate_act as usize),
         ],
         Grid::Threadgroups { groups: (num_heads, 1, 1), threadgroup: (dim, 1, 1) },
+    )
+}
+
+/// Verifies one to four causal rows in one dispatch, preserving ordinary
+/// decode's F32 recurrence, reduction order and BF16 output-rounding boundary.
+/// Each thread retains its state column across the short verification group.
+/// `mid`, when present, receives the state after every row except the last.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_verify_gated_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    norm_w: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    eps: f32,
+    gate_act: GdnGate,
+    mid: Option<&Tensor>,
+) -> Result<()> {
+    gdn_verify_gated_exact_named(
+        ctx,
+        pass,
+        qkv,
+        a,
+        b,
+        a_log,
+        dt_bias,
+        state,
+        z,
+        norm_w,
+        out,
+        scale,
+        num_k_heads,
+        eps,
+        gate_act,
+        mid,
+        "gdn_verify_gated_exact_register",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gdn_verify_gated_exact_named(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    norm_w: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    num_k_heads: usize,
+    eps: f32,
+    gate_act: GdnGate,
+    mid: Option<&Tensor>,
+    kernel: &'static str,
+) -> Result<()> {
+    let heads = a_log.numel();
+    ensure!(
+        heads > 0 && num_k_heads > 0 && heads.is_multiple_of(num_k_heads),
+        "invalid GDN verify heads"
+    );
+    ensure!(a.numel().is_multiple_of(heads), "invalid GDN verify rows");
+    let rows = a.numel() / heads;
+    ensure!((1..=4).contains(&rows), "GDN verify requires one to four rows");
+    let dim = GDN_HEAD_DIM;
+    let channels = (2 * num_k_heads + heads) * dim;
+    let values = rows * heads * dim;
+    ensure!(
+        qkv.dtype() == DType::BF16 && qkv.numel() == rows * channels,
+        "invalid GDN verify qkv"
+    );
+    ensure!(
+        a.dtype() == DType::BF16 && b.dtype() == DType::BF16 && b.numel() == a.numel(),
+        "invalid GDN verify gates"
+    );
+    ensure!(
+        a_log.dtype() == DType::F32
+            && dt_bias.dtype() == DType::BF16
+            && dt_bias.numel() == heads,
+        "invalid GDN verify gate weights"
+    );
+    ensure!(
+        state.dtype() == DType::F32 && state.numel() == heads * dim * dim,
+        "invalid GDN verify state"
+    );
+    ensure!(
+        z.dtype() == DType::BF16 && z.numel() == values,
+        "invalid GDN verify output gate"
+    );
+    ensure!(
+        out.dtype() == DType::BF16 && out.numel() == values,
+        "invalid GDN verify output"
+    );
+    ensure!(
+        norm_w.dtype() == DType::F32 && norm_w.numel() == dim,
+        "invalid GDN verify norm"
+    );
+    ensure!(
+        scale.is_finite() && eps.is_finite() && eps > 0.0,
+        "invalid GDN verify scale or epsilon"
+    );
+    if let Some(mid) = mid {
+        ensure!(
+            mid.dtype() == DType::F32 && mid.numel() >= (rows - 1) * state.numel(),
+            "invalid GDN verify captures"
+        );
+    }
+    let captures = if mid.is_some() { rows - 1 } else { 0 };
+    let pipeline = ctx.pipeline(kernel, SOURCE, MslVersion::V3_1)?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            qkv.binding(),
+            a.binding(),
+            b.binding(),
+            a_log.binding(),
+            dt_bias.binding(),
+            state.binding(),
+            z.binding(),
+            norm_w.binding(),
+            out.binding(),
+            mid.unwrap_or(state).binding(),
+        ],
+        &[
+            &u32_bytes(rows),
+            &u32_bytes(heads),
+            &u32_bytes(num_k_heads),
+            &u32_bytes(captures),
+            &scale.to_ne_bytes(),
+            &eps.to_ne_bytes(),
+            &u32_bytes(gate_act as usize),
+        ],
+        Grid::Threadgroups { groups: (heads, 1, 1), threadgroup: (dim, 1, 1) },
     )
 }
 
@@ -1348,6 +1496,147 @@ pub fn gdn_step_raw_value_key_mlx(
     )
 }
 
+/// Short verification convolution with ordinary ValueKey decode's custom SiLU.
+/// It keeps the incoming window intact for rollback and writes the final
+/// window into the other slot, matching the host verifier's slot protocol.
+pub fn conv1d_verify_value_key_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    window_in: &Tensor,
+    window_out: &Tensor,
+    x: &Tensor,
+    w: &Tensor,
+    out: &Tensor,
+) -> Result<()> {
+    ensure!(x.numel().is_multiple_of(10240), "VK verify conv width");
+    let rows = x.numel() / 10240;
+    ensure!((1..=4).contains(&rows), "VK verify conv rows");
+    ensure!(
+        [window_in, window_out, x, w, out].iter().all(|t| t.dtype() == DType::BF16)
+            && window_in.numel() == 3 * 10240
+            && window_out.numel() == 3 * 10240
+            && w.numel() == 4 * 10240
+            && out.numel() == x.numel(),
+        "VK verify conv geometry"
+    );
+    let (ib, io) = window_in.binding();
+    let (ob, oo) = window_out.binding();
+    ensure!(!(std::ptr::eq(ib, ob) && io == oo), "VK verify conv windows alias");
+    let pipeline = ctx.pipeline_with_math_mode(
+        "conv1d_verify_value_key_exact",
+        SOURCE,
+        MslVersion::V3_1,
+        MslMathMode::Safe,
+    )?;
+    pass.dispatch_at(
+        &pipeline,
+        &[
+            window_in.binding(),
+            window_out.binding(),
+            x.binding(),
+            w.binding(),
+            out.binding(),
+        ],
+        &[&u32_bytes(rows)],
+        Grid::Threads { grid: (10240, 1, 1), threadgroup: (256, 1, 1) },
+    )
+}
+
+/// Exact ordinary-decode ValueKey recurrence over one to four verification
+/// rows. Registers retain the F32 physical state between rows; captures use
+/// that same `[head, value, key]` order, never a transposed approximation.
+#[allow(clippy::too_many_arguments)]
+pub fn gdn_verify_value_key_exact(
+    ctx: &MetalContext,
+    pass: &ComputePass<'_>,
+    qkv: &Tensor,
+    a: &Tensor,
+    b: &Tensor,
+    a_log: &Tensor,
+    dt_bias: &Tensor,
+    state: &Tensor,
+    z: &Tensor,
+    norm_w: &Tensor,
+    raw: &Tensor,
+    out: &Tensor,
+    scale: f32,
+    eps: f32,
+    mid: Option<&Tensor>,
+) -> Result<()> {
+    ensure!(a.numel().is_multiple_of(48), "VK verify gate rows");
+    let rows = a.numel() / 48;
+    ensure!((1..=4).contains(&rows), "VK verify requires one to four rows");
+    ensure!(
+        [qkv, a, b, dt_bias, z, raw, out].iter().all(|t| t.dtype() == DType::BF16)
+            && qkv.numel() == rows * 10240
+            && b.numel() == rows * 48
+            && dt_bias.numel() == 48
+            && z.numel() == rows * 6144
+            && raw.numel() == rows * 6144
+            && out.numel() == rows * 6144,
+        "VK verify activation geometry"
+    );
+    ensure!(
+        a_log.dtype() == DType::F32
+            && a_log.numel() == 48
+            && norm_w.dtype() == DType::F32
+            && norm_w.numel() == 128
+            && state.dtype() == DType::F32
+            && state.shape() == [48, 128, 128],
+        "VK verify state/weight geometry"
+    );
+    ensure!(
+        scale.to_bits() == (1.0f32 / 128.0f32.sqrt()).to_bits()
+            && eps.is_finite()
+            && eps > 0.0,
+        "VK verify scale or epsilon"
+    );
+    if let Some(mid) = mid {
+        ensure!(
+            mid.dtype() == DType::F32 && mid.numel() == (rows - 1) * state.numel(),
+            "VK verify capture geometry"
+        );
+    }
+    let recurrence = ctx.pipeline_with_math_mode(
+        "gdn_verify_raw_value_key_exact",
+        SOURCE,
+        MslVersion::V3_1,
+        MslMathMode::Safe,
+    )?;
+    pass.dispatch_at(
+        &recurrence,
+        &[
+            qkv.binding(),
+            a.binding(),
+            b.binding(),
+            a_log.binding(),
+            dt_bias.binding(),
+            state.binding(),
+            raw.binding(),
+            mid.unwrap_or(state).binding(),
+        ],
+        &[
+            &scale.to_ne_bytes(),
+            &u32_bytes(rows),
+            &u32_bytes(if mid.is_some() { rows - 1 } else { 0 }),
+        ],
+        Grid::Threadgroups { groups: (48 * 4, 1, 1), threadgroup: (256, 1, 1) },
+    )?;
+    pass.level_barrier(&[raw, state])?;
+    let norm = ctx.pipeline_with_math_mode(
+        "gdn_verify_normgate_value_key_exact",
+        SOURCE,
+        MslVersion::V3_1,
+        MslMathMode::Safe,
+    )?;
+    pass.dispatch_at(
+        &norm,
+        &[raw.binding(), z.binding(), norm_w.binding(), out.binding()],
+        &[&eps.to_ne_bytes()],
+        Grid::Threadgroups { groups: (48 * rows, 1, 1), threadgroup: (32, 1, 1) },
+    )
+}
+
 /// Explicit state-policy dispatcher. Legacy callers continue to use their
 /// original function/entrypoint, without changed arithmetic or layout.
 #[allow(clippy::too_many_arguments)]
@@ -1718,3 +2007,6 @@ fn gdn_prefill_qk_contiguous_value_key_mlx(
 #[cfg(test)]
 #[path = "official_gdn_prefill_qk_tests.rs"]
 mod official_prefill_qk_tests;
+#[cfg(test)]
+#[path = "gdn_verify_exact_tests.rs"]
+mod verify_exact_tests;

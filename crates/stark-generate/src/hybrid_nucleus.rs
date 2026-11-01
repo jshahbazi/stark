@@ -3,8 +3,8 @@
 use rayon::prelude::*;
 
 use super::{
-    PARALLEL_PROBABILITY_MIN_CANDIDATES, ProbabilityMapper, Sampling, descending_sample_key, finite_guard,
-    probability_exp_f32, profile, sample_with_mapper, sampling_indices, uniform,
+    Distribution, PARALLEL_PROBABILITY_MIN_CANDIDATES, ProbabilityMapper, Sampling, descending_sample_key,
+    finite_guard, probability_exp_f32, profile, sample_with_mapper, sampling_distribution, sampling_indices, uniform,
 };
 
 const MAX_VOCABULARY: usize = 1_000_000;
@@ -211,6 +211,61 @@ impl NucleusSampler {
         self.probabilities.clear();
     }
 
+    /// Builds the same ordered distribution as the reference, without drawing.
+    /// MTP needs its unnormalized weights and exact retained sum for acceptance
+    /// and residual resampling. The proof changes only how the prefix is found;
+    /// its probability terms and accumulation order remain the reference ones.
+    pub(super) fn distribution(
+        &mut self,
+        logits: &[f32],
+        sampling: &Sampling,
+        mapper: &mut ProbabilityMapper,
+    ) -> Result<Distribution, &'static str> {
+        self.clear();
+        if !eligible(logits, sampling) {
+            #[cfg(test)]
+            {
+                self.last_route = Some(Route::Ineligible);
+            }
+            return sampling_distribution(logits, sampling, Some(mapper));
+        }
+        let _scope = profile::Scope::new("sample.nucleus.distribution");
+        let result = (|| match self.try_prefix(logits, sampling, mapper) {
+            Attempt::Proved(prefix) => {
+                #[cfg(test)]
+                {
+                    self.last_route = Some(Route::Proved);
+                }
+                Ok(Distribution {
+                    indices: self.indices[..prefix.kept].to_vec(),
+                    weights: self.indices[..prefix.kept].iter().map(|&id| self.probabilities[id]).collect(),
+                    total: prefix.cumulative,
+                })
+            },
+            Attempt::FullOrder => {
+                let mut indices = sampling_indices(logits, None)?;
+                let Sampling::Stochastic {
+                    top_p: Some(top_p),
+                    ..
+                } = sampling
+                else {
+                    unreachable!();
+                };
+                let prefix = ordered_prefix(&indices, &self.probabilities, *top_p as f64);
+                indices.truncate(prefix.kept);
+                let weights = indices.iter().map(|&id| self.probabilities[id]).collect();
+                Ok(Distribution {
+                    indices,
+                    weights,
+                    total: prefix.cumulative,
+                })
+            },
+            Attempt::Reference => sampling_distribution(logits, sampling, Some(mapper)),
+        })();
+        self.clear();
+        result
+    }
+
     // No RNG argument: selection and proof cannot advance the random stream.
     fn try_prefix(
         &mut self,
@@ -372,3 +427,131 @@ impl NucleusSampler {
 #[cfg(test)]
 #[path = "hybrid_nucleus_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod distribution_tests {
+    use super::*;
+
+    fn sampling(top_p: f32) -> Sampling {
+        Sampling::Stochastic {
+            temperature: 0.7,
+            top_k: None,
+            top_p: Some(top_p),
+            min_p: None,
+        }
+    }
+
+    fn exact(
+        left: &Distribution,
+        right: &Distribution,
+    ) {
+        assert!(left.indices == right.indices);
+        assert!(left.weights.len() == right.weights.len());
+        assert!(left.weights.iter().zip(&right.weights).all(|(a, b)| a.to_bits() == b.to_bits()));
+        assert!(left.total.to_bits() == right.total.to_bits());
+    }
+
+    #[test]
+    fn nucleus_distribution_matches_reference_bits_across_proof_and_fallback_routes() {
+        let mut concentrated = vec![-100.0; 257];
+        concentrated[119] = 8.0;
+        concentrated[5] = 7.0;
+        let mut cases = vec![
+            concentrated,
+            vec![0.0; 257],
+            vec![0.0, -0.0, f32::from_bits(1), -f32::from_bits(1), f32::MAX, -f32::MAX],
+            (0..2048).map(|id| id as f32).collect(),
+            (0..2048).map(|id| -(id as f32)).collect(),
+        ];
+        let mut word = 91_u64;
+        for length in [1, 2, 31, 32, 63, 64, 65, 257, 4096, 65_536] {
+            let values = (0..length)
+                .map(|id| {
+                    word ^= word << 13;
+                    word ^= word >> 7;
+                    word ^= word << 17;
+                    match id % 11 {
+                        0 => -0.0,
+                        1 => f32::from_bits(1),
+                        2 => -f32::MIN_POSITIVE,
+                        _ => (word as i32 % 32768) as f32 / 197.0,
+                    }
+                })
+                .collect();
+            cases.push(values);
+        }
+        let mut sampler = NucleusSampler::default();
+        let mut mapper = ProbabilityMapper::default();
+        let mut reference_mapper = ProbabilityMapper::default();
+        let mut proved = 0;
+        let mut fallback = 0;
+        for values in &cases {
+            for top_p in [0.0, 0.1, 0.5, 0.95, 1.0_f32.next_down()] {
+                let options = sampling(top_p);
+                let actual = sampler.distribution(values, &options, &mut mapper).unwrap();
+                let expected = sampling_distribution(values, &options, Some(&mut reference_mapper)).unwrap();
+                exact(&actual, &expected);
+                proved += usize::from(sampler.last_route == Some(Route::Proved));
+                fallback += usize::from(matches!(
+                    sampler.last_route,
+                    Some(Route::SelectionBudget | Route::InsufficientReuse | Route::UncertainReuse)
+                ));
+                assert!(sampler.indices.is_empty() && sampler.probabilities.is_empty());
+            }
+        }
+        assert!(proved > 0 && fallback > 0);
+    }
+
+    #[test]
+    fn nucleus_distribution_uncertain_boundary_and_ineligible_settings_keep_reference_bits() {
+        let mut sampler = NucleusSampler::default();
+        let mut mapper = ProbabilityMapper::default();
+        let mut uncertain = false;
+        for length in [2, 4, 16, 128] {
+            let values = vec![0.0; length];
+            for top_p in [0.5_f32.next_down(), 0.5, 0.5_f32.next_up()] {
+                let options = sampling(top_p);
+                let actual = sampler.distribution(&values, &options, &mut mapper).unwrap();
+                exact(&actual, &sampling_distribution(&values, &options, None).unwrap());
+                uncertain |= sampler.last_route == Some(Route::UncertainReuse);
+            }
+        }
+        assert!(uncertain);
+        let values = [1.0, 0.0, -0.0, -4.0];
+        for options in [
+            Sampling::Greedy {},
+            Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: Some(20),
+                top_p: Some(0.95),
+                min_p: None,
+            },
+            Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: None,
+                top_p: None,
+                min_p: None,
+            },
+            Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: None,
+                top_p: Some(1.0),
+                min_p: None,
+            },
+            Sampling::Stochastic {
+                temperature: 1.0,
+                top_k: None,
+                top_p: Some(0.95),
+                min_p: Some(0.1),
+            },
+        ] {
+            let actual = sampler.distribution(&values, &options, &mut mapper).unwrap();
+            exact(&actual, &sampling_distribution(&values, &options, None).unwrap());
+            assert!(sampler.last_route == Some(Route::Ineligible));
+        }
+        for invalid in [vec![], vec![f32::NAN], vec![0.0, f32::INFINITY], vec![f32::NEG_INFINITY, 0.0]] {
+            assert!(sampler.distribution(&invalid, &sampling(0.95), &mut mapper).is_err());
+            assert!(sampler.indices.is_empty() && sampler.probabilities.is_empty());
+        }
+    }
+}
