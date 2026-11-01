@@ -26,13 +26,21 @@ measurement window are separate from the current fixed-checkpoint comparison.
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
+**GLM-5.3-Flash, MLX-Serve GGUF baseline (2026-11-01).**
+The same existing UD-Q2_K_XL checkpoint measured **35.44 tok/s** through
+MLX-Serve 26.10.3's embedded llama.cpp backend, or **34.33** with the first
+token excluded from the numerator. Four measured requests passed individual
+host screens after quiet admission. The packed finite-check fusion trial
+passed numerical checks and did not establish a performance benefit; the
+production kernels remain unchanged. See the [baseline and trial report](GLM53_MLX_BASELINE_2026_11_01.md).
+
 **Native GLM-5.3-Flash and Qwen3.8-Flash-Next integration (2026-10-28).**
 Qwen's initial mixed-precision Lily-format path measures 77.18 tok/s warm decode at 4K
 input and 256 outputs, with speculation disabled. The original Pipe checkpoint
 improves from 23.16 to 43.70 tok/s on its matched short F32 workload. See the
 [mixed-precision study](QWEN38_MIXED_PRECISION_2026_10_28.md) for distinct artifacts,
-precision policies and source validation. GLM's current 9.04 versus 8.13 tok/s
-result remains in the [decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md).
+precision policies and source validation. GLM's earlier 9.04 versus 8.13 tok/s
+result remains source-bound historical evidence in the [decode graph study](GLM_QWEN_DECODE_GRAPH_2026_10_28.md).
 Earlier Qwen throughput and kernel measurements remain historical records for
 their named builds.
 
@@ -109,7 +117,8 @@ rejected, inconclusive and deferred outcomes with source and evidence links.
 | [Qwen HC and GDN kernels](QWEN38_KERNELS_2026_10_29.md) | Current kernels; exact references and component gains; same-loaded-model top-k observation +1.93%, nucleus unchanged; between-load throughput remains unstable |
 | [Qwen sampled generation and BF16 profiling](QWEN38_SAMPLED_BF16_2026_10_28.md) | Sampler/scheduling baseline at fixed quantization: repeat-window warm gains of 48.33% with top-k 20 and 31.84% without top-k; exact seeded outputs |
 | [Qwen mixed-precision native inference](QWEN38_MIXED_PRECISION_2026_10_28.md) | Initial Lily integration: 77.18 tok/s at 4K without speculation; original Pipe/F32 checkpoint 43.70 tok/s on the matched short workload |
-| [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Current GLM result; earlier Qwen throughput superseded, source-bound validation retained |
+| [GLM MLX-Serve baseline and packed finite-check trial](GLM53_MLX_BASELINE_2026_11_01.md) | Screened same-GGUF baseline 35.44 reported / 34.33 useful tok/s; trial not admitted, original kernels retained |
+| [Native GLM and Qwen decode graphs](GLM_QWEN_DECODE_GRAPH_2026_10_28.md) | Historical GLM graph comparison; earlier Qwen throughput superseded, source-bound validation retained |
 | [Native GLM and Qwen graph and kernels](GLM_QWEN_NATIVE_GRAPH_2026_10_28.md) | Earlier stage-chaining study; superseded throughput, source-bound validation retained |
 | [Native GLM and Qwen optimization](GLM_QWEN_NATIVE_OPTIMIZATION_2026_10_28.md) | Initial no-copy and batching study; build identities and validation remain source-bound historical evidence |
 | [MLX-informed generation optimization](MLX_GENERATION_OPTIMIZATION_2026_10_20.md) | Two decode changes accepted after bitwise validation; the throughput they produced is included in the current result |

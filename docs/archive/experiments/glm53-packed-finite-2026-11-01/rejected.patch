@@ -1,0 +1,387 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/decode_graph.rs b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+index 94cabca3..5c8f35b5 100644
+--- a/crates/stark-engine/src/engine/hybrid/decode_graph.rs
++++ b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+@@ -554,7 +554,7 @@ impl DecodeGraph {
+         let parameters = operation.parameters_for_input(input.len)?;
+         let output = self.scratch(operation.rows * operation.matrices.len())?;
+         let executor = executor()?;
+-        let checked = matches!(operation.format, MatrixFormat::Affine { .. }) && !self.separate_finite;
++        let checked = !self.separate_finite;
+         let typed = checked
+             && !self.byte_loads
+             && operation.matrices.iter().all(|matrix| matrix.aligned_affine_loads(operation.format));
+@@ -562,7 +562,17 @@ impl DecodeGraph {
+         let uint4 = chunk32
+             && !self.scalar_uint_loads
+             && operation.matrices.iter().all(|matrix| matrix.codes.offset.is_multiple_of(16));
+-        let pipeline = if uint4 && self.factored_affine {
++        let graph_checked_name = match operation.format {
++            MatrixFormat::Packed(13 | 14) => Some("hybrid_graph_packed_block_matvec"),
++            MatrixFormat::Packed(17 | 18) => Some("hybrid_graph_iq_matvec_vector8"),
++            MatrixFormat::Packed(_) => Some("hybrid_graph_packed_matvec"),
++            MatrixFormat::Affine {
++                ..
++            } => None,
++        };
++        let pipeline = if checked && let Some(name) = graph_checked_name {
++            executor.checked_graph_pipeline(operation.format, name)?
++        } else if uint4 && self.factored_affine {
+             executor.cached_pipeline(
+                 operation.format,
+                 "hybrid_graph_affine_matvec_factored",
+@@ -1317,6 +1327,143 @@ mod tests {
+         }
+     }
+ 
++    #[stark_test]
++    fn checked_packed_projection_matches_scans_and_rejects_nonfinite_values() {
++        fn matrix(
++            kind: u32,
++            rows: usize,
++            columns: usize,
++            seed: usize,
++        ) -> MappedMatrix {
++            let (block, size) = super::super::weights::block_layout(kind).unwrap();
++            let mut codes = Vec::with_capacity(rows * columns / block * size);
++            for row in 0..rows {
++                for number in 0..columns / block {
++                    let mut encoded: Vec<u8> =
++                        (0..size).map(|i| ((i * 37 + number * 13 + row * 23 + seed) % 256) as u8).collect();
++                    let half_offsets: &[usize] = match kind {
++                        1 | 8 | 16 | 17 | 18 | 23 => &[0],
++                        10 => &[80, 82],
++                        11 => &[108],
++                        12 | 13 => &[0, 2],
++                        14 => &[208],
++                        _ => &[],
++                    };
++                    for &at in half_offsets {
++                        encoded[at..at + 2].copy_from_slice(&half::f16::from_f32(0.125).to_bits().to_le_bytes());
++                    }
++                    if kind == 0 {
++                        for value in encoded.chunks_exact_mut(4) {
++                            value.copy_from_slice(&0.01f32.to_le_bytes());
++                        }
++                    } else if kind == 30 {
++                        encoded.copy_from_slice(&half::bf16::from_f32(0.125).to_bits().to_le_bytes());
++                    }
++                    codes.extend(encoded);
++                }
++            }
++            let storage = buffer(executor().unwrap(), &codes).unwrap();
++            MappedMatrix {
++                codes: MappedSlice {
++                    buffer: storage,
++                    offset: 0,
++                    length: codes.len(),
++                    registered_length: codes.len(),
++                },
++                planes: None,
++            }
++        }
++
++        let formats = [0, 1, 30, 8, 10, 11, 12, 13, 14, 16, 17, 18, 23];
++        for kind in formats {
++            let (block, _) = super::super::weights::block_layout(kind).unwrap();
++            let (rows, columns) = (3, block.max(256));
++            let operation = MappedOperation {
++                matrices: vec![matrix(kind, rows, columns, 1), matrix(kind, rows, columns, 17)],
++                inputs: &[],
++                rows,
++                columns,
++                rows_per_batch: 0,
++                format: MatrixFormat::Packed(kind),
++            };
++            let values = (0..2 * columns).map(|i| (i as f32 * 0.17).sin()).collect::<Vec<_>>();
++            let input = DecodeGraph::upload(&values).unwrap();
++            let mut fused = DecodeGraph::new().unwrap();
++            fused.separate_finite = false;
++            let output = fused.mapped(&operation, &input).unwrap();
++            let fused_values = fused.finish(&[output]).unwrap();
++
++            let mut scanned = DecodeGraph::new().unwrap();
++            scanned.separate_finite = true;
++            let output = scanned.mapped(&operation, &input).unwrap();
++            let scanned_values = scanned.finish(&[output]).unwrap();
++            assert!(
++                fused_values
++                    .iter()
++                    .flatten()
++                    .zip(scanned_values.iter().flatten())
++                    .all(|(a, b)| a.to_bits() == b.to_bits()),
++                "finite packed result bits changed for GGML type {kind}"
++            );
++
++            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++                for separate_finite in [false, true] {
++                    let mut graph = DecodeGraph::new().unwrap();
++                    graph.separate_finite = separate_finite;
++                    let input = DecodeGraph::zeros(columns).unwrap();
++                    // Bypass host upload validation to verify the GPU-side
++                    // sticky failure contract for every packed kernel family.
++                    unsafe {
++                        input.buffer.contents().as_ptr().cast::<f32>().add(input.offset / 4 + 5).write(poison);
++                    }
++                    let poisoned = MappedOperation {
++                        matrices: vec![operation.matrices[0].clone()],
++                        inputs: &[],
++                        rows,
++                        columns,
++                        rows_per_batch: 0,
++                        format: operation.format,
++                    };
++                    let output = graph.mapped(&poisoned, &input).unwrap();
++                    assert!(graph.finish(&[output]).is_err(), "GGML type {kind} accepted {poison:?}");
++                }
++            }
++        }
++
++        let rows = 3;
++        let columns = 256;
++        let mut codes = Vec::with_capacity(rows * columns * 4);
++        for _ in 0..rows * columns {
++            codes.extend_from_slice(&2.0f32.to_le_bytes());
++        }
++        let storage = buffer(executor().unwrap(), &codes).unwrap();
++        let operation = MappedOperation {
++            matrices: vec![MappedMatrix {
++                codes: MappedSlice {
++                    buffer: storage,
++                    offset: 0,
++                    length: codes.len(),
++                    registered_length: codes.len(),
++                },
++                planes: None,
++            }],
++            inputs: &[],
++            rows,
++            columns,
++            rows_per_batch: 0,
++            format: MatrixFormat::Packed(0),
++        };
++        for separate_finite in [false, true] {
++            let mut graph = DecodeGraph::new().unwrap();
++            graph.separate_finite = separate_finite;
++            let input = DecodeGraph::upload(&vec![f32::MAX; columns]).unwrap();
++            let projected = graph.mapped(&operation, &input).unwrap();
++            let gate = DecodeGraph::upload(&vec![1.0; rows]).unwrap();
++            let clipped = graph.swiglu(&projected, &gate, Some(1.0)).unwrap();
++            assert!(graph.finish(&[clipped]).is_err(), "packed overflow was hidden by SwiGLU clipping");
++        }
++    }
++
+     #[stark_test]
+     fn deferred_arena_views_survive_command_boundaries_and_reject_overlapping_copies() {
+         let mut first = DecodeGraph::new().unwrap();
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_block_matvec.metal b/crates/stark-engine/src/engine/hybrid/packed_block_matvec.metal
+index 04d37a8b..4ed483da 100644
+--- a/crates/stark-engine/src/engine/hybrid/packed_block_matvec.metal
++++ b/crates/stark-engine/src/engine/hybrid/packed_block_matvec.metal
+@@ -62,3 +62,79 @@ kernel void hybrid_packed_block_matvec(
+     const float total = simd_sum(sum);
+     if (lane == 0) output[row] = total;
+ }
++
++// Graph-only checked counterpart; preserve the standalone kernel's unbound
++// resource contract and identical per-lane arithmetic/reduction chronology.
++kernel void hybrid_graph_packed_block_matvec(
++    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
++    constant uint4 &offsets [[buffer(6)]], device atomic_uint *failure [[buffer(30)]],
++    uint tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
++    uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint row = tile * 2 + simd_group;
++    if (row >= p.rows) return;
++    const uint kind = hybrid_packed_kind;
++    device const uchar *codes = codes_base + offsets.x;
++    const uint block_shift = kind == 8 ? 5 : 8;
++    const ulong row_offset = ulong(row) * (p.columns >> block_shift) * hybrid_packed_block_bytes;
++    const ulong input_offset = p.group ? ulong(row / p.group) * p.columns : 0;
++    float sum = 0;
++    if (kind == 8) {
++        for (uint col = lane; col < p.columns; col += 32) {
++            device const uchar *block = codes + row_offset + ulong(col >> 5) * 34;
++            const float x = input[input_offset + col];
++            if (!isfinite(x)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            const float w = hybrid_half(block) * float(as_type<char>(block[2 + lane]));
++            sum += w * x;
++        }
++    } else {
++        for (uint first = 0; first < p.columns; first += 256) {
++            device const uchar *block = codes + row_offset + ulong(first >> 8) * hybrid_packed_block_bytes;
++            if (kind == 13) {
++                const float d = hybrid_half(block);
++                const float dmin = hybrid_half(block + 2);
++                const uint high = block[16 + lane];
++                #pragma clang loop unroll(full)
++                for (uint part = 0; part < 4; ++part) {
++                    const uint low = block[48 + part * 32 + lane];
++                    const uint q0 = (low & 15) | (((high >> (part * 2)) & 1) << 4);
++                    const uint q1 = (low >> 4) | (((high >> (part * 2 + 1)) & 1) << 4);
++                    const uint2 sm0 = hybrid_scale_min(block + 4, part * 2);
++                    const uint2 sm1 = hybrid_scale_min(block + 4, part * 2 + 1);
++                    const float w0 = d * float(sm0.x) * float(q0) - dmin * float(sm0.y);
++                    const float w1 = d * float(sm1.x) * float(q1) - dmin * float(sm1.y);
++                    const float x0 = input[input_offset + first + part * 64 + lane];
++                    const float x1 = input[input_offset + first + part * 64 + lane + 32];
++                    if (!isfinite(x0) || !isfinite(x1)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++                    sum += w0 * x0;
++                    sum += w1 * x1;
++                }
++            } else {
++                const float d = hybrid_half(block + 208);
++                #pragma clang loop unroll(full)
++                for (uint half_block = 0; half_block < 2; ++half_block) {
++                    const uint low0 = block[half_block * 64 + lane];
++                    const uint low1 = block[half_block * 64 + lane + 32];
++                    const uint high = block[128 + half_block * 32 + lane];
++                    #pragma clang loop unroll(full)
++                    for (uint part = 0; part < 4; ++part) {
++                        const uint low = part & 1 ? low1 : low0;
++                        const int q = int(((low >> (part >= 2 ? 4 : 0)) & 15)
++                            | (((high >> (part * 2)) & 3) << 4)) - 32;
++                        const float scale = float(as_type<char>(block[192 + half_block * 8 + lane / 16 + part * 2]));
++                        const float w = d * scale * float(q);
++                        const uint at = first + half_block * 128 + part * 32 + lane;
++                        const float x = input[input_offset + at];
++                        if (!isfinite(x)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++                        sum += w * x;
++                    }
++                }
++            }
++        }
++    }
++    const float total = simd_sum(sum);
++    if (lane == 0) {
++        if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        output[row] = total;
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_matvec.metal b/crates/stark-engine/src/engine/hybrid/packed_matvec.metal
+index f5e549ac..6b8d94e8 100644
+--- a/crates/stark-engine/src/engine/hybrid/packed_matvec.metal
++++ b/crates/stark-engine/src/engine/hybrid/packed_matvec.metal
+@@ -118,6 +118,87 @@ kernel void hybrid_packed_matvec(device const uchar *codes_base [[buffer(0)]],
+     hybrid_write_sum(sum,output,row,lane,simd_lane,simd_group,partial);
+ }
+ 
++// Graph-only checked variant. Standalone pipeline signatures stay unchanged,
++// so callers that do not own the graph failure word never bind buffer 30.
++kernel void hybrid_graph_packed_matvec(device const uchar *codes_base [[buffer(0)]],
++    device const float *input [[buffer(1)]], device float *output [[buffer(2)]],
++    constant HybridMatrixParams &p [[buffer(3)]], constant uint4 &offsets [[buffer(6)]],
++    device atomic_uint *failure [[buffer(30)]], uint row [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_threadgroup]], uint simd_lane [[thread_index_in_simdgroup]],
++    uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    threadgroup float partial[8];
++    device const uchar *codes=codes_base+offsets.x;
++    float sum=0;
++    ulong input_offset=p.group ? ulong(row/p.group)*p.columns : 0;
++    uint block_shift=hybrid_packed_block==256?8:(hybrid_packed_block==32?5:0);
++    ulong row_offset=ulong(row)*(p.columns>>block_shift)*hybrid_packed_block_bytes;
++    for (uint col=lane;col<p.columns;col+=256) {
++        ulong block_offset=ulong(col>>block_shift)*hybrid_packed_block_bytes;
++        const float x = input[input_offset+col];
++        if (!isfinite(x)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        sum+=hybrid_quant(codes+row_offset+block_offset,hybrid_packed_kind,col&(hybrid_packed_block-1))*x;
++    }
++    float total=simd_sum(sum);
++    if (simd_lane==0) partial[simd_group]=total;
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (lane==0) {
++        float result=0;
++        for (uint i=0;i<8;++i) result+=partial[i];
++        if (!isfinite(result)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        output[row]=result;
++    }
++}
++
++// Graph-only checked IQ2 kernels use the same decoded values and reduction
++// tree as hybrid_iq_matvec_vector8, with sticky finite checks before return.
++kernel void hybrid_graph_iq_matvec_vector8(
++    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
++    constant uint4 &offsets [[buffer(6)]], device atomic_uint *failure [[buffer(30)]],
++    uint tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
++    uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint row = tile * 8 + simd_group;
++    if (row >= p.rows) return;
++    const uint kind = hybrid_packed_kind;
++    device const uchar *codes = codes_base + offsets.x;
++    const ulong row_offset = ulong(row) * (p.columns >> 8) * hybrid_packed_block_bytes;
++    const ulong input_offset = p.group ? ulong(row / p.group) * p.columns : 0;
++    float sum = 0;
++    for (uint col = lane * 8; col < p.columns; col += 256) {
++        device const uchar *block = codes + row_offset + ulong(col >> 8) * hybrid_packed_block_bytes;
++        const uint part = (col & 255) >> 5;
++        const uint l = (col & 31) >> 3;
++        uint signs;
++        ulong grid;
++        float scale;
++        if (kind == 17) {
++            const uint q = hybrid_u16(block + 2 + part * 8 + l * 2);
++            const uint scales = block[66 + part];
++            grid = iq2xs_grid[q & 511];
++            signs = ksigns[q >> 9];
++            scale = hybrid_half(block) * (0.5f + float((scales >> (l < 2 ? 0 : 4)) & 15)) * 0.25f;
++        } else {
++            const uint ss = hybrid_u32(block + 66 + part * 4);
++            signs = ksigns[(ss >> (7 * l)) & 127];
++            const uint at = 2 + part * 8 + 2 * l;
++            grid = ulong(iq3xxs_grid[block[at]]) | (ulong(iq3xxs_grid[block[at + 1]]) << 32);
++            scale = hybrid_half(block) * (0.5f + float(ss >> 28)) * 0.5f;
++        }
++        #pragma clang loop unroll(full)
++        for (uint j = 0; j < 8; ++j) {
++            const float w = scale * float((grid >> (8 * j)) & 255ul) * ((signs & (1 << j)) ? -1.0f : 1.0f);
++            const float x = input[input_offset + col + j];
++            if (!isfinite(x)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            sum += w * x;
++        }
++    }
++    const float total = simd_sum(sum);
++    if (lane == 0) {
++        if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++        output[row] = total;
++    }
++}
++
+ kernel void hybrid_affine_matvec(device const uchar *codes_base [[buffer(0)]],
+     device const float *input [[buffer(1)]], device float *output [[buffer(2)]],
+     constant HybridMatrixParams &p [[buffer(3)]], device const uchar *scales_base [[buffer(4)]],
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+index 90762692..3192eff2 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -44,6 +44,7 @@ struct Executor {
+     uint4_indexed_pipelines: PipelineCache,
+     factored_matrix_pipelines: PipelineCache,
+     factored_indexed_pipelines: PipelineCache,
++    graph_checked_pipelines: PipelineCache,
+     ordered_rms: bool,
+     #[cfg(test)]
+     tiled_pipelines: PipelineCache,
+@@ -504,6 +505,7 @@ fn executor() -> Result<&'static Executor> {
+                 uint4_indexed_pipelines: Mutex::new(HashMap::new()),
+                 factored_matrix_pipelines: Mutex::new(HashMap::new()),
+                 factored_indexed_pipelines: Mutex::new(HashMap::new()),
++                graph_checked_pipelines: Mutex::new(HashMap::new()),
+                 ordered_rms: std::env::var_os("STARK_HYBRID_ORDERED_RMS").is_some_and(|value| value == "1"),
+                 #[cfg(test)]
+                 tiled_pipelines: Mutex::new(HashMap::new()),
+@@ -1202,6 +1204,14 @@ impl Executor {
+         Ok(pipeline)
+     }
+ 
++    fn checked_graph_pipeline(
++        &self,
++        format: MatrixFormat,
++        name: &str,
++    ) -> Result<PipelineState> {
++        self.cached_pipeline(format, name, &self.graph_checked_pipelines)
++    }
++
+     fn run_mapped(
+         &self,
+         operations: &[MappedOperation<'_>],

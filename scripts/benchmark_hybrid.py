@@ -15,7 +15,10 @@ def sha(path: Path) -> str:
 
 
 def run(args):
+    from tokenizers import Tokenizer
+
     codec, template = load_template(args.model)
+    tokenizer = Tokenizer.from_file(str(args.model / "tokenizer.json"))
     prompt = template.render(
         messages=[{"role": "user", "content": "Hello."}],
         tools=None,
@@ -27,10 +30,12 @@ def run(args):
     report = {
         "schema_version": 1,
         "scope": "serialized_native_text_greedy",
+        "harness_sha256": sha(Path(__file__)),
         "worker_sha256": sha(args.worker),
         "configuration_sha256": sha(args.model / "config.json"),
         "source_receipt_sha256": sha(args.model / "native-source.json"),
         "requested_output_tokens": args.tokens,
+        "warmup_replays": args.warmups,
         "replays": [],
     }
     worker = Worker(args.worker.resolve(), args.model.resolve(), 3600)
@@ -61,6 +66,7 @@ def run(args):
                 raise ValueError("generation_failed_or_too_short")
             item = {
                 "replay": replay,
+                "warmup": replay < args.warmups,
                 "wall_seconds": time.monotonic() - started,
                 "sampled_tokens": result["sampled_tokens"],
                 "finish_reason": result["finish_reason"],
@@ -68,6 +74,9 @@ def run(args):
                     json.dumps(
                         result["generated_token_ids"], separators=(",", ":")
                     ).encode()
+                ).hexdigest(),
+                "output_text_sha256": hashlib.sha256(
+                    tokenizer.decode(result["generated_token_ids"], skip_special_tokens=False).encode()
                 ).hexdigest(),
             }
             for key in (
@@ -80,7 +89,7 @@ def run(args):
                 item[key] = result[key]
             report["replays"].append(item)
             print(json.dumps({"completed_replay": replay}), flush=True)
-        stable = report["replays"][1:] or report["replays"]
+        stable = report["replays"][args.warmups:] or report["replays"]
         report["median_warm_decode_tokens_per_second"] = statistics.median(
             item["output_tokens_per_second"] for item in stable
         )
@@ -107,7 +116,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--tokens", type=int, default=32, choices=range(8, 129))
     parser.add_argument("--replays", type=int, default=3, choices=range(2, 9))
+    parser.add_argument("--warmups", type=int, default=1, choices=range(0, 8))
     args = parser.parse_args()
+    if args.warmups >= args.replays:
+        parser.error("warmups must be smaller than replays")
     try:
         run(args)
     except (OSError, ValueError, KeyError, TypeError, ChatError):
