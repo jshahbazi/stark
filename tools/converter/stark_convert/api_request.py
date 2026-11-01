@@ -7,6 +7,7 @@ import math
 import re
 from typing import Any
 
+from .api_tools import MAX_TOOL_RESULT_BYTES, normalize_calls, normalize_tool_options, validate_history
 from .local_api import APIError
 from .media import MediaError, parse_image_url
 
@@ -33,6 +34,10 @@ _FIELDS = {
     "user",
     "metadata",
     "mtp",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "store",
 }
 
 
@@ -94,20 +99,43 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
         raise _bad("messages must be a non-empty array.")
     result = []
     for message in value:
-        if not isinstance(message, dict) or "role" not in message or "content" not in message:
-            raise _bad("Each message requires role and content.")
-        if set(message) - {"role", "content", "name", "reasoning_content"}:
+        if not isinstance(message, dict) or "role" not in message:
+            raise _bad("Each message requires a role.")
+        if set(message) - {"role", "content", "name", "reasoning_content", "tool_calls", "tool_call_id"}:
             raise _bad("Unsupported message fields.", "unsupported_parameter")
         role = message["role"]
         if role == "developer":
             role = "system"
-        if not isinstance(role, str) or role not in {"system", "user", "assistant"}:
+        if not isinstance(role, str) or role not in {"system", "user", "assistant", "tool"}:
             raise _bad("Unsupported message role.", "unsupported_parameter")
         if "name" in message and (
             not isinstance(message["name"], str) or len(message["name"]) > 64 or not _NAME.fullmatch(message["name"])
         ):
             raise _bad("Message name must be an ASCII identifier of at most 64 characters.")
-        normalized = {"role": role, "content": _content(message["content"], images if role == "user" else None)}
+        calls = None
+        if "tool_calls" in message:
+            if role != "assistant":
+                raise _bad("tool_calls is supported only on assistant messages.")
+            calls = normalize_calls(message["tool_calls"])
+        content = message.get("content")
+        if content is None and calls:
+            content = None
+        elif "content" not in message:
+            raise _bad("Messages require content unless an assistant supplies tool_calls.")
+        else:
+            content = _content(content, images if role == "user" else None)
+        normalized = {"role": role, "content": content}
+        if calls:
+            normalized["tool_calls"] = calls
+        if role == "tool":
+            identifier = message.get("tool_call_id")
+            if not isinstance(identifier, str) or not 1 <= len(identifier) <= 128:
+                raise _bad("Tool results require a bounded tool_call_id.")
+            if len(content.encode("utf-8")) > MAX_TOOL_RESULT_BYTES:
+                raise _bad("A tool result exceeds the 256 KiB byte limit.")
+            normalized["tool_call_id"] = identifier
+        elif "tool_call_id" in message:
+            raise _bad("tool_call_id is supported only on tool-result messages.")
         if "reasoning_content" in message:
             reasoning = message["reasoning_content"]
             if role != "assistant" or not isinstance(reasoning, str):
@@ -120,7 +148,7 @@ def _messages(value: Any, images: list | None = None) -> list[dict]:
 
 
 def parse_chat_request(
-    payload: Any, max_output: int, vocab_size: int, *, allow_images: bool = False
+    payload: Any, max_output: int, vocab_size: int, *, allow_images: bool = False, allow_tools: bool = False
 ) -> dict[str, Any]:
     """Normalize content without exposing image bytes to templates or worker JSON."""
     if not isinstance(payload, dict):
@@ -128,6 +156,8 @@ def parse_chat_request(
     unknown = set(payload) - _FIELDS
     if unknown:
         raise _bad("Unsupported request fields.", "unsupported_parameter")
+    if payload.get("store") is not None and payload["store"] is not False:
+        raise _bad("Stark does not store completions. Use store=false or omit it.", "unsupported_parameter")
     model = payload.get("model")
     if model is not None and (not isinstance(model, str) or not model):
         raise _bad("model must be a non-empty string.")
@@ -216,10 +246,16 @@ def parse_chat_request(
         raise _bad("stop must contain at most four non-empty strings of at most 1024 characters.")
     images = [] if allow_images else None
     messages = _messages(payload.get("messages"), images)
+    tool_options = normalize_tool_options(payload)
+    has_tool_history = validate_history(messages)
+    if not allow_tools and (tool_options["tools"] or has_tool_history):
+        raise _bad("The loaded model and chat template are not qualified for tool use.", "tools_unsupported")
+    if images and (tool_options["tools"] or has_tool_history):
+        raise _bad("Image input and tool use cannot be combined.", "unsupported_parameter")
     text_bytes = sum(
         len(message["content"].encode("utf-8"))
         if isinstance(message["content"], str)
-        else sum(len(part.get("text", "").encode("utf-8")) for part in message["content"])
+        else sum(len(part.get("text", "").encode("utf-8")) for part in (message["content"] or []))
         for message in messages
     ) + sum(len(message.get("reasoning_content", "").encode("utf-8")) for message in messages)
     if text_bytes > 1024 * 1024:
@@ -244,4 +280,6 @@ def parse_chat_request(
         "stop": stop,
         "image": images[0] if images else None,
         "mtp": payload.get("mtp"),
+        "has_tool_history": has_tool_history,
+        **tool_options,
     }

@@ -263,6 +263,7 @@ def desktop(tmp_path, attachments):
     store, root = attachments
     value = Desktop(Path("/synthetic/worker"), tmp_path / "library", output=io.StringIO())
     value.attachments = store
+    value.context_capacity_known = True
     value.worker = ImageWorker()
     value.active_model = "synthetic-model"
     value.active_mode = "chat"

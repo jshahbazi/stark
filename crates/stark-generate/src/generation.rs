@@ -9,7 +9,6 @@ use serde_json::{Value, json};
 
 use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
 
-pub(crate) const MAX_CONTEXT_TOKENS: u32 = 16_384;
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
 const MAX_EXTRA_STOPS: usize = 256;
@@ -201,7 +200,6 @@ fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
         && metadata.processed_dimensions[1].checked_div(16) == Some(height)
         && metadata.processed_dimensions.iter().all(|dimension| dimension.is_multiple_of(16))
         && metadata.input_tokens >= metadata.image_tokens as usize + 2
-        && metadata.input_tokens <= MAX_CONTEXT_TOKENS as usize
         && metadata.image_tokens > 0
         && metadata.image_tokens <= 1024
 }
@@ -495,6 +493,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         let mtp = backend.mtp_capabilities();
         if backend.vocab_size() == 0
             || backend.vocab_size() > u32::MAX as usize
+            || backend.max_context_length() == Some(0)
             || !valid_ids(backend.eos_token_ids(), backend.vocab_size())
             || mtp.is_some_and(|capabilities| {
                 capabilities.max_drafts == 0
@@ -550,7 +549,6 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         options: &GenerationOptions,
     ) -> Result<(), &'static str> {
         if options.context_tokens == 0
-            || options.context_tokens > MAX_CONTEXT_TOKENS
             || options.max_new_tokens == 0
             || options.max_new_tokens > MAX_NEW_TOKENS
             || options.extra_stop_token_ids.len() > MAX_EXTRA_STOPS
@@ -900,7 +898,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     let mut readiness = json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
         "mode":"text-generation-v1","operations":["tokenize","decode","generate"],
         "state_policy":"fresh-per-request","vocab_size":worker.backend.vocab_size(),
-        "max_context_tokens":MAX_CONTEXT_TOKENS.min(worker.backend.max_context_length().unwrap_or(MAX_CONTEXT_TOKENS)),
+        "max_context_tokens":worker.backend.max_context_length().unwrap_or(u32::MAX),
         "max_new_tokens":MAX_NEW_TOKENS,"eos_token_ids":worker.backend.eos_token_ids(),
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
@@ -1011,6 +1009,7 @@ mod tests {
     }
 
     struct FakeBackend {
+        max_context: Option<u32>,
         tokens: Vec<Result<u64, &'static str>>,
         eos: Vec<u32>,
         generation_calls: usize,
@@ -1053,7 +1052,7 @@ mod tests {
             8
         }
         fn max_context_length(&self) -> Option<u32> {
-            Some(1024)
+            self.max_context
         }
         fn eos_token_ids(&self) -> &[u32] {
             &self.eos
@@ -1223,6 +1222,7 @@ mod tests {
     }
     fn worker() -> GenerationWorker<FakeBackend> {
         GenerationWorker::new(FakeBackend {
+            max_context: Some(1024),
             tokens: vec![Ok(3), Ok(4), Ok(1), Ok(7)],
             eos: vec![1],
             generation_calls: 0,
@@ -2009,6 +2009,50 @@ mod tests {
         assert_eq!(worker.backend.inputs.last(), Some(&vec![2]));
         assert_eq!(worker.backend.seeds.last(), Some(&0));
         assert_eq!(worker.backend.sampling.last(), Some(&Sampling::Greedy {}));
+    }
+
+    #[test]
+    fn image_metadata_accepts_long_text_contexts() {
+        assert!(valid_image_metadata(&PreparedImageMetadata {
+            input_tokens: 16_385,
+            image_tokens: 4,
+            grid: [1, 4, 4],
+            processed_dimensions: [64, 64],
+        }));
+    }
+
+    #[test]
+    fn context_capacity_uses_the_loaded_model_maximum() {
+        let mut worker = worker();
+        worker.backend.max_context = Some(262_144);
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut std::io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["max_context_tokens"], 262_144);
+
+        let mut request = standard();
+        request["context_tokens"] = json!(262_144);
+        // Exercise an actual prompt beyond the former 16K boundary.
+        request["input_token_ids"] = json!(vec![2; 16_385]);
+        assert_eq!(post(&mut worker, request.clone())["finish_reason"], "eos");
+        assert_eq!(worker.backend.generation_calls, 1);
+        request["context_tokens"] = json!(262_145);
+        assert_eq!(post(&mut worker, request)["error"], "context_overflow");
+        assert_eq!(worker.backend.generation_calls, 1);
+        assert_eq!(post(&mut worker, standard())["finish_reason"], "eos");
+    }
+
+    #[test]
+    fn context_without_a_finite_model_maximum_uses_the_protocol_integer_range() {
+        let mut worker = worker();
+        worker.backend.max_context = None;
+        let mut output = Vec::new();
+        run_lines(&mut worker, &mut std::io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        let ready: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(ready["max_context_tokens"], u32::MAX);
+        let mut request = standard();
+        request["context_tokens"] = json!(u32::MAX);
+        assert_eq!(post(&mut worker, request)["finish_reason"], "eos");
     }
 
     #[test]

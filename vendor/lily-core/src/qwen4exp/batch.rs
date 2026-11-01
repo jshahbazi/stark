@@ -118,7 +118,7 @@ impl Qwen4ExpModel {
             .map(|_| {
                 Ok(RowScratch {
                     sampler: SamplerScratch::new(ctx, cfg.vocab_size)?,
-                    qsa: QsaScratch::new(ctx, cfg, MAX_SEQ, 1)?,
+                    qsa: QsaScratch::new(ctx, cfg, cfg.max_position_embeddings, 1)?,
                     sdpa_partials: Tensor::zeros(ctx, &[nq, splits, hd], DType::F32)?,
                     sdpa_stats: Tensor::zeros(ctx, &[nq, splits, 2], DType::F32)?,
                 })
@@ -288,7 +288,9 @@ impl Qwen4ExpModel {
         let began = mark();
         let m = rows.len();
         self.check_batch_rows(rows)?;
-        self.ensure_prefill_scratch(ctx, s, m)?;
+        let context_capacity =
+            rows.iter().map(|row| row.state.capacity()).max().unwrap_or(1);
+        self.ensure_prefill_scratch(ctx, s, m, context_capacity)?;
         self.ensure_batch_scratch(ctx, s)?;
         let s = &*s;
         let (ps, bs) = self.batch_views(s, m)?;

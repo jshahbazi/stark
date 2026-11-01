@@ -59,7 +59,7 @@ impl Qwen4ExpModel {
         );
         let m = tokens.len();
         state.ensure_capacity(ctx, state.pos + m)?;
-        self.ensure_prefill_scratch(ctx, s, m)?;
+        self.ensure_prefill_scratch(ctx, s, m, state.capacity())?;
         let capacity =
             s.prefill.as_ref().ok_or_else(|| anyhow::anyhow!("candidate scratch"))?;
         let ps = capacity.chunk(&tokens)?;
@@ -110,7 +110,7 @@ impl Qwen4ExpModel {
         ensure!((1..=MAX_DRAFTS).contains(&drafts), "invalid host draft count");
         ensure!((first as usize) < self.config.vocab_size, "invalid host draft input");
         state.ensure_capacity(ctx, state.pos + drafts)?;
-        self.ensure_prefill_scratch(ctx, s, 1)?;
+        self.ensure_prefill_scratch(ctx, s, 1, state.capacity())?;
         let s = &*s;
         let mtp =
             self.weights.mtp.as_ref().ok_or_else(|| anyhow::anyhow!("no MTP head"))?;
@@ -205,7 +205,7 @@ impl Qwen4ExpModel {
         );
         let m = tokens.len();
         state.ensure_capacity(ctx, state.pos + m)?;
-        self.ensure_prefill_scratch(ctx, s, m)?;
+        self.ensure_prefill_scratch(ctx, s, m, state.capacity())?;
         let pos_before = state.pos;
         let hist_before = state.ple.as_ref().map(|p| p.hist);
         // Decode updates one window in place. Preserve its original in the

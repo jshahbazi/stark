@@ -155,6 +155,7 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     assert response["usage"] == {"prompt_tokens": 20, "completion_tokens": 4, "total_tokens": 24}
     assert desktop.messages == history
     assert desktop.worker.process is process
+
     assert desktop.api_models()[0]["id"] == model.name
     assert desktop.job is None
     assert all(e["event"] != "reply" for e in events(desktop))
@@ -169,6 +170,184 @@ def test_api_completions_are_stateless_and_share_loaded_worker(desktop, model):
     finish(desktop)
     assert len(desktop.messages) == 3
     assert desktop.worker.process is process
+
+
+@pytest.fixture
+def tool_desktop(desktop, model, monkeypatch):
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+    running(desktop, model)
+    seen = []
+    reply = {
+        "text": '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>',
+        "input_tokens": 24,
+        "output_tokens": 17,
+        "finish_reason": "eos",
+    }
+
+    def request(payload, **options):
+        seen.append(payload)
+        if payload["operation"] == "tokenize":
+            return {"token_count": 24, "token_ids": [2] * 24}
+        return dict(reply)
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: "qwen3-hermes-v1")
+    desktop.template = ImmutableSandboxedEnvironment().from_string("{{ tools | tojson }};{{ messages | tojson }}")
+    payload = {
+        "messages": [{"role": "user", "content": "synthetic fixture"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "parameters": {"type": "object", "properties": {"value": {"type": "integer"}}},
+                },
+            }
+        ],
+    }
+    return desktop, payload, seen, reply
+
+
+def test_tool_calls_render_and_replay_complete_history(tool_desktop):
+    desktop, payload, seen, _ = tool_desktop
+    response = desktop.api_complete(payload)
+    choice = response["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    message = choice["message"]
+    assert message["content"] is None
+    call = message["tool_calls"][0]
+    assert json.loads(call["function"]["arguments"]) == {"value": 3}
+    assert response["usage"] == {"prompt_tokens": 24, "completion_tokens": 17, "total_tokens": 41}
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    payload["messages"] += [message, {"role": "tool", "tool_call_id": call["id"], "content": "6"}]
+    desktop.api_complete(payload)
+    rendered = json.loads(seen[2]["text"].split(";", 1)[1])
+    assert rendered[-2]["tool_calls"][0]["function"]["arguments"] == {"value": 3}
+    assert rendered[-1]["tool_call_id"] == call["id"] and rendered[-1]["content"] == "6"
+    assert desktop.job is None and desktop.api_queue == []
+
+
+@pytest.mark.parametrize(
+    "failure", ["malformed", "unknown", "truncated", "context", "cancel", "replacement", "worker"]
+)
+def test_tool_failure_releases_request_and_never_delivers_partial_calls(tool_desktop, monkeypatch, failure):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    worker = desktop.worker
+    control = threading.Event()
+    if failure == "malformed":
+        reply["text"] = '<tool_call>{"name":"lookup","arguments":'
+    elif failure == "unknown":
+        reply["text"] = reply["text"].replace("lookup", "unavailable")
+    elif failure == "truncated":
+        reply["finish_reason"] = "length"
+    elif failure == "context":
+        payload["max_tokens"] = desktop.api_maximum
+        monkeypatch.setattr(worker, "request", lambda *args, **kwargs: {"token_count": 8192})
+    else:
+        original = desktop.infer
+
+        def infer(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if failure == "cancel":
+                control.set()
+            elif failure == "replacement":
+                desktop.epoch += 1
+            else:
+                raise ValueError
+            return result
+
+        monkeypatch.setattr(desktop, "infer", infer)
+    delivered = []
+    with pytest.raises(APIError):
+        desktop.api_complete(payload, on_delta=delivered.append, cancelled=control)
+    assert delivered == [] and desktop.job is None and desktop.api_queue == []
+    if failure in {"malformed", "unknown", "truncated", "cancel"}:
+        assert desktop.worker is worker
+        reply["text"], reply["finish_reason"] = "synthetic retry", "eos"
+        if failure != "cancel":
+            assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == "synthetic retry"
+    if failure == "worker":
+        assert desktop.worker is None
+
+
+def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_desktop):
+    import urllib.request
+
+    from stark_convert.local_api import LocalAPI
+
+    desktop, payload, _, _ = tool_desktop
+    buffered = desktop.api_complete(payload)["choices"][0]
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="b" * 64, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({**payload, "stream": True, "stream_options": {"include_usage": True}}).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            body = response.read()
+        chunks = [json.loads(line[6:]) for line in body.splitlines() if line.startswith(b"data: {")]
+        calls = [
+            call for chunk in chunks for choice in chunk["choices"] for call in choice["delta"].get("tool_calls", [])
+        ]
+        assert len(calls) == 1 and calls[0]["index"] == 0
+        assert calls[0]["function"] == buffered["message"]["tool_calls"][0]["function"]
+        assert any(c.get("finish_reason") == "tool_calls" for chunk in chunks for c in chunk["choices"])
+        assert chunks[-1]["usage"]["total_tokens"] == 41
+        assert body.count(b"data: [DONE]") == 1
+    finally:
+        api.close()
+
+
+def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    worker = desktop.worker
+    reply["text"] = "synthetic preamble\n" + reply["text"]
+
+    def disconnected(_text):
+        raise BrokenPipeError
+
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, on_delta=disconnected)
+    assert error.value.code == "request_cancelled"
+    assert desktop.worker is worker and desktop.job is None
+    assert desktop.api_complete(payload)["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_private_api_configuration_preserves_listener_on_port_conflict(desktop):
+    import socket
+    import urllib.error
+    import urllib.request
+
+    # Production command validation never accepts an ephemeral port.
+    with pytest.raises(DesktopError):
+        desktop.configure_api({"command": "configure_api", "api_key": "a" * 64, "port": 0})
+    desktop.start_api("a" * 64, port=0)
+    old = desktop.api
+    base = events(desktop)[-1]["base_url"]
+    occupied = socket.socket()
+    occupied.bind(("127.0.0.1", 0))
+    occupied.listen()
+    try:
+        desktop.configure_api({"command": "configure_api", "api_key": "b" * 64, "port": occupied.getsockname()[1]})
+        event = events(desktop)[-1]
+        assert event["event"] == "connection" and "in use" in event["message"]
+        assert event["base_url"] == base
+        assert desktop.api is old and "api_key" not in event
+        request = urllib.request.Request(base + "/models", headers={"Authorization": "Bearer " + "b" * 64})
+        with urllib.request.urlopen(request, timeout=2) as result:
+            assert result.status == 200
+    finally:
+        occupied.close()
+        desktop.api.close()
 
 
 def test_api_assistant_reasoning_history_reaches_model_template(desktop, model):
@@ -241,7 +420,7 @@ def test_http_rejects_unknown_model_with_public_ids(desktop, model, stream):
     from stark_convert.local_api import LocalAPI
 
     running(desktop, model)
-    api = LocalAPI(desktop.api_models, desktop.api_complete, port=0, cancellable=True)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="a" * 64, port=0, cancellable=True)
     info = api.start()
     try:
         request = Request(
@@ -265,7 +444,7 @@ def test_http_rejects_unknown_model_with_public_ids(desktop, model, stream):
         {"temperature": 3},
         {"temperature": False},
         {"n": 2},
-        {"tools": []},
+        {"tools": [{"type": "function", "function": {"name": "lookup"}}]},
         {"max_tokens": True},
         {"max_tokens": 4097},
         {"max_tokens": 1, "max_completion_tokens": 1},
@@ -323,7 +502,7 @@ def test_api_live_http_uses_desktop_model(desktop, model):
     import urllib.request
 
     identifier = running(desktop, model)
-    desktop.start_api()
+    desktop.start_api("a" * 64, port=0)
     details = next(e for e in events(desktop) if e["event"] == "connection")
     try:
         request = urllib.request.Request(
@@ -331,7 +510,7 @@ def test_api_live_http_uses_desktop_model(desktop, model):
             data=json.dumps(
                 {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True}
             ).encode(),
-            headers={"Authorization": "Bearer " + details["api_key"], "Content-Type": "application/json"},
+            headers={"Authorization": "Bearer " + "a" * 64, "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(request, timeout=5) as response:
             body = response.read()
@@ -339,7 +518,7 @@ def test_api_live_http_uses_desktop_model(desktop, model):
         text = "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
         assert text == "synthetic answer"
         assert b"data: [DONE]" in body
-        assert details["api_key"] not in desktop.registry.read_text()
+        assert "a" * 64 not in desktop.registry.read_text()
     finally:
         desktop.api.close()
 
@@ -460,9 +639,9 @@ def test_http_worker_request_overflow_preserves_model_and_allows_retry(desktop, 
     assert len(body) <= limit
     if overflow != "template":
         assert len(body) == limit
-    api = LocalAPI(desktop.api_models, desktop.api_complete, port=0, cancellable=True)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="a" * 64, port=0, cancellable=True)
     details = api.start()
-    headers = {"Authorization": "Bearer " + details["api_key"], "Content-Type": "application/json"}
+    headers = {"Authorization": "Bearer " + "a" * 64, "Content-Type": "application/json"}
     try:
         with pytest.raises(HTTPError) as error:
             urlopen(Request(details["base_url"] + "/chat/completions", data=body, headers=headers), timeout=5)
@@ -890,7 +1069,8 @@ def test_advanced_options_model_default_empty_override_and_restart(desktop, mode
     assert desktop.thinking is False
     replacement = Desktop(desktop.executable, desktop.data_dir, io.StringIO())
     assert replacement.system_prompt is None
-    assert (replacement.context, replacement.maximum, replacement.thinking) == (8192, 512, False)
+    assert (replacement.context, replacement.maximum, replacement.thinking) == (None, 512, False)
+    assert replacement.context_override is None
 
 
 @pytest.mark.parametrize(
@@ -934,6 +1114,89 @@ def test_advanced_options_reject_missing_fields_no_model_and_busy(desktop, model
     with pytest.raises(DesktopError, match="Wait for the current operation"):
         desktop.dispatch(advanced_options())
     desktop.dispatch({"command": "stop"})
+
+
+@pytest.mark.parametrize("context_limit", [2, 512, 32768, 262144, 1048576])
+def test_model_context_capacity_reaches_settings_and_api(desktop, model, context_limit):
+    identifier = installed(desktop, model)
+    with patch(
+        "stark_convert.desktop.Worker.read",
+        return_value={
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": context_limit,
+            "max_new_tokens": 4096,
+        },
+    ):
+        desktop.dispatch({"command": "run", "model_id": identifier})
+        finish(desktop)
+    ready = [event for event in events(desktop) if event["event"] == "ready"][-1]
+    assert ready["max_context_tokens"] == context_limit
+    assert ready["context_tokens"] == context_limit
+    assert desktop.context == context_limit
+    assert desktop.api_models()[0]["context_length"] == context_limit
+    desktop.dispatch(advanced_options(context_tokens=context_limit, max_new_tokens=min(128, context_limit - 1)))
+    assert desktop.context == context_limit
+    with pytest.raises(DesktopError, match="Invalid advanced options"):
+        desktop.dispatch(advanced_options(context_tokens=context_limit + 1))
+
+
+def test_default_context_follows_model_changes_and_reaches_generation(desktop, model):
+    from stark_convert.chat import Worker
+
+    identifier = running(desktop, model)
+    read = Worker.read
+    for context_limit in [512, 32768, 262144, 1048576, 32768]:
+
+        def ready(worker, limit=context_limit):
+            reply = read(worker)
+            reply["max_context_tokens"] = limit
+            return reply
+
+        with patch(
+            "stark_convert.desktop.Worker.read",
+            autospec=True,
+            side_effect=ready,
+        ):
+            desktop.dispatch({"command": "run", "model_id": identifier})
+            finish(desktop)
+        assert desktop.context == context_limit
+    with patch.object(desktop.worker, "request", wraps=desktop.worker.request) as request:
+        desktop.dispatch({"command": "generate", "text": "model default fixture"})
+        finish(desktop)
+    assert request.call_args_list[-1].args[0]["context_tokens"] == 32768
+    assert any(event["event"] == "reply" for event in events(desktop))
+
+
+def test_custom_context_survives_clamps_and_restore_defaults_tracks_models(desktop, model):
+    identifier = running(desktop, model)
+    desktop.dispatch(advanced_options(context_tokens=2048))
+
+    def load(context_limit):
+        with patch(
+            "stark_convert.desktop.Worker.read",
+            return_value={
+                "ready": True,
+                "mode": "text-generation-v1",
+                "max_context_tokens": context_limit,
+                "max_new_tokens": 4096,
+            },
+        ):
+            desktop.dispatch({"command": "run", "model_id": identifier})
+            finish(desktop)
+
+    load(512)
+    assert desktop.context == 512
+    load(262144)
+    assert desktop.context == 2048
+    desktop.dispatch(advanced_options(context_tokens=262144))
+    load(1048576)
+    assert desktop.context == 1048576
+    desktop.dispatch({"command": "reset"})
+    assert desktop.context == 1048576
+    desktop.dispatch({"command": "stop"})
+    load(32768)
+    assert desktop.context == 32768
 
 
 def test_model_change_clamps_options_to_advertised_limits(desktop, model):
@@ -1018,6 +1281,71 @@ def mtp_executable(tmp_path):
 
 def set_mtp(desktop, identifier, enabled):
     desktop.dispatch({"command": "configure_mtp", "model_id": identifier, "enabled": enabled})
+
+
+@pytest.mark.parametrize("override, expected", [(None, 2), (True, 2), (False, 0)])
+@pytest.mark.parametrize("stream", [False, True])
+def test_tool_requests_preserve_mtp_selection_and_tool_rendering(tool_desktop, override, expected, stream):
+    desktop, payload, seen, reply = tool_desktop
+    capability = {
+        "supported": True,
+        "max_drafts": 3,
+        "recommended_drafts": 2,
+        "default_drafts": 0,
+        "sampling": "exact-rejection-v1",
+        "verification": "fixture-exact-v1",
+        "operations": ["generate"],
+    }
+    desktop.worker.mtp = capability
+    set_mtp(desktop, desktop.active_model, True)
+    reply["mtp"] = {
+        "enabled": expected > 0,
+        "drafts": expected,
+        "sampling": capability["sampling"],
+        "verification": capability["verification"],
+    }
+    payload["stream"] = stream
+    if override is not None:
+        payload["mtp"] = override
+    response = desktop.api_complete(payload, on_delta=(lambda _: None) if stream else None)
+    assert response["choices"][0]["finish_reason"] == "tool_calls"
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    assert seen[-1]["mtp_drafts"] == expected
+    assert desktop.api_models()[0]["tool_calling"] is True
+    assert desktop.api_models()[0]["defaults"]["mtp"] is True
+    assert desktop.worker is not None
+    assert desktop.job is None
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_unknown_context_mtp_requests_reserve_only_request_capacity(desktop, model, mtp_executable, enabled, stream):
+    from stark_convert.chat import Worker
+
+    desktop.executable = mtp_executable
+    read = Worker.read
+
+    def ready(worker):
+        result = read(worker)
+        result["max_context_tokens"] = 0xFFFFFFFF
+        return result
+
+    with patch("stark_convert.desktop.Worker.read", autospec=True, side_effect=ready):
+        identifier = running(desktop, model)
+    set_mtp(desktop, identifier, enabled)
+    worker = desktop.worker
+    with patch.object(worker, "request", wraps=worker.request) as request:
+        desktop.api_complete(
+            {"messages": [{"role": "user", "content": "Synthetic MTP context request"}], "max_tokens": 32},
+            on_delta=(lambda _: None) if stream else None,
+        )
+    generated = request.call_args_list[-1].args[0]
+    assert generated["context_tokens"] == 20 + 32
+    assert generated["mtp_drafts"] == (2 if enabled else 0)
+    assert desktop.api_models()[0]["context_length"] is None
+    assert desktop.api_models()[0]["defaults"]["mtp"] is enabled
+    assert desktop.worker is worker
+    assert desktop.job is None
 
 
 def test_mtp_preference_is_per_model_persistent_and_does_not_reset_chat(desktop, model, mtp_executable, tmp_path):

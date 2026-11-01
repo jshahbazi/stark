@@ -197,16 +197,20 @@ def test_invalid_token_readouts_are_protocol_failures(ids):
         evaluate(Worker(tokenize=lambda text, original: ids))
 
 
-def test_context_overflow_is_rejected_without_truncation_or_native_scoring():
+def test_decisions_above_16384_tokens_reach_model_bound_scoring_without_truncation():
     worker = Worker(tokenize=lambda text, original: [1] * 16385 if len(text) > 1 else original)
-    with pytest.raises(DecisionInputError, match="context limit"):
-        evaluate(worker)
-    assert all(request["operation"] != "score" for request in worker.requests)
+    assert evaluate(worker)["input_tokens"] == 16385
+    assert worker.requests[-1]["operation"] == "score"
+    assert worker.requests[-1]["context_tokens"] == 16385
+    assert len(worker.requests[-1]["input_token_ids"]) == 16385
 
 
 def test_model_specific_context_overflow_is_recoverable():
+    worker = Worker(score={"error": "context_overflow"})
     with pytest.raises(DecisionInputError, match="model's context limit"):
-        evaluate(Worker(score={"error": "context_overflow"}))
+        evaluate(worker)
+    worker.score = None
+    assert evaluate(worker)["choice_index"] == 1
 
 
 @pytest.mark.parametrize(

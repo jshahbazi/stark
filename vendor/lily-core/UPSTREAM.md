@@ -47,6 +47,23 @@ Stark adds `src/kernels/metal/stark_finite_readout.metal`, an original integer-b
 
 Host patches also sanitize framework errors and retain submitted command memory until GPU completion feedback arrives after a fault. Missing completion feedback keeps fault cleanup blocked; it cannot safely release live GPU memory. Unused capture, profiling and standalone vision helpers are removed from the extracted Rust modules.
 
+Stark replaces the upstream 262,144-token host capacity ceiling with the largest
+8,192-aligned capacity representable by the attention shaders' signed sequence
+indices and tensor extents. Capacity rounding and the Q8 dequantization grid's
+U32 element count use checked arithmetic. Prefill attention scratch
+is sized from the active state's reserved capacity and grows with that state;
+batch attention scratch uses the checkpoint's declared context. No scratch
+allocator reserves the integer ceiling. The adapter reports the checkpoint's
+published context, starts with at most 16,384 reserved tokens and grows K/V and
+decode scratch as needed between completed GPU operations. These changes do
+not establish numerical or performance qualification at full context length.
+
+Stark's host-sampled MTP bridge sizes draft and verifier prefill scratch from
+the active state's reserved context capacity. The adapter reserves the admitted
+MTP stream's full span before borrowing scratch; context growth preserves the
+committed recurrent, n-gram, MTP hidden and K/V state. This integrates MTP with
+the model-specific context capacity policy without changing target arithmetic.
+
 Stark adds a canonical Uzu storage admission path in `src/safetensors/uzu.rs`
 and refactors Qwen weight/model loading so native-source and typed Uzu inputs
 share the existing specialized kernels. The host's

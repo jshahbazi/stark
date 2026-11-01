@@ -32,11 +32,17 @@ def model(tmp_path):
 
 
 class FakeWorker:
-    def __init__(self):
+    def __init__(self, *, context_limit=8192):
         self.requests = []
+        self.context_limit = context_limit
 
     def read(self):
-        return {"ready": True, "mode": "text-generation-v1", "max_context_tokens": 8192, "max_new_tokens": 4096}
+        return {
+            "ready": True,
+            "mode": "text-generation-v1",
+            "max_context_tokens": self.context_limit,
+            "max_new_tokens": 4096,
+        }
 
     def request(self, payload):
         self.requests.append(payload)
@@ -44,7 +50,60 @@ class FakeWorker:
 
 
 def options(model, **kwargs):
-    return Namespace(model_path=model, context_tokens=1024, max_new_tokens=32, system=None, thinking=False, **kwargs)
+    values = dict(model_path=model, context_tokens=1024, max_new_tokens=32, system=None, thinking=False)
+    values.update(kwargs)
+    return Namespace(**values)
+
+
+@pytest.mark.parametrize("context_limit", [512, 32768, 262144, 1048576])
+def test_default_context_uses_the_loaded_model_maximum(model, context_limit):
+    worker = FakeWorker(context_limit=context_limit)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=None), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["context_tokens"] == context_limit
+
+
+def test_explicit_context_override_is_preserved(model):
+    worker = FakeWorker(context_limit=262144)
+    with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
+        assert run_chat(options(model, context_tokens=2048), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 1
+    assert generated[0]["context_tokens"] == 2048
+
+
+def test_explicit_context_above_the_model_maximum_is_rejected_before_requests(model):
+    worker = FakeWorker(context_limit=32768)
+    with pytest.raises(ChatError, match="Requested token limits exceed"):
+        run_chat(options(model, context_tokens=32769), worker)
+    assert worker.requests == []
+
+
+def test_context_help_describes_the_model_default(capsys):
+    with pytest.raises(SystemExit) as error:
+        main(["--help"])
+    assert error.value.code == 0
+    assert "loaded model's maximum" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("budget", [None, 2048])
+def test_unknown_context_capacity_reserves_actual_cli_text_request(model, budget):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic turn\nsynthetic follow-up\n/exit\n")):
+        assert run_chat(options(model, context_tokens=budget), worker) == 0
+    generated = [request for request in worker.requests if request["operation"] == "generate"]
+    assert len(generated) == 2
+    assert all(request["context_tokens"] == 20 + 32 for request in generated)
+
+
+def test_unknown_context_capacity_cli_still_enforces_custom_budget(model, capsys):
+    worker = FakeWorker(context_limit=0xFFFFFFFF)
+    with patch("sys.stdin", io.StringIO("synthetic overflow\n/exit\n")):
+        assert run_chat(options(model, context_tokens=21), worker) == 0
+    assert all(request["operation"] != "generate" for request in worker.requests)
+    assert "Conversation exceeds the context budget" in capsys.readouterr().out
 
 
 def test_history_reset_and_eof(model):
@@ -342,14 +401,18 @@ class MtpWorker(FakeWorker):
 
 
 @pytest.mark.parametrize("enabled, expected", [(False, 0), (True, 4)])
-def test_cli_toggle_resolves_loaded_model_depth_and_forwards_legacy_wire_field(model, enabled, expected):
-    worker = MtpWorker()
+@pytest.mark.parametrize("context_limit", [8192, 0xFFFFFFFF])
+def test_cli_toggle_resolves_loaded_model_depth_and_forwards_legacy_wire_field(
+    model, enabled, expected, context_limit
+):
+    worker = MtpWorker(context_limit=context_limit)
     with patch("sys.stdin", io.StringIO("synthetic turn\n/exit\n")):
         assert run_chat(options(model, mtp=enabled), worker) == 0
     generated = [r for r in worker.requests if r["operation"] == "generate"]
     assert len(generated) == 1
     assert generated[0]["mtp_drafts"] == expected
     assert "mtp" not in generated[0]
+    assert generated[0]["context_tokens"] == (1024 if context_limit != 0xFFFFFFFF else 20 + 32)
 
 
 def test_cli_default_off_keeps_older_unsupported_worker_requests_compatible(model):

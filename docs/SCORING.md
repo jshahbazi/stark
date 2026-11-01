@@ -22,7 +22,7 @@ stark-score --score-model-path PATH [--consecutive-cache]
 ## Readiness
 
 ```json
-{"ready":true,"engine":"stark","version":"0.1.0","mode":"exact-token-scoring-cache-v1","upstream_version":"0.6.1","upstream_revision":"8d01581474760bd1fc7f4a547ff1d02f7dada437","scoring_patch_sha256":"...","cache_policy":"fresh-state","cache_enabled":false,"cache_key":"exact-token-ids+context-tokens+model-instance","cache":{"enabled":false,"hits":0,"native_score_calls":0},"load_seconds":1.9,"vocab_size":151936,"peak_memory_bytes":1234567890}
+{"ready":true,"engine":"stark","version":"0.1.0","mode":"exact-token-scoring-cache-v1","upstream_version":"0.6.1","upstream_revision":"8d01581474760bd1fc7f4a547ff1d02f7dada437","scoring_patch_sha256":"...","cache_policy":"fresh-state","cache_enabled":false,"cache_key":"exact-token-ids+context-tokens+model-instance","cache":{"enabled":false,"hits":0,"native_score_calls":0},"load_seconds":1.9,"vocab_size":151936,"max_context_tokens":262144,"peak_memory_bytes":1234567890}
 ```
 
 | Field | Meaning |
@@ -34,6 +34,7 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | `cache_enabled`, `cache_key`, `cache` | Cache state and counters; `cache` is repeated on every reply |
 | `load_seconds` | Model load time |
 | `vocab_size` | Upper bound for every token ID |
+| `max_context_tokens` | Loaded model's context maximum, or `null` when it has no finite maximum |
 | `peak_memory_bytes` | Engine peak memory, or `null` when unavailable |
 
 ## Requests
@@ -56,8 +57,10 @@ stark-score --score-model-path PATH [--consecutive-cache]
 | --- | --- |
 | `input_token_ids` | Non-empty array of token IDs below `vocab_size`; the sequence to score the next token after |
 | `candidate_token_ids` | 2 through 16 distinct token IDs below `vocab_size`; order is preserved in the reply |
-| `context_tokens` | 1 through 16,384 and at most the model maximum; `input_token_ids` may be at most this long |
+| `context_tokens` | Positive 32-bit integer at most the model maximum reported in readiness; `input_token_ids` may be at most this long |
 | `temperature` | Finite and positive; the calibration temperature applied to the candidate distribution |
+
+The worker applies the loaded model's configured context capacity. It has no separate fixed token ceiling. The shared worker-line byte limit still applies to every request.
 
 The reply:
 

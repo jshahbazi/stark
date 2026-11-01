@@ -242,8 +242,10 @@ ValueKey GDN, stock HC, affine-64 cache and BF16-valued head policy.
 Lily weights retain `batched-decode-exact-v1`. The official verifier uses
 its own short-row kernels and physical ValueKey rollback captures; both
 policies retain their ordinary target arithmetic.
-This path requires macOS 26 and Metal 4, retains Stark's 16,384-token limit,
-and does not execute vision. Source modifications and licenses are
+This path requires macOS 26 and Metal 4, uses the checkpoint's declared context
+maximum, and does not execute vision. Initial K/V and decode scratch
+reserve at most 16,384 tokens and grow as needed; that reserve is not a token
+limit. Prefill scratch follows the current state capacity. Source modifications and licenses are
 recorded in [the vendored core provenance](../vendor/lily-core/UPSTREAM.md).
 
 The official mixed-affine MLX checkpoint policy keeps its stored weights and
@@ -423,9 +425,9 @@ license boundaries.
 These paths are text-only. They do not execute vision, video, audio or DFlash.
 MTP is available through the native Lily and official mixed-affine generation
 paths described above when the checkpoint contains its trained head.
-The workers retain their 16,384-token context and
-4,096-output-token caps; the upstream advertised maximum context is not a Stark
-memory qualification. A weight set fitting within 128 GiB does not establish
+The workers enforce the loaded model's configured context
+maximum and retain the 4,096-output-token cap; the upstream advertised maximum
+context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.
 
 Generation uses fresh state for every request. Scoring serializes the complete

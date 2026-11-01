@@ -607,7 +607,15 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
             executable = root / "controller-check"
             swift.write_text(controller + harness)
             compiled = subprocess.run(
-                ["swiftc", str(swift), "-o", str(executable)],
+                [
+                    "swiftc",
+                    str(swift),
+                    str(
+                        builder.ROOT / "apps/menu-bar/Sources/APICredentialStore.swift"
+                    ),
+                    "-o",
+                    str(executable),
+                ],
                 capture_output=True,
                 timeout=60,
                 check=False,

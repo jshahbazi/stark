@@ -11,14 +11,32 @@ use std::{collections::VecDeque, path::Path, time::Instant};
 
 use stark_lily_core::{
     engine::{DecodeStateApi, Draw, ScratchApi, VisionMode},
-    kernels::{attention::KvFormat, sample::SamplingParams},
+    kernels::{
+        attention::{KvFormat, MAX_SEQ},
+        sample::SamplingParams,
+    },
     metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
     qwen4exp::{DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig},
 };
 
 use super::{Error, MtpSampler, MtpStats, Result, profile};
 
-pub const MAX_CONTEXT: usize = 16_384;
+const INITIAL_CONTEXT_CAPACITY: usize = 16_384;
+
+/// Reserve capacity grows geometrically; it does not define model capacity.
+fn planned_context_capacity(
+    current: usize,
+    needed: usize,
+    maximum: usize,
+) -> Result<usize> {
+    if maximum == 0 || current > maximum || needed > maximum {
+        return Err(Error::Invalid("mixed precision context capacity"));
+    }
+    if needed <= current {
+        return Ok(current);
+    }
+    Ok(current.max(1).saturating_mul(2).max(needed).min(maximum))
+}
 
 /// Only aggregate static phase categories leave the native counter module.
 fn record_gpu_profile() {
@@ -190,6 +208,7 @@ pub struct LilyModel {
     model: Qwen4ExpModel,
     state: DecodeState,
     scratch: Scratch,
+    scratch_capacity: usize,
     pending: Vec<u32>,
     vocab_size: usize,
     max_context: usize,
@@ -253,8 +272,9 @@ impl LilyModel {
         mut model: Qwen4ExpModel,
     ) -> Result<Self> {
         let vocab_size = model.config.vocab_size;
-        let max_context = model.config.max_position_embeddings.min(MAX_CONTEXT);
-        if vocab_size == 0 || vocab_size > 1_000_000 || max_context == 0 {
+        let max_context = model.config.max_position_embeddings;
+        let initial_capacity = max_context.min(INITIAL_CONTEXT_CAPACITY);
+        if vocab_size == 0 || vocab_size > 1_000_000 || max_context == 0 || max_context > MAX_SEQ {
             return Err(Error::Invalid("mixed precision model geometry"));
         }
         // Match the pinned upstream fast path explicitly; do not depend on
@@ -266,16 +286,17 @@ impl LilyModel {
         });
         model.set_mtp_enabled(false).map_err(|_| Error::Invalid("MTP initialization failed"))?;
         let state = model
-            .new_state(&context, max_context)
+            .new_state(&context, initial_capacity)
             .map_err(|_| Error::Invalid("mixed precision state allocation failed"))?;
         let scratch = model
-            .new_scratch_with_capacity(&context, max_context)
+            .new_scratch_with_capacity(&context, initial_capacity)
             .map_err(|_| Error::Invalid("mixed precision scratch allocation failed"))?;
         scratch.begin_request();
         Ok(Self {
             model,
             state,
             scratch,
+            scratch_capacity: initial_capacity,
             pending: Vec::new(),
             vocab_size,
             max_context,
@@ -332,6 +353,52 @@ impl LilyModel {
 
     pub fn mtp_stats(&self) -> MtpStats {
         self.mtp_stats
+    }
+
+    /// Called only between completed synchronous operations, before a stream
+    /// borrows scratch. Recurrent state and committed K/V survive growth.
+    fn ensure_context_capacity(
+        &mut self,
+        needed: usize,
+    ) -> Result<()> {
+        let target = planned_context_capacity(self.scratch_capacity, needed, self.max_context)?;
+        if target > self.scratch_capacity {
+            // A greedy continuation consumes the readout in either slot. All
+            // other scratch is temporary, and Stark's core draws are greedy;
+            // stochastic sampling and its RNG belong to the outer worker.
+            let slots = self
+                .scratch
+                .next_token
+                .to_u32()
+                .map_err(|_| Error::Invalid("mixed precision scratch readout failed"))?;
+            if slots.len() != 2 {
+                return Err(Error::Invalid("mixed precision scratch readout geometry"));
+            }
+            self.usable = false;
+            let scratch = self
+                .model
+                .new_scratch_with_capacity(&self.context, target)
+                .map_err(|_| Error::Invalid("mixed precision scratch growth failed"))?;
+            scratch.begin_request();
+            let bytes: Vec<u8> = slots.iter().flat_map(|slot| slot.to_le_bytes()).collect();
+            scratch
+                .next_token
+                .write_bytes(&bytes)
+                .map_err(|_| Error::Invalid("mixed precision scratch staging failed"))?;
+            self.state
+                .ensure_capacity(&self.context, target)
+                .map_err(|_| Error::Invalid("mixed precision context growth failed"))?;
+            self.scratch = scratch;
+            self.scratch_capacity = target;
+            self.usable = true;
+        } else if needed > self.state.capacity() {
+            self.usable = false;
+            self.state
+                .ensure_capacity(&self.context, needed)
+                .map_err(|_| Error::Invalid("mixed precision context growth failed"))?;
+            self.usable = true;
+        }
+        Ok(())
     }
 
     /// Explicit diagnostic mode for future passes; no payload is captured.
@@ -473,7 +540,9 @@ impl LilyModel {
                 return Err(Error::Invalid("mixed precision greedy start"));
             },
         };
-        if let Err(error) = admitted_decode_end(self.state.pos, remaining_decode_count, self.max_context) {
+        if let Err(error) = admitted_decode_end(self.state.pos, remaining_decode_count, self.max_context)
+            .and_then(|end| self.ensure_context_capacity(end))
+        {
             self.reset();
             return Err(error);
         }
@@ -514,7 +583,8 @@ impl LilyModel {
         }
         let admission =
             admitted_sampled_start(self.state.pos, self.pending.len(), self.last_full_readout, first, self.vocab_size)
-                .and_then(|_| admitted_decode_end(self.state.pos, remaining, self.max_context));
+                .and_then(|_| admitted_decode_end(self.state.pos, remaining, self.max_context))
+                .and_then(|end| self.ensure_context_capacity(end));
         if let Err(error) = admission {
             self.reset();
             return Err(error);
@@ -556,7 +626,13 @@ impl LilyModel {
             return Err(Error::Invalid("MTP stream admission failed"));
         }
         admitted_sampled_start(self.state.pos, self.pending.len(), self.last_full_readout, first, self.vocab_size)?;
-        admitted_decode_end(self.state.pos, remaining, self.max_context)?;
+        let end = admitted_decode_end(self.state.pos, remaining, self.max_context)?;
+        // The borrowed stream cannot replace scratch between rounds. Reserve
+        // its complete admitted span before any draft or verifier work runs.
+        if let Err(error) = self.ensure_context_capacity(end) {
+            self.reset();
+            return Err(error);
+        }
         self.last_full_readout = None;
         self.last_greedy = None;
         Ok(MtpDecode {
@@ -593,6 +669,7 @@ impl LilyModel {
         token: u32,
     ) -> Result<usize> {
         let expected_position = self.check_token(token)?;
+        self.ensure_context_capacity(expected_position)?;
         let greedy = SamplingParams::greedy();
         let draw = Draw {
             params: &greedy,
@@ -1643,11 +1720,25 @@ mod tests {
     }
 
     #[stark_test]
+    fn context_reservation_grows_to_published_capacity_without_a_16k_limit() {
+        let published = 1_048_576;
+        assert_eq!(planned_context_capacity(16_384, 16_385, published).unwrap(), 32_768);
+        assert_eq!(planned_context_capacity(32_768, 262_145, published).unwrap(), 262_145);
+        assert_eq!(planned_context_capacity(262_145, published, published).unwrap(), published);
+        assert_eq!(planned_context_capacity(published, published, published).unwrap(), published);
+        assert!(planned_context_capacity(16_384, published + 1, published).is_err());
+        assert!(planned_context_capacity(published + 1, 1, published).is_err());
+        assert!(planned_context_capacity(0, 0, 0).is_err());
+        assert_eq!(admitted_position(262_144, 0, 7, 8, published).unwrap(), 262_145);
+        assert_eq!(admitted_decode_end(262_144, published - 262_144, published).unwrap(), published);
+    }
+
+    #[stark_test]
     fn pending_prompt_tokens_count_toward_the_same_context_limit() {
         assert_eq!(admitted_position(3, 2, 7, 8, 6).unwrap(), 6);
         assert!(admitted_position(3, 3, 7, 8, 6).is_err());
         assert!(admitted_position(3, 2, 8, 8, 6).is_err());
-        assert!(admitted_position(usize::MAX, 1, 0, 8, MAX_CONTEXT).is_err());
+        assert!(admitted_position(usize::MAX, 1, 0, 8, INITIAL_CONTEXT_CAPACITY).is_err());
         assert_eq!(admitted_position(0, 0, 7, 8, 6).unwrap(), 1);
     }
 
@@ -1951,7 +2042,7 @@ mod tests {
             for pending in [1, 15, 16, 63, 64, 4094, 4095, 4096] {
                 let total = pending + 1;
                 let prefix = official_holdout_prefix_len(true, total).unwrap();
-                let expected = admitted_position(committed, pending, 7, 8, MAX_CONTEXT).unwrap();
+                let expected = admitted_position(committed, pending, 7, 8, INITIAL_CONTEXT_CAPACITY).unwrap();
                 assert!(committed + prefix + 1 == expected);
                 assert!(admitted_position(committed, pending, 7, 8, expected - 1).is_err());
             }

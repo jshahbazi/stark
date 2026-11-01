@@ -103,6 +103,19 @@ def test_accepts_neutral_compatibility_flags():
     assert result["maximum"] == 512
 
 
+@pytest.mark.parametrize("store", [False, None])
+def test_nonstoring_clients_have_identical_request_semantics(store):
+    assert parse(store=store) == parse()
+
+
+@pytest.mark.parametrize("store", [True, 0, "false", [], {}])
+def test_storage_requests_or_non_boolean_flags_are_rejected(store):
+    with pytest.raises(APIError) as error:
+        parse(store=store)
+    assert error.value.status == 400 and error.value.code == "unsupported_parameter"
+    assert "does not store completions" in error.value.message
+
+
 @pytest.mark.parametrize(
     "extra",
     [
