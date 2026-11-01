@@ -152,6 +152,21 @@ The inherited Uzu bindings, server and command-line crates have been removed (se
 
 ## Measured performance
 
+### Qwen3.8-Flash-Next
+
+On an Apple M5 Max (40 GPU cores, 128 GiB), a 2026-10-30 same-checkpoint comparison with speculation disabled measured a maximum of **66.81 tok/s** for Stark versus **61.17 tok/s** for MLX-Serve 26.10.3 (+9.21%), using identical verified checkpoint files and quantization. Other apps were closed. Each maximum is the fastest of ten measured 4K-input/256-output requests per engine. Longer greedy continuations differ, so whole-model numerical and quality equivalence remain unestablished. See the [matched-checkpoint report](docs/benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md).
+
+Separate 2026-10-31 Stark-only MTP studies on the same Mac measured pooled decode throughput with top-k 20, top-p 0.95, temperature 1, seed 42, 4K input, 256 sampled outputs, two drafts and 16 paired on/off requests per checkpoint:
+
+| Checkpoint | MTP off (tok/s) | MTP on (tok/s) | Change |
+| --- | ---: | ---: | ---: |
+| Lily Q4-XL | 72.97 | **82.85** | +13.54% |
+| Mixed 4/8-bit | 56.69 | **65.02** | +14.69% |
+
+These compare MTP on and off within each checkpoint. MLX-Serve was not rerun. The two quantization profiles were measured in separate windows, with desktop GPU activity and clock drift uncontrolled. Lily nucleus sampling without top-k gained 1.70%. MTP remains off by default, and these results do not establish performance across arbitrary workloads or a sustained throughput floor. Reports: [Lily](docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md) and [mixed 4/8-bit](docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md).
+
+### Qwen3.5-2B
+
 Qwen3.5-2B (4-bit), Apple M5 Max (40 GPU cores, 128 GiB), one request at a time, measured 2026-10-22:
 
 | Engine | Build / version | End-to-end tokens/s |
