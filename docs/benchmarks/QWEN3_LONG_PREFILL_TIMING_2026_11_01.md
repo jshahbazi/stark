@@ -1,8 +1,8 @@
 # Qwen3 long-prompt timing attempts — 2026-11-01
 
 **No demonstrated speedup and no accepted timing window.** The latest completed
-three-cycle run observed a median **6.117 seconds to first text for the baseline
-and 6.218 seconds for the candidate**. Its CPU guard failed, so these are
+three-cycle run observed a median **6.074 seconds to first text for the baseline
+and 6.157 seconds for the candidate**. Its CPU guard failed, so these are
 descriptive measurements from a CPU-guard-rejected window, not a qualified regression.
 The candidate remains uninstalled.
 
@@ -56,6 +56,7 @@ of individual samples within each attempt; different windows are not pooled.
 | 02 | One load, three ABBA cycles, timing only | 6 | 6.117 s | 6.218 s | CPU guard |
 | 03 | One load, one ABBA cycle, timing only | 2 | 5.607 s | 5.739 s | CPU guard |
 | 04 | Quiet admission | 0 | — | — | `quiet_window_timeout` |
+| 06 | New user-invited retry, one load, three ABBA cycles, timing only | 6 | 6.074 s | 6.157 s | CPU guard |
 
 Native first-sample medians were respectively 6.307155 → 6.357561,
 6.116210 → 6.216848 and 5.606077 → 5.737762 seconds. The candidate's observed
@@ -100,17 +101,48 @@ inferred for attempts 02–03. Quiet-window GPU utilization and process/CPU/
 thermal screening cannot prove whole-device GPU exclusivity.
 
 An independent reviewer recomputed medians, sample counts, seals and rejection
-conditions. The honest outcome is **no observed benefit worth promoting**;
-no guarded comparison was accepted. After observing another active inference
-worker, no further attempt was started. The
+conditions for attempts 01–04. The honest outcome is **no observed benefit worth
+promoting**; no guarded comparison was accepted. The initial session ended after
+observing another active inference worker; the later user-invited retry is
+recorded below. The
 earlier generation concern, Developer ID upgrade checks and real OpenWork
 validation remain separate incomplete qualifications. No app was installed or
 credential accessed for this measurement.
 
+## Retry after the user reported an idle machine
+
+Attempt 06 is a new, standalone three-cycle attempt, using the unchanged sealed
+binaries, controller and complete tools/history fixture above. It does not
+resume or pool data with the aborted three-block protocol. Attempt 05 remains
+unstarted. No other inference worker or compiler appeared in the live process
+checks; this does not establish whole-device GPU exclusivity.
+
+All 24 one-token timing rows and both warmups match. Six samples per build and
+fixture give native first-sample medians of **6.072645 → 6.156550 seconds** and
+first-text medians of **6.073666 → 6.157472 seconds**. The candidate is observed
+about 1.4% slower, with no demonstrated benefit. Baseline/candidate native
+cycle medians are 5.505/5.688, 6.082/6.157 and 6.171/6.329 seconds. The opening
+and closing baseline samples in the first cycle span 5.037–5.973 seconds;
+substantial order/time drift remains.
+
+All six end seals pass. There are 123 fully measured monitor intervals and 125
+boundary-inclusive guard intervals, with zero sampling failures, excessive
+gaps, background-model flags, thermal flags, pageouts, swapouts or sleep events.
+The CPU guard still fails, so `passed` is true but `timing_accepted` is false.
+The retained guard does not identify the CPU process responsible. A separate
+20-second monitor-only check afterward passes its CPU guard; it cannot attribute
+or retroactively accept attempt 06. Timing-only mode does not repeat the separate
+32-token generation and lifecycle controls or resolve the earlier mismatch.
+
+No further timing retry is justified by this candidate's observed results.
+The candidate remains uninstalled. No tool definitions or history were dropped,
+and no credential was accessed.
+
 ## Retained aggregate records
 
 Primary JSON records are private, mode 0600, under the isolated checkout's
-ignored `runtime/`, named `prefill-timing-20261101-01.json` through `-04.json`.
+ignored `runtime/`, named `prefill-timing-20261101-01.json` through `-04.json`
+and `prefill-timing-20261101-06.json`.
 They contain timings, counts, hashes, booleans and sanitized failure categories;
 no prompt, reply, token-vector or credential payloads are retained.
 
@@ -120,3 +152,4 @@ no prompt, reply, token-vector or credential payloads are retained.
 | 02 | `279eab0da3fe98d604a2ce1a0c32a1342d20abf64213bc0159f2b3709e9b17a3` |
 | 03 | `a436eae7021d433b55159c021aa6b0d28b67bf9445641fdee10863c441f015c1` |
 | 04 | `fc3b502cb524dcb0ed04778f02dc088415957c0bca7ec09a06df2c6f69735328` |
+| 06 | `eb975710f4803a8f29ce78a15027c309cfe5eafffa0a1037c65f35dbaa103e82` |
