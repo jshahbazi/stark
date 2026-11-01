@@ -161,8 +161,9 @@ open "$HOME/Applications/Stark.app"</code></pre>
       <div id="bench-engines" aria-hidden="true"></div>
       <div class="wrap">
         <div class="benchmark-overview"><p class="eyebrow">03 / BENCHMARKS</p><h2 id="benchmark-title">Measured on<br>Apple silicon.</h2></div>
-        <div class="benchmark-tabs" role="tablist" aria-label="Benchmark model">
+        <div class="benchmark-tabs" role="tablist" aria-label="Benchmark study">
           <button type="button" role="tab" id="benchmark-tab-qwen38" aria-selected="true" aria-controls="qwen38-benchmark" tabindex="0" data-benchmark-panel="qwen38-benchmark">Qwen3.8-Flash-Next<small>Maximum observed decode</small></button>
+          <button type="button" role="tab" id="benchmark-tab-qwen38-mtp" aria-selected="false" aria-controls="qwen38-mtp-benchmark" tabindex="-1" data-benchmark-panel="qwen38-mtp-benchmark">Qwen3.8-Flash-Next MTP<small>Stark enabled vs disabled</small></button>
           <button type="button" role="tab" id="benchmark-tab-qwen35" aria-selected="false" aria-controls="qwen35-benchmark" tabindex="-1" data-benchmark-panel="qwen35-benchmark">Qwen3.5-2B<small>Six end-to-end workloads</small></button>
         </div>
         <div class="benchmark-panel qwen38-study" id="qwen38-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38" tabindex="0">
@@ -191,6 +192,34 @@ open "$HOME/Applications/Stark.app"</code></pre>
           </div></details>
           <div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/3d22b4dfb41aab4b10001bef6bbdf37a4f5cb86b/docs/benchmarks/QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md">Full Qwen3.8 report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-qwen38-results.json" download>Download Qwen3.8 results <span aria-hidden="true">↓</span></a></div>
         </div>
+        </div>
+        <div class="benchmark-panel qwen38-mtp-study" id="qwen38-mtp-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen38-mtp" tabindex="0">
+          <p class="eyebrow">31 OCTOBER 2026 / MULTI-TOKEN PREDICTION</p>
+          <h3 id="qwen38-mtp-title">Qwen3.8-Flash-Next MTP.</h3>
+          <p class="qwen38-intro">Multi-token prediction (MTP) drafts and verifies tokens in groups. Stark recorded <strong>13.54% higher pooled decode throughput on Lily Q4-XL</strong> and <strong>14.69% on mixed 4/8-bit</strong> with two drafts enabled. Each checkpoint has its own enabled-versus-disabled study.</p>
+          <div class="benchmark-specs"><span>APPLE M5 MAX / 128 GiB</span><span>4,096 INPUT / 256 OUTPUT TOKENS</span><span>TOP-K 20 / TOP-P 0.95</span><span>TEMPERATURE 1 / SEED 42</span></div>
+          <div class="table-scroll" tabindex="0" role="region" aria-label="Qwen3.8 Stark MTP enabled versus disabled results">
+            <table class="benchmark-table mtp-table">
+              <caption class="sr-only">Pooled decode throughput for Stark with MTP disabled and two drafts enabled, measured separately for two Qwen3.8 checkpoints with top-k 20 sampling.</caption>
+              <thead><tr><th scope="col">Checkpoint</th><th scope="col">MTP disabled<span>tokens / second</span></th><th scope="col">MTP: two drafts<span>tokens / second</span></th><th scope="col">Decode gain</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Lily Q4-XL<small>fabiogreter / lily-q4-xl<br>16 on/off pairs · 16 MTP wins</small></th><td>72.97</td><td><strong>82.85</strong></td><td class="gain">+13.54%</td></tr>
+                <tr><th scope="row">Mixed 4/8-bit<small>ddalcu / MLX-Serve-mixed-4-8bit<br>16 on/off pairs · 16 MTP wins</small></th><td>56.69</td><td><strong>65.02</strong></td><td class="gain">+14.69%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note qwen38-conditions">Pooled rates count 255 decode advances after the first output per request and exclude input processing. Each study used one loaded worker, paired on/off requests after warmup, and the same weights and quantization within each pair. The MTP head stayed in memory for both routes. <strong>MTP is opt-in and remains disabled by default.</strong></p>
+          <p class="qwen38-precision"><strong>Checkpoint and sampling conditions matter.</strong> These packs have different quantization profiles and were timed in separate windows. Desktop GPU activity and clock drift were uncontrolled. The Lily study's nucleus sampling without top-k gained 1.70% (74.53 versus 73.28 tok/s), with essentially unchanged whole-call latency. These MTP studies did not rerun MLX-Serve and do not establish performance across arbitrary workloads.</p>
+          <div class="measurement-notes qwen38-method">
+            <details><summary>MTP checkpoints and measurement details <span aria-hidden="true">+</span></summary><div>
+              <p>Lily used <code>fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl</code> at revision <code>0f94842e3682b49acace4daeb4cf2e65a6f94f83</code>, with Stark execution source <code>2c78ea6c</code>. Mixed 4/8-bit used <code>ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit</code> at revision <code>788c07a8725642bccf13a0a3b8a21954ab84b4f2</code>, with Stark execution source <code>959ec981</code>. No weights were converted or requantized during either study.</p>
+              <p>Both studies used 4,096 input tokens from the same public source corpus, 256 sampled outputs, context capacity 4,352, temperature 1, top-k 20, top-p 0.95 and seed 42. MTP enabled used two drafts and exact rejection sampling; disabled used zero drafts. Prefix reuse and stage profiling were disabled. The nucleus control used eight pairs with top-k omitted and the other sampling settings retained.</p>
+              <p>The M5 Max ran macOS 26.7.1 on AC power in Automatic mode; desktop apps and power settings were left as found. Full model jobs were serialized. Lily's MTP requests ranged from 78.61 to 85.82 tok/s; mixed 4/8-bit ranged from 53.25 to 74.53 tok/s and showed substantial timing drift. These observed ranges do not establish a sustained throughput floor.</p>
+              <p>Median whole-call latency was 5.504 seconds disabled versus 5.143 enabled for Lily, and 7.135 versus 6.615 seconds for mixed 4/8-bit. Numerical, sampling and lifecycle controls are recorded in each source-bound report. Cross-engine quality equivalence remains unestablished.</p>
+            </div></details>
+            <div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/4ebdbf15fce9fe6dca584a8bb9df7c183c55aaba/docs/benchmarks/QWEN38_MTP_COMBINATION_2026_10_31.md">Lily MTP report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-qwen38-mtp-lily-results.json" download>Download Lily results <span aria-hidden="true">↓</span></a></div>
+            <div class="benchmark-links"><a class="text-link gold-link" href="https://github.com/jshahbazi/stark/blob/688975102703563992c67065d9506c06c104e794/docs/benchmarks/QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md">Mixed 4/8-bit MTP report <span aria-hidden="true">↗</span></a><a class="text-link" href="benchmark-qwen38-mtp-mixed48-results.json" download>Download mixed 4/8-bit results <span aria-hidden="true">↓</span></a></div>
+          </div>
         </div>
         <div class="benchmark-panel qwen35-study" id="qwen35-benchmark" role="tabpanel" aria-labelledby="benchmark-tab-qwen35" tabindex="0">
           <p class="eyebrow">22 OCTOBER 2026 / SIX WORKLOADS</p>
