@@ -4,7 +4,7 @@
 
 This run checks the built-in Chat playground's time-to-first-token display and remaining-completion estimates. Native streaming progress carries token counts and timings through the Python bridge to a request-fenced Swift view. Calibration retains bounded counts and durations in memory for comparable requests in the same model session. A cold request learns decode speed as tokens arrive; a later comparable request can predict first-token latency before its first sample.
 
-The implementation was checked on `codex/openwork-secure-connection`, based on `30574579` (`docs: record window and agent streaming validation`). The following SHA-256 hashes identify the runtime sources used for these checks:
+The implementation was checked on `codex/openwork-secure-connection`, using `69c9cffc` (`fix: keep windows quiet and stream agent text`) as its functional base. A concurrent documentation-only update was also present. The following SHA-256 hashes identify the runtime sources used for these checks:
 
 | Source | SHA-256 |
 | --- | --- |
