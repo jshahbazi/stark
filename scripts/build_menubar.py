@@ -377,16 +377,23 @@ def read_plist(path: Path) -> dict:
         raise BuildError("app_metadata_invalid") from None
 
 
-def set_application_version(info: dict, version: str | None) -> None:
-    """Use a release's numeric version in Apple bundle metadata when supplied."""
-    if version is None:
-        info["CFBundleVersion"] = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        return
-    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)(?:[.-][A-Za-z0-9]+)*", version)
-    if match is None:
+def set_application_version(
+    info: dict, version: str | None, build_number: str | None = None
+) -> None:
+    """Keep local build identity separate from versions reserved for releases."""
+    if (
+        version is not None
+        and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9]+)*", version)
+        is None
+    ):
         raise BuildError("application_version_invalid")
-    info["CFBundleShortVersionString"] = match.group(1)
-    info["CFBundleVersion"] = match.group(1)
+    if build_number is None:
+        build_number = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    if re.fullmatch(r"[1-9][0-9]{0,19}", build_number) is None:
+        raise BuildError("application_build_number_invalid")
+    info["CFBundleShortVersionString"] = "0.0.0"
+    info["CFBundleVersion"] = build_number
+    info["StarkBuildChannel"] = "development"
 
 
 def verify_runtime(runtime: Path) -> dict:
@@ -1044,7 +1051,11 @@ def build(options: argparse.Namespace) -> Path:
             )
         make_icon(artwork, resources, temporary)
         info = read_plist(source_directory / "Info.plist")
-        set_application_version(info, getattr(options, "version", None))
+        set_application_version(
+            info,
+            getattr(options, "version", None),
+            getattr(options, "build_number", None),
+        )
         with (contents / "Info.plist").open("wb") as stream:
             plistlib.dump(info, stream)
         run(
@@ -1111,6 +1122,9 @@ def build(options: argparse.Namespace) -> Path:
             "application_id": APP_ID,
             "minimum_macos": MIN_MACOS,
             "distribution_version": getattr(options, "version", None),
+            "application_version": info["CFBundleShortVersionString"],
+            "build_number": info["CFBundleVersion"],
+            "build_channel": info["StarkBuildChannel"],
             "source": source_identity(),
             "base_runtime": {
                 "manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
@@ -1267,7 +1281,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/menu-bar")
     parser.add_argument(
-        "--version", help="distribution version to record in the application bundle"
+        "--version",
+        help="archive identifier recorded in build provenance; app stays a development build",
+    )
+    parser.add_argument(
+        "--build-number",
+        help="positive numeric local build identifier (default: UTC timestamp with microseconds)",
     )
     parser.add_argument(
         "--install",

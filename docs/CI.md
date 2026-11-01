@@ -47,6 +47,12 @@ sh install.sh --archive "$PWD/stark-VERSION-aarch64-apple-darwin.tar.gz"
 
 Development builds are unsigned and expire after seven days. Use the [published release](INSTALLATION.md) for normal installation.
 
+The app displays **Development build NUMBER** and records its build number
+separately from the archive identifier. Its application version is `0.0.0` with a
+development channel marker. Only release signing assigns a stable app version;
+local build numbers cannot prevent the app from offering the latest stable
+release. See [app versioning](../apps/menu-bar/README.md#build-and-install).
+
 ## Release workflows
 
 The prebuilt release job has `contents: write` only for its final upload step; build and verification receive no publishing token. It requires an existing version tag on a commit merged into `main`.

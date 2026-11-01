@@ -26,6 +26,100 @@ SPEC.loader.exec_module(distribution)
 
 
 class BundleConstructionTests(unittest.TestCase):
+    def test_local_archives_require_a_development_suffix_without_tag_lookup(self):
+        source = {"revision": "a" * 40, "dirty": True}
+        with patch.object(distribution, "run") as command:
+            for version in ("0.11.14", "0.0.0", "01.2.3", "../0.1.0"):
+                with (
+                    self.subTest(version=version),
+                    self.assertRaisesRegex(
+                        distribution.BuildError, "development_version_suffix_required"
+                    ),
+                ):
+                    distribution.validate_build_version(
+                        version, release_input=False, source=source, environment={}
+                    )
+            for version in (
+                "0.0.0-dev.abc123.42",
+                "0.11.3-unsigned",
+                "0.1.0-dev.local.1",
+            ):
+                distribution.validate_build_version(
+                    version, release_input=False, source=source, environment={}
+                )
+            command.assert_not_called()
+
+    def test_release_input_requires_clean_source_and_a_matching_immutable_tag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            environment = os.environ.copy()
+            environment.update(
+                GIT_AUTHOR_NAME="Codex",
+                GIT_AUTHOR_EMAIL="noreply@github.com",
+                GIT_COMMITTER_NAME="Codex",
+                GIT_COMMITTER_EMAIL="noreply@github.com",
+            )
+
+            def git(*arguments):
+                return (
+                    subprocess.run(
+                        ["git", *arguments],
+                        cwd=root,
+                        env=environment,
+                        capture_output=True,
+                        check=True,
+                    )
+                    .stdout.decode()
+                    .strip()
+                )
+
+            git("init", "-q")
+            git("commit", "-q", "--allow-empty", "-m", "tagged source")
+            revision = git("rev-parse", "HEAD")
+            git("tag", "-a", "v0.11.2", "-m", "release input")
+            real_run = distribution.run
+
+            def temporary_run(*args, **kwargs):
+                return real_run(*args, **kwargs, cwd=root)
+
+            with patch.object(distribution, "run", side_effect=temporary_run):
+                distribution.validate_build_version(
+                    "0.11.2",
+                    release_input=True,
+                    source={"revision": revision, "dirty": False},
+                    environment=environment,
+                )
+                for version, dirty in (("0.11.2-dev.1", False), ("0.11.2", True)):
+                    with self.assertRaisesRegex(
+                        distribution.BuildError,
+                        "release_input_requires_stable_version_and_clean_source",
+                    ):
+                        distribution.validate_build_version(
+                            version,
+                            release_input=True,
+                            source={"revision": revision, "dirty": dirty},
+                            environment=environment,
+                        )
+                git("commit", "-q", "--allow-empty", "-m", "later source")
+                with self.assertRaisesRegex(
+                    distribution.BuildError, "release_input_tag_does_not_match_source"
+                ):
+                    distribution.validate_build_version(
+                        "0.11.2",
+                        release_input=True,
+                        source={"revision": git("rev-parse", "HEAD"), "dirty": False},
+                        environment=environment,
+                    )
+                with self.assertRaisesRegex(
+                    distribution.BuildError, "release_input_tag"
+                ):
+                    distribution.validate_build_version(
+                        "0.11.3",
+                        release_input=True,
+                        source={"revision": revision, "dirty": False},
+                        environment=environment,
+                    )
+
     def test_menu_app_uses_new_runtime_worker_and_external_staging_directory(self):
         with tempfile.TemporaryDirectory() as temporary_name:
             temporary = Path(temporary_name)

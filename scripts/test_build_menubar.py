@@ -74,13 +74,31 @@ def make_converter_wheel(
 
 
 class RuntimeVerificationTests(unittest.TestCase):
-    def test_release_version_is_recorded_without_a_build_timestamp(self):
+    def test_local_builds_never_claim_a_release_patch_version(self):
+        for version in (None, "0.11.14", "0.11.14-preview.1", "0.0.0-dev.abc.12"):
+            with self.subTest(version=version):
+                info = {"CFBundleShortVersionString": "0.11.14"}
+                builder.set_application_version(info, version, "20261031234500123456")
+                self.assertEqual(info["CFBundleShortVersionString"], "0.0.0")
+                self.assertEqual(info["CFBundleVersion"], "20261031234500123456")
+                self.assertEqual(info["StarkBuildChannel"], "development")
+
+    def test_local_build_number_defaults_to_microsecond_utc_timestamp(self):
         info = {}
-        builder.set_application_version(info, "0.1.2-preview.1")
-        self.assertEqual(info["CFBundleShortVersionString"], "0.1.2")
-        self.assertEqual(info["CFBundleVersion"], "0.1.2")
+        builder.set_application_version(info, None)
+        self.assertRegex(info["CFBundleVersion"], r"^[1-9][0-9]{19}$")
+
+    def test_invalid_local_build_metadata_is_rejected(self):
         with self.assertRaisesRegex(builder.BuildError, "application_version_invalid"):
             builder.set_application_version({}, "../../0.1.2")
+        for number in ("", "0", "01", "0.11.14", "-1", "build-1", "1" * 21):
+            with (
+                self.subTest(build_number=number),
+                self.assertRaisesRegex(
+                    builder.BuildError, "application_build_number_invalid"
+                ),
+            ):
+                builder.set_application_version({}, None, number)
 
     def test_combined_runtime_is_pruned_without_recursive_application_embedding(self):
         with tempfile.TemporaryDirectory() as temporary:

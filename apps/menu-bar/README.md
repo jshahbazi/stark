@@ -20,9 +20,25 @@ For release DMGs containing **Install Stark**, open the image and choose that la
 
 Local builds are ad-hoc signed; they are not notarized and cannot be installed by the updater. Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
+Local apps display **Development build NUMBER**. The build number is a UTC
+timestamp with microseconds by default; `--build-number NUMBER` supplies a unique
+positive decimal identifier of up to 20 digits instead. Local apps use
+`CFBundleShortVersionString=0.0.0`, store their build number in `CFBundleVersion`
+and mark `StarkBuildChannel=development`. `--version` records an archive identifier
+in provenance and does not assign a release version to the app. Use identifiers
+such as `0.0.0-dev.COMMIT.BUILD` for local archives. Reserve major, minor and patch
+versions for the [release workflow](../../docs/RELEASING.md).
+
 ## App updates
 
 Stark checks stable release metadata automatically at launch and about once an hour while it runs. Opening the menu also checks when the last metadata check was more than 15 minutes ago. These background checks stay quiet when the network is unavailable. A newer release is shown with one **Upgrade to VERSION** button; choosing it downloads, verifies and stages the DMG, then quits Stark, stops active requests, clears the in-memory conversation, swaps the bundles and relaunches. No release DMG is downloaded or installed before that button is chosen. Models, preferences and the Keychain API credential are kept, while the active chat ends. The CLI is not updated by the app.
+
+Development builds always offer the latest compatible stable release, including
+when their archive identifier or old local version is numerically higher. Build
+numbers do not participate in stable update ordering. Published installations
+continue to offer only newer release versions. The release signing path sets the
+published app's version and stable channel; signing a local app with
+`--sign-only` retains its development identity.
 
 Before anything is installed, the updater requires: the release's versioned Apple silicon DMG with a SHA-256 digest published by GitHub, a `codesign` verification of the disk image and the complete app against Stark's Developer ID team (`S5BT2PRN5B`), a passing Gatekeeper assessment, and a matching bundle identifier, version, architecture and minimum macOS. A private helper runs from the verified candidate's bundled Python, locks the destination, waits for the old app to exit, re-verifies the staged copy, exchanges the bundles atomically and relaunches. Detected failures restore the old app. Background check failures remain quiet; errors from a requested upgrade appear in the dropdown with a retry action.
 
