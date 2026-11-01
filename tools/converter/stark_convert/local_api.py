@@ -5,7 +5,6 @@ Streaming requests are written as inference produces text deltas.
 
 from __future__ import annotations
 
-import hashlib
 import hmac
 import json
 import math
@@ -230,7 +229,11 @@ class LocalAPI:
             self._validate_key(api_key)
         except ValueError:
             raise APIError(400, "Invalid API client grant.", "invalid_api_client_command") from None
-        digest = hashlib.sha256(("Bearer " + api_key).encode("ascii")).digest()
+        digest = hmac.digest(
+            self._api_session.encode("ascii"),
+            ("Bearer " + api_key).encode("ascii"),
+            "sha256",
+        )
         with self._lock:
             self._require_session_locked(api_session)
             if hmac.compare_digest(api_key, self._api_key) or any(
