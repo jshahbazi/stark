@@ -397,7 +397,7 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
         _xml_tool_schemas(tools)
 
 
-def _xml_prefix_safe(prefix):
+def _tool_prefix_safe(prefix):
     visible = []
     cursor = 0
     while cursor < len(prefix):
@@ -675,14 +675,12 @@ def parse_tool_output(
         raise invalid()
     if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
         raise ValueError("Invalid private tool-call ID prefix")
-    if start < 0 or "</tool_call" in text[:start] or (parser == _PARSER and "```" in text[:start]):
+    if start < 0 or "</tool_call" in text[:start] or not _tool_prefix_safe(text[:start]):
         raise invalid()
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
     if parser in _XML_PARSERS:
-        if not _xml_prefix_safe(text[:start]):
-            raise invalid()
         return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     calls = []
     cursor = start

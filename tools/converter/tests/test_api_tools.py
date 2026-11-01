@@ -653,20 +653,26 @@ def test_xml_local_reference_expansion_has_a_depth_limit():
     assert error.value.code == "tool_schema_unsupported"
 
 
-@pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1"])
-def test_xml_completed_thinking_before_a_call_is_distinct_from_a_call_inside_thinking(parser):
+@pytest.mark.parametrize("parser", ["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1"])
+def test_completed_thinking_before_a_call_is_distinct_from_a_call_inside_thinking(parser):
+    wire = OUTPUT if parser == "qwen3-hermes-v1" else xml_call()
     prefix = '<think>Completed reasoning containing an open quotation " and ```ordinary code```.</think>\n'
-    message, reason = xml_output(prefix + xml_call(), parser=parser)
+    message, reason = output(prefix + wire, parser=parser)
     assert reason == "tool_calls" and message["content"] == prefix.rstrip()
     for unsafe in [
-        "<think>Unclosed reasoning " + xml_call(),
-        "<think>Quoted call " + xml_call() + "</think>",
-        "<think>Nested <think>reasoning</think></think>" + xml_call(),
-        "</think>" + xml_call(),
-        "Example: 'I'm describing a quoted call " + xml_call(),
+        "<think>Unclosed reasoning " + wire,
+        "<think>Quoted call " + wire + "</think>",
+        "<think>Nested <think>reasoning</think></think>" + wire,
+        "</think>" + wire,
+        "Example: 'I'm describing a quoted call " + wire,
+        'Example: "' + wire,
+        "Example: '" + wire,
+        "Example: “" + wire,
+        "Example: `" + wire,
+        "```\n" + wire + "\n```",
     ]:
         with pytest.raises(APIError) as error:
-            xml_output(unsafe, parser=parser)
+            output(unsafe, parser=parser)
         assert error.value.code == "invalid_tool_call"
 
 
