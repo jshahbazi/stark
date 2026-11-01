@@ -1951,7 +1951,10 @@ struct MenuView: View {
                 }
                 Spacer()
             }
-            StatusLine(engine: engine)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                StatusLine(engine: engine)
+                GPUMemoryView(engine: engine)
+            }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
             if engine.mode == .chat {
@@ -2814,7 +2817,7 @@ private final class MenuPanel: NSPanel {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
-    private let engine = EngineController()
+    private let engine: EngineController
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
@@ -2824,6 +2827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var modelsWindow: NSWindow?
     private var promptWindow: NSWindow?
     private var connectionWindow: NSWindow?
+
+    init(engine: EngineController = EngineController()) {
+        self.engine = engine
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
@@ -2867,6 +2875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menuPanel.backgroundColor = .clear
         menuPanel.hasShadow = true
         menuPanel.isReleasedWhenClosed = false
+        menuPanel.isRestorable = false
         menuPanel.collectionBehavior = [.transient, .moveToActiveSpace, .fullScreenAuxiliary]
         menuPanel.onEscape = { [weak self] in self?.dismissMenu() }
         menuPanel.contentViewController = NSHostingController(rootView: MenuView(
@@ -2884,14 +2893,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag { if engine.models.isEmpty { toggle() } else { showPrompt() } }
-        return true
+        if !flag { toggle() }
+        // Handle app reopens here; AppKit must not bring unrelated Stark windows
+        // forward or open the Playground as a side effect of activation.
+        return false
     }
 
     @objc private func toggle() {
         if menuPanel.isVisible { dismissMenu(); return }
         updater.checkIfNeeded()
-        guard let button = status.button, let statusWindow = button.window,
+        guard let button = status?.button, let statusWindow = button.window,
               let screen = statusWindow.screen else { return }
         let buttonFrame = statusWindow.convertToScreen(button.convert(button.bounds, to: nil))
         let safe = screen.visibleFrame.insetBy(dx: 8, dy: 8)
@@ -3007,13 +3018,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         result.title = title
         result.styleMask = resizable ? [.titled, .closable, .miniaturizable, .resizable] : [.titled, .closable]
         result.isReleasedWhenClosed = false
+        result.isRestorable = false
+        result.disableSnapshotRestoration()
         result.center()
         return result
     }
 
     private func present(_ window: NSWindow?) {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        guard let window else { return }
+        // Select the requested key/main window before activation. AppKit's
+        // default activation brings those windows forward; never activate all.
+        window.makeKeyAndOrderFront(nil)
+        NSRunningApplication.current.activate(options: [])
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }

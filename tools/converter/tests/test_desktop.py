@@ -189,9 +189,17 @@ def tool_desktop(desktop, model, monkeypatch):
         seen.append(payload)
         if payload["operation"] == "tokenize":
             return {"token_count": 24, "token_ids": [2] * 24}
+        if on_delta := options.get("on_delta"):
+            try:
+                on_delta(reply["text"])
+            except OSError:
+                from stark_convert.chat import ChatCancelled
+
+                raise ChatCancelled("Request cancelled.") from None
         return dict(reply)
 
     monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.worker.streaming = True
     monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: "qwen3-hermes-v1")
     desktop.template = ImmutableSandboxedEnvironment().from_string("{{ tools | tojson }};{{ messages | tojson }}")
     payload = {
@@ -320,6 +328,84 @@ def test_tool_buffered_stream_disconnect_keeps_worker_aligned(tool_desktop):
     assert error.value.code == "request_cancelled"
     assert desktop.worker is worker and desktop.job is None
     assert desktop.api_complete(payload)["choices"][0]["finish_reason"] == "tool_calls"
+
+
+def test_tool_enabled_http_delivers_text_before_generation_finishes(tool_desktop, monkeypatch):
+    import threading
+    import urllib.request
+
+    from stark_convert.local_api import LocalAPI
+
+    desktop, payload, _, reply = tool_desktop
+    original = desktop.worker.request
+    release = threading.Event()
+    terminal = threading.Event()
+
+    def generate(request, **options):
+        if request["operation"] != "generate":
+            return original(request, **options)
+        assert request["stream"] is True
+        options["on_delta"]("Early text")
+        assert release.wait(5)
+        options["on_delta"](" then final.")
+        terminal.set()
+        return {**reply, "text": "Early text then final."}
+
+    monkeypatch.setattr(desktop.worker, "request", generate)
+    api = LocalAPI(desktop.api_models, desktop.api_complete, api_key="b" * 64, port=0, cancellable=True)
+    info = api.start()
+    try:
+        request = urllib.request.Request(
+            info["base_url"] + "/chat/completions",
+            data=json.dumps({**payload, "stream": True}).encode(),
+            headers={"Authorization": "Bearer " + "b" * 64, "Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            chunks = []
+            while True:
+                line = response.readline()
+                assert line
+                if line.startswith(b"data: {"):
+                    item = json.loads(line[6:])
+                    chunks.append(item)
+                    if item["choices"][0]["delta"].get("content"):
+                        break
+            assert not terminal.is_set()  # The HTTP client can render while native work is still active.
+            release.set()
+            rest = response.read()
+        chunks += [json.loads(line[6:]) for line in rest.splitlines() if line.startswith(b"data: {")]
+        text = "".join(choice["delta"].get("content", "") for chunk in chunks for choice in chunk["choices"])
+        assert text == "Early text then final."
+        assert rest.count(b"data: [DONE]") == 1
+        assert desktop.job is None and desktop.api_queue == []
+    finally:
+        release.set()
+        api.close()
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unknown", "truncated"])
+def test_tool_stream_failure_after_provisional_text_recovers(tool_desktop, failure):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    worker = desktop.worker
+    if failure == "malformed":
+        reply["text"] = "<tool_call>{"
+    elif failure == "unknown":
+        reply["text"] = reply["text"].replace("lookup", "unknown")
+    else:
+        reply["finish_reason"] = "length"
+    reply["text"] = "Provisional text \n" + reply["text"]
+    delivered = []
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, on_delta=delivered.append)
+    assert error.value.code == "invalid_tool_call"
+    assert "".join(delivered) == "Provisional text"
+    assert desktop.worker is worker and desktop.job is None and desktop.api_queue == []
+    reply.update(text="Fresh response.", finish_reason="eos")
+    delivered.clear()
+    result = desktop.api_complete(payload, on_delta=delivered.append)
+    assert "".join(delivered) == result["choices"][0]["message"]["content"] == "Fresh response."
 
 
 def test_private_api_configuration_preserves_listener_on_port_conflict(desktop):

@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .api_tools import parse_tool_output, render_tools, template_messages, tool_parser_for
+from .api_tools import ToolTextStream, parse_tool_output, render_tools, template_messages, tool_parser_for
 from .chat import (
     ChatCancelled,
     ChatError,
@@ -1723,10 +1723,11 @@ class Desktop:
                 candidate.insert(0, {"role": "system", "content": system})
             self.status("generating", "Generating for connected application…", epoch)
         try:
+            tool_stream = ToolTextStream(on_delta) if tool_request and on_delta is not None else None
             reply = self.infer(
                 candidate,
                 maximum,
-                on_delta=None if tool_request else on_delta,
+                on_delta=tool_stream.feed if tool_stream is not None else on_delta,
                 context=self.api_context,
                 sampling=request["sampling"],
                 seed=request["seed"],
@@ -1757,9 +1758,9 @@ class Desktop:
                         "length" if reply.get("finish_reason") in ("length", "context") else "stop",
                     )
                 )
-                if tool_request and on_delta is not None and message.get("content"):
+                if tool_stream is not None:
                     try:
-                        on_delta(message["content"])
+                        tool_stream.finish(message.get("content"))
                     except OSError:
                         # The terminal worker frame is already consumed. A
                         # failed client write must not unload the aligned model.

@@ -10,9 +10,11 @@ import pytest
 from stark_convert.api_request import parse_chat_request
 from stark_convert.api_tools import (
     MAX_ARGUMENT_BYTES,
+    MAX_TOOL_OUTPUT_BYTES,
     MAX_TOOL_RESULT_BYTES,
     QWEN3_4B_TEMPLATE_SHA256,
     QWEN3_TEMPLATE_SHA256,
+    ToolTextStream,
     bounded_json,
     parse_tool_output,
     render_tools,
@@ -31,6 +33,68 @@ TOOL = {
 }
 CALL = {"id": "call_synthetic_0", "type": "function", "function": {"name": "lookup", "arguments": '{"key":"a"}'}}
 OUTPUT = '<tool_call>\n{"name":"lookup","arguments":{"key":"a"}}\n</tool_call>'
+
+
+@pytest.mark.parametrize("text", ["Synthetic text.\n", "  Unicode café and <tag> text  ", " ", "Partial <tool_ca"])
+def test_tool_text_stream_plain_text_matches_buffered_for_every_split(text):
+    for split in range(len(text) + 1):
+        delivered = []
+        stream = ToolTextStream(delivered.append)
+        stream.feed(text[:split])
+        stream.feed(text[split:])
+        stream.finish(text)
+        assert "".join(delivered) == text
+
+
+@pytest.mark.parametrize("prefix", ["", "Synthetic preamble", "Synthetic preamble \n\t"])
+def test_tool_text_stream_withholds_every_call_marker_split(prefix):
+    text = prefix + OUTPUT
+    for split in range(len(text) + 1):
+        delivered = []
+        stream = ToolTextStream(delivered.append)
+        stream.feed(text[:split])
+        stream.feed(text[split:])
+        assert "".join(delivered) == prefix.rstrip()
+        message, _ = output(text)
+        stream.finish(message["content"])
+        assert "".join(delivered) == prefix.rstrip()
+
+
+def test_tool_text_stream_incremental_text_and_long_whitespace():
+    delivered = []
+    stream = ToolTextStream(delivered.append)
+    stream.feed("First")
+    assert delivered == ["First"]  # Visible before the terminal frame.
+    for _ in range(2048):
+        stream.feed(" \n")
+    stream.feed("second")
+    assert "".join(delivered) == "First" + " \n" * 2048 + "second"
+    stream.finish("First" + " \n" * 2048 + "second")
+
+
+@pytest.mark.parametrize("suffix", ["<tool_call>{", "</tool_call>", "<tool_callX"])
+def test_tool_text_stream_keeps_malformed_wire_private(suffix):
+    delivered = []
+    stream = ToolTextStream(delivered.append)
+    for char in "Preamble \n" + suffix:
+        stream.feed(char)
+    assert "".join(delivered) == "Preamble"
+    with pytest.raises(APIError):
+        output("Preamble \n" + suffix)
+
+
+def test_tool_text_stream_bounds_and_terminal_consistency():
+    delivered = []
+    stream = ToolTextStream(delivered.append)
+    stream.feed(" " * MAX_TOOL_OUTPUT_BYTES)
+    stream.feed("overflow")
+    assert delivered == [] and stream.whitespace == [] and stream.tail == ""
+    with pytest.raises(APIError):
+        output(" " * MAX_TOOL_OUTPUT_BYTES + "overflow")
+    stream = ToolTextStream(delivered.append)
+    stream.feed("First")
+    with pytest.raises(ValueError):
+        stream.finish("Other")
 
 
 def request(**extra):

@@ -543,9 +543,9 @@ class LocalAPI:
                     if streaming:
                         choices = result.get("choices") or [{}]
                         choice = choices[0] if isinstance(choices[0], dict) else {}
-                        # Tool-enabled generations are buffered until the whole
-                        # call is validated. Emit each call exactly once, in
-                        # model order, using the same IDs as buffered output.
+                        # Text prefixes stream during generation. Calls stay
+                        # private until terminal validation, then each is sent
+                        # exactly once in model order with its buffered ID.
                         message = choice.get("message", {})
                         calls = message.get("tool_calls", []) if isinstance(message, dict) else []
                         for index, call in enumerate(calls):
