@@ -68,3 +68,6 @@ records format-tab filtering with search, sorting and exact download targets.
 The [generation prefix reuse run](archive/runs/2026-11-01-generation-prefix-reuse.md)
 records exact cached-versus-fresh outputs, invalidation checks, first-token
 timing for agent follow-ups and a long-prompt prefill profile.
+The [Qwen3.8 prefix reuse run](archive/runs/2026-11-02-hybrid-prefix-reuse.md)
+records the same checks for recurrent-state snapshots on the native Lily-format
+Qwen3.8 backend.
