@@ -1,0 +1,168 @@
+{
+  "schema_version": 1,
+  "record": "glm53-iq-shared-bound-2026-11-02",
+  "status": "correctness_gates_passed_component_timing_unqualified",
+  "qualification": {
+    "full_model_generation_run": false,
+    "integrated_engine_comparison": false,
+    "host_screened": false,
+    "per_round_drift_available": false,
+    "stable_performance_effect_established": false,
+    "integrated_speedup_claim": false,
+    "production_promotion": false,
+    "root_optimization_branch_contains_candidate": false
+  },
+  "candidate": {
+    "remote_branch": "codex/glm53-iq-shared-bound",
+    "commit": "ef48dcaeaec4bdc5024b411aef47f086e1bbded7",
+    "parent": "cd03dc7c44bb7dbf44711b797634fb3d864e4b12",
+    "tree": "378abbefbbd85375f1446a852cfe3bcdf82ac494",
+    "remote_head_verified": "ef48dcaeaec4bdc5024b411aef47f086e1bbded7",
+    "optimization_branch_head_at_record": "3bdbf15ea357bb966bd6681a77921c5fb4e24f88",
+    "default_flag": "STARK_GLM53_IQ_SHARED_BOUND",
+    "default_enabled": false,
+    "opt_in_value": "1",
+    "scope": "One input pair computes shared IQ input bounds once for its two GEMVs; both GEMVs remain separate and unchanged.",
+    "cross_pair_cache": false,
+    "production_wrapper_changed": false,
+    "source_freeze_sha256": "440852fd1fddbb73c4549a9a63ed674087d1b574b63a12994e041dcbebe96f38",
+    "source_patch_sha256": "60db73420f3a747dddff8867111c9d32e1bb191e45e32e9aa16b5f2e58d5c095",
+    "source_patch_bytes": 485297,
+    "source_patch_included_in_public_archive": false,
+    "source_freeze_path": "runtime/glm53-iq-shared-bound-source/source-freeze.json",
+    "source_patch_private_path": "runtime/glm53-iq-shared-bound-source/candidate-full-context.patch",
+    "commit_source_proof_sha256": "5a141c855f7852964456e90a12edcc4d56bb339354b12345bfada928d34d88f8",
+    "commit_source_proof_path": "runtime/glm53-iq-shared-bound-source/commit-source-proof.json",
+    "five_committed_blobs_match_original_freeze": true,
+    "files": [
+      {"path":"crates/stark-engine/src/engine/hybrid/decode_graph.rs","bytes":117595,"sha256":"436febd78ae75be0ab762b25c916aecd894543d4a57107c28b8e956c6aaad46e"},
+      {"path":"crates/stark-engine/src/engine/hybrid/decode_graph_iq_shared_bound_tests.rs","bytes":21931,"sha256":"3c6e4348d477921210ff138e02731e945b4e0d8153748ecac3cc37a0296cddb2"},
+      {"path":"crates/stark-engine/src/engine/hybrid/glm.rs","bytes":118184,"sha256":"af4e2eeed82171989fb8f1953ef2517ca9cf655d6aec6f670f69078fdd263571"},
+      {"path":"crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs","bytes":14412,"sha256":"04e445d82e614a70506441e7bf7405ea0448abfce65e53979e9831ba3a80c102"},
+      {"path":"crates/stark-engine/src/engine/hybrid/weights.rs","bytes":198971,"sha256":"551b4b12ded518cc6139354764943844ded50d235348bcb0f5273eb5cae85bc2"}
+    ]
+  },
+  "capture_lineage": {
+    "v1": {
+      "build_passed": false,
+      "failure_type": "FileNotFoundError",
+      "failure_stage": "before Cargo spawned; Cargo absent from managed Python PATH",
+      "private_model_free_fixture_results": 4,
+      "receipt_path": "runtime/glm53-iq-shared-bound-capture-v1/receipts/build-v1.json",
+      "receipt_sha256": "2219b76b4b2f64144457b4eeacc1a1ee3c8686d709192fce97abf45d9c4877fd",
+      "launcher_sha256": "af1b75598570d2bd69e7460df3cfc85ee4d1fa1b9a3ff5f7cfc7ab52cceb7d12"
+    },
+    "v2": {
+      "build_passed": true,
+      "build_receipt_path": "runtime/glm53-iq-shared-bound-capture-v2/receipts/build-v2.json",
+      "build_receipt_sha256": "b848c1591063f1de75ee2b4d17efd5b94fc818577d33ef942a0abf6fdb780606",
+      "gpu_unit_tests_passed": 7,
+      "gpu_unit_tests_failed": 0,
+      "gpu_units_receipt_path": "runtime/glm53-iq-shared-bound-capture-v2/receipts/gpu-units-v2.json",
+      "gpu_units_receipt_sha256": "d19e1fca1d77d4d7426448c6c6431136337f0f4d22ec57b45be158685a5710f9",
+      "launcher_sha256": "4931fee1c67695c27a9e5c2a0d9c07bdd7b80788ff8341f815619f59f29ac835"
+    },
+    "v3": {
+      "whitelist_test_passed": 1,
+      "whitelist_test_failed": 0,
+      "receipt_path": "runtime/glm53-iq-shared-bound-capture-v3/receipts/whitelist-v3.json",
+      "receipt_sha256": "946de52dd81826a3ef9bd87bb438c624e21a6255d32c3faac6afe30978d6366a",
+      "launcher_sha256": "ccbf640ee27d1663cc09062234cb5e710ad7f762aaffa2a3f08071c9c1f2211f"
+    },
+    "v4": {
+      "component_test_passed": 1,
+      "component_test_failed": 0,
+      "receipt_path": "runtime/glm53-iq-shared-bound-capture-v4/receipts/component-v4.json",
+      "receipt_sha256": "3f206235699e329f2d87c3681f5cda124dfa30af1cdd571086e7296f167512bd",
+      "launcher_sha256": "ef64be054c51eada92466fe8fa82fa4e882a58c2f050cc7ae6abcc0fa00773bb",
+      "parser_v2_sha256": "4931fee1c67695c27a9e5c2a0d9c07bdd7b80788ff8341f815619f59f29ac835",
+      "capture_cap_bytes": 8388608,
+      "raw_child_stdout_stderr_persisted": false
+    }
+  },
+  "validation": {
+    "handoff_sha256": "18b7aaa322d8d94fd731a00bc5b17c829e921fd63405c4acce993288e4855d11",
+    "handoff_path": "runtime/glm53-iq-shared-bound-source/HANDOFF.md",
+    "source_static_checks": ["owned_files_rustfmt_parse", "git_diff_check"],
+    "build": {
+      "passed": true,
+      "command_scope": "stark-engine library, cpu and metal features, no-run",
+      "toolchain": "nightly-2026-10-01",
+      "locked": true,
+      "jobs": 2,
+      "elapsed_seconds": 341.032968332991,
+      "compiler_errors": 0,
+      "compiler_warnings": 3,
+      "binary_sha256": "cf17550d585601a3a177a7086110e4564bc404fb3d5af94558baa85bb1c40388",
+      "binary_bytes": 172252640,
+      "receipt_sha256": "b848c1591063f1de75ee2b4d17efd5b94fc818577d33ef942a0abf6fdb780606",
+      "raw_child_output_persisted": false
+    },
+    "gpu_correctness_tests": {
+      "iq_shared_bound_tests_passed": 7,
+      "whitelist_budget_test_passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "coverage": [
+        "source and F64 parity",
+        "one versus two bound dispatches with two GEMVs",
+        "nonfinite, extreme and zero-scale fallback",
+        "masked and sticky failure with recovery",
+        "input mutation",
+        "unretained submission and mapped ownership",
+        "whitelist and budget admission"
+      ]
+    }
+  },
+  "component": {
+    "receipt_sha256": "3f206235699e329f2d87c3681f5cda124dfa30af1cdd571086e7296f167512bd",
+    "passed": true,
+    "screened": false,
+    "prospective_host_guard": false,
+    "prospective_drift_guard": false,
+    "expected_aggregate_rows": 4,
+    "loop_commands": 56,
+    "loop_pairs": 448,
+    "kind_order": [17, 18],
+    "replays_per_kind": 7,
+    "commands_per_replay": 4,
+    "order": "ABBA/BAAB alternating",
+    "replay_zero_excluded_from_warm_samples": true,
+    "warm_command_samples_per_kind_and_mode": 12,
+    "pairs_per_command": 8,
+    "rows": 2048,
+    "experts": 288,
+    "columns": 4096,
+    "selected_experts": 8,
+    "rotating_scattered_groups": 8,
+    "gemv_dispatches_per_pair": 2,
+    "bound_dispatches_per_pair": {"shared_bound_off": 2,"shared_bound_on": 1},
+    "gate_up_activation_bitwise_equal": true,
+    "f64_gate_sampled_rows_per_command": 512,
+    "f64_relative_absolute_sum_tolerance": 2e-6,
+    "effective_flags": {
+      "STARK_GLM53_IQ_GPU_BOUND": "1",
+      "STARK_GLM53_IQ_MULTIROW": "1",
+      "STARK_GLM53_IQ_SHARED_BOUND": "1",
+      "STARK_GLM53_IQ_SIGNED_FACTOR": "1",
+      "STARK_GLM53_IQ_TYPED16": "1",
+      "STARK_GLM53_PACKED_FAST_MATH": "0"
+    },
+    "maximum_f64_error_over_absolute_sum": {"kind_17": 6.031283195230824e-9,"kind_18": 4.504282453766835e-9},
+    "units": "microseconds per pair",
+    "results": [
+      {"kind":17,"shared_bound":false,"min":104.26041626487859,"median":106.51041702658404,"max":176.6093773767352,"range_over_median":0.6792665274589901,"combined_bank_bytes":1396703232,"rotating_population_bytes":310378496},
+      {"kind":17,"shared_bound":true,"min":101.45312626264058,"median":102.25000005448237,"max":168.26562568894587,"range_over_median":0.6534229769262129,"combined_bank_bytes":1396703232,"rotating_population_bytes":310378496},
+      {"kind":18,"shared_bound":false,"min":115.23437569849193,"median":115.65885324671399,"max":181.71354167861864,"range_over_median":0.5747866601990148,"combined_bank_bytes":1849688064,"rotating_population_bytes":411041792},
+      {"kind":18,"shared_bound":true,"min":110.73437417508103,"median":111.08854050689843,"max":202.93749912525527,"range_over_median":0.8299967263000325,"combined_bank_bytes":1849688064,"rotating_population_bytes":411041792}
+    ],
+    "per_round_abba_drift_available": false,
+    "performance_claim": null
+  },
+  "privacy": {
+    "raw_child_stdout_stderr_persisted": false,
+    "raw_gpu_or_compiler_streams_published": false,
+    "runtime_payloads_published": false,
+    "published_content": "source hashes, aggregate gate counts, component timing statistics, flags, and receipt hashes"
+  }
+}
