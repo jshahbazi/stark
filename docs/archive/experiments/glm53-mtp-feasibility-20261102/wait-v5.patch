@@ -1,0 +1,1615 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/glm.rs b/crates/stark-engine/src/engine/hybrid/glm.rs
+index ff65222e..4a46ee33 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm.rs
+@@ -25,0 +26,4 @@ mod prefill_batch;
++#[cfg(all(test, feature = "metal"))]
++#[path = "glm_mtp_probe.rs"]
++mod mtp_probe;
++
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_metal.rs b/crates/stark-engine/src/engine/hybrid/glm_metal.rs
+index 7d2c3139..bb5e9b1a 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_metal.rs
+@@ -1023,0 +1024,16 @@ impl Attention {
++    #[cfg(test)]
++    pub(super) fn mtp_probe_position(&self) -> usize {
++        self.position
++    }
++
++    #[cfg(test)]
++    pub(super) fn mtp_probe_cache(&self) -> Result<Vec<Vec<f32>>> {
++        // Completed test-only snapshots stay in RAM and are never printed.
++        DecodeGraph::new()?.finish(&[
++            self.latents.clone(),
++            self.pool_keys.clone(),
++            self.tail_keys.clone(),
++            self.tail_gates.clone(),
++        ])
++    }
++
+diff --git a/crates/stark-engine/src/engine/hybrid/profile.rs b/crates/stark-engine/src/engine/hybrid/profile.rs
+index 357cca9d..5fe6b7f8 100644
+--- a/crates/stark-engine/src/engine/hybrid/profile.rs
++++ b/crates/stark-engine/src/engine/hybrid/profile.rs
+@@ -43,0 +44,7 @@ pub fn snapshot() -> BTreeMap<&'static str, Counter> {
++/// No GPU/driver call: test-only head profiling reads one completed-command
++/// counter without cloning the complete aggregate map at each phase boundary.
++#[cfg(all(test, feature = "metal"))]
++pub(super) fn native_gpu_seconds_for_test() -> f64 {
++    COUNTERS.get_or_init(Mutex::default).lock().unwrap().get("native.metal.gpu").map_or(0.0, |c| c.seconds)
++}
++
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+index bfa83131..e1072db1 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -1453,0 +1454,3 @@ impl Executor {
++        #[cfg(test)]
++        let mtp_fence_profile =
++            super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnFence);
+@@ -1454,0 +1458,3 @@ impl Executor {
++        #[cfg(test)]
++        let mtp_commit_profile =
++            super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnCommit);
+@@ -1455,0 +1462,2 @@ impl Executor {
++        #[cfg(test)]
++        drop(mtp_commit_profile);
+@@ -1457,0 +1466,10 @@ impl Executor {
++        #[cfg(test)]
++        let mtp_wait_profile =
++            super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnWait);
++        #[cfg(test)]
++        if super::weights::mtp_probe::head_profile::poll_head_ffn() {
++            while !matches!(command.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error) {
++                std::thread::sleep(std::time::Duration::from_micros(20));
++            }
++        }
++        // Keep the original final completion fence and resource lifetimes.
+@@ -1464,0 +1483,4 @@ impl Executor {
++        #[cfg(test)]
++        drop(mtp_wait_profile);
++        #[cfg(test)]
++        drop(mtp_fence_profile);
+@@ -1679,0 +1702,4 @@ impl Executor {
++        #[cfg(test)]
++        let mtp_fence_profile = super::weights::mtp_probe::head_profile::phase(
++            super::weights::mtp_probe::head_profile::Phase::ProjectionFence,
++        );
+@@ -1690,0 +1717,2 @@ impl Executor {
++        #[cfg(test)]
++        drop(mtp_fence_profile);
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+index a44c2ced..a7cb5594 100644
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -39,0 +40,4 @@ use super::{Error, Result};
++#[cfg(all(test, feature = "metal"))]
++#[path = "weights_mtp_probe.rs"]
++pub(super) mod mtp_probe;
++
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs b/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs
+new file mode 100644
+index 00000000..d5fc1528
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs
+@@ -0,0 +1,660 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Ignored, aggregate-only one-step NextN feasibility probe. No runtime route.
++//!
++//! Positive-position math and cold-row policy follow llama.cpp (MIT),
++//! 1b6935b227b9f9aa89deea8016c0e208f547446f:
++//! src/models/glm5-next.cpp:544-671,779-804 and common/speculative.cpp:1593,1673-1695.
++//! Copyright (c) 2023-2026 the ggml authors. See LICENSE.ggml-hybrid.
++//! vLLM 3b6eeb060621eba88deb74a146039291a1afbc42's pos-0 zero-embedding
++//! convention is different and is deliberately not mixed into these results.
++
++use std::{io::Read, path::PathBuf, time::Instant};
++
++use serde::Deserialize;
++use sha2::{Digest, Sha256};
++use stark_engine_macros::stark_test;
++
++use super::*;
++use crate::engine::hybrid::{
++    glm_metal, profile,
++    weight_metal::DecodeGraph,
++    weights::mtp_probe::{
++        Receipt,
++        head_profile::{self as hp, Phase, phase},
++    },
++};
++
++const SOURCE: &str = "llama_1b6935b227b9f9aa89deea8016c0e208f547446f_zero_prior_hidden_normal_pos0_embedding";
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Case {
++    input_token_ids: Vec<u32>,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Request {
++    schema_version: usize,
++    cases: Vec<Case>,
++    continuation_tokens: usize,
++    context_tokens: usize,
++    corpus_sha256: String,
++}
++
++struct TargetRow {
++    hidden: Vec<f32>,
++    choice: Option<u32>,
++    logits: Option<Vec<f32>>,
++}
++
++fn choice(values: &[f32]) -> Result<u32> {
++    if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
++        return Err(Error::Invalid("MTP greedy values"));
++    }
++    let mut best = 0;
++    for i in 1..values.len() {
++        if values[i] > values[best] {
++            best = i;
++        }
++    }
++    Ok(best as u32)
++}
++
++fn index(
++    values: &[f32],
++    vocab: usize,
++) -> Result<u32> {
++    if values.len() != 1
++        || !values[0].is_finite()
++        || values[0] < 0.0
++        || values[0].fract() != 0.0
++        || values[0] as f64 >= vocab as f64
++    {
++        return Err(Error::Invalid("MTP GPU index"));
++    }
++    Ok(values[0] as u32)
++}
++
++/// Source-equivalent serial encoder path, omitting cfg(test) layer trace
++/// readbacks. The returned tap is exactly the existing readout's norm input.
++fn target_row(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++    full: bool,
++    extra: usize,
++    memory: &mut Receipt,
++) -> Result<TargetRow> {
++    objc2::rc::autoreleasepool(|_| target_row_inner(model, token, readout, full, extra, memory))
++}
++
++fn target_row_inner(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++    full: bool,
++    extra: usize,
++    memory: &mut Receipt,
++) -> Result<TargetRow> {
++    let c = &model.config;
++    if token as usize >= c.vocab || model.position >= c.max_context {
++        return Err(Error::Invalid("MTP target bounds"));
++    }
++    let decode = model.decode.as_mut().ok_or(Error::Invalid("MTP target not initialized"))?;
++    let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("MTP requires bounded target"))?;
++    if !decode.encoder_banks {
++        return Err(Error::Invalid("MTP requires target encoder banks"));
++    }
++    let embedding = model.weights.row("token_embd.weight", token as usize)?;
++    let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
++    let mut graph = new_encoder_graph(decode)?;
++    for group in &plan.groups {
++        let banks = model.weights.encoder_indexed_group(&group.names, plan.budget)?;
++        if banks.registered_bytes() > group.bytes {
++            return Err(Error::Invalid("MTP target bank accounting"));
++        }
++        for layer in group.start..group.end {
++            (graph, streams) = encode_metal_layer(
++                &model.weights,
++                c,
++                decode,
++                layer,
++                &mut model.states[layer],
++                graph,
++                streams,
++                Some(&banks),
++            )?;
++        }
++        drop(banks);
++        if group.end < c.layer_types.len() {
++            graph.resource_boundary()?;
++        }
++    }
++    let mean = glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
++    let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
++    let mut outputs = vec![hidden];
++    if readout {
++        let logits = model.weights.encode_matvec(&mut graph, "output.weight", &outputs[0])?;
++        let greedy = graph.greedy_argmax(&logits)?;
++        outputs.push(greedy);
++        if full {
++            outputs.push(logits);
++        }
++    }
++    model.weights.mtp_probe_observe(extra, memory)?;
++    let mut rows = graph.finish(&outputs)?.into_iter();
++    let hidden = rows.next().ok_or(Error::Invalid("MTP target tap"))?;
++    let selected = if readout {
++        Some(index(&rows.next().ok_or(Error::Invalid("MTP target index"))?, c.vocab)?)
++    } else {
++        None
++    };
++    let logits = if full {
++        rows.next()
++    } else {
++        None
++    };
++    for state in &model.states {
++        if let LayerState::Kda(s) = state {
++            if let Some(metal) = &s.metal {
++                metal.check_completed()?;
++            }
++        }
++    }
++    model.position += 1;
++    model.weights.mtp_probe_observe(extra, memory)?;
++    Ok(TargetRow {
++        hidden,
++        choice: selected,
++        logits,
++    })
++}
++
++struct Head {
++    attention: glm_metal::Attention,
++    position: usize,
++}
++
++impl Head {
++    fn new(
++        model: &GlmModel,
++        context: usize,
++    ) -> Result<Self> {
++        let c = &model.config;
++        Ok(Self {
++            attention: glm_metal::Attention::new(
++                glm_metal::AttentionGeometry {
++                    rank: c.kv_rank,
++                    heads: c.heads,
++                    query_dim: c.qk_dim,
++                    index_dim: c.index_dim,
++                    index_heads: c.index_heads,
++                    pool: c.index_pool,
++                    top_k: c.index_topk,
++                    context,
++                },
++                &model.weights.vector("blk.45.indexer_compressor_ape.weight")?,
++            )?,
++            position: 0,
++        })
++    }
++
++    /// Full head or cache-only catch-up. Both execute identical MLA updates;
++    /// FFN and output layers have no cache state. No mHC control is called.
++    fn row(
++        &mut self,
++        model: &GlmModel,
++        previous_hidden: &[f32],
++        token: u32,
++        expected_position: usize,
++        readout: bool,
++        extra: usize,
++        memory: &mut Receipt,
++    ) -> Result<Option<u32>> {
++        let _head_scope = hp::enter_head();
++        let _total = phase(Phase::Total);
++        let mut drain = None;
++        let result = objc2::rc::autoreleasepool(|_| {
++            let result = self.row_inner(model, previous_hidden, token, expected_position, readout, extra, memory);
++            drain = Some(phase(Phase::Autorelease));
++            result
++        });
++        drop(drain);
++        result
++    }
++
++    fn row_inner(
++        &mut self,
++        model: &GlmModel,
++        previous_hidden: &[f32],
++        token: u32,
++        expected_position: usize,
++        readout: bool,
++        extra: usize,
++        memory: &mut Receipt,
++    ) -> Result<Option<u32>> {
++        let prepare_profile = phase(Phase::Prepare);
++        let c = &model.config;
++        let w = &model.weights;
++        if previous_hidden.len() != c.hidden
++            || self.position != expected_position
++            || self.attention.mtp_probe_position() != expected_position
++            || token as usize >= c.vocab
++        {
++            return Err(Error::Invalid("MTP shifted-row alignment"));
++        }
++        let mut graph = DecodeGraph::new()?;
++        let embed = DecodeGraph::upload(&w.row("token_embd.weight", token as usize)?)?;
++        let prior = DecodeGraph::upload(previous_hidden)?;
++        let en = DecodeGraph::upload(&w.vector("blk.45.nextn.enorm.weight")?)?;
++        let hn = DecodeGraph::upload(&w.vector("blk.45.nextn.hnorm.weight")?)?;
++        drop(prepare_profile);
++        let encode_profile = phase(Phase::NormMlaEncode);
++        let e = graph.rms_norm(&embed, &en, c.hidden, c.rms_eps)?;
++        let h = graph.rms_norm(&prior, &hn, c.hidden, c.rms_eps)?;
++        let joined = graph.scratch(2 * c.hidden)?;
++        graph.copy_into(&e, &joined.slice(0, c.hidden)?)?;
++        graph.copy_into(&h, &joined.slice(c.hidden, c.hidden)?)?;
++        let z = w.encode_matvec(&mut graph, "blk.45.nextn.eh_proj.weight", &joined)?;
++        let norm = DecodeGraph::upload(&w.vector("blk.45.attn_norm.weight")?)?;
++        let x = graph.rms_norm(&z, &norm, c.hidden, c.rms_eps)?;
++        let attention = encode_mla(w, c, &mut graph, &x, "blk.45", &mut self.attention, false)?;
++        let residual = graph.add(&z, &attention)?;
++        let ffn_norm = DecodeGraph::upload(&w.vector("blk.45.ffn_norm.weight")?)?;
++        let x = graph.rms_norm(&residual, &ffn_norm, c.hidden, c.rms_eps)?;
++        drop(encode_profile);
++        w.mtp_probe_observe(extra, memory)?;
++        let wait_profile = phase(Phase::NormMlaWait);
++        let rows = graph.finish(if readout {
++            std::slice::from_ref(&x)
++        } else {
++            &[]
++        })?;
++        drop(wait_profile);
++        self.position += 1;
++        if self.attention.mtp_probe_position() != self.position {
++            return Err(Error::Invalid("MTP MLA position"));
++        }
++        if !readout {
++            return Ok(None);
++        }
++        let x = &rows[0];
++        let projection_profile = phase(Phase::Projection);
++        let [router, shared_gate, shared_up] = project_many(
++            w,
++            [
++                ("blk.45.ffn_gate_inp.weight", x.as_slice()),
++                ("blk.45.ffn_gate_shexp.weight", x.as_slice()),
++                ("blk.45.ffn_up_shexp.weight", x.as_slice()),
++            ],
++        )?;
++        drop(projection_profile);
++        let router_profile = phase(Phase::Router);
++        let routed = route(&router, &w.vector("blk.45.exp_probs_b.bias")?, c.active_experts, c.routed_scale)?;
++        let experts = routed.iter().map(|&(i, _)| i).collect::<Vec<_>>();
++        let probabilities = routed.iter().map(|&(_, p)| p).collect::<Vec<_>>();
++        drop(router_profile);
++        let ffn =
++            w.mtp_probe_ffn(&experts, x, &probabilities, &shared_gate, &shared_up, c.swiglu_limit, extra, memory)?;
++        let readout_profile = phase(Phase::ReadoutEncode);
++        let mut graph = DecodeGraph::new()?;
++        let ffn = DecodeGraph::upload(&ffn)?;
++        let output = graph.add(&residual, &ffn)?;
++        let hn = DecodeGraph::upload(&w.vector("blk.45.nextn.shared_head_norm.weight")?)?;
++        let output = graph.rms_norm(&output, &hn, c.hidden, c.rms_eps)?;
++        let logits = w.encode_matvec(&mut graph, "output.weight", &output)?;
++        let output = graph.greedy_argmax(&logits)?;
++        drop(readout_profile);
++        w.mtp_probe_observe(extra, memory)?;
++        let _wait_profile = phase(Phase::ReadoutWait);
++        Ok(Some(index(&graph.finish(&[output])?.remove(0), c.vocab)?))
++    }
++}
++
++fn same_rows(
++    a: &[Vec<f32>],
++    b: &[Vec<f32>],
++) -> bool {
++    a.len() == b.len()
++        && a.iter().zip(b).all(|(x, y)| x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.to_bits() == b.to_bits()))
++}
++
++fn gpu_seconds() -> f64 {
++    profile::snapshot().get("native.metal.gpu").map_or(0.0, |c| c.seconds)
++}
++
++fn validate_head(model: &GlmModel) -> Result<()> {
++    let c = &model.config;
++    if c.hidden != 4096
++        || c.hc != 4
++        || c.layer_types.len() != 45
++        || c.active_experts != 8
++        || c.kv_rank != 512
++        || c.index_pool != 4
++        || c.index_dim != 128
++        || c.expert_intermediate != 2048
++        || model.weights.names().iter().filter(|n| n.starts_with("blk.45.")).count() != 29
++    {
++        return Err(Error::Invalid("MTP model geometry"));
++    }
++    for (name, dims) in [
++        ("nextn.eh_proj.weight", vec![4096, 8192]),
++        ("nextn.enorm.weight", vec![4096]),
++        ("nextn.hnorm.weight", vec![4096]),
++        ("nextn.shared_head_norm.weight", vec![4096]),
++        ("attn_norm.weight", vec![4096]),
++        ("ffn_norm.weight", vec![4096]),
++        ("ffn_gate_inp.weight", vec![288, 4096]),
++        ("ffn_down_shexp.weight", vec![4096, 2048]),
++    ] {
++        shape(&model.weights, &format!("blk.45.{name}"), &dims)?;
++    }
++    if model.weights.names().iter().any(|n| n.starts_with("blk.45.hc_") || n.starts_with("blk.45.ssm_")) {
++        return Err(Error::Invalid("MTP must be mHC-free MLA"));
++    }
++    Ok(())
++}
++
++fn probe() -> Result<Value> {
++    let mut bytes = Vec::new();
++    std::io::stdin().take(128 * 1024 + 1).read_to_end(&mut bytes)?;
++    if bytes.len() > 128 * 1024 {
++        return Err(Error::Invalid("MTP stdin bound"));
++    }
++    let request: Request = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("MTP stdin schema"))?;
++    if request.schema_version != 1
++        || !(1..=4).contains(&request.cases.len())
++        || !(1..=16).contains(&request.continuation_tokens)
++        || request.context_tokens != 256
++        || request.corpus_sha256.len() != 64
++        || !request.corpus_sha256.bytes().all(|b| b.is_ascii_hexdigit())
++        || request.cases.iter().any(|c| !(8..=128).contains(&c.input_token_ids.len()))
++    {
++        return Err(Error::Invalid("MTP stdin admission"));
++    }
++    let ids = request.cases.iter().map(|c| &c.input_token_ids).collect::<Vec<_>>();
++    let encoded = serde_json::to_vec(&ids).map_err(|_| Error::Invalid("MTP stdin schema"))?;
++    if format!("{:x}", Sha256::digest(&encoded)) != request.corpus_sha256 {
++        return Err(Error::Invalid("MTP stdin admission"));
++    }
++    for name in ["STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER"] {
++        if std::env::var_os(name).is_none_or(|v| v != "1") {
++            return Err(Error::Invalid("MTP target policy required"));
++        }
++    }
++    for name in ["STARK_GLM53_GREEDY_OVERLAP", "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_SCRATCH_HEAP"] {
++        if std::env::var_os(name).is_some_and(|v| v == "1") {
++            return Err(Error::Invalid("MTP probe is serial only"));
++        }
++    }
++    let ffn_poll = match std::env::var("STARK_GLM53_MTP_TEST_FFN_POLL_WAIT").as_deref() {
++        Ok("1") => true,
++        Ok("0") | Err(std::env::VarError::NotPresent) => false,
++        _ => return Err(Error::Invalid("MTP FFN wait policy")),
++    };
++    hp::configure_ffn_poll(ffn_poll);
++    let path =
++        PathBuf::from(std::env::var_os("STARK_GLM53_MTP_PROBE_MODEL_PATH").ok_or(Error::Invalid("MTP model path"))?);
++    let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json"))?)
++        .map_err(|_| Error::Invalid("MTP model config"))?;
++    let source: Value = serde_json::from_slice(&std::fs::read(path.join("native-source.json"))?)
++        .map_err(|_| Error::Invalid("MTP model provenance"))?;
++    if source["architecture"].as_str() != Some("glm5_next")
++        || source["weights_source"]["revision"].as_str() != Some("a38483c8cd5df544f53d70fb281afe97369d5ab6")
++        || source["metadata_source"]["revision"].as_str() != Some("04c4e9e95c5da8862dced7e5056455116f83a7e0")
++    {
++        return Err(Error::Invalid("MTP model provenance"));
++    }
++    let mut model = GlmModel::new(Weights::open(&path)?, &config)?;
++    validate_head(&model)?;
++    if request.cases.iter().any(|row| {
++        row.input_token_ids.iter().any(|&t| t as usize >= model.config.vocab)
++            || row.input_token_ids.len() + request.continuation_tokens + 1 > request.context_tokens
++    }) {
++        return Err(Error::Invalid("MTP corpus bounds"));
++    }
++    model.decode = Some(MetalDecode::new(&model.weights, &model.config, model.hyper_connections.as_deref())?);
++    // Mirror production ownership after controls move to Metal. The ordinary
++    // graph reference below reuses this initialized decode, so it needs no CPU
++    // control-weight copy. Do not retain test-only duplicate model weights.
++    model.hyper_connections = None;
++    let generation: Value = serde_json::from_slice(&std::fs::read(path.join("generation_config.json"))?)
++        .map_err(|_| Error::Invalid("MTP generation config"))?;
++    let eos = match &generation["eos_token_id"] {
++        Value::Number(n) => {
++            vec![n.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("MTP EOS config"))?]
++        },
++        Value::Array(values) => values
++            .iter()
++            .map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("MTP EOS config")))
++            .collect::<Result<Vec<_>>>()?,
++        _ => return Err(Error::Invalid("MTP EOS config")),
++    };
++    if eos.is_empty() || eos.iter().any(|&n| n as usize >= model.config.vocab) {
++        return Err(Error::Invalid("MTP EOS config"));
++    }
++    let extra = model.weights.mtp_probe_extra_bytes(request.context_tokens)?;
++    let mut memory = Receipt::default();
++    model.weights.mtp_probe_observe(extra, &mut memory)?;
++    profile::enable(true);
++    profile::reset();
++    // Explicit alignment proof: first eight target rows match the ordinary
++    // API's full logits; full-head and chunked cache-only catch-up agree exactly.
++    let initial = &request.cases[0].input_token_ids[..8];
++    let mut target_rows = Vec::with_capacity(8);
++    for &t in initial {
++        target_rows.push(target_row(&mut model, t, true, true, extra, &mut memory)?);
++    }
++    model.reset();
++    for (&t, reference) in initial.iter().zip(&target_rows) {
++        let ordinary = model.step(t)?;
++        let expected = reference.logits.as_ref().ok_or(Error::Invalid("MTP missing reference"))?;
++        if ordinary.len() != expected.len()
++            || ordinary.iter().zip(expected).any(|(a, b)| a.to_bits() != b.to_bits())
++            || Some(choice(&ordinary)?) != reference.choice
++        {
++            return Err(Error::Invalid("MTP target-tap parity"));
++        }
++    }
++    let mut full = Head::new(&model, request.context_tokens)?;
++    let mut chunked = Head::new(&model, request.context_tokens)?;
++    let zero = vec![0.0; 4096];
++    let mut final_full = None;
++    let mut cold_full_head_ms = 0.0;
++    for (i, &t) in initial.iter().enumerate() {
++        let started = Instant::now();
++        final_full = full.row(
++            &model,
++            if i == 0 {
++                &zero
++            } else {
++                &target_rows[i - 1].hidden
++            },
++            t,
++            i,
++            true,
++            extra,
++            &mut memory,
++        )?;
++        if i == 0 {
++            cold_full_head_ms = started.elapsed().as_secs_f64() * 1000.0;
++        }
++    }
++    let mut at = 0;
++    let mut final_chunked = None;
++    for size in [1, 3, 4] {
++        for _ in 0..size {
++            final_chunked = chunked.row(
++                &model,
++                if at == 0 {
++                    &zero
++                } else {
++                    &target_rows[at - 1].hidden
++                },
++                initial[at],
++                at,
++                at == 7,
++                extra,
++                &mut memory,
++            )?;
++            at += 1;
++        }
++    }
++    if final_full != final_chunked
++        || !same_rows(&full.attention.mtp_probe_cache()?, &chunked.attention.mtp_probe_cache()?)
++    {
++        return Err(Error::Invalid("MTP shifted cache alignment parity"));
++    }
++    drop(full);
++    drop(chunked);
++    drop(target_rows);
++    model.reset();
++    let static_entries = memory.static_cache_entries_peak;
++    let static_bytes = memory.static_cache_peak_bytes;
++    let mut agreement = 0usize;
++    let mut comparisons = 0usize;
++    let mut prompt_rows = 0usize;
++    let mut head_prefill_ms = 0.0;
++    let mut head_decode_ms = 0.0;
++    let mut target_decode_ms = 0.0;
++    let mut first_prefill_cache_ms = 0.0;
++    let mut head_decode_gpu_ms = 0.0;
++    let mut target_decode_gpu_ms = 0.0;
++    let mut eos_cases = 0usize;
++    let mut output_hash = Sha256::new();
++    let mut case_rows = serde_json::Map::new();
++    hp::reset();
++    for (case_index, case) in request.cases.iter().enumerate() {
++        model.reset();
++        let mut head = Head::new(&model, request.context_tokens)?;
++        let mut hidden = vec![0.0; 4096];
++        let mut pending = None;
++        for (i, &t) in case.input_token_ids.iter().enumerate() {
++            let started = Instant::now();
++            let _ = head.row(&model, &hidden, t, i, false, extra, &mut memory)?;
++            let ms = started.elapsed().as_secs_f64() * 1000.0;
++            if prompt_rows == 0 {
++                first_prefill_cache_ms = ms;
++            }
++            head_prefill_ms += ms;
++            prompt_rows += 1;
++            let row = target_row(&mut model, t, i + 1 == case.input_token_ids.len(), false, extra, &mut memory)?;
++            hidden = row.hidden;
++            pending = row.choice;
++        }
++        let mut case_agree = 0;
++        let mut case_comparisons = 0;
++        for _ in 0..request.continuation_tokens {
++            let t = pending.ok_or(Error::Invalid("MTP pending target token"))?;
++            if eos.contains(&t) {
++                eos_cases += 1;
++                break;
++            }
++            let gpu_before = gpu_seconds();
++            hp::active(true);
++            let started = Instant::now();
++            let draft_result = head.row(&model, &hidden, t, model.position, true, extra, &mut memory);
++            head_decode_ms += started.elapsed().as_secs_f64() * 1000.0;
++            hp::active(false);
++            let draft = draft_result?.ok_or(Error::Invalid("MTP draft index"))?;
++            head_decode_gpu_ms += (gpu_seconds() - gpu_before) * 1000.0;
++            let gpu_before = gpu_seconds();
++            let started = Instant::now();
++            let row = target_row(&mut model, t, true, false, extra, &mut memory)?;
++            target_decode_ms += started.elapsed().as_secs_f64() * 1000.0;
++            target_decode_gpu_ms += (gpu_seconds() - gpu_before) * 1000.0;
++            let next = row.choice.ok_or(Error::Invalid("MTP target index"))?;
++            case_agree += usize::from(draft == next);
++            comparisons += 1;
++            case_comparisons += 1;
++            output_hash.update(next.to_le_bytes());
++            hidden = row.hidden;
++            pending = Some(next);
++        }
++        agreement += case_agree;
++        case_rows.insert(
++            format!("case_{case_index}"),
++            serde_json::json!({"comparisons": case_comparisons, "agreements": case_agree}),
++        );
++        if memory.static_cache_entries_peak != static_entries || memory.static_cache_peak_bytes != static_bytes {
++            return Err(Error::Invalid("MTP static registrations crept after warm-up"));
++        }
++    }
++    let counters = profile::snapshot();
++    let (head_profile_wall, head_profile_gpu, head_profile_calls) = hp::snapshot();
++    profile::enable(false);
++    if let Some(counter) = counters.get("native.metal.allocated_bytes") {
++        memory.sampled_metal_allocated_peak_bytes =
++            memory.sampled_metal_allocated_peak_bytes.max(counter.max_bytes as usize);
++    }
++    model.weights.mtp_probe_observe(extra, &mut memory)?;
++    if comparisons == 0
++        || memory.selected_live_bytes_at_return != 0
++        || memory.selected_calls != memory.released_owner_checks
++        || memory.sampled_metal_allocated_peak_bytes > memory.admitted_cap_bytes
++    {
++        return Err(Error::Invalid("MTP final memory gate"));
++    }
++    model.reset();
++    Ok(serde_json::json!({"glm_mtp_probe_result": true, "aggregate": {
++        "status": "component_probe_complete_no_speculative_runtime", "precision": "existing_safe_f32_graph_quant_weights_cpu_f32_router",
++        "source_convention": SOURCE, "memory_gauges": memory,
++        "head_profile_schema": hp::SCHEMA, "head_profile_v5_wall_ms": head_profile_wall,
++        "head_profile_v5_gpu_ms": head_profile_gpu, "head_profile_v5_calls": head_profile_calls,
++        "ffn_wait_policy": hp::ffn_policy_name(),
++        "counts": {"cases": request.cases.len(), "prompt_rows": prompt_rows, "comparisons": comparisons, "agreements": agreement, "eos_cases": eos_cases,
++            "alignment_target_rows": 8, "alignment_cache_rows": 8, "alignment_chunk_groups": 3, "target_rollback_calls": 0},
++        "timing_ms": {"cold_full_head_wall_including_lazy_pipeline_compile": cold_full_head_ms,
++            "first_measured_prefill_cache_row_wall": first_prefill_cache_ms, "prefill_cache_only_head_wall": head_prefill_ms,
++            "decode_head_wall": head_decode_ms, "serial_target_with_hidden_tap_wall": target_decode_ms,
++            "decode_head_gpu": head_decode_gpu_ms, "serial_target_with_hidden_tap_gpu": target_decode_gpu_ms},
++        "hashes": {"corpus_sha256": request.corpus_sha256, "target_continuation_sha256": format!("{:x}", output_hash.finalize())},
++        "rows": case_rows
++    }}))
++}
++
++#[stark_test]
++#[ignore]
++fn glm_mtp_one_step_probe() {
++    let result = objc2::rc::autoreleasepool(|_| probe());
++    match result {
++        Ok(aggregate) => println!("{aggregate}"),
++        Err(error) => {
++            hp::active(false);
++            profile::enable(false);
++            // Only fixed enum labels cross the process boundary. Never format
++            // an Error, request, model value, or captured process output.
++            let guard = match error {
++                Error::Invalid("MTP stdin bound") => "stdin_bound",
++                Error::Invalid("MTP stdin schema") => "stdin_schema",
++                Error::Invalid("MTP stdin admission") => "stdin_admission",
++                Error::Invalid("MTP target policy required" | "MTP probe is serial only") => "target_policy",
++                Error::Invalid("MTP static registrations crept after warm-up") => "static_cache_growth",
++                Error::Invalid(code)
++                    if code.contains("parity") || code.contains("alignment") || code.contains("tap") =>
++                {
++                    "alignment_parity"
++                },
++                Error::Invalid(code)
++                    if code.contains("cap")
++                        || code.contains("resident")
++                        || code.contains("selected")
++                        || code.contains("alloc")
++                        || code.contains("memory") =>
++                {
++                    "memory_gate"
++                },
++                Error::Io(_) => "model_load",
++                _ => "probe_rejected",
++            };
++            println!(
++                "{}",
++                serde_json::json!({"glm_mtp_probe_result":true,"aggregate":{
++                    "status":"rejected","source_convention":SOURCE,"rows":{"failure":{"guard":guard}}
++                }})
++            );
++            panic!("MTP aggregate probe failed; no private values are reported");
++        },
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs b/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs
+new file mode 100644
+index 00000000..f1e16520
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs
+@@ -0,0 +1,233 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Test-only accounting adapter over existing bounded mapped FFN operations.
++//! No residency/cap/cache policy is changed by this module.
++
++use super::*;
++use crate::engine::hybrid::weight_metal::{MappedOperation, allocated_bytes, mapped_ffn};
++
++#[path = "mtp_head_profile.rs"]
++pub(in crate::engine::hybrid) mod head_profile;
++use head_profile::{Phase, phase};
++
++#[derive(Default, serde::Serialize)]
++pub(in crate::engine::hybrid) struct Receipt {
++    pub selected_calls: usize,
++    pub selected_view_count_peak: usize,
++    pub selected_registered_peak_bytes: usize,
++    pub selected_live_bytes_at_return: usize,
++    pub released_owner_checks: usize,
++    pub resident_bank_peak_bytes: usize,
++    pub resident_static_peak_bytes: usize,
++    pub residency_allocated_peak_bytes: usize,
++    pub static_cache_peak_bytes: usize,
++    pub static_cache_entries_peak: usize,
++    pub sampled_metal_allocated_peak_bytes: usize,
++    pub prospective_reserved_bytes: usize,
++    pub admitted_cap_bytes: usize,
++    pub extra_reserved_bytes: usize,
++    pub target_registered_trunk_prospective_bytes: usize,
++    pub target_static_reserve_bytes: usize,
++    pub target_dynamic_allowance_bytes: usize,
++    pub observed_target_required_peak_bytes: usize,
++    pub projected_production_overlap_extra_bytes: usize,
++    pub projected_production_reserved_bytes: usize,
++    pub projected_production_cap_margin_bytes: usize,
++    pub projected_production_cap_deficit_bytes: usize,
++}
++
++impl Weights {
++    /// Fail before a selected view can enter bank_view's promotion branch.
++    fn mtp_probe_selected_mode(&self) -> Result<()> {
++        let cache = self.bank_views.lock().map_err(|_| Error::Invalid("MTP bank cache lock"))?;
++        if cache.limit != 0 || cache.registered_bytes != 0 || !cache.entries.is_empty() {
++            return Err(Error::Invalid("MTP requires uncached selected ranges"));
++        }
++        Ok(())
++    }
++
++    /// Reserve selected planes and one independent draft cache above the
++    /// unchanged trunk/static/dynamic reservation. No new resident bank names.
++    pub(in crate::engine::hybrid) fn mtp_probe_observe(
++        &self,
++        extra: usize,
++        receipt: &mut Receipt,
++    ) -> Result<()> {
++        let _profile = phase(Phase::Observe);
++        self.mtp_probe_selected_mode()?;
++        let guard = self.encoder_residency.lock().map_err(|_| Error::Invalid("MTP residency lock"))?;
++        let r = guard.as_ref().ok_or(Error::Invalid("MTP requires existing residency admission"))?;
++        if r.failed || r.names.iter().any(|n| n.starts_with("blk.45.")) {
++            return Err(Error::Invalid("MTP must not enter resident trunk inventory"));
++        }
++        let names = r.names.iter().cloned().collect::<Vec<_>>();
++        let trunk = self.bounded_bank_bytes(&names)?;
++        let prospective = trunk
++            .checked_add(r.static_reserve)
++            .and_then(|n| n.checked_add(r.dynamic_allowance))
++            .and_then(|n| n.checked_add(extra))
++            .filter(|&n| n <= r.cap)
++            .ok_or(Error::Invalid("MTP extra allocations exceed existing cap"))?;
++        let driver = r.driver.lock().map_err(|_| Error::Invalid("MTP residency driver lock"))?;
++        let actual = usize::try_from(driver.set.allocated_size()).map_err(|_| Error::Invalid("MTP allocation size"))?;
++        let actual_required = r.required(r.bank_bytes, r.static_bytes, actual)?;
++        // Driver overhead may exceed the header-based registration estimate.
++        // Keep MTP's extra reservation above BOTH source inventory and the
++        // actual existing-residency requirement; never spend it twice.
++        let actual_with_extra = actual_required
++            .checked_add(extra)
++            .filter(|&n| n <= r.cap)
++            .ok_or(Error::Invalid("MTP actual residency plus extra exceeds existing cap"))?;
++        receipt.resident_bank_peak_bytes = receipt.resident_bank_peak_bytes.max(r.bank_bytes);
++        receipt.resident_static_peak_bytes = receipt.resident_static_peak_bytes.max(r.static_bytes);
++        receipt.residency_allocated_peak_bytes = receipt.residency_allocated_peak_bytes.max(actual);
++        receipt.admitted_cap_bytes = r.cap;
++        receipt.prospective_reserved_bytes = receipt.prospective_reserved_bytes.max(prospective.max(actual_with_extra));
++        receipt.extra_reserved_bytes = extra;
++        receipt.target_registered_trunk_prospective_bytes = trunk;
++        receipt.target_static_reserve_bytes = r.static_reserve;
++        receipt.target_dynamic_allowance_bytes = r.dynamic_allowance;
++        receipt.observed_target_required_peak_bytes = receipt.observed_target_required_peak_bytes.max(actual_required);
++        // The probe rejects overlap=1, while the production recipe reserves
++        // two graphs. This is an accounting projection, never an admission of
++        // production scratch-heap behavior or speculative runtime state.
++        receipt.projected_production_overlap_extra_bytes = 512 * 1024 * 1024;
++        receipt.projected_production_reserved_bytes = receipt
++            .prospective_reserved_bytes
++            .checked_add(receipt.projected_production_overlap_extra_bytes)
++            .ok_or(Error::Invalid("MTP production projection overflow"))?;
++        receipt.projected_production_cap_margin_bytes =
++            r.cap.saturating_sub(receipt.projected_production_reserved_bytes);
++        receipt.projected_production_cap_deficit_bytes =
++            receipt.projected_production_reserved_bytes.saturating_sub(r.cap);
++        drop(driver);
++        drop(guard);
++        let statics = self.static_views.lock().map_err(|_| Error::Invalid("MTP static cache lock"))?;
++        if statics.registered_bytes > statics.limit || statics.limit != MAX_STATIC_VIEW_BYTES {
++            return Err(Error::Invalid("MTP static cache exceeded existing bound"));
++        }
++        receipt.static_cache_peak_bytes = receipt.static_cache_peak_bytes.max(statics.registered_bytes);
++        receipt.static_cache_entries_peak = receipt.static_cache_entries_peak.max(statics.entries.len());
++        receipt.sampled_metal_allocated_peak_bytes = receipt.sampled_metal_allocated_peak_bytes.max(allocated_bytes()?);
++        Ok(())
++    }
++
++    pub(in crate::engine::hybrid) fn mtp_probe_extra_bytes(
++        &self,
++        context: usize,
++    ) -> Result<usize> {
++        self.mtp_probe_selected_mode()?;
++        let mut selected = 0usize;
++        for (name, kind, rows, columns) in [
++            ("blk.45.ffn_gate_exps.weight", 10, 2048, 4096),
++            ("blk.45.ffn_up_exps.weight", 10, 2048, 4096),
++            ("blk.45.ffn_down_exps.weight", 11, 4096, 2048),
++        ] {
++            let t = self.tensor(name)?;
++            if t.kind != kind || t.shape != [288, rows, columns] || t.affine.is_some() {
++                return Err(Error::Invalid("MTP selected tensor contract"));
++            }
++            let plane = rows * encoded_size(kind, columns)?;
++            let max_span = (0..288)
++                .map(|index| self.files[t.file].metal_span(t.offset + index * plane, plane).map(|x| x.1))
++                .collect::<Result<Vec<_>>>()?
++                .into_iter()
++                .max()
++                .ok_or(Error::Invalid("MTP empty bank"))?;
++            selected = selected.checked_add(8 * max_span).ok_or(Error::Invalid("MTP selected size"))?;
++        }
++        // Two cache generations at a growth boundary, tails/APE, scores,
++        // private normalized rows and small persistent host/GPU norm buffers.
++        let cache = 4 * (2 * (context * 512 + context.div_ceil(4) * 128) + 3 * 4 * 128 + context);
++        selected.checked_add(cache).and_then(|n| n.checked_add(1024 * 1024)).ok_or(Error::Invalid("MTP extra size"))
++    }
++
++    /// Same mapped_ffn engine as selected_ffn, with explicit fixed NextN
++    /// geometry, page-span accounting, and drained mmap-owner release checks.
++    #[expect(clippy::too_many_arguments, reason = "test-only source-bound FFN and accounting operands")]
++    pub(in crate::engine::hybrid) fn mtp_probe_ffn(
++        &self,
++        experts: &[usize],
++        input: &[f32],
++        probabilities: &[f32],
++        shared_gate: &[f32],
++        shared_up: &[f32],
++        limit: f32,
++        extra: usize,
++        receipt: &mut Receipt,
++    ) -> Result<Vec<f32>> {
++        self.mtp_probe_observe(extra, receipt)?;
++        let mapping_profile = phase(Phase::Mapping);
++        if experts.len() != 8
++            || probabilities.len() != 8
++            || experts.iter().any(|&i| i >= 288)
++            || experts.iter().copied().collect::<HashSet<_>>().len() != 8
++            || input.len() != 4096
++            || shared_gate.len() != 2048
++            || shared_up.len() != 2048
++        {
++            return Err(Error::Invalid("MTP selected operands"));
++        }
++        let shared = self.tensor("blk.45.ffn_down_shexp.weight")?;
++        let shared_matrix = self.mapped_matrix(shared, 0, 4096, 2048, true)?;
++        let before = self.files.iter().map(Arc::strong_count).collect::<Vec<_>>();
++        let repeated = input.repeat(8);
++        let down_inputs = vec![0.0; 8 * 2048];
++        let shared_inputs = vec![0.0; 2048];
++        let mut operations = Vec::with_capacity(4);
++        let mut registered = 0usize;
++        for (name, rows, columns, values) in [
++            ("blk.45.ffn_gate_exps.weight", 2048, 4096, repeated.as_slice()),
++            ("blk.45.ffn_up_exps.weight", 2048, 4096, repeated.as_slice()),
++            ("blk.45.ffn_down_exps.weight", 4096, 2048, down_inputs.as_slice()),
++        ] {
++            self.mtp_probe_selected_mode()?;
++            let t = self.tensor(name)?;
++            let matrices =
++                experts.iter().map(|&i| self.mapped_matrix(t, i, rows, columns, false)).collect::<Result<Vec<_>>>()?;
++            for m in &matrices {
++                registered =
++                    registered.checked_add(m.codes.registered_bytes()).ok_or(Error::Invalid("MTP selected span"))?;
++            }
++            operations.push(MappedOperation {
++                matrices,
++                inputs: values,
++                rows,
++                columns,
++                rows_per_batch: 0,
++                format: self.matrix_format(t)?,
++            });
++        }
++        if registered > extra || registered > MAX_SELECTED_BYTES {
++            return Err(Error::Invalid("MTP live selected views exceed admission"));
++        }
++        operations.push(MappedOperation {
++            matrices: vec![shared_matrix],
++            inputs: &shared_inputs,
++            rows: 4096,
++            columns: 2048,
++            rows_per_batch: 0,
++            format: self.matrix_format(shared)?,
++        });
++        let operations: [MappedOperation<'_>; 4] =
++            operations.try_into().map_err(|_| Error::Invalid("MTP FFN count"))?;
++        receipt.selected_calls += 1;
++        receipt.selected_view_count_peak = receipt.selected_view_count_peak.max(24);
++        receipt.selected_registered_peak_bytes = receipt.selected_registered_peak_bytes.max(registered);
++        receipt.selected_live_bytes_at_return = registered;
++        drop(mapping_profile);
++        self.mtp_probe_observe(extra, receipt)?;
++        let ffn_profile = phase(Phase::Ffn);
++        let result = mapped_ffn(&operations, probabilities, 1.0, shared_gate, shared_up, Some((limit, limit)));
++        drop(ffn_profile);
++        let release_profile = phase(Phase::Release);
++        drop(operations);
++        if self.files.iter().map(Arc::strong_count).ne(before) {
++            return Err(Error::Invalid("MTP selected mmap owners remained live after completion"));
++        }
++        receipt.selected_live_bytes_at_return = 0;
++        receipt.released_owner_checks += 1;
++        drop(release_profile);
++        self.mtp_probe_observe(extra, receipt)?;
++        result
++    }
++}
+diff --git a/scripts/probe_glm53_mtp.py b/scripts/probe_glm53_mtp.py
+new file mode 100644
+index 00000000..106a0d12
+--- /dev/null
++++ b/scripts/probe_glm53_mtp.py
+@@ -0,0 +1,433 @@
++"""Private, aggregate-only driver for the ignored GLM-5.3 MTP probe.
++
++Prompts, token IDs, and the Rust test process output are kept in memory. The
++driver writes only allowlisted aggregate JSON to stdout and never writes a
++report or private test input to disk.
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import hashlib
++import io
++import json
++import math
++import os
++import re
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++
++SCOPE = "glm53_mtp_one_step_probe"
++MODEL_PATH_ENV = "STARK_GLM53_MTP_PROBE_MODEL_PATH"
++FFN_POLL_ENV = "STARK_GLM53_MTP_TEST_FFN_POLL_WAIT"
++TEST_NAME = b"stark_engine::engine::hybrid::glm::mtp_probe::glm_mtp_one_step_probe"
++CONTINUATION_TOKENS = 8
++CONTEXT_TOKENS = 256
++TIMEOUT_SECONDS = 1800
++
++# Authored public prompts; content is deliberately never included in receipts.
++PROMPTS = (
++    "Name three colors.",
++    "Give one sentence about a quiet garden.",
++    "What is 7 plus 5? Answer briefly.",
++)
++
++AGGREGATE_KEYS = {
++    "status", "precision", "source_convention", "memory_gauges", "rows",
++    "timing_ms", "counts", "hashes",
++    "head_profile_schema", "head_profile_v5_wall_ms", "head_profile_v5_gpu_ms", "head_profile_v5_calls",
++    "ffn_wait_policy",
++}
++PROFILE_V5_SCHEMA = "v5_warm_decode_ffn_wait_policy"
++PROFILE_V5_PHASES = {
++    "head_total_inclusive", "prepare", "norm_mla_encode", "norm_mla_wait_readback",
++    "projection_blocking", "cpu_router", "selected_mapping_admission", "mapped_ffn_compute_wait",
++    "final_readout_encode", "final_readout_wait_readback", "validation_observe", "selected_owner_release",
++    "autorelease_drain", "projection_submit_return_inclusive", "ffn_submit_return_inclusive",
++    "ffn_commit_call_inclusive", "ffn_wait_return_inclusive",
++}
++MEMORY_KEYS = {
++    "selected_calls", "selected_view_count_peak", "selected_registered_peak_bytes",
++    "selected_live_bytes_at_return", "released_owner_checks", "resident_bank_peak_bytes",
++    "resident_static_peak_bytes", "residency_allocated_peak_bytes", "static_cache_peak_bytes",
++    "static_cache_entries_peak", "sampled_metal_allocated_peak_bytes",
++    "prospective_reserved_bytes", "admitted_cap_bytes", "extra_reserved_bytes",
++    "target_registered_trunk_prospective_bytes", "target_static_reserve_bytes",
++    "target_dynamic_allowance_bytes", "observed_target_required_peak_bytes",
++    "projected_production_overlap_extra_bytes", "projected_production_reserved_bytes",
++    "projected_production_cap_margin_bytes", "projected_production_cap_deficit_bytes",
++}
++COUNT_KEYS = {
++    "cases", "prompt_rows", "comparisons", "agreements", "eos_cases",
++    "alignment_target_rows", "alignment_cache_rows", "alignment_chunk_groups",
++    "target_rollback_calls",
++}
++TIMING_KEYS = {
++    "cold_full_head_wall_including_lazy_pipeline_compile", "first_measured_prefill_cache_row_wall",
++    "prefill_cache_only_head_wall", "decode_head_wall", "serial_target_with_hidden_tap_wall",
++    "decode_head_gpu", "serial_target_with_hidden_tap_gpu",
++}
++HASH_KEYS = {"corpus_sha256", "target_continuation_sha256"}
++FAILURE_GUARDS = {
++    "probe_rejected", "stdin_bound", "stdin_schema", "stdin_admission",
++    "target_policy", "model_load", "alignment_parity", "memory_gate",
++    "static_cache_growth",
++}
++BOOLEAN_EXECUTION_SELECTORS = (
++    FFN_POLL_ENV,
++    "STARK_GLM53_ENCODER_BANKS",
++    "STARK_GLM53_RESIDENT_BANKS",
++    "STARK_GLM53_WIDE_ENCODER",
++    "STARK_GLM53_Q4_GROUPED32",
++    "STARK_GLM53_Q5_GROUPED32",
++    "STARK_GLM53_Q6_GROUPED16",
++    "STARK_GLM53_IQ_GPU_BOUND",
++    "STARK_GLM53_IQ_TYPED16",
++    "STARK_GLM53_IQ_SIGNED_FACTOR",
++    "STARK_GLM53_IQ_FUSED_GATE_UP",
++    "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
++    "STARK_GLM53_IQ_MULTIROW",
++    "STARK_GLM53_IQ4_VECTOR",
++    "STARK_GLM53_Q8_GROUPED8",
++    "STARK_GLM53_Q8_SHAPES",
++    "STARK_GLM53_Q4K_BLOCK",
++    "STARK_GLM53_KQUANT_FACTORED",
++    "STARK_GLM53_KDA_TRANSPOSED",
++    "STARK_GLM53_KDA_FUSED_STATE",
++    "STARK_GLM53_KDA_PARALLEL_NORM",
++    "STARK_GLM53_BATCH_FINITE",
++    "STARK_GLM53_FINITE_SELECTIVE",
++    "STARK_GLM53_SERIAL_FINITE_ORDER",
++    "STARK_HYBRID_SEPARATE_FINITE",
++    "STARK_GLM53_PARALLEL_RMS",
++    "STARK_GLM53_RMS_PREFETCH",
++    "STARK_HYBRID_ORDERED_RMS",
++    "STARK_GLM53_CONTROL_SPLIT",
++    "STARK_GLM53_CONTROL_SIMD",
++    "STARK_GLM53_CONTROL_RMS_PROJECT",
++    "STARK_GLM53_CONTROL_FUSED_PARALLEL",
++    "STARK_GLM53_UNRETAINED_GRAPH",
++    "STARK_GLM53_BOUNDED_GRAPH",
++    "STARK_GLM53_GREEDY_OVERLAP",
++    "STARK_GLM53_PREFILL_MMA",
++    "STARK_GLM53_PREFILL_OVERLAP",
++    "STARK_GLM53_PREFILL_QUEUED",
++    "STARK_GLM53_SCRATCH_HEAP",
++)
++SCALAR = (str, int, float, bool, type(None))
++
++
++class ProbeError(Exception):
++    def __init__(self, stage: str):
++        super().__init__(stage)
++        self.stage = stage
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def file_identity(path: Path) -> dict:
++    if not path.is_file():
++        raise ProbeError("model_artifacts")
++    return {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
++
++
++def execution_selector_sha256() -> str:
++    environment = os.environ
++    selectors = {name: environment.get(name) == "1" for name in BOOLEAN_EXECUTION_SELECTORS}
++
++    group_layers = environment.get("STARK_GLM53_BANK_GROUP_LAYERS")
++    if group_layers is None:
++        selectors["STARK_GLM53_BANK_GROUP_LAYERS"] = 45
++    else:
++        try:
++            parsed_group_layers = int(group_layers, 10)
++            selectors["STARK_GLM53_BANK_GROUP_LAYERS"] = (
++                parsed_group_layers if 1 <= parsed_group_layers <= 45 else "invalid"
++            )
++        except ValueError:
++            selectors["STARK_GLM53_BANK_GROUP_LAYERS"] = "invalid"
++
++    chunks = environment.get("STARK_GLM53_CONTROL_CHUNKS")
++    selectors["STARK_GLM53_CONTROL_CHUNKS"] = chunks if chunks in {"8", "16", "32"} else "unset_or_invalid"
++    encoded = json.dumps(selectors, sort_keys=True, separators=(",", ":")).encode("ascii")
++    return hashlib.sha256(encoded).hexdigest()
++
++
++def requested_ffn_wait_policy() -> str:
++    flag = os.environ.get(FFN_POLL_ENV, "0")
++    if flag not in {"0", "1"}:
++        raise ProbeError("arguments")
++    return "status_poll_then_final_wait" if flag == "1" else "blocking_final_wait"
++
++
++def validate_aggregate(value: object) -> dict:
++    if (
++        not isinstance(value, dict)
++        or set(value) != {"glm_mtp_probe_result", "aggregate"}
++        or value.get("glm_mtp_probe_result") is not True
++    ):
++        raise ProbeError("test_result")
++    aggregate = value.get("aggregate")
++    if not isinstance(aggregate, dict):
++        raise ProbeError("test_result")
++    rejected = aggregate.get("status") == "rejected"
++    expected_keys = {"status", "source_convention", "rows"} if rejected else AGGREGATE_KEYS
++    if set(aggregate) != expected_keys:
++        raise ProbeError("test_result")
++    for key, item in aggregate.items():
++        if key == "rows":
++            if not isinstance(item, dict):
++                raise ProbeError("test_result")
++            if rejected and set(item) != {"failure"}:
++                raise ProbeError("test_result")
++            if not rejected and any(row_name == "failure" for row_name in item):
++                raise ProbeError("test_result")
++            for row_name, row in item.items():
++                if not isinstance(row_name, str) or not isinstance(row, dict):
++                    raise ProbeError("test_result")
++                if row_name == "failure":
++                    if set(row) != {"guard"} or row["guard"] not in FAILURE_GUARDS:
++                        raise ProbeError("test_result")
++                elif (
++                    not row_name.startswith("case_")
++                    or not row_name[5:].isdigit()
++                    or set(row) != {"comparisons", "agreements"}
++                    or any(type(cell) is not int or cell < 0 for cell in row.values())
++                ):
++                    raise ProbeError("test_result")
++        elif key in {"head_profile_v5_wall_ms", "head_profile_v5_gpu_ms", "head_profile_v5_calls"}:
++            if not isinstance(item, dict) or set(item) != PROFILE_V5_PHASES:
++                raise ProbeError("test_result")
++            if key == "head_profile_v5_calls":
++                if any(type(cell) is not int or cell < 0 for cell in item.values()):
++                    raise ProbeError("test_result")
++            elif any(type(cell) not in (int, float) or not math.isfinite(cell) or cell < 0 for cell in item.values()):
++                raise ProbeError("test_result")
++        elif key == "head_profile_schema":
++            if item != PROFILE_V5_SCHEMA:
++                raise ProbeError("test_result")
++        elif key == "ffn_wait_policy":
++            if item != requested_ffn_wait_policy():
++                raise ProbeError("test_result")
++        elif key in {"memory_gauges", "timing_ms", "counts", "hashes"}:
++            expected_map_keys = {
++                "memory_gauges": MEMORY_KEYS,
++                "timing_ms": TIMING_KEYS,
++                "counts": COUNT_KEYS,
++                "hashes": HASH_KEYS,
++            }[key]
++            if not isinstance(item, dict) or set(item) != expected_map_keys:
++                raise ProbeError("test_result")
++            if key == "hashes":
++                if any(not isinstance(cell, str) or len(cell) != 64 or any(c not in "0123456789abcdef" for c in cell) for cell in item.values()):
++                    raise ProbeError("test_result")
++            elif any(type(cell) not in (int, float) or not math.isfinite(cell) or cell < 0 for cell in item.values()):
++                raise ProbeError("test_result")
++        elif key == "status":
++            if item not in {"component_probe_complete_no_speculative_runtime", "rejected"}:
++                raise ProbeError("test_result")
++        elif key == "precision":
++            if item != "existing_safe_f32_graph_quant_weights_cpu_f32_router":
++                raise ProbeError("test_result")
++        elif key == "source_convention":
++            if item != "llama_1b6935b227b9f9aa89deea8016c0e208f547446f_zero_prior_hidden_normal_pos0_embedding":
++                raise ProbeError("test_result")
++        elif not isinstance(item, SCALAR):
++            raise ProbeError("test_result")
++    return aggregate
++
++
++def parse_test_result(output: bytes) -> dict:
++    """Accept the sole strict sentinel, with pinned libtest-mimic framing.
++
++    libtest-mimic 0.8.2 pretty mode flushes this exact test prefix without a
++    newline before running the test. Names come from stark_test's module_path.
++    Only padding spaces and the fixed delimiter may precede the JSON object.
++    All captured bytes remain in RAM; no parser exception includes them.
++    """
++    if len(output) > 256 * 1024:
++        raise ProbeError("test_result")
++    prefix = re.compile(rb"test " + re.escape(TEST_NAME) + rb" * \.\.\. (?P<json>\{.*\})")
++    def unique_object(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                raise ProbeError("test_result")
++            result[key] = value
++        return result
++    results = []
++    try:
++        for line in output.splitlines():
++            stripped = line.strip()
++            if b'"glm_mtp_probe_result"' not in stripped:
++                continue
++            if stripped.startswith(b"{"):
++                candidate = stripped
++            else:
++                match = prefix.fullmatch(stripped)
++                if match is None:
++                    raise ProbeError("test_result")
++                candidate = match.group("json")
++            results.append(json.loads(candidate, object_pairs_hook=unique_object))
++        if len(results) != 1:
++            raise ProbeError("test_result")
++        return validate_aggregate(results[0])
++    except ProbeError:
++        raise
++    except BaseException:
++        raise ProbeError("test_result") from None
++
++
++def run(args: argparse.Namespace) -> dict:
++    requested_ffn_wait_policy()
++    model_path = args.model_path.resolve(strict=True)
++    test_binary = args.test_binary.resolve(strict=True)
++    if not model_path.is_dir() or not test_binary.is_file():
++        raise ProbeError("arguments")
++
++    # Load the same rendering convention used by benchmark_glm_mlx_serve.py.
++    try:
++        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
++            from stark_convert.chat import load_template
++            from tokenizers import Tokenizer
++
++            codec, template = load_template(model_path)
++            tokenizer_path = model_path / "tokenizer.json"
++            tokenizer = Tokenizer.from_file(str(tokenizer_path))
++            rendered = [
++                template.render(
++                    messages=[{"role": "user", "content": prompt}],
++                    tools=None,
++                    add_generation_prompt=True,
++                    enable_thinking=True,
++                    bos_token=codec.get("bos_token") or "",
++                    eos_token=codec.get("eos_token") or "",
++                )
++                for prompt in PROMPTS
++            ]
++            inputs = [tokenizer.encode(prompt, add_special_tokens=False).ids for prompt in rendered]
++    except ProbeError:
++        raise
++    except BaseException:
++        raise ProbeError("tokenization") from None
++
++    if (
++        len(inputs) != len(PROMPTS)
++        or any(len(ids) < 8 or len(ids) > 128 for ids in inputs)
++    ):
++        raise ProbeError("tokenization")
++
++    input_count = sum(map(len, inputs))
++    corpus_hash = hashlib.sha256(
++        json.dumps(inputs, separators=(",", ":")).encode("ascii")
++    ).hexdigest()
++    request = {
++        "schema_version": 1,
++        "cases": [{"input_token_ids": ids} for ids in inputs],
++        "continuation_tokens": CONTINUATION_TOKENS,
++        "context_tokens": CONTEXT_TOKENS,
++        "corpus_sha256": corpus_hash,
++    }
++    request_bytes = (json.dumps(request, separators=(",", ":")) + "\n").encode("ascii")
++
++    environment = os.environ.copy()
++    environment[MODEL_PATH_ENV] = str(model_path)
++    started = time.monotonic_ns()
++    try:
++        completed = subprocess.run(
++            [str(test_binary), "glm_mtp_one_step_probe", "--ignored", "--nocapture", "--test-threads=1"],
++            input=request_bytes,
++            stdout=subprocess.PIPE,
++            stderr=subprocess.PIPE,
++            env=environment,
++            timeout=TIMEOUT_SECONDS,
++            check=False,
++        )
++    except subprocess.TimeoutExpired:
++        raise ProbeError("test_timeout") from None
++    except BaseException:
++        raise ProbeError("test_launch") from None
++    elapsed_ms = (time.monotonic_ns() - started) // 1_000_000
++    # Preserve strict schemas; only the pinned harness prefix is stripped.
++    aggregate = parse_test_result(completed.stdout)
++
++    artifact_names = (
++        "config.json", "generation_config.json", "tokenizer.json",
++        "tokenizer_config.json", "chat_template.jinja", "native-source.json",
++    )
++    artifacts = {}
++    for name in artifact_names:
++        candidate = model_path / name
++        if candidate.is_file():
++            artifacts[name] = file_identity(candidate)
++    if "tokenizer.json" not in artifacts:
++        raise ProbeError("model_artifacts")
++
++    passed = completed.returncode == 0 and aggregate.get("status") != "rejected"
++    return {
++        "schema_version": 1,
++        "scope": SCOPE,
++        "status": "complete" if passed else "failed",
++        "glm_mtp_probe_result": True,
++        "error_stage": None if passed else ("test_exit" if completed.returncode != 0 else "test_rejected"),
++        "model_artifacts": artifacts,
++        "test_binary_sha256": sha256_file(test_binary),
++        "driver_sha256": sha256_file(Path(__file__).resolve()),
++        "execution_selector_sha256": execution_selector_sha256(),
++        "corpus_sha256": corpus_hash,
++        "prompt_count": len(inputs),
++        "input_token_count": input_count,
++        "input_token_min": min(map(len, inputs)),
++        "input_token_max": max(map(len, inputs)),
++        "context_tokens": CONTEXT_TOKENS,
++        "continuation_tokens": CONTINUATION_TOKENS,
++        "elapsed_ms": elapsed_ms,
++        "aggregate": aggregate,
++    }
++
++
++def emit(value: dict) -> None:
++    # Constructed output uses only fixed keys and allowlisted aggregate values.
++    sys.stdout.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
++    sys.stdout.flush()
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--test-binary", type=Path, required=True)
++    parser.add_argument("--model-path", type=Path, required=True)
++    args = parser.parse_args()
++    try:
++        result = run(args)
++    except ProbeError as error:
++        result = {
++            "schema_version": 1,
++            "scope": SCOPE,
++            "status": "failed",
++            "glm_mtp_probe_result": False,
++            "error_stage": error.stage,
++        }
++    except BaseException:
++        result = {
++            "schema_version": 1,
++            "scope": SCOPE,
++            "status": "failed",
++            "glm_mtp_probe_result": False,
++            "error_stage": "driver",
++        }
++    emit(result)
++    return 0 if result["glm_mtp_probe_result"] and result["status"] == "complete" else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs b/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs
+new file mode 100644
+index 00000000..c16ed408
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs
+@@ -0,0 +1,175 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Aggregate-only test instrumentation. Disabled TLS fast path does not read
++//! clocks/counters or allocate. Warm head rows alone activate the counters.
++
++use std::{
++    cell::{Cell, RefCell},
++    time::Instant,
++};
++
++pub(in crate::engine::hybrid) const SCHEMA: &str = "v5_warm_decode_ffn_wait_policy";
++pub(in crate::engine::hybrid) const KEYS: [&str; 17] = [
++    "head_total_inclusive",
++    "prepare",
++    "norm_mla_encode",
++    "norm_mla_wait_readback",
++    "projection_blocking",
++    "cpu_router",
++    "selected_mapping_admission",
++    "mapped_ffn_compute_wait",
++    "final_readout_encode",
++    "final_readout_wait_readback",
++    "validation_observe",
++    "selected_owner_release",
++    "autorelease_drain",
++    "projection_submit_return_inclusive",
++    "ffn_submit_return_inclusive",
++    "ffn_commit_call_inclusive",
++    "ffn_wait_return_inclusive",
++];
++
++#[repr(usize)]
++#[derive(Clone, Copy)]
++pub(in crate::engine::hybrid) enum Phase {
++    Total,
++    Prepare,
++    NormMlaEncode,
++    NormMlaWait,
++    Projection,
++    Router,
++    Mapping,
++    Ffn,
++    ReadoutEncode,
++    ReadoutWait,
++    Observe,
++    Release,
++    Autorelease,
++    ProjectionFence,
++    FfnFence,
++    FfnCommit,
++    FfnWait,
++}
++
++struct Stats {
++    wall: [f64; 17],
++    gpu: [f64; 17],
++    calls: [usize; 17],
++}
++impl Default for Stats {
++    fn default() -> Self {
++        Self {
++            wall: [0.0; 17],
++            gpu: [0.0; 17],
++            calls: [0; 17],
++        }
++    }
++}
++
++thread_local! {
++    static ACTIVE: Cell<bool> = const { Cell::new(false) };
++    static STATS: RefCell<Stats> = RefCell::new(Stats::default());
++    static IN_HEAD: Cell<bool> = const { Cell::new(false) };
++    static FFN_POLL: Cell<bool> = const { Cell::new(false) };
++}
++
++pub(in crate::engine::hybrid) fn configure_ffn_poll(enabled: bool) {
++    FFN_POLL.with(|value| value.set(enabled));
++}
++
++pub(in crate::engine::hybrid) fn ffn_policy_name() -> &'static str {
++    if FFN_POLL.with(Cell::get) {
++        "status_poll_then_final_wait"
++    } else {
++        "blocking_final_wait"
++    }
++}
++
++pub(in crate::engine::hybrid) fn poll_head_ffn() -> bool {
++    IN_HEAD.with(Cell::get) && FFN_POLL.with(Cell::get)
++}
++
++pub(in crate::engine::hybrid) struct HeadScope(bool);
++
++pub(in crate::engine::hybrid) fn enter_head() -> HeadScope {
++    HeadScope(IN_HEAD.with(|inside| inside.replace(true)))
++}
++
++impl Drop for HeadScope {
++    fn drop(&mut self) {
++        IN_HEAD.with(|inside| inside.set(self.0));
++    }
++}
++
++pub(in crate::engine::hybrid) fn reset() {
++    ACTIVE.with(|active| active.set(false));
++    STATS.with(|stats| *stats.borrow_mut() = Stats::default());
++}
++
++pub(in crate::engine::hybrid) fn active(value: bool) {
++    ACTIVE.with(|active| active.set(value));
++}
++
++pub(in crate::engine::hybrid) struct Span(Option<(Phase, Instant, f64)>);
++
++pub(in crate::engine::hybrid) fn phase(phase: Phase) -> Span {
++    if !ACTIVE.with(Cell::get) {
++        return Span(None);
++    }
++    let gpu = crate::engine::hybrid::profile::native_gpu_seconds_for_test();
++    Span(Some((phase, Instant::now(), gpu)))
++}
++
++impl Drop for Span {
++    fn drop(&mut self) {
++        if let Some((phase, started, gpu_before)) = self.0.take() {
++            let wall = started.elapsed().as_secs_f64() * 1000.0;
++            let gpu = (crate::engine::hybrid::profile::native_gpu_seconds_for_test() - gpu_before) * 1000.0;
++            STATS.with(|stats| {
++                let mut stats = stats.borrow_mut();
++                let slot = phase as usize;
++                stats.wall[slot] += wall;
++                stats.gpu[slot] += gpu;
++                stats.calls[slot] += 1;
++            });
++        }
++    }
++}
++
++pub(in crate::engine::hybrid) fn snapshot() -> (serde_json::Value, serde_json::Value, serde_json::Value) {
++    STATS.with(|stats| {
++        let stats = stats.borrow();
++        let mut wall = serde_json::Map::new();
++        let mut gpu = serde_json::Map::new();
++        let mut calls = serde_json::Map::new();
++        for (index, key) in KEYS.into_iter().enumerate() {
++            wall.insert(key.to_owned(), serde_json::json!(stats.wall[index]));
++            gpu.insert(key.to_owned(), serde_json::json!(stats.gpu[index]));
++            calls.insert(key.to_owned(), serde_json::json!(stats.calls[index]));
++        }
++        (wall.into(), gpu.into(), calls.into())
++    })
++}
++
++#[stark_engine_macros::stark_test]
++fn mtp_ffn_poll_policy_is_head_scoped_and_restored_on_error() {
++    configure_ffn_poll(true);
++    assert!(!poll_head_ffn(), "test FFN policy escaped its head scope");
++    {
++        let _outer = enter_head();
++        assert!(poll_head_ffn(), "test FFN policy missing in head");
++        {
++            let _inner = enter_head();
++            assert!(poll_head_ffn(), "nested head policy");
++        }
++        assert!(poll_head_ffn(), "nested head scope failed to restore outer policy");
++    }
++    let fail = || -> Result<(), ()> {
++        let _head = enter_head();
++        Err(())
++    };
++    assert!(fail().is_err(), "simulated head failure");
++    assert!(!poll_head_ffn(), "head error leaked test FFN policy");
++    configure_ffn_poll(false);
++    let _head = enter_head();
++    assert!(!poll_head_ffn(), "blocking test policy unexpectedly polls");
++}
