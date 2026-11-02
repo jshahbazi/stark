@@ -290,10 +290,12 @@ def tool_parser_for(codec: dict | None) -> str | None:
     return None
 
 
-def _xml_schema_error():
+def _xml_schema_error(reason="parameter_type"):
     return _bad(
-        "This XML tool parser requires direct named parameters with declared types or bounded local schema "
-        "references; dynamic parameters, root composition, and untyped or unresolved schemas are unsupported.",
+        "This XML tool parser requires direct named parameters with declared or literal-constrained types or bounded "
+        "local schema references. Dynamic parameters, root composition, and untyped or unresolved schemas "
+        "are unsupported. "
+        f"Unsupported schema form: {reason}.",
         "tool_schema_unsupported",
     )
 
@@ -301,7 +303,7 @@ def _xml_schema_error():
 def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
     work[0] -= 1
     if work[0] < 0 or not isinstance(schema, dict) or depth > MAX_JSON_DEPTH:
-        raise _xml_schema_error()
+        raise _xml_schema_error("resolution_limit_or_invalid_schema")
     declared = schema.get("type")
     if declared is not None:
         values = [declared] if isinstance(declared, str) else declared
@@ -310,29 +312,53 @@ def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
             or not values
             or any(not isinstance(v, str) or v not in _XML_TYPES for v in values)
         ):
-            raise _xml_schema_error()
+            raise _xml_schema_error("declared_type")
         return frozenset(values)
     if "$ref" in schema:
         reference = schema["$ref"]
         if not isinstance(reference, str) or not reference.startswith("#/") or reference in references:
-            raise _xml_schema_error()
+            raise _xml_schema_error("local_reference")
         identity = (id(root), reference)
         if identity in memo:
             return memo[identity]
         tokens = reference[2:].split("/")
         if len(tokens) > MAX_JSON_DEPTH or any(re.search(r"~(?![01])", token) for token in tokens):
-            raise _xml_schema_error()
+            raise _xml_schema_error("local_reference")
         target = root
         for token in tokens:
             if not isinstance(target, dict):
-                raise _xml_schema_error()
+                raise _xml_schema_error("local_reference")
             target = target.get(token.replace("~1", "/").replace("~0", "~"))
         result = _xml_types(target, root, work, memo, depth + 1, references | {reference})
         memo[identity] = result
         return result
+    if "enum" in schema or "const" in schema:
+        literals = schema.get("enum", [schema.get("const")])
+        if not isinstance(literals, list) or not literals:
+            raise _xml_schema_error("literal_constraint")
+        # Effect Schema emits enum-only scalar schemas on OpenCode's OpenAI
+        # wire. Literal JSON values conclusively determine their representations;
+        # this never infers a type from generated model text. Full constraint
+        # validation remains the executing client's responsibility.
+        return frozenset(
+            "null"
+            if value is None
+            else "boolean"
+            if type(value) is bool
+            else "integer"
+            if type(value) is int
+            else "number"
+            if type(value) is float
+            else "string"
+            if isinstance(value, str)
+            else "array"
+            if isinstance(value, list)
+            else "object"
+            for value in literals
+        )
     alternatives = [schema[key] for key in ("anyOf", "oneOf") if key in schema]
     if len(alternatives) != 1 or not isinstance(alternatives[0], list) or not alternatives[0]:
-        raise _xml_schema_error()
+        raise _xml_schema_error("untyped_or_composed_parameter")
     result = frozenset()
     for candidate in alternatives[0]:
         result |= _xml_types(candidate, root, work, memo, depth + 1, references)
@@ -346,7 +372,7 @@ def _xml_tool_schemas(tools):
     for tool in tools:
         function = tool.get("function", {}) if isinstance(tool, dict) else {}
         if not isinstance(function, dict):
-            raise _xml_schema_error()
+            raise _xml_schema_error("function_definition")
         name = function.get("name")
         parameters = function.get("parameters", {"type": "object", "properties": {}})
         if (
@@ -355,7 +381,7 @@ def _xml_tool_schemas(tools):
             or name in result
             or not isinstance(parameters, dict)
         ):
-            raise _xml_schema_error()
+            raise _xml_schema_error("function_or_root_parameters")
         properties = parameters.get("properties", {})
         unsupported_root = {
             "$ref",
@@ -373,15 +399,14 @@ def _xml_tool_schemas(tools):
             "dependencies",
             "unevaluatedProperties",
         }
-        if (
-            parameters.get("type", "object") != "object"
-            or not isinstance(properties, dict)
-            or unsupported_root.intersection(parameters)
-            or parameters.get("additionalProperties", False) is not False
-        ):
-            raise _xml_schema_error()
+        if parameters.get("type", "object") != "object" or not isinstance(properties, dict):
+            raise _xml_schema_error("root_properties")
+        if unsupported_root.intersection(parameters):
+            raise _xml_schema_error("root_composition_or_dynamic_parameters")
+        if parameters.get("additionalProperties", False) is not False:
+            raise _xml_schema_error("root_additional_properties")
         if any(not _NAME.fullmatch(key) for key in properties):
-            raise _xml_schema_error()
+            raise _xml_schema_error("parameter_name")
         result[name] = {key: _xml_types(schema, parameters, work, memo) for key, schema in properties.items()}
     return result
 

@@ -512,6 +512,60 @@ def test_xml_schema_guided_values_preserve_types_and_raw_string_whitespace(schem
     assert reason == "tool_calls" and type(actual) is type(expected) and actual == expected
 
 
+@pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1"])
+@pytest.mark.parametrize("constraint", ["enum", "const"])
+@pytest.mark.parametrize(
+    "literal,body",
+    [
+        ("5", "5"),
+        ("  raw string\n", "  raw string\n"),
+        (7, "7"),
+        (1.5, "1.5"),
+        (True, "true"),
+        (False, "false"),
+        (None, "null"),
+        ({"nested": [True, None]}, '{"nested":[true,null]}'),
+        ([1, "two", False], '[1,"two",false]'),
+    ],
+)
+def test_xml_literal_constraints_conclusively_determine_parameter_representation(parser, constraint, literal, body):
+    schema = {constraint: [literal] if constraint == "enum" else literal}
+    tool = xml_property_tool(schema)
+    validate_parser_tools([tool], parser)
+    message, reason = xml_output(xml_call({"key": body}), tools=[tool], parser=parser)
+    actual = json.loads(message["tool_calls"][0]["function"]["arguments"])["key"]
+    assert reason == "tool_calls" and type(actual) is type(literal) and actual == literal
+
+
+@pytest.mark.parametrize(
+    "schema,body,parser",
+    [
+        ({"enum": ["5", 5]}, "5", "qwen38-xml-v1"),
+        ({"enum": ["null", None]}, "null", "qwen38-xml-v1"),
+        ({"enum": ["True", True]}, "True", "qwen35-xml-v1"),
+        ({"enum": ['{"nested":true}', {"nested": True}]}, '{"nested":true}', "qwen38-xml-v1"),
+    ],
+)
+def test_xml_mixed_literal_constraints_preserve_ambiguous_value_rejection(schema, body, parser):
+    tool = xml_property_tool(schema)
+    validate_parser_tools([tool], parser)
+    with pytest.raises(APIError) as error:
+        xml_output(xml_call({"key": body}), tools=[tool], parser=parser)
+    assert error.value.status == 502 and error.value.code == "invalid_tool_call"
+
+
+def test_xml_unsupported_schema_error_identifies_only_a_fixed_form_category():
+    tool = xml_property_tool({"description": "Synthetic schema text must stay private"})
+    with pytest.raises(APIError) as error:
+        validate_parser_tools([tool], "qwen38-xml-v1")
+    assert "untyped_or_composed_parameter" in error.value.message
+    assert "Synthetic schema text" not in error.value.message and "lookup" not in error.value.message
+    tool["function"]["parameters"]["additionalProperties"] = True
+    with pytest.raises(APIError) as error:
+        validate_parser_tools([tool], "qwen38-xml-v1")
+    assert "root_additional_properties" in error.value.message
+
+
 @pytest.mark.parametrize(
     "body,expected,kind", [("True", True, "boolean"), ("False", False, "boolean"), ("None", None, "null")]
 )
@@ -564,6 +618,8 @@ def test_xml_bounded_local_schema_references_and_nested_json():
         {"type": []},
         {"type": "arbitrary"},
         {"type": True},
+        {"enum": []},
+        {"enum": "not-a-literal-list"},
         {"$ref": "https://example.invalid/type"},
         {"$ref": "#/$defs/missing"},
         {"anyOf": []},
