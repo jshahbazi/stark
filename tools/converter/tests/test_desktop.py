@@ -417,6 +417,74 @@ def test_tool_failure_releases_request_and_never_delivers_partial_calls(tool_des
         assert desktop.worker is None
 
 
+@pytest.mark.parametrize("terminal", ["worker_fault", "cancelled", "reply"])
+def test_active_model_replacement_is_classified_without_closing_new_worker(tool_desktop, monkeypatch, terminal):
+    from unittest.mock import Mock
+
+    from stark_convert.chat import ChatCancelled
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    old_worker, old_model = desktop.worker, desktop.active_model
+    replacement = Mock(spec=["close"])
+
+    def infer(*args, **kwargs):
+        with desktop.lock:
+            desktop.epoch += 1
+            desktop.worker = replacement
+            desktop.active_model = "synthetic-replacement"
+        if terminal == "worker_fault":
+            raise ValueError("Synthetic old-worker failure")
+        if terminal == "cancelled":
+            raise ChatCancelled("Synthetic old-worker cancellation")
+        return dict(reply)
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    delivered = []
+    try:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=delivered.append)
+        assert error.value.status == 503 and error.value.code == "model_changed"
+        assert desktop.worker is replacement and desktop.active_model == "synthetic-replacement"
+        replacement.close.assert_not_called()
+        assert desktop.job is None and desktop.api_queue == [] and delivered == []
+    finally:
+        # The synthetic replacement owns no process. Restore the fixture's real
+        # private worker so its normal teardown can reap that process.
+        desktop.worker, desktop.active_model = old_worker, old_model
+
+
+@pytest.mark.parametrize(
+    "reason,expected_status,expected_code",
+    [
+        (None, 499, "request_cancelled"),
+        ("deadline", 504, "request_timeout"),
+    ],
+)
+def test_same_model_worker_fault_after_cancellation_keeps_cancellation_category(
+    tool_desktop, monkeypatch, reason, expected_status, expected_code
+):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, _ = tool_desktop
+    control = threading.Event()
+    control.reason = reason
+    process = desktop.worker.process
+
+    def infer(*args, **kwargs):
+        control.set()
+        raise ValueError("Synthetic interrupted worker failure")
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, cancelled=control)
+    assert error.value.status == expected_status and error.value.code == expected_code
+    assert desktop.worker is None and process.poll() is not None
+    assert desktop.job is None and desktop.api_queue == []
+
+
 def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_desktop):
     import urllib.request
 

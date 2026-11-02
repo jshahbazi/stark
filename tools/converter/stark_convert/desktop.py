@@ -1935,7 +1935,7 @@ class Desktop:
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
-                    raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed")
                 if cancelled.is_set():
                     raise cancellation_error(cancelled)
                 message, finish_reason = (
@@ -1984,6 +1984,9 @@ class Desktop:
                 },
             }
         except ChatCancelled:
+            with self.lock:
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed") from None
             raise cancellation_error(cancelled) from None
         except ChatImageError as error:
             if error.code == "context_overflow":
@@ -2007,8 +2010,11 @@ class Desktop:
             raise
         except BaseException:
             with self.lock:
-                if epoch == self.epoch and self.worker is worker and self.active_model == identifier:
-                    self.close_worker()
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed") from None
+                self.close_worker()
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled) from None
             raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
         finally:
             with self.lock:
