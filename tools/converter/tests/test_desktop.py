@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -13,7 +14,26 @@ from unittest.mock import patch
 import psutil
 import pytest
 
-from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric
+from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric, metrics, progress_counts
+
+API_PROGRESS_FIELDS = {
+    "event",
+    "source",
+    "id",
+    "model",
+    "phase",
+    "sampled_tokens",
+    "output_token_budget",
+    "elapsed_seconds",
+    "ttft_seconds",
+    "ttft_lower_seconds",
+    "ttft_upper_seconds",
+    "remaining_lower_seconds",
+    "remaining_upper_seconds",
+    "calibrated",
+    "input_tokens",
+    "reused_input_tokens",
+}
 
 
 @pytest.fixture
@@ -229,6 +249,167 @@ def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, mode
     desktop.dispatch({"command": "generate", "text": "replacement timing fixture", "request_id": "replacement"})
     finish(desktop)
     assert not any(event["event"] == "generation_progress" for event in events(desktop))
+    assert not desktop.generation_estimates.history
+
+
+def lifecycle(desktop):
+    """Status, progress and metrics events in publication order."""
+    return [
+        event["state"] if event["event"] == "status" else event["event"]
+        for event in events(desktop)
+        if event["event"] in {"status", "generation_progress", "metrics"}
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, monkeypatch, stream):
+    identifier = running(desktop, model)
+    request = desktop.worker.request
+    generations = []
+
+    def recorded(payload, **options):
+        if payload["operation"] == "generate":
+            generations.append(payload)
+        return request(payload, **options)
+
+    monkeypatch.setattr(desktop.worker, "request", recorded)
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "synthetic API request"}]}
+    for _ in range(2):
+        response = desktop.api_complete({**payload, "stream": stream}, on_delta=(lambda _: None) if stream else None)
+        assert response["choices"][0]["message"]["content"] == "synthetic answer"
+    # Buffered requests stream from the worker so the app still receives progress.
+    assert [generation["stream"] for generation in generations] == [True, True]
+    output = desktop.output.getvalue()
+    assert "synthetic API request" not in output and "synthetic answer" not in output
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [event["sampled_tokens"] for event in progress] == [0, 1, 5] * 2
+    assert all(set(event) <= API_PROGRESS_FIELDS for event in progress)
+    assert all(event["source"] == "api" and event["model"] == identifier for event in progress)
+    assert all(event["input_tokens"] == 20 and "reused_input_tokens" not in event for event in progress)
+    first, second = progress[0]["id"], progress[3]["id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first) and re.fullmatch(r"[0-9a-f]{32}", second) and first != second
+    assert {event["id"] for event in progress[:3]} == {first} and {event["id"] for event in progress[3:]} == {second}
+    assert progress[1]["ttft_seconds"] == 0.2
+    assert not progress[0]["calibrated"] and progress[3]["calibrated"]
+    assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+
+
+def test_serialized_api_requests_never_interleave_progress(desktop, model, monkeypatch):
+    import threading
+
+    running(desktop, model)
+    request = desktop.worker.request
+    decoding, release = threading.Event(), threading.Event()
+
+    def gated(payload, **options):
+        if payload["operation"] != "generate" or decoding.is_set():
+            return request(payload, **options)
+        forward = options["on_progress"]
+
+        def on_progress(frame):
+            forward(frame)
+            if frame["sampled_tokens"] == 1:
+                decoding.set()
+                assert release.wait(5)
+
+        return request(payload, **{**options, "on_progress": on_progress})
+
+    monkeypatch.setattr(desktop.worker, "request", gated)
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    payload = {"messages": [{"role": "user", "content": "synthetic serialized request"}]}
+    first = threading.Thread(target=desktop.api_complete, args=(payload,))
+    second = threading.Thread(target=desktop.api_complete, args=(payload,))
+    first.start()
+    assert decoding.wait(5)
+    second.start()
+    deadline = time.monotonic() + 2
+    while len(desktop.api_queue) != 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(desktop.api_queue) == 1
+    assert lifecycle(desktop) == ["generating", "generation_progress", "generation_progress"]
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert len({event["id"] for event in progress[:3]}) == len({event["id"] for event in progress[3:]}) == 1
+    assert progress[0]["id"] != progress[3]["id"]
+
+
+def test_api_progress_and_metrics_report_worker_prefix_reuse(desktop, model, monkeypatch):
+    running(desktop, model)
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return {"token_count": 2048, "token_ids": [2] * 2048}
+        frame = {
+            "event": "progress",
+            "input_tokens": 2048,
+            "reused_input_tokens": 1024,
+            "sampled_tokens": 0,
+            "output_token_budget": payload["max_new_tokens"],
+            "elapsed_seconds": 0.0,
+            "prefill_seconds": None,
+        }
+        options["on_progress"](frame)
+        options["on_progress"]({**frame, "sampled_tokens": 1, "elapsed_seconds": 0.1, "prefill_seconds": 0.1})
+        return {
+            "text": "synthetic answer",
+            "input_tokens": 2048,
+            "reused_input_tokens": 1024,
+            "output_tokens": 1,
+            "sampled_tokens": 1,
+            "finish_reason": "eos",
+            "prefill_seconds": 0.1,
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.api_complete({"messages": [{"role": "user", "content": "synthetic reuse request"}], "max_tokens": 16})
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [(event["input_tokens"], event["reused_input_tokens"]) for event in progress] == [(2048, 1024)] * 2
+    assert [event for event in events(desktop) if event["event"] == "metrics"][-1]["reused_input_tokens"] == 1024
+
+
+@pytest.mark.parametrize("reused", [2048, 4096, -1, True, 1024.0, "1024", None])
+def test_invalid_or_absent_reused_prompt_counts_are_omitted(reused):
+    frame = {"input_tokens": 2048, **({"reused_input_tokens": reused} if reused is not None else {})}
+    assert progress_counts(frame) == {"input_tokens": 2048}
+    assert "reused_input_tokens" not in metrics(frame)
+
+
+def test_api_progress_from_a_replaced_model_is_fenced(desktop, model, monkeypatch):
+    from stark_convert.chat import ChatCancelled
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    previous = desktop.worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return previous(payload, **options)
+        desktop.epoch += 1
+        with pytest.raises(OSError, match="no longer belongs"):
+            options["on_progress"](
+                {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": 512,
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+            )
+        raise ChatCancelled("Request cancelled.")
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete({"messages": [{"role": "user", "content": "replacement fixture"}]})
+    assert failed.value.code == "model_changed"
+    assert not any(event["event"] in {"generation_progress", "metrics"} for event in events(desktop))
     assert not desktop.generation_estimates.history
 
 
@@ -608,6 +789,22 @@ def test_tool_stream_failure_after_provisional_text_recovers(tool_desktop, failu
     delivered.clear()
     result = desktop.api_complete(payload, on_delta=delivered.append)
     assert "".join(delivered) == result["choices"][0]["message"]["content"] == "Fresh response."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_metrics_publish_when_tool_parsing_fails(tool_desktop, stream):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    reply.update(text="<tool_call>{", sampled_tokens=17, prefill_seconds=0.2, decode_seconds=0.3)
+    with pytest.raises(APIError) as error:
+        desktop.api_complete({**payload, "stream": stream}, on_delta=(lambda _: None) if stream else None)
+    assert error.value.code == "invalid_tool_call"
+    published = [event for event in events(desktop) if event["event"] == "metrics"]
+    assert [(event["input_tokens"], event["output_tokens"]) for event in published] == [(24, 17)]
+    assert "<tool_call>" not in desktop.output.getvalue()
+    # A response the client could not use does not train completion estimates.
+    assert not desktop.generation_estimates.history
 
 
 def test_private_api_configuration_preserves_listener_on_port_conflict(desktop):

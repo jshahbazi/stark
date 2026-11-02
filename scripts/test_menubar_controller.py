@@ -177,18 +177,81 @@ extension EngineController {
              "ttft_lower_seconds": 0.3, "ttft_upper_seconds": 0.8,
              "remaining_lower_seconds": 2.0, "remaining_upper_seconds": 6.0, "calibrated": true]
         }
+        func apiProgress(_ id: String, sampled: Int = 0, elapsed: Double = 0, reused: Int? = nil) -> [String: Any] {
+            var event = generationProgress(id: id, sampled: sampled, elapsed: elapsed)
+            event["source"] = "api"; event["input_tokens"] = 900
+            if let reused { event["reused_input_tokens"] = reused }
+            return event
+        }
+        let apiFirst = String(repeating: "a", count: 32), apiSecond = String(repeating: "b", count: 32)
         switch scenario {
         case "generation-progress-external-activity":
             engine.mode = .chat; engine.loadedMode = .chat
             engine.state = "generating"; engine.message = "Connected application request"
-            guard !engine.hasPlaygroundGeneration else { return false }
+            guard !engine.hasPlaygroundGeneration, engine.hasAPIGeneration else { return false }
             engine.apply(generationProgress(id: UUID().uuidString))
             guard engine.generationProgress == nil, engine.message == "Connected application request" else { return false }
             engine.state = "ready"; engine.draft = "synthetic prompt"
             engine.generate(); _ = command()
-            guard engine.hasPlaygroundGeneration else { return false }
+            guard engine.hasPlaygroundGeneration, !engine.hasAPIGeneration else { return false }
+            engine.apply(apiProgress(apiFirst))
+            guard engine.generationProgress == nil else { return false }
             engine.apply(["event": "reply", "text": "synthetic answer"])
             return !engine.hasPlaygroundGeneration
+        case "generation-progress-api-requests":
+            engine.mode = .decision; engine.loadedMode = .chat
+            engine.apply(["event": "status", "state": "generating", "message": "Generating for connected application…"])
+            guard engine.hasAPIGeneration, !engine.hasPlaygroundGeneration, engine.generationProgress == nil else { return false }
+            engine.apply(apiProgress(apiFirst))
+            guard engine.generationProgress?.sampledTokens == 0, engine.generationProgress?.inputTokens == 900,
+                  engine.generationProgress?.reusedInputTokens == nil,
+                  engine.generationProgress?.promptDetail == "900" else { return false }
+            var wrongModel = apiProgress(apiFirst, sampled: 1, elapsed: 0.5)
+            wrongModel["model"] = "replacement-model"
+            var unsourced = apiProgress(apiFirst, sampled: 1, elapsed: 0.5)
+            unsourced.removeValue(forKey: "source")
+            var otherSource = apiProgress(apiFirst, sampled: 1, elapsed: 0.5)
+            otherSource["source"] = "client"
+            var changedInput = apiProgress(apiFirst, sampled: 1, elapsed: 0.5)
+            changedInput["input_tokens"] = 901
+            for stale in [wrongModel, unsourced, otherSource, changedInput,
+                          apiProgress("openwork.1.2.3", sampled: 1, elapsed: 0.5),
+                          apiProgress(apiFirst.uppercased(), sampled: 1, elapsed: 0.5),
+                          apiProgress(apiFirst, sampled: 1, elapsed: 0.5, reused: 512)] {
+                engine.apply(stale)
+            }
+            guard engine.generationProgress?.sampledTokens == 0 else { return false }
+            engine.apply(apiProgress(apiFirst, sampled: 4, elapsed: 0.9))
+            guard engine.generationProgress?.sampledTokens == 4, engine.generationProgress?.firstTokenSeconds == 0.5,
+                  engine.generationProgress?.tokenDetail == "4 of up to 64" else { return false }
+            engine.apply(["event": "metrics", "input_tokens": 900, "output_tokens": 3, "input_tokens_per_second": 1800.0,
+                          "output_tokens_per_second": 7.5, "prefill_seconds": 0.5])
+            guard engine.firstTokenSeconds == 0.5, engine.outputSpeed == 7.5, engine.inputTokens == 900,
+                  engine.reusedPromptDetail == nil else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.generationProgress == nil, !engine.hasAPIGeneration else { return false }
+            engine.apply(apiProgress(apiFirst, sampled: 5, elapsed: 1.0))
+            guard engine.generationProgress == nil else { return false }
+            // The next serialized request starts fresh; its predecessor cannot reappear.
+            engine.apply(["event": "status", "state": "generating", "message": "Generating for connected application…"])
+            engine.apply(apiProgress(apiFirst, sampled: 6, elapsed: 1.1))
+            guard engine.generationProgress == nil else { return false }
+            engine.apply(apiProgress(apiSecond, reused: 512))
+            guard engine.generationProgress?.reusedInputTokens == 512,
+                  engine.generationProgress?.promptDetail == "900 (512 reused)" else { return false }
+            engine.apply(apiProgress(apiSecond, sampled: 1, elapsed: 0.5))
+            guard engine.generationProgress?.sampledTokens == 0 else { return false }
+            engine.apply(["event": "metrics", "input_tokens": 900, "reused_input_tokens": 512, "output_tokens": 1,
+                          "prefill_seconds": 0.5])
+            guard engine.reusedPromptDetail == "512 of 900 prompt tokens reused" else { return false }
+            engine.apply(["event": "metrics", "input_tokens": 900, "reused_input_tokens": 900, "output_tokens": 1])
+            guard engine.reusedPromptDetail == nil else { return false }
+            engine.apply(["event": "status", "state": "loading", "message": "Loading model…"])
+            guard engine.generationProgress == nil else { return false }
+            engine.apply(["event": "status", "state": "generating", "message": "Generating for connected application…"])
+            engine.loadedID = "replacement-model"
+            engine.apply(apiProgress(String(repeating: "c", count: 32)))
+            return engine.generationProgress == nil
         case "generation-progress-request-and-lifecycle":
             engine.mode = .chat; engine.loadedMode = .chat; engine.draft = "synthetic prompt"
             engine.generate()
@@ -236,6 +299,18 @@ extension EngineController {
                 var event = base; event[key] = invalid
                 guard GenerationTimingProgress(event) == nil else { return false }
             }
+            let counted = apiProgress(apiFirst, reused: 512)
+            guard GenerationTimingProgress(counted)?.reusedInputTokens == 512 else { return false }
+            for (key, invalid): (String, Any) in [
+                ("input_tokens", -1), ("input_tokens", 0.5), ("input_tokens", true), ("input_tokens", NSNull()),
+                ("reused_input_tokens", 900), ("reused_input_tokens", -1), ("reused_input_tokens", false),
+                ("reused_input_tokens", "512")
+            ] {
+                var event = counted; event[key] = invalid
+                guard GenerationTimingProgress(event) == nil else { return false }
+            }
+            var orphanReuse = counted; orphanReuse.removeValue(forKey: "input_tokens")
+            guard GenerationTimingProgress(orphanReuse) == nil else { return false }
             var decode = generationProgress(id: UUID().uuidString, sampled: 1, elapsed: 0.4)
             guard GenerationTimingProgress(decode) == nil else { return false }
             decode["elapsed_seconds"] = 0.5
@@ -271,14 +346,20 @@ extension EngineController {
             let now = Date(timeIntervalSinceReferenceDate: 0)
             var initial = generationProgress(id: UUID().uuidString)
             guard let progress = GenerationTimingProgress(initial, receivedAt: now),
-                  progress.firstTokenDetail(at: now) == "About 0.3 s–0.8 s",
-                  progress.firstTokenDetail(at: now.addingTimeInterval(1)) == "Taking longer than estimated…",
+                  progress.firstTokenDetail(at: now) == "0.0 s so far, about 0.3 s–0.8 s",
+                  progress.firstTokenDetail(at: now.addingTimeInterval(1)) == "1.0 s so far, longer than estimated",
                   progress.completionDetail(at: now.addingTimeInterval(3)) == "About 0.0 s–3.0 s remaining",
-                  progress.completionDetail(at: now.addingTimeInterval(7)) == "Updating estimate…" else { return false }
+                  progress.completionDetail(at: now.addingTimeInterval(7)) == "Updating estimate…",
+                  progress.tokenDetail == "0 of up to 64", progress.promptDetail == nil else { return false }
+            var learning = initial
+            learning["ttft_lower_seconds"] = NSNull(); learning["ttft_upper_seconds"] = NSNull()
+            guard GenerationTimingProgress(learning, receivedAt: now)?.firstTokenDetail(at: now.addingTimeInterval(12.4))
+                    == "12 s so far" else { return false }
             initial["sampled_tokens"] = 2; initial["phase"] = "decode"
             initial["elapsed_seconds"] = 0.7; initial["ttft_seconds"] = 0.5
             guard let decoded = GenerationTimingProgress(initial, receivedAt: now),
-                  decoded.firstTokenDetail(at: now.addingTimeInterval(20)) == "0.5 s" else { return false }
+                  decoded.firstTokenDetail(at: now.addingTimeInterval(20)) == "0.5 s",
+                  decoded.tokenDetail == "2 of up to 64" else { return false }
             return GenerationTimingProgress.duration(120) == "2.0 min" &&
                 GenerationTimingProgress.duration(7200) == "2.0 hr"
         case "context-model-defaults":
@@ -1770,6 +1851,9 @@ exit(EngineController.exercise(scenario, backendError: backendError) ? 0 : 1)
 class ControllerLifecycleTests(unittest.TestCase):
     def test_connected_application_activity_does_not_show_playground_timing(self):
         self.exercise("generation-progress-external-activity")
+
+    def test_api_progress_is_fenced_per_request_and_reports_prefix_reuse(self):
+        self.exercise("generation-progress-api-requests")
 
     def test_generation_progress_matches_active_request_and_retains_actual_first_token(self):
         self.exercise("generation-progress-request-and-lifecycle")
