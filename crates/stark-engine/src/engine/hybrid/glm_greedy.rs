@@ -51,6 +51,10 @@ impl GlmModel {
         tokens: &[u32],
         before_token: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        // Capture once per bulk request; scalar ingest remains synchronous.
+        if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
+            return self.ingest_prefix_chunked(tokens, before_token, true);
+        }
         let overlap = std::env::var_os("STARK_GLM53_PREFILL_OVERLAP").is_some_and(|value| value == "1");
         let queued = std::env::var_os("STARK_GLM53_PREFILL_QUEUED").is_some_and(|value| value == "1");
         self.ingest_prefix_policy(tokens, before_token, overlap, queued)

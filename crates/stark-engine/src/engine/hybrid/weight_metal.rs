@@ -42,6 +42,10 @@ mod q8_grouped_tests;
 mod q4_grouped_tests;
 
 #[cfg(test)]
+#[path = "weight_metal_kquant_mma_tests.rs"]
+mod kquant_mma_tests;
+
+#[cfg(test)]
 #[path = "weight_metal_iq_constant_tests.rs"]
 mod iq_constant_tests;
 
@@ -710,6 +714,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_q6_coalesced_factored_matvec.metal"));
             source.push_str(include_str!("packed_q6_grouped16_matvec.metal"));
             source.push_str(include_str!("packed_q5_grouped32_matvec.metal"));
+            source.push_str(include_str!("packed_kquant_mma_matvec.metal"));
             #[cfg(test)]
             source.push_str(include_str!("packed_q5_multirow_matvec.metal"));
             source.push_str(include_str!("feed_forward.metal"));

@@ -22,6 +22,9 @@ from stark_convert.chat import load_template
 from tokenizers import Tokenizer
 
 CONTEXT = 512
+MMA_PROBE_ENV = "STARK_GLM53_MMA_SCORE_PROBE"
+MMA_PROBE_LIMIT = 65_536
+U64_MAX = (1 << 64) - 1
 ARCHIVED_REFERENCE_SHA256 = "190930839f1525722a6f90e2b27c12171a9ddb6af6e5e2bb0595ed319b5d9c3d"
 PROMPTS = [
     ("user", "Explain why a stable sort preserves the original order of equal keys, and give a short example."),
@@ -79,10 +82,12 @@ class PipeWorker:
 
 
 async def run_worker(binary: Path, model: Path, inputs: list[list[int]], candidates: list[int],
-                     inherited_flags: bool) -> list[list[float]]:
+                     inherited_flags: bool, probe_path: Path | None = None) -> list[list[float]]:
     env = dict(os.environ)
     if not inherited_flags:
         env = {k: v for k, v in env.items() if not k.startswith(("STARK_", "UZU_"))}
+    if inherited_flags and probe_path is not None:
+        env[MMA_PROBE_ENV] = str(probe_path)
     process = await asyncio.create_subprocess_exec(
         str(binary), "--score-model-path", str(model), "--consecutive-cache",
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -124,6 +129,61 @@ async def run_worker(binary: Path, model: Path, inputs: list[list[int]], candida
         extra = await process.stdout.read(1_048_577)
         if clean:
             require(process.returncode == 0 and not extra, "worker_shutdown_boundary_invalid")
+
+
+def requested_probe_path() -> Path | None:
+    value = os.environ.get(MMA_PROBE_ENV)
+    if value is None:
+        return None
+    path = Path(value).expanduser().absolute()
+    require(not path.exists() and not path.is_symlink(), "mma_probe_path_not_fresh")
+    require(path.parent.is_dir(), "mma_probe_parent_invalid")
+    return path
+
+
+def read_mma_probe(path: Path) -> dict:
+    try:
+        info = path.lstat()
+        require(path.is_file() and not path.is_symlink(), "mma_probe_file_invalid")
+        require(info.st_mode & 0o777 == 0o600, "mma_probe_permissions_invalid")
+        require(info.st_size <= MMA_PROBE_LIMIT, "mma_probe_too_large")
+        raw = path.read_bytes()
+    except CheckFailed:
+        raise
+    except OSError:
+        raise CheckFailed("mma_probe_missing_or_unreadable") from None
+    require(len(raw) <= MMA_PROBE_LIMIT, "mma_probe_too_large")
+    require(raw.endswith(b"\n"), "mma_probe_jsonl_boundary_invalid")
+    try:
+        lines = raw.splitlines()
+        require(len(lines) == len(PROMPTS), "mma_probe_row_count_invalid")
+        rows = [json.loads(line) for line in lines]
+    except CheckFailed:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise CheckFailed("mma_probe_json_invalid") from None
+    calls = 0
+    weight_bytes = 0
+    for row in rows:
+        require(isinstance(row, dict) and set(row) == {
+            "success", "encoded_dispatch_calls", "encoded_weight_bytes",
+        }, "mma_probe_schema_invalid")
+        require(row["success"] is True, "mma_probe_request_failed")
+        for key in ("encoded_dispatch_calls", "encoded_weight_bytes"):
+            value = row[key]
+            require(type(value) is int and 0 <= value <= U64_MAX, "mma_probe_counter_invalid")
+        if os.environ.get("STARK_GLM53_PREFILL_MMA") == "1":
+            require(row["encoded_dispatch_calls"] > 0, "mma_probe_dispatch_missing")
+        calls += row["encoded_dispatch_calls"]
+        weight_bytes += row["encoded_weight_bytes"]
+    require(calls <= U64_MAX and weight_bytes <= U64_MAX, "mma_probe_total_overflow")
+    return {
+        "request_count": len(rows),
+        "encoded_dispatch_calls": calls,
+        "encoded_weight_bytes": weight_bytes,
+        "probe_sha256": hashlib.sha256(raw).hexdigest(),
+        "qualification": "Software encoded-dispatch counters; successful records follow the request GPU completion fence and reset. Counts do not measure hardware utilization.",
+    }
 
 
 def collect_inputs(model: Path) -> tuple[list[list[int]], list[int], str]:
@@ -173,8 +233,10 @@ async def run(args) -> dict:
     inputs, candidates, template_hash = collect_inputs(model)
     input_hash = token_hash(inputs)
     candidate_hash = token_hash([candidates])
+    probe_path = requested_probe_path()
     reference_rows = await run_worker(reference, model, inputs, candidates, False)
-    candidate_rows = await run_worker(candidate, model, inputs, candidates, True)
+    candidate_rows = await run_worker(candidate, model, inputs, candidates, True, probe_path)
+    mma_probe = read_mma_probe(probe_path) if probe_path is not None else None
     deltas = [b - a for ref, cand in zip(reference_rows, candidate_rows, strict=True)
               for a, b in zip(ref, cand, strict=True)]
     maximum = max(abs(x) for x in deltas)
@@ -203,6 +265,7 @@ async def run(args) -> dict:
         "STARK_GLM53_Q4_GROUPED32", "STARK_GLM53_GPU_GREEDY",
         "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_KDA_PARALLEL_NORM",
         "STARK_GLM53_PREFILL_QUEUED",
+        "STARK_GLM53_PREFILL_MMA",
         "STARK_GLM53_IQ_FUSED_GATE_UP",
         "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
         "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS",
@@ -222,6 +285,7 @@ async def run(args) -> dict:
         "rms_logprob_delta": rms_delta,
         "reference_mean_candidate_nll": statistics.fmean(-x for row in reference_rows for x in row),
         "candidate_mean_candidate_nll": statistics.fmean(-x for row in candidate_rows for x in row),
+        **({"mma_score_probe": mma_probe} if mma_probe is not None else {}),
         "reference_worker_sha256": reference_sha, "candidate_worker_sha256": candidate_sha,
         "reference_identity": (
             "Archived GLM candidate using original F32 scoring math (source 3eca plus patch 7056); not an MLX teacher."

@@ -636,6 +636,61 @@ impl BoundedBankGroup<'_> {
         self.registered_bytes
     }
 
+    /// Dense weights retain the existing separately capped static-view cache.
+    /// Expert access still goes exclusively through this group's whitelist.
+    pub(super) fn encode_same_weight_batch(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        input: &super::weight_metal::DeviceVector,
+        tokens: usize,
+        use_mma: bool,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        if !self.encoder_registry || self.registered_bytes > self.budget {
+            return Err(Error::Invalid("same-weight batch requires an admitted encoder group"));
+        }
+        {
+            let configured = self
+                .weights
+                .encoder_residency
+                .lock()
+                .map_err(|_| Error::Invalid("same-weight residency lock failed"))?;
+            let residency = configured.as_ref().ok_or(Error::Invalid("same-weight batch requires residency"))?;
+            if residency.failed
+                || self.names.iter().any(|name| !residency.names.contains(name))
+                || self.budget
+                    > resident_encoder_bank_budget(
+                        residency.cap,
+                        residency.static_reserve,
+                        residency.dynamic_allowance,
+                    )?
+            {
+                return Err(Error::Invalid("same-weight batch exceeds admitted residency"));
+            }
+        }
+        let tensor = self.weights.tensor(name)?;
+        if tensor.shape.len() != 2
+            || !(1..=4).contains(&tokens)
+            || tensor.shape[1].checked_mul(tokens) != Some(input.len)
+            || tensor.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR)
+        {
+            return Err(Error::Invalid("same-weight batch requires a dense rank-two matrix"));
+        }
+        graph.mapped_same_weight(
+            &super::weight_metal::MappedOperation {
+                matrices: vec![self.weights.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+                inputs: &[],
+                rows: tensor.shape[0],
+                columns: tensor.shape[1],
+                rows_per_batch: 0,
+                format: self.weights.matrix_format(tensor)?,
+            },
+            input,
+            tokens,
+            use_mma,
+        )
+    }
+
     #[expect(clippy::too_many_arguments, reason = "whitelisted pair of independent expert banks and shared input")]
     pub(super) fn try_encode_iq2_gate_up(
         &self,

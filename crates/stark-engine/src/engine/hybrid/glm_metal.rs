@@ -574,6 +574,121 @@ impl Control {
         self.pre_mode(graph, residual, self.rms_project)
     }
 
+    /// Encode one row before its branch projection, preserving its mix until
+    /// the matching post even when later rows reuse this Control's scratch.
+    /// These dependent kernels must be outside an independent projection level.
+    pub(super) fn pre_batch_row(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+        normalized: &DeviceVector,
+    ) -> Result<DeviceVector> {
+        self.validate_batch_view(residual, self.parameters[3] as usize)?;
+        self.validate_batch_view(normalized, self.input.len)?;
+        self.validate_batch_destination(normalized, &[residual])?;
+        // Raw GLM dispatches bypass kernel()'s write hook. Discharge earlier
+        // finite obligations before any persistent row scratch is overwritten.
+        for destination in [&self.projection, &self.mix, &self.input, normalized] {
+            graph.prepare_external_write(destination)?;
+        }
+        self.project_mode(graph, residual, self.rms_project)?;
+        if self.fused_parallel && self.rms_project && self.fused_parallel_admitted() {
+            let p = self.parameters;
+            dispatch_with_threads(
+                graph,
+                "glm_control_fused_parallel",
+                &[
+                    &self.projection,
+                    &self.coefficients,
+                    residual,
+                    &self.normalization,
+                    &self.mix,
+                    &self.input,
+                    normalized,
+                ],
+                &[p[0], p[1], p[2], p[3], p[4], self.rms_eps.to_bits()],
+                768,
+                false,
+                768,
+            )?;
+        } else {
+            let value = self.pre_projected(graph, residual)?;
+            graph.copy_into(&value, normalized)?;
+        }
+        let mix = graph.scratch(self.mix.len)?;
+        graph.copy_into(&self.mix, &mix)?;
+        Ok(mix)
+    }
+
+    /// Complete a row using its immutable pre snapshot and explicit output
+    /// destination. Source overlap is rejected because streams read each other.
+    pub(super) fn post_batch_row(
+        &self,
+        graph: &mut DecodeGraph,
+        residual: &DeviceVector,
+        output: &DeviceVector,
+        mix: &DeviceVector,
+        destination: &DeviceVector,
+    ) -> Result<()> {
+        self.validate_batch_view(residual, self.parameters[3] as usize)?;
+        self.validate_batch_view(output, self.input.len)?;
+        self.validate_batch_view(mix, self.mix.len)?;
+        self.validate_batch_view(destination, residual.len)?;
+        self.validate_batch_destination(destination, &[residual, output, mix])?;
+        graph.prepare_external_write(destination)?;
+        dispatch(
+            graph,
+            "glm_control_post",
+            &[residual, output, mix, destination],
+            &self.parameters,
+            destination.len,
+            false,
+        )
+    }
+
+    fn validate_batch_view(
+        &self,
+        value: &DeviceVector,
+        length: usize,
+    ) -> Result<()> {
+        if value.len != length {
+            return Err(Error::Invalid("Metal GLM control batch row dimensions"));
+        }
+        // slice() validates the entire underlying span, including byte offset
+        // alignment and checked allocation bounds, before any work is encoded.
+        value.slice(0, length).map(|_| ())
+    }
+
+    fn validate_batch_destination(
+        &self,
+        destination: &DeviceVector,
+        sources: &[&DeviceVector],
+    ) -> Result<()> {
+        let overlaps = |source: &DeviceVector| {
+            std::ptr::eq(&*source.buffer, &*destination.buffer)
+                && source.offset < destination.offset + destination.len * 4
+                && destination.offset < source.offset + source.len * 4
+        };
+        // Neither input rows nor immutable or reusable Control buffers may be
+        // silently overwritten by a destination supplied by the batch caller.
+        if sources.iter().any(|source| overlaps(source))
+            || [
+                &self.weights,
+                &self.coefficients,
+                &self.ones,
+                &self.normalization,
+                &self.projection,
+                &self.mix,
+                &self.input,
+            ]
+            .into_iter()
+            .any(overlaps)
+        {
+            return Err(Error::Invalid("Metal GLM control batch destination overlaps a source"));
+        }
+        Ok(())
+    }
+
     fn pre_mode(
         &self,
         graph: &mut DecodeGraph,
@@ -1427,6 +1542,191 @@ mod tests {
         control.projection = DecodeGraph::zeros(rows * 32).unwrap();
         control.simd_mix = true;
         control
+    }
+
+    fn batch_control(fused: bool) -> Control {
+        let mut control = synthetic_control_split32(0);
+        control.rms_project = fused;
+        control.fused_parallel = fused;
+        control
+    }
+
+    fn encode_control_batch_fixture(
+        control: &Control,
+        batched: bool,
+        unretained: bool,
+    ) -> (DecodeGraph, Vec<DeviceVector>) {
+        let rows = 3;
+        let hidden = control.input.len;
+        let columns = control.parameters[3] as usize;
+        let residual = DecodeGraph::upload(
+            &(0..rows * columns)
+                .map(|i| ((i % columns) as f32 * 0.017 + (i / columns) as f32 * 0.31).sin())
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let branch = DecodeGraph::upload(
+            &(0..rows * hidden)
+                .map(|i| ((i % hidden) as f32 * 0.013 + (i / hidden) as f32 * 0.47).cos() * 0.1)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        let mut graph = if unretained {
+            DecodeGraph::new_unretained()
+        } else {
+            DecodeGraph::new()
+        }
+        .unwrap();
+        let normalized = graph.scratch(rows * hidden).unwrap();
+        let destination = graph.scratch(rows * columns).unwrap();
+        let mut snapshots = Vec::new();
+        for row in 0..rows {
+            let input = residual.slice(row * columns, columns).unwrap();
+            let norm = normalized.slice(row * hidden, hidden).unwrap();
+            if batched {
+                snapshots.push(control.pre_batch_row(&mut graph, &input, &norm).unwrap());
+            } else {
+                let value = control.pre(&mut graph, &input).unwrap();
+                graph.copy_into(&value, &norm).unwrap();
+                let mix = graph.scratch(control.mix.len).unwrap();
+                graph.copy_into(&control.mix, &mix).unwrap();
+                snapshots.push(mix);
+                let output = branch.slice(row * hidden, hidden).unwrap();
+                let post = control.post(&mut graph, &input, &output).unwrap();
+                graph.copy_into(&post, &destination.slice(row * columns, columns).unwrap()).unwrap();
+            }
+        }
+        if batched {
+            // Every pre has overwritten persistent mix/input/projection. Read
+            // snapshots in reverse order to catch use of the final row's mix.
+            for row in (0..rows).rev() {
+                control
+                    .post_batch_row(
+                        &mut graph,
+                        &residual.slice(row * columns, columns).unwrap(),
+                        &branch.slice(row * hidden, hidden).unwrap(),
+                        &snapshots[row],
+                        &destination.slice(row * columns, columns).unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+        let mut outputs = Vec::new();
+        for (row, mix) in snapshots.into_iter().enumerate() {
+            outputs.extend([
+                normalized.slice(row * hidden, hidden).unwrap(),
+                mix,
+                destination.slice(row * columns, columns).unwrap(),
+            ]);
+        }
+        (graph, outputs)
+    }
+
+    #[stark_test]
+    fn control_batch_rows_snapshot_mix_and_match_legacy_pre_post() {
+        for fused in [false, true] {
+            let control = batch_control(fused);
+            let (reference, outputs) = encode_control_batch_fixture(&control, false, false);
+            let expected = reference.finish(&outputs).unwrap();
+            for unretained in [false, true] {
+                let (graph, outputs) = encode_control_batch_fixture(&control, true, unretained);
+                let actual = graph.finish(&outputs).unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .zip(&expected)
+                        .all(|(a, b)| { a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()) }),
+                    "Control batch snapshot changed pre/mix/post bits"
+                );
+            }
+        }
+    }
+
+    #[stark_test]
+    fn control_batch_queued_unretained_snapshots_retain_control_and_row_owners() {
+        let control = batch_control(true);
+        let (reference, outputs) = encode_control_batch_fixture(&control, false, false);
+        let expected = reference.finish(&outputs).unwrap();
+        drop(control);
+        let pending = objc2::rc::autoreleasepool(|_| {
+            let control = batch_control(true);
+            let mut pending = Vec::new();
+            for _ in 0..2 {
+                let (graph, outputs) = encode_control_batch_fixture(&control, true, true);
+                graph.validate_queued_submission().unwrap();
+                pending.push(graph.submit(&outputs).unwrap());
+            }
+            // Control, residual/branch locals, row views, and temporary Metal
+            // references are gone before either Pending is awaited below.
+            pending
+        });
+        for command in pending {
+            let actual = command.wait().unwrap();
+            assert!(
+                actual.iter().zip(&expected).all(|(a, b)| { a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()) }),
+                "Control batch queued ownership changed row results"
+            );
+        }
+    }
+
+    #[stark_test]
+    fn control_batch_rows_reject_invalid_spans_and_overlapping_destinations() {
+        let control = batch_control(false);
+        let residual = DecodeGraph::zeros(16384).unwrap();
+        let output = DecodeGraph::zeros(4096).unwrap();
+        let wrong = DecodeGraph::zeros(4095).unwrap();
+        let invalid = DeviceVector {
+            buffer: output.buffer.clone(),
+            offset: output.buffer.length(),
+            len: 4096,
+        };
+        let mut graph = DecodeGraph::new().unwrap();
+        assert!(control.pre_batch_row(&mut graph, &residual, &wrong).is_err());
+        assert!(control.pre_batch_row(&mut graph, &residual, &invalid).is_err());
+        assert!(control.pre_batch_row(&mut graph, &residual, &residual.slice(0, 4096).unwrap()).is_err());
+        assert!(control.post_batch_row(&mut graph, &residual, &output, &control.mix, &residual).is_err());
+        graph.finish(&[]).unwrap();
+    }
+
+    #[stark_test]
+    fn control_batch_rows_preserve_finite_obligations_before_scratch_reuse() {
+        for fused in [false, true] {
+            let control = batch_control(fused);
+            let residual = DecodeGraph::zeros(16384).unwrap();
+            let branch = DecodeGraph::zeros(4096).unwrap();
+            for poisoned in [&control.projection, &control.mix, &control.input] {
+                // A previous operator's pending obligation must execute before
+                // this raw GLM writer replaces its nonfinite value with zero.
+                unsafe { poisoned.buffer.contents().as_ptr().cast::<f32>().add(poisoned.offset / 4).write(f32::NAN) };
+                let mut graph = DecodeGraph::new().unwrap();
+                graph.check_finite(poisoned).unwrap();
+                let normalized = graph.scratch(4096).unwrap();
+                control.pre_batch_row(&mut graph, &residual, &normalized).unwrap();
+                assert!(graph.finish(&[normalized]).is_err(), "Control batch reuse hid a pending nonfinite value");
+            }
+            let mut graph = DecodeGraph::new().unwrap();
+            let normalized = graph.scratch(4096).unwrap();
+            unsafe { normalized.buffer.contents().as_ptr().cast::<f32>().add(normalized.offset / 4).write(f32::NAN) };
+            graph.check_finite(&normalized).unwrap();
+            control.pre_batch_row(&mut graph, &residual, &normalized).unwrap();
+            assert!(graph.finish(&[normalized]).is_err(), "Control batch normalized overwrite hid a finite obligation");
+            let mut graph = DecodeGraph::new().unwrap();
+            let normalized = graph.scratch(4096).unwrap();
+            let mix = control.pre_batch_row(&mut graph, &residual, &normalized).unwrap();
+            let destination = graph.scratch(16384).unwrap();
+            unsafe {
+                destination.buffer.contents().as_ptr().cast::<f32>().add(destination.offset / 4).write(f32::INFINITY)
+            };
+            graph.check_finite(&destination).unwrap();
+            control.post_batch_row(&mut graph, &residual, &branch, &mix, &destination).unwrap();
+            assert!(graph.finish(&[destination]).is_err(), "Control batch post overwrite hid a finite obligation");
+            let mut graph = DecodeGraph::new().unwrap();
+            let normalized = graph.scratch(4096).unwrap();
+            let mix = control.pre_batch_row(&mut graph, &residual, &normalized).unwrap();
+            let destination = graph.scratch(16384).unwrap();
+            control.post_batch_row(&mut graph, &residual, &branch, &mix, &destination).unwrap();
+            assert!(graph.finish(&[normalized, destination]).is_ok(), "Control batch fresh graph did not recover");
+        }
     }
 
     #[stark_test]

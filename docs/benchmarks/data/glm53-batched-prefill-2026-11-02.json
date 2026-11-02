@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "status": "qualification_pending_longer_context",
+  "performance_qualified": false,
+  "date": "2026-11-02",
+  "workload": {
+    "scope": "serialized_native_text_greedy",
+    "context_tokens": 512,
+    "input_tokens": 14,
+    "requested_output_tokens": 32,
+    "sampling": "greedy_no_speculation",
+    "input_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+    "output_sha256": "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c",
+    "tokenizer_sha256": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+    "prompt_template_sha256": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891",
+    "weights": {
+      "receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb",
+      "verification": "Prior SHA-256 values; file size, modification time, and inode guarded before and after execution.",
+      "files": {
+        "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf": {"bytes": 9429984, "sha256": "2f32eba33ebc75a715e9c85a010faac4c67542e38e8970bd961d544bfe815f9e"},
+        "GLM-5.3-Flash-UD-Q2_K_XL-00002-of-00004.gguf": {"bytes": 49294975936, "sha256": "f4a9e1ab13d5d9620f5590c9a4aba4c169e6707a1554f3be3fe3112f80a66825"},
+        "GLM-5.3-Flash-UD-Q2_K_XL-00003-of-00004.gguf": {"bytes": 49949266048, "sha256": "330a8ad76c787b3ab6df062dd30abea7aafe6a0e3d5860e8720dfa4abb2434a5"},
+        "GLM-5.3-Flash-UD-Q2_K_XL-00004-of-00004.gguf": {"bytes": 9466399584, "sha256": "5c294f42edc5d69cf00a79ab444e61f0742e9933105fc5c85f97da54dab8946f"}
+      }
+    }
+  },
+  "host": {"model": "Mac17,7", "architecture": "arm64", "physical_memory_bytes": 137438953472, "os_version": "26.7.1"},
+  "comparison": {
+    "control": {
+      "build": "v46",
+      "harness_sha256": "7011d46dd4ea32da6453095c65851988b0e26c4993add90c2c42c4e5d7f6f210",
+      "worker_sha256": "2254405fd2653b69519e974d72b2e21778a71a61522389b6ecb56aa2e953805a",
+      "configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+      "build_receipt": "runtime/glm53-resume-20261102/build-receipt-v46.json",
+      "accepted_requests": 4,
+      "excluded_attempts": 8,
+      "warmup_replays": 4,
+      "accepted_paging_delta": {"pageouts": 0, "swapouts": 0},
+      "median_prefill_tokens_per_second": 30.93478421823404,
+      "median_useful_decode_tokens_per_second": 34.918578113145315,
+      "median_all_sampled_tokens_per_decode_second": 36.044983858730646,
+      "median_prefill_seconds": 0.452570271,
+      "median_decode_seconds": 0.8877795625,
+      "median_request_wall_seconds": 1.3555931459995918,
+      "screened_receipt": "runtime/glm53-resume-20261102/merged-control-screened-v46.json"
+    },
+    "candidate": {
+      "build": "v47",
+      "harness_sha256": "d254a328cd6f2144d6bf8007ffb815abd8108919d36f386e210045eb7fe3d0e1",
+      "worker_sha256": "078a0cdd934722d904e372c0a64564a280639164d1daf2ef2a156f8f5f279ae4",
+      "configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+      "build_receipt": "runtime/glm53-resume-20261102/build-receipt-v47.json",
+      "source_binding": {
+        "head": "13de5d4ee095a77029d38863e58ffca0339051a9",
+        "tracked_diff_sha256": "0f6105eea93f594c4181bdae7f7932554ebca491af9cdc3b64009f09fa9f327d",
+        "hybrid_source_bundle_sha256": "d082a80c8d935d405703300f9af0567c72531c79b233b0a1e0d32f32e6f4420c",
+        "candidate_patch": "runtime/glm53-resume-20261102/candidate-v47.patch"
+      },
+      "prefill_mma": {"enabled": true, "chunk_tokens": 4, "arithmetic": "layer-major F32 with exact M5Max admission", "quantized_matrices": 68, "matrix_shape": "8192x4096 Q6_K/V", "prototype_revision": "dde879bc4f954b809892fd0d660515f42536394a", "prototype_license": "MIT; see LICENSE.ggml-hybrid"},
+      "accepted_requests": 4,
+      "excluded_attempts": 3,
+      "warmup_replays": 4,
+      "accepted_paging_delta": {"pageouts": 0, "swapouts": 0},
+      "median_prefill_tokens_per_second": 35.33199671256037,
+      "median_useful_decode_tokens_per_second": 34.99258272949564,
+      "median_all_sampled_tokens_per_decode_second": 36.12137572076969,
+      "median_prefill_seconds": 0.3962421665,
+      "median_decode_seconds": 0.8859020625,
+      "median_request_wall_seconds": 1.2955429580033524,
+      "screened_receipt": "runtime/glm53-resume-20261102/mma-screened-v47.json"
+    },
+    "changes": {
+      "prefill_tokens_per_second_percent": 14.2108,
+      "useful_decode_tokens_per_second_percent": 0.2119,
+      "request_wall_seconds_percent": -4.4306,
+      "decode_gain_claimed": false
+    },
+    "cold_prefill_seconds": {
+      "control": 23.7466,
+      "candidate": 21.8563,
+      "matched_experiment": false,
+      "gain_claimed": false
+    }
+  },
+  "numerical_validation": {
+    "scope": "8 public rendered contexts x up to 16 candidate tokens; next-token normalized logprob agreement only",
+    "score_points": 128,
+    "max_absolute_logprob_delta": 1.1426695305516432e-05,
+    "rms_logprob_delta": 4.003720315488339e-06,
+    "passed": true,
+    "receipt": "runtime/glm53-resume-20261102/score-parity-mma-v47.json",
+    "dispatch_probe": {"encoded_dispatch_calls": 3400, "successful_requests": 8, "hardware_utilization_measurement": false, "receipt": "runtime/glm53-resume-20261102/score-mma-dispatch-v47.jsonl"}
+  },
+  "validation": {
+    "precision_policy": "F32 activations and accumulation; reduction reassociation",
+    "private_tests": {"tests": 3, "valid_configurations": 3, "passed": 9},
+    "quantized_fixture": {"fixture": "HC4", "admitted": false, "failure_stage": "before model admission", "reason": "overlapping GGUF files"},
+    "hybrid_suite": {"passed": 195, "ignored": 73},
+    "score_suite": {"passed": 25},
+    "generator_suite": {"passed": 96, "ignored": 2},
+    "clippy": {"generate_passed": true, "score_passed": true},
+    "whole_engine_suite_claimed": false
+  },
+  "pending": {
+    "longer_context_96_runs": {
+      "performance_qualified": false,
+      "input_tokens": 96,
+      "output_tokens": 8,
+      "replay_count": 5,
+      "reported_warm_replays": 4,
+      "control": {
+        "source_build": "v46",
+        "receipt": "runtime/glm53-resume-20261102/context96-control-v46.json",
+        "median_prefill_tokens_per_second": 34.69129705493282,
+        "median_decode_tokens_per_second": 33.04145027566834,
+        "median_request_wall_seconds": 2.9811201664997498,
+        "output_sha256": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+        "paging_observed": true,
+        "external_load": "other-process CPU roughly 73-88%; external GPU activity near zero"
+      },
+      "candidate": {
+        "source_build": "v47",
+        "receipt": "runtime/glm53-resume-20261102/context96-mma-v47.json",
+        "median_prefill_tokens_per_second": 29.70173047330747,
+        "median_decode_tokens_per_second": 25.71305186605236,
+        "median_request_wall_seconds": 3.5074251665064367,
+        "output_sha256": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+        "paging_observed": true,
+        "external_load": "other-process CPU roughly 470-568%; WindowServer and other-process GPU activity each around 8%"
+      },
+      "exact_replay_output_hashes_match": true,
+      "attribution": null,
+      "interpretation": "Unfiltered, uncontrolled observation. Large host-load difference prevents attributing timing differences to the candidate or qualifying performance.",
+      "prospective_quiet_host_screening": "being added to the 96-token harness; screened longer-context runs pending"
+    },
+    "optional_chunk_8_source_experiment": null,
+    "final_wrapper_promoted": false,
+    "default_promoted": false,
+    "mlx_serve_control_refresh": null,
+    "q5_mma": {"study": "docs/archive/experiments/glm53-q5-mma-20261102/README.md", "status": "rejected prototype; no Q5 runtime route admitted"},
+    "chunk_8_experiment": "separate ongoing work; not included in v47 source or results"
+  },
+  "public_data_policy": "Aggregate metrics and hashes only; no prompts, responses, token IDs, logits, probability arrays, exception dumps, or raw logs."
+}

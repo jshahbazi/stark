@@ -9,6 +9,9 @@ mod counters;
 use counters::EncoderTiming;
 use metal::MTLHeap;
 
+#[path = "decode_graph_batch.rs"]
+mod batch;
+
 /// Persistent backing for automatic, non-aliasable Shared scratch buffers.
 /// Apple documents that each subresource strongly retains its heap until the
 /// resource is destroyed. No buffer here is ever made aliasable or placed.
@@ -602,6 +605,19 @@ impl DecodeGraph {
         self.kernel("hybrid_graph_finite", &[input], &[input.len as u32], input.len, 256)
     }
 
+    /// Raw backend dispatches must discharge queued checks before reusing a
+    /// persistent output span, just like generic graph kernels and copies.
+    pub fn prepare_external_write(
+        &mut self,
+        output: &DeviceVector,
+    ) -> Result<()> {
+        if self.projection_level {
+            return Err(Error::Invalid("external dependent write inside projection level"));
+        }
+        output.validate()?;
+        self.flush_finite_before_write(output)
+    }
+
     fn flush_finite_before_write(
         &mut self,
         output: &DeviceVector,
@@ -987,6 +1003,21 @@ impl DecodeGraph {
         input.validate()?;
         let parameters = operation.parameters_for_input(input.len)?;
         let output = self.scratch(operation.rows * operation.matrices.len())?;
+        self.mapped_into(operation, input, &output, &parameters)?;
+        Ok(output)
+    }
+
+    fn mapped_into(
+        &mut self,
+        operation: &MappedOperation<'_>,
+        input: &DeviceVector,
+        output: &DeviceVector,
+        parameters: &[u32; 8],
+    ) -> Result<()> {
+        output.validate()?;
+        if output.len != operation.rows * operation.matrices.len() {
+            return Err(Error::Invalid("decode mapped output shape"));
+        }
         let executor = executor()?;
         let checked = matches!(operation.format, MatrixFormat::Affine { .. }) && !self.separate_finite;
         let typed = checked
@@ -1047,7 +1078,7 @@ impl DecodeGraph {
         Executor::encode_matrix_at(
             &self.encoding,
             operation,
-            &parameters,
+            parameters,
             &pipeline,
             (&input.buffer, input.offset),
             (&output.buffer, output.offset),
@@ -1065,9 +1096,9 @@ impl DecodeGraph {
             }
         }
         if !checked {
-            self.check_finite(&output)?;
+            self.check_finite(output)?;
         }
-        Ok(output)
+        Ok(())
     }
 
     /// End this encoder's resource scope without submitting or waiting. Large

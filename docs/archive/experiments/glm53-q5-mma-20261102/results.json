@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "experiment": "glm53_q5_integer_fragment_mma_t4",
+  "date": "2026-11-02",
+  "disposition": "REJECTED_RUNTIME_CANDIDATE",
+  "reason": "Main median improvement versus legacy is only 0.90%, with no uncertainty qualification; output median regresses 7.24%. Faster generic-MMA comparisons do not justify runtime admission.",
+  "production_route_added": false,
+  "full_model_qualified": false,
+  "prototype_base": "13de5d4ee095a77029d38863e58ffca0339051a9",
+  "upstream": {
+    "repository": "ggml-org/llama.cpp",
+    "revision": "dde879bc4f954b809892fd0d660515f42536394a",
+    "file": "ggml/src/ggml-metal/kernels/mul_mv_mma.metal",
+    "raw_file_sha256": "115e843e70a6b5f8b6d4dc691a14706fadf6e9929b7f661989b5d7ae3d7716f9",
+    "license": "MIT; notices retained in prototype and LICENSE.ggml-hybrid"
+  },
+  "archived_generic_reference_archive_sha256": "074b70eae64a5b389ae447342035acc0c3fb6db6c27999cb845ecaddcd738c4a",
+  "rejected_patch_sha256": "251125a6838f52905aad90a19b66f6b53c56ecd5e3b33eac06b86ca5602668c7",
+  "source_sha256_v1": {
+    "crates/stark-engine/src/engine/hybrid/weight_metal.rs": "58679695d46a52fca985e3fa0bb5a04b8ae6263348001d60b0ade65a11648e1b",
+    "crates/stark-engine/src/engine/hybrid/packed_q5_special_mma.metal": "b426afaa94f89f7abab06e9da7e8a21a9dae7d06cb85d7f0d007e6ef19292c81",
+    "crates/stark-engine/src/engine/hybrid/packed_q5_special_mma_reference.metal": "e6306b9c0f42591e3b82a6190dd3b58901032b46b0f7b3b7c8b4ce381ae33661",
+    "crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_tests.rs": "11f2f0084665e522d26778972a8671fe5442ecf64b03fb903eb2b41b4861737b",
+    "crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_components.rs": "e4189006f6e4e9e4f53b102141d6887d5311f65e3f534251b7dd6aaeaa6f2ec8"
+  },
+  "source_sha256_v2": {
+    "crates/stark-engine/src/engine/hybrid/weight_metal.rs": "58679695d46a52fca985e3fa0bb5a04b8ae6263348001d60b0ade65a11648e1b",
+    "crates/stark-engine/src/engine/hybrid/packed_q5_special_mma.metal": "b426afaa94f89f7abab06e9da7e8a21a9dae7d06cb85d7f0d007e6ef19292c81",
+    "crates/stark-engine/src/engine/hybrid/packed_q5_special_mma_reference.metal": "e6306b9c0f42591e3b82a6190dd3b58901032b46b0f7b3b7c8b4ce381ae33661",
+    "crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_tests.rs": "7acdd1b2b80c45c8204c528b50804795d2294ea1739b20f9bbe11e106e4b1e93",
+    "crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_components.rs": "e4189006f6e4e9e4f53b102141d6887d5311f65e3f534251b7dd6aaeaa6f2ec8"
+  },
+  "precision": {
+    "legacy": "grouped F32 affine factoring",
+    "generic": "F32 decoded weights, activations, matrix fragments, accumulation",
+    "candidate": "exact small-integer F16 A fragments; F32 activation B, metadata conversion, accumulator and affine reconstruction; Safe Metal math"
+  },
+  "experimental_admission": {
+    "maximum_abs_integer_coefficient_term": 1.0,
+    "maximum_abs_minimum_coefficient_term": 1.0,
+    "nonzero_input_magnitude_envelope": [
+      1e-30,
+      1e+20
+    ],
+    "zero_input_admitted": true,
+    "input_classification": "IEEE integer magnitude keys",
+    "post_MMA_cancellation_threshold_vs_affine_L1_magnitude": 2e-06,
+    "universal_error_bound_claimed": false,
+    "metadata_rejection_fallback": "generic F32 MMA, uniform whole threadgroup",
+    "tiny_extreme_nonfinite_input_fallback": "legacy Q5 grouped chronology including its original-block extreme fallback",
+    "cancellation_rejection_fallback": "generic F32 MMA, uniform whole threadgroup"
+  },
+  "validation_v1": {
+    "status": "FAILED_WRONG_ZERO_ORACLE",
+    "test_executable_sha256": "c5e50baa7c6e2baf7fcc88c535a8154296f0727ce7ab23fcb1740a1a5d6b2ed9",
+    "bounded_nonzero_affine_gate": "passed",
+    "cancellation_gate": "failed at assertion that legacy grouped output was exact zero",
+    "third_gate": "not_run",
+    "timings": "not_run",
+    "diagnosis": "Fixture packing verified independently; 13312 CPU F32 and F64 coefficient checks per policy found zero nonzero coefficients. The GPU legacy baseline was already affine-factored and was not an exact coefficient oracle."
+  },
+  "validation_v2": {
+    "status": "PASSED_COMPONENT_ONLY",
+    "test_executable_sha256": "ec1e405a9866d51de7120d8d8b7e3f95b20cd58991d91a8f6f2c7a559b1ca920",
+    "source_unchanged_through_execution": true,
+    "MSL_pipeline_creation_and_execution": "passed",
+    "correctness_gates_passed": 3,
+    "timing_components_passed": 1,
+    "coefficient_checks_per_CPU_policy": 106496,
+    "CPU_F32_nonzero_coefficient_count": 0,
+    "CPU_F64_nonzero_coefficient_count": 0,
+    "cancellation_case_count": 32,
+    "generic_GPU_exact_zero_cases": 32,
+    "guarded_exact_zero_cases": 32,
+    "raw_specialized_numerical_rejections": 18,
+    "legacy_grouped_nonzero_cases": 4,
+    "legacy_grouped_execution_failures": 0,
+    "first_legacy_error_case": {
+      "case_id": 2,
+      "scale_f16_bits": "0x7bff",
+      "input_magnitude_f32_bits": "0x501502f9",
+      "nonzero_output_count": 52,
+      "maximum_absolute_error_vs_zero": 424673280.0
+    },
+    "limits": {
+      "relative_RMS_vs_baseline": 2e-05,
+      "F64_error_normalized_by_absolute_product_sum": 2e-06
+    },
+    "reference_correction": "Each case independently asserts CPU F32 and F64 coefficients zero, then asserts generic per-weight F32 MMA zero. Guarded exact-zero, bit-comparison, RRMS/F64 and uniform-fallback gates remain mandatory. Legacy grouped errors are separately labelled baseline diagnostics. Raw rejection is counted only where specialized work executed.",
+    "quality_limit": "Pathological synthetic baseline errors do not establish an actual-checkpoint quality defect or improvement."
+  },
+  "measurement": {
+    "tokens": 4,
+    "banks": 8,
+    "weight_population_bytes": 184549376,
+    "fixture": "synthetic nonzero-affine Q5 payloads with metadata guided by bounded actual-checkpoint aggregate samples; no payloads archived",
+    "warmup_ABBA_rounds_per_pair": 3,
+    "measured_ABBA_rounds_per_pair": 8,
+    "measured_commands_per_schedule": 16,
+    "bank_order": "rotated",
+    "comparisons_have_separate_guarded_measurements": true,
+    "GPU_timer": "command GPU timestamps; upload excluded",
+    "host_execution": "single serialized GPU workload without concurrent task compilation",
+    "F64_sampled_rows_per_bank": 16,
+    "bit_equivalence_claimed": false,
+    "uncertainty_interval_qualified": false
+  },
+  "paired_results": [
+    {
+      "component": "q5_main",
+      "comparison": "legacy_projection_major_vs_guarded",
+      "base_gpu_us_per_matrix": 157.94531282153912,
+      "guarded_gpu_us_per_matrix": 156.52864749426953,
+      "speedup": 1.0090505179080491,
+      "gpu_time_change_percent": -0.896934072915645,
+      "fallback_fraction": 0.0068359375,
+      "relative_rms": 1.9680209984671656e-07,
+      "f64_error_over_absolute_sum": 5.0859281454559774e-08,
+      "candidate_output_sha256": "3ddb2a0aa22ed82bd2fe8c179f6a845bb6ec25d48e9a0f5e0cef6ca2462be4c0"
+    },
+    {
+      "component": "q5_main",
+      "comparison": "generic_f32_mma_vs_guarded",
+      "base_gpu_us_per_matrix": 219.60416779620573,
+      "guarded_gpu_us_per_matrix": 156.15104166499805,
+      "speedup": 1.4063573669097782,
+      "gpu_time_change_percent": -28.89431779368261,
+      "fallback_fraction": 0.0068359375,
+      "relative_rms": 1.9680209984671656e-07,
+      "f64_error_over_absolute_sum": 5.0859281454559774e-08,
+      "candidate_output_sha256": "3ddb2a0aa22ed82bd2fe8c179f6a845bb6ec25d48e9a0f5e0cef6ca2462be4c0"
+    },
+    {
+      "component": "q5_output",
+      "comparison": "legacy_projection_major_vs_guarded",
+      "base_gpu_us_per_matrix": 160.41666640376206,
+      "guarded_gpu_us_per_matrix": 172.03645620611496,
+      "speedup": 0.9324573985153974,
+      "gpu_time_change_percent": 7.243505343208145,
+      "fallback_fraction": 0.0087890625,
+      "relative_rms": 2.2617323326875873e-07,
+      "f64_error_over_absolute_sum": 8.138738970005998e-08,
+      "candidate_output_sha256": "b47afc0847d47886e1fc031634b318a530cce5551f62daaa60e6d565ac77a922"
+    },
+    {
+      "component": "q5_output",
+      "comparison": "generic_f32_mma_vs_guarded",
+      "base_gpu_us_per_matrix": 266.4765634108335,
+      "guarded_gpu_us_per_matrix": 171.9427073112456,
+      "speedup": 1.549798578711835,
+      "gpu_time_change_percent": -35.475486057602254,
+      "fallback_fraction": 0.0087890625,
+      "relative_rms": 2.2617323326875873e-07,
+      "f64_error_over_absolute_sum": 8.138738970005998e-08,
+      "candidate_output_sha256": "b47afc0847d47886e1fc031634b318a530cce5551f62daaa60e6d565ac77a922"
+    }
+  ],
+  "fallback_counts_per_comparison": {
+    "main": {
+      "specialized_threadgroups": 32544,
+      "cancellation_generic_fallback_threadgroups": 224,
+      "total_threadgroups": 32768,
+      "fraction": 0.0068359375
+    },
+    "output": {
+      "specialized_threadgroups": 16240,
+      "cancellation_generic_fallback_threadgroups": 144,
+      "total_threadgroups": 16384,
+      "fraction": 0.0087890625
+    },
+    "ordinary_metadata_and_source_input_fallback_threadgroups": 0
+  },
+  "privacy": "Only aggregate results, source/binary hashes, provenance and reproducibility source are archived. Raw run logs, generated payloads, activations, model bytes and runtime artifacts remain private.",
+  "actual_model_metadata_sample_provenance": {
+    "repository": "unsloth/GLM-5.3-Flash-GGUF",
+    "revision": "a38483c8cd5df544f53d70fb281afe97369d5ab6",
+    "quantization": "UD-Q2_K_XL",
+    "shards": 4,
+    "read_policy": "bounded headers; 16 metadata bytes per spread sampled block; no tensor payload output",
+    "aggregate_shapes": {
+      "(4096, 8192)": {
+        "tensors_available": 34,
+        "tensors_sampled": 17,
+        "blocks_sampled": 8704,
+        "nonfinite_metadata": 0,
+        "subnormal_metadata": 7148,
+        "max_integer_term": {
+          "p50": 0.10441786050796509,
+          "p90": 0.12583690881729126,
+          "p99": 0.15365839004516602,
+          "maximum": 0.3769286870956421
+        },
+        "max_minimum_term": {
+          "p50": 0.05509471893310547,
+          "p90": 0.07059574127197266,
+          "p99": 0.08675765991210938,
+          "maximum": 0.28214263916015625
+        },
+        "nonzero_min_blocks": 8704,
+        "possible_nontrivial_zero_coefficient_blocks": 48
+      },
+      "(8192, 4096)": {
+        "tensors_available": 34,
+        "tensors_sampled": 17,
+        "blocks_sampled": 8704,
+        "nonfinite_metadata": 0,
+        "subnormal_metadata": 5981,
+        "max_integer_term": {
+          "p50": 0.10849213600158691,
+          "p90": 0.14027148485183716,
+          "p99": 0.21756631135940552,
+          "maximum": 0.8469836711883545
+        },
+        "max_minimum_term": {
+          "p50": 0.058309078216552734,
+          "p90": 0.07822608947753906,
+          "p99": 0.12475967407226562,
+          "maximum": 0.498565673828125
+        },
+        "nonzero_min_blocks": 8704,
+        "possible_nontrivial_zero_coefficient_blocks": 36
+      }
+    },
+    "actual_model_weights_used_in_component_timing": false
+  },
+  "patch_application": "git apply --unidiff-zero rejected.patch on the pinned base"
+}

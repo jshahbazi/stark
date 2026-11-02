@@ -19,6 +19,10 @@ use super::{
 #[path = "glm_greedy.rs"]
 mod greedy;
 
+#[cfg(feature = "metal")]
+#[path = "glm_prefill_batch.rs"]
+mod prefill_batch;
+
 #[derive(Clone)]
 struct Config {
     hidden: usize,
@@ -1705,16 +1709,12 @@ fn kda(
 }
 
 #[cfg(feature = "metal")]
-fn encode_kda(
+fn initialize_kda(
     w: &Weights,
     c: &Config,
-    graph: &mut super::weight_metal::DecodeGraph,
-    x: &super::weight_metal::DeviceVector,
     p: &str,
     state: &mut KdaState,
-    parallel: bool,
-) -> Result<super::weight_metal::DeviceVector> {
-    use super::weight_metal::DeviceVector;
+) -> Result<()> {
     if state.metal.is_none() {
         state.metal = Some(super::glm_metal::Kda::new(
             super::glm_metal::Geometry {
@@ -1734,6 +1734,21 @@ fn encode_kda(
             &w.vector(&format!("{p}.ssm_a"))?,
         )?);
     }
+    Ok(())
+}
+
+#[cfg(feature = "metal")]
+fn encode_kda(
+    w: &Weights,
+    c: &Config,
+    graph: &mut super::weight_metal::DecodeGraph,
+    x: &super::weight_metal::DeviceVector,
+    p: &str,
+    state: &mut KdaState,
+    parallel: bool,
+) -> Result<super::weight_metal::DeviceVector> {
+    use super::weight_metal::DeviceVector;
+    initialize_kda(w, c, p, state)?;
     let metal = state.metal.as_mut().ok_or(Error::Invalid("glm_kda_decode_state"))?;
     let inner = metal.inner();
     let input = DeviceVector {

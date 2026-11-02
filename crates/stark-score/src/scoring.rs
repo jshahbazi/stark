@@ -1,8 +1,9 @@
 //! Isolated exact-token scoring protocol. Request content is never diagnostic data.
 use std::{
     collections::HashSet,
-    fs::File,
+    fs::{File, OpenOptions},
     io::{self, BufRead, Read, Write},
+    os::unix::fs::OpenOptionsExt,
     path::Path,
     sync::Arc,
     time::Instant,
@@ -66,6 +67,95 @@ struct NativeBackend {
     engine: Option<Arc<Engine<Metal>>>,
     model: NativeModel,
     vocab_size: usize,
+    mma_probe: Option<MmaScoreProbe<File>>,
+}
+
+/// Private qualification output, separate from the response protocol. The
+/// software counter records encoded dispatches, not hardware utilization.
+struct MmaScoreProbe<W: Write> {
+    output: W,
+    failed: bool,
+    previous_profile: Option<bool>,
+}
+
+#[derive(Serialize)]
+struct MmaScoreProbeRow {
+    success: bool,
+    encoded_dispatch_calls: u64,
+    encoded_weight_bytes: u64,
+}
+
+impl MmaScoreProbe<File> {
+    fn open(path: &Path) -> Result<Self, &'static str> {
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|_| "mma_score_probe_open_failed")?;
+        Ok(Self {
+            output,
+            failed: false,
+            previous_profile: None,
+        })
+    }
+
+    fn from_env() -> Result<Option<Self>, &'static str> {
+        std::env::var_os("STARK_GLM53_MMA_SCORE_PROBE").map(|path| Self::open(Path::new(&path))).transpose()
+    }
+}
+
+impl<W: Write> MmaScoreProbe<W> {
+    fn begin(&mut self) -> Result<(), &'static str> {
+        if self.failed || self.previous_profile.is_some() {
+            return Err("mma_score_probe_failed");
+        }
+        use stark_engine::engine::hybrid::profile;
+        self.previous_profile = Some(profile::enabled());
+        profile::reset();
+        profile::enable(true);
+        Ok(())
+    }
+
+    /// Called only after the serialized hybrid operation and model reset have
+    /// fenced every submitted GPU writer, including its error cleanup.
+    fn complete(
+        &mut self,
+        success: bool,
+    ) -> Result<(), &'static str> {
+        use stark_engine::engine::hybrid::profile;
+        let previous = self.previous_profile.take().ok_or("mma_score_probe_failed")?;
+        let counters = profile::snapshot();
+        profile::enable(previous);
+        let counter = counters.get("native.glm.prefill.q6_mma");
+        self.record(MmaScoreProbeRow {
+            success,
+            encoded_dispatch_calls: counter.map_or(0, |counter| counter.calls),
+            encoded_weight_bytes: counter.map_or(0, |counter| counter.bytes),
+        })
+    }
+
+    fn record(
+        &mut self,
+        row: MmaScoreProbeRow,
+    ) -> Result<(), &'static str> {
+        if self.failed {
+            return Err("mma_score_probe_failed");
+        }
+        if write_reply(&mut self.output, &row).is_err() {
+            self.failed = true;
+            return Err("mma_score_probe_failed");
+        }
+        Ok(())
+    }
+}
+
+impl<W: Write> Drop for MmaScoreProbe<W> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous_profile.take() {
+            stark_engine::engine::hybrid::profile::enable(previous);
+        }
+    }
 }
 
 enum NativeModel {
@@ -209,13 +299,18 @@ impl NativeBackend {
             _ => "invalid_model_config",
         })?;
         if hybrid {
+            let mma_probe = MmaScoreProbe::from_env()?;
             let model = stark_engine::engine::hybrid::Model::load(path).map_err(|_| "hybrid_model_load_failed")?;
             let vocab_size = model.vocab_size();
             return Ok(Self {
                 engine: None,
                 model: NativeModel::Hybrid(Box::new(model)),
                 vocab_size,
+                mma_probe,
             });
+        }
+        if std::env::var_os("STARK_GLM53_MMA_SCORE_PROBE").is_some() {
+            return Err("mma_score_probe_requires_hybrid");
         }
         let config: Value =
             serde_json::from_reader(File::open(path.join("config.json")).map_err(|_| "model_config_unavailable")?)
@@ -232,6 +327,7 @@ impl NativeBackend {
             engine: Some(engine),
             model: NativeModel::Dense(Box::new(model)),
             vocab_size,
+            mma_probe: None,
         })
     }
 }
@@ -271,6 +367,9 @@ impl ScoringBackend for NativeBackend {
             };
             let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
                 .map_err(|_| "inference_activity_unavailable")?;
+            if let Some(probe) = &mut self.mma_probe {
+                probe.begin()?;
+            }
             let started = Instant::now();
             model.reset();
             let state_creation_seconds = started.elapsed().as_secs_f64();
@@ -280,11 +379,20 @@ impl ScoringBackend for NativeBackend {
                     return Err("context_overflow");
                 }
                 let mut logits = Vec::new();
-                for (index, &token) in input.iter().enumerate() {
-                    if index + 1 == input.len() {
-                        logits = model.step(token).map_err(|_| "native_scoring_failed")?;
-                    } else {
-                        model.ingest(token).map_err(|_| "native_scoring_failed")?;
+                if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
+                    // Exercise the same known-prefix path as generation when
+                    // qualifying the opt-in projection scheduling policy.
+                    // The ordinary scalar scorer remains the reference.
+                    let (&last, prefix) = input.split_last().ok_or("context_overflow")?;
+                    model.ingest_prefix(prefix, || Ok(())).map_err(|_| "native_scoring_failed")?;
+                    logits = model.step(last).map_err(|_| "native_scoring_failed")?;
+                } else {
+                    for (index, &token) in input.iter().enumerate() {
+                        if index + 1 == input.len() {
+                            logits = model.step(token).map_err(|_| "native_scoring_failed")?;
+                        } else {
+                            model.ingest(token).map_err(|_| "native_scoring_failed")?;
+                        }
                     }
                 }
                 Ok(NativeScores {
@@ -296,6 +404,9 @@ impl ScoringBackend for NativeBackend {
                 })
             })();
             model.reset();
+            if let Some(probe) = &mut self.mma_probe {
+                probe.complete(result.is_ok())?;
+            }
             return result;
         };
         model
@@ -491,7 +602,7 @@ impl<B: ScoringBackend> ScoreWorker<B> {
                 self.cache.clear();
                 write_reply(output, &json!({"error":code,"cache":self.telemetry(false)}))
                     .map_err(|_| "protocol_write_failed")?;
-                if matches!(code, "native_scoring_failed" | "invalid_score_values") {
+                if matches!(code, "native_scoring_failed" | "invalid_score_values" | "mma_score_probe_failed") {
                     Err("native_operation_failed")
                 } else {
                     Ok(())
@@ -585,6 +696,7 @@ mod tests {
     struct FakeBackend {
         calls: usize,
         fail_score: bool,
+        fail_probe: bool,
         invalid_output: bool,
         fail_tokenize: bool,
         max_context: Option<u32>,
@@ -616,6 +728,9 @@ mod tests {
             _: u32,
         ) -> Result<NativeScores, &'static str> {
             self.calls += 1;
+            if self.fail_probe {
+                return Err("mma_score_probe_failed");
+            }
             if self.fail_score {
                 return Err("native_scoring_failed");
             }
@@ -639,6 +754,7 @@ mod tests {
             FakeBackend {
                 calls: 0,
                 fail_score: false,
+                fail_probe: false,
                 invalid_output: false,
                 fail_tokenize: false,
                 max_context: Some(262_144),
@@ -802,6 +918,99 @@ mod tests {
             worker.backend.invalid_output = false;
             assert_eq!(post(&mut worker, standard())["cache_hit"], false);
         }
+    }
+
+    #[test]
+    fn mma_probe_failure_is_fatal_and_clears_the_consecutive_cache() {
+        let mut worker = worker(true, false);
+        post(&mut worker, standard());
+        worker.backend.fail_probe = true;
+        let request = serde_json::to_vec(&request(&[2, 1], &[2, 3], 8192, 1.22)).unwrap();
+        assert_eq!(worker.process_line(&request, &mut Vec::new()), Err("native_operation_failed"));
+        assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+    }
+
+    #[test]
+    fn mma_probe_file_is_fresh_private_and_contains_only_aggregate_scalars() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::atomic::{AtomicU64, Ordering},
+        };
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "stark-score-mma-probe-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let mut probe = MmaScoreProbe::open(&path).unwrap();
+        probe
+            .record(MmaScoreProbeRow {
+                success: true,
+                encoded_dispatch_calls: 2,
+                encoded_weight_bytes: 4096,
+            })
+            .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        let before = std::fs::read(&path).unwrap();
+        assert!(MmaScoreProbe::open(&path).is_err(), "probe replaced existing evidence");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let row: Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(row, json!({"success":true,"encoded_dispatch_calls":2,"encoded_weight_bytes":4096}));
+        drop(probe);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mma_probe_write_and_flush_failures_remain_sticky() {
+        for fail_flush in [false, true] {
+            let mut probe = MmaScoreProbe {
+                output: FailingWriter {
+                    fail_flush,
+                },
+                failed: false,
+                previous_profile: None,
+            };
+            let row = || MmaScoreProbeRow {
+                success: true,
+                encoded_dispatch_calls: 2,
+                encoded_weight_bytes: 4096,
+            };
+            assert_eq!(probe.record(row()), Err("mma_score_probe_failed"));
+            assert!(probe.failed);
+            assert_eq!(probe.begin(), Err("mma_score_probe_failed"));
+            assert_eq!(probe.record(row()), Err("mma_score_probe_failed"));
+        }
+    }
+
+    #[test]
+    fn mma_probe_counters_reset_per_uncached_request_and_filter_other_categories() {
+        use stark_engine::engine::hybrid::profile;
+        let previous = profile::enabled();
+        let mut probe = MmaScoreProbe {
+            output: Vec::new(),
+            failed: false,
+            previous_profile: None,
+        };
+        probe.begin().unwrap();
+        profile::record("native.glm.prefill.q6_mma", 123.0, 4096);
+        profile::record("synthetic.unrelated", 321.0, 999);
+        probe.complete(true).unwrap();
+        assert_eq!(profile::enabled(), previous);
+        probe.begin().unwrap();
+        probe.complete(false).unwrap();
+        assert_eq!(profile::enabled(), previous);
+        let rows = std::str::from_utf8(&probe.output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            vec![
+                json!({"success":true,"encoded_dispatch_calls":1,"encoded_weight_bytes":4096}),
+                json!({"success":false,"encoded_dispatch_calls":0,"encoded_weight_bytes":0})
+            ]
+        );
     }
 
     struct FailingWriter {
