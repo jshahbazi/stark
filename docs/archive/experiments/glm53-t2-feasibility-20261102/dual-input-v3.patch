@@ -1,0 +1,1988 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/decode_graph.rs b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+index 3cd0dd07..12d2352a 100644
+--- a/crates/stark-engine/src/engine/hybrid/decode_graph.rs
++++ b/crates/stark-engine/src/engine/hybrid/decode_graph.rs
+@@ -12,6 +12,10 @@ use metal::MTLHeap;
+ #[path = "decode_graph_batch.rs"]
+ mod batch;
+ 
++#[cfg(test)]
++#[path = "decode_graph_dual_input.rs"]
++pub(crate) mod dual_input;
++
+ /// Persistent backing for automatic, non-aliasable Shared scratch buffers.
+ /// Apple documents that each subresource strongly retains its heap until the
+ /// resource is destroyed. No buffer here is ever made aliasable or placed.
+diff --git a/crates/stark-engine/src/engine/hybrid/decode_graph_batch.rs b/crates/stark-engine/src/engine/hybrid/decode_graph_batch.rs
+index fd59dcb1..94656ef4 100644
+--- a/crates/stark-engine/src/engine/hybrid/decode_graph_batch.rs
++++ b/crates/stark-engine/src/engine/hybrid/decode_graph_batch.rs
+@@ -3,6 +3,7 @@
+ //! MMA scheduling derives from MIT llama.cpp dde879bc4f954b809892fd0d660515f42536394a;
+ //! see packed_kquant_mma_matvec.metal and LICENSE.ggml-hybrid. F32 activations,
+ //! fragments and accumulation are retained; the reduction association changes.
++//! The cfg(test) dual-input route is separately gated and keeps legacy order.
+ 
+ use super::*;
+ 
+@@ -100,6 +101,13 @@ impl DecodeGraph {
+         }
+         let parameters = operation.parameters_for_input(operation.columns)?;
+         let output = self.scratch(operation.rows * tokens)?;
++        #[cfg(test)]
++        if !use_mma
++            && super::dual_input::enabled()
++            && self.mapped_exact_dual_input(operation, input, &output, tokens)?
++        {
++            return Ok(output);
++        }
+         if !use_mma || !admitted(operation, tokens)? {
+             for token in 0..tokens {
+                 self.mapped_into(
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs b/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
+index 371fd8fc..d75401c0 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
+@@ -340,3 +340,7 @@ fn encode_kda_batch(
+ #[cfg(test)]
+ #[path = "glm_prefill_batch_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path = "glm_t2_probe.rs"]
++mod t2_probe;
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+index bfa83131..2ede9466 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -714,6 +714,8 @@ fn executor() -> Result<&'static Executor> {
+             source.push_str(include_str!("packed_q6_coalesced_factored_matvec.metal"));
+             source.push_str(include_str!("packed_q6_grouped16_matvec.metal"));
+             source.push_str(include_str!("packed_q5_grouped32_matvec.metal"));
++            #[cfg(test)]
++            source.push_str(include_str!("packed_q5q6_dual_input_matvec.metal"));
+             source.push_str(include_str!("packed_kquant_mma_matvec.metal"));
+             #[cfg(test)]
+             source.push_str(include_str!("packed_q5_multirow_matvec.metal"));
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_mma_tests.rs b/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_mma_tests.rs
+index 13e6cd44..979dd182 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_mma_tests.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_mma_tests.rs
+@@ -620,6 +620,9 @@ fn kquant_mma_preserves_f32_activation_detail_and_extreme_fallback() {
+ #[path = "weight_metal_kquant_mma_components.rs"]
+ mod components;
+ 
++#[path = "weight_metal_kquant_dual_input_tests.rs"]
++mod exact_dual_input;
++
+ #[stark_test]
+ fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
+     for (kind, tokens) in [(14, 4), (13, 8), (14, 8)] {
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+index 73217deb..046591c2 100644
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -45,6 +45,10 @@ const MAX_SELECTED_BYTES: usize = 256 * 1024 * 1024;
+ const MAX_BATCH_WEIGHT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+ #[cfg(feature = "metal")]
+ const MAX_STATIC_VIEW_BYTES: usize = 8 * 1024 * 1024 * 1024;
++
++#[cfg(all(test, feature = "metal"))]
++#[path = "weights_t2_probe.rs"]
++mod t2_probe;
+ #[cfg(feature = "metal")]
+ fn require_wide_encoder_flags(
+     encoder: bool,
+diff --git a/crates/stark-engine/src/engine/hybrid/decode_graph_dual_input.rs b/crates/stark-engine/src/engine/hybrid/decode_graph_dual_input.rs
+new file mode 100644
+index 00000000..af0e7f86
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/decode_graph_dual_input.rs
+@@ -0,0 +1,143 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Test-only exact-order two-input Q5/Q6 row dispatch. No production selector.
++
++use super::*;
++
++type DualCache = Mutex<HashMap<u32, PipelineState>>;
++static DUAL_PIPELINES: OnceLock<DualCache> = OnceLock::new();
++static ENABLED: OnceLock<bool> = OnceLock::new();
++
++pub(super) fn enabled() -> bool {
++    *ENABLED.get_or_init(|| std::env::var_os("STARK_GLM53_T2_DUAL_INPUT").is_some_and(|v| v == "1"))
++}
++
++pub(crate) fn pipeline(kind: u32) -> Result<PipelineState> {
++    if !matches!(kind, 13 | 14) {
++        return Err(Error::Invalid("exact dual input packed kind"));
++    }
++    let mut cache = DUAL_PIPELINES
++        .get_or_init(|| Mutex::new(HashMap::new()))
++        .lock()
++        .map_err(|_| Error::Invalid("exact dual input pipeline cache"))?;
++    if let Some(pipeline) = cache.get(&kind) {
++        return Ok(pipeline.clone());
++    }
++    let executor = executor()?;
++    let constants = MTLFunctionConstantValues::new();
++    for (index, value) in [(0, kind), (4, 256), (5, weights::block_layout(kind)?.1 as u32)] {
++        constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
++    }
++    let name = if kind == 13 {
++        "hybrid_q5_grouped32_dual_input"
++    } else {
++        "hybrid_q6_grouped16_dual_input"
++    };
++    // Always the Safe library, including if another packed path opts into Fast.
++    let function = executor
++        .library
++        .new_function_with_name_constant_values(name, &constants)
++        .map_err(|_| Error::Unsupported("exact dual input function"))?;
++    let result = executor
++        .device
++        .new_compute_pipeline_state_with_function(&function)
++        .map_err(|_| Error::Unsupported("exact dual input pipeline"))?;
++    if result.thread_execution_width() != 32
++        || result.max_total_threads_per_threadgroup() < 64
++        || result.static_threadgroup_memory_length() > executor.device.max_threadgroup_memory_length()
++    {
++        return Err(Error::Unsupported("exact dual input pipeline geometry"));
++    }
++    cache.insert(kind, result.clone());
++    Ok(result)
++}
++
++impl DecodeGraph {
++    pub(crate) fn mapped_exact_dual_input(
++        &mut self,
++        operation: &MappedOperation<'_>,
++        input: &DeviceVector,
++        output: &DeviceVector,
++        tokens: usize,
++    ) -> Result<bool> {
++        let source_admitted = match operation.format {
++            MatrixFormat::Packed(13) => q5_grouped32_shape(operation.format, operation.columns),
++            MatrixFormat::Packed(14) => q6_grouped16_shape(operation.format, operation.columns),
++            _ => false,
++        };
++        if tokens != 2
++            || !source_admitted
++            || operation.matrices.len() != 1
++            || operation.rows_per_batch != 0
++            || !matches!((operation.rows, operation.columns), (8192, 4096) | (4096, 8192))
++            || executor()?.device.name() != "Apple M5 Max"
++        {
++            return Ok(false);
++        }
++        input.validate()?;
++        output.validate()?;
++        if operation.columns.checked_mul(2) != Some(input.len)
++            || operation.rows.checked_mul(2) != Some(output.len)
++            || self.projection_level
++            || self.encoding_dispatch != MTLDispatchType::SERIAL
++        {
++            return Err(Error::Invalid("exact dual input row or encoder shape"));
++        }
++        let MatrixFormat::Packed(kind) = operation.format else {
++            unreachable!()
++        };
++        let matrix = &operation.matrices[0];
++        let block_bytes = weights::block_layout(kind)?.1;
++        let bytes = operation
++            .rows
++            .checked_mul(operation.columns / 256)
++            .and_then(|n| n.checked_mul(block_bytes))
++            .ok_or(Error::Invalid("exact dual input weight size"))?;
++        if matrix.planes.is_some()
++            || matrix.codes.length < bytes
++            || matrix.codes.offset.checked_add(bytes).is_none_or(|end| end > matrix.codes.buffer.length())
++            || matrix.codes.offset > u32::MAX as usize
++        {
++            return Err(Error::Invalid("exact dual input checked weight span"));
++        }
++        let parameters = operation.parameters_for_input(operation.columns)?;
++        let pipeline = pipeline(kind)?;
++        self.check_finite(input)?;
++        self.prepare_external_write(output)?;
++        self.order_dispatch();
++        self.encoding.set_compute_pipeline_state(&pipeline);
++        self.encoding.set_buffer(Some(&matrix.codes.buffer), 0, 0);
++        self.encoding.set_buffer(Some(&input.buffer), input.offset, 1);
++        self.encoding.set_buffer(Some(&output.buffer), output.offset, 2);
++        self.encoding.set_bytes(NonNull::from(&parameters).cast(), std::mem::size_of_val(&parameters), 3);
++        let offsets = [matrix.codes.offset as u32, 0, 0, 0];
++        self.encoding.set_bytes(NonNull::from(&offsets).cast(), std::mem::size_of_val(&offsets), 6);
++        self.encoding.dispatch_threadgroups(
++            MTLSize {
++                width: operation.rows.div_ceil(if kind == 13 {
++                    2
++                } else {
++                    4
++                }),
++                height: 1,
++                depth: 1,
++            },
++            MTLSize {
++                width: 64,
++                height: 1,
++                depth: 1,
++            },
++        );
++        self.resources.extend([matrix.codes.buffer.clone(), input.buffer.clone(), output.buffer.clone()]);
++        self.check_finite(output)?;
++        profile::record(
++            if kind == 13 {
++                "native.glm.t2.dual_input.q5"
++            } else {
++                "native.glm.t2.dual_input.q6"
++            },
++            0.0,
++            bytes,
++        );
++        Ok(true)
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+new file mode 100644
+index 00000000..1cf15d3e
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+@@ -0,0 +1,728 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Ignored target-pair parity/cost probe. No speculative runtime or rollback.
++//!
++//! The pair reuses the production layer-major encoder with MMA disabled. The
++//! serial tap uses the same existing GLM Metal layer and final readout math;
++//! eight full logit rows first gate that tap against the ordinary serial API.
++//! V2 keeps all full-row gates outside compact greedy+hidden timing intervals.
++//! V3 optionally shares Q5/Q6 decoding with exact-order, counter-proven kernels.
++
++use std::{io::Read, path::PathBuf, time::Instant};
++
++use serde::Deserialize;
++use sha2::{Digest, Sha256};
++use stark_engine_macros::stark_test;
++
++use super::*;
++use crate::engine::hybrid::{glm_metal, profile, weight_metal::allocated_bytes};
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Case {
++    input_token_ids: Vec<u32>,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Request {
++    schema_version: usize,
++    cases: Vec<Case>,
++    continuation_tokens: usize,
++    rounds: usize,
++    context_tokens: usize,
++    corpus_sha256: String,
++    dual_input: bool,
++}
++
++struct Row {
++    hidden: Vec<f32>,
++    logits: Vec<f32>,
++    choice: u32,
++}
++
++struct Reference {
++    inputs: Vec<u32>,
++    rows: Vec<Row>,
++}
++
++#[derive(Default, serde::Serialize)]
++struct Memory {
++    cap_bytes: usize,
++    observed_required_peak_bytes: usize,
++    residency_allocated_peak_bytes: usize,
++    static_registered_peak_bytes: usize,
++    static_entries_peak: usize,
++    dynamic_allowance_bytes: usize,
++    sampled_metal_peak_bytes: usize,
++    graph_scratch_high_water_bytes: usize,
++}
++
++impl Memory {
++    fn observe(
++        &mut self,
++        model: &GlmModel,
++    ) -> Result<()> {
++        let [cap, required, actual, statics, entries, dynamic] = model.weights.t2_probe_accounting()?;
++        self.cap_bytes = cap;
++        self.observed_required_peak_bytes = self.observed_required_peak_bytes.max(required);
++        self.residency_allocated_peak_bytes = self.residency_allocated_peak_bytes.max(actual);
++        self.static_registered_peak_bytes = self.static_registered_peak_bytes.max(statics);
++        self.static_entries_peak = self.static_entries_peak.max(entries);
++        self.dynamic_allowance_bytes = dynamic;
++        self.sampled_metal_peak_bytes = self.sampled_metal_peak_bytes.max(allocated_bytes()?);
++        let counters = profile::snapshot();
++        if let Some(counter) = counters.get("native.metal.allocated_bytes") {
++            self.sampled_metal_peak_bytes = self.sampled_metal_peak_bytes.max(counter.max_bytes as usize);
++        }
++        if let Some(counter) = counters.get("native.metal.graph.scratch_high_water") {
++            self.graph_scratch_high_water_bytes = self.graph_scratch_high_water_bytes.max(counter.max_bytes as usize);
++        }
++        if self.sampled_metal_peak_bytes > cap || self.graph_scratch_high_water_bytes > 512 * 1024 * 1024 {
++            return Err(Error::Invalid("T2 memory cap"));
++        }
++        Ok(())
++    }
++}
++
++fn same(
++    a: &[f32],
++    b: &[f32],
++) -> bool {
++    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
++}
++
++fn choice(values: &[f32]) -> Result<u32> {
++    if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
++        return Err(Error::Invalid("T2 greedy values"));
++    }
++    let mut best = 0;
++    for i in 1..values.len() {
++        if values[i] > values[best] {
++            best = i;
++        }
++    }
++    Ok(best as u32)
++}
++
++fn take_row(
++    rows: &mut impl Iterator<Item = Vec<f32>>,
++    c: &Config,
++    full: bool,
++) -> Result<Row> {
++    let hidden = rows.next().ok_or(Error::Invalid("T2 hidden row"))?;
++    let index = rows.next().ok_or(Error::Invalid("T2 greedy row"))?;
++    let logits = if full {
++        rows.next().ok_or(Error::Invalid("T2 logit row"))?
++    } else {
++        Vec::new()
++    };
++    if hidden.len() != c.hidden
++        || hidden.iter().any(|v| !v.is_finite())
++        || index.len() != 1
++        || !index[0].is_finite()
++        || index[0] < 0.0
++        || index[0].fract() != 0.0
++        || index[0] as f64 >= c.vocab as f64
++        || (full && logits.len() != c.vocab)
++    {
++        return Err(Error::Invalid("T2 readout values"));
++    }
++    let selected = index[0] as u32;
++    if full && choice(&logits)? != selected {
++        return Err(Error::Invalid("T2 greedy parity"));
++    }
++    Ok(Row {
++        hidden,
++        logits,
++        choice: selected,
++    })
++}
++
++/// Serial source-equivalent target with full readout and a post-output-norm tap.
++/// No test layer-trace readbacks are inserted into this timing path.
++fn serial_row(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++) -> Result<Option<Row>> {
++    serial_row_mode(model, token, readout, true)
++}
++
++fn serial_row_mode(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++    full: bool,
++) -> Result<Option<Row>> {
++    objc2::rc::autoreleasepool(|_| {
++        let c = &model.config;
++        if model.cleanup_failed || token as usize >= c.vocab || model.position >= c.max_context {
++            return Err(Error::Invalid("T2 serial bounds"));
++        }
++        let decode = model.decode.as_mut().ok_or(Error::Invalid("T2 serial decode"))?;
++        let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("T2 bounded plan"))?;
++        if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
++            return Err(Error::Invalid("T2 serial policy"));
++        }
++        let embedding = model.weights.row("token_embd.weight", token as usize)?;
++        let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
++        let mut graph = new_encoder_graph(decode)?;
++        let group = &plan.groups[0];
++        let banks = model.weights.encoder_indexed_group(&group.names, plan.budget)?;
++        if banks.registered_bytes() > group.bytes {
++            return Err(Error::Invalid("T2 serial inventory changed"));
++        }
++        for layer in group.start..group.end {
++            (graph, streams) = encode_metal_layer(
++                &model.weights,
++                c,
++                decode,
++                layer,
++                &mut model.states[layer],
++                graph,
++                streams,
++                Some(&banks),
++            )?;
++        }
++        let mut outputs = Vec::new();
++        if readout {
++            let mean = glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
++            let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
++            let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
++            let greedy = graph.greedy_argmax(&logits)?;
++            outputs.extend([hidden, greedy]);
++            if full {
++                outputs.push(logits);
++            }
++        } else {
++            graph.check_finite(&streams)?;
++        }
++        drop(banks);
++        let mut rows = graph.finish(&outputs)?.into_iter();
++        for state in &model.states {
++            if let LayerState::Kda(state) = state
++                && let Some(metal) = &state.metal
++            {
++                metal.check_completed()?;
++            }
++        }
++        model.position += 1;
++        model.last_greedy = None;
++        if readout {
++            take_row(&mut rows, c, full).map(Some)
++        } else {
++            Ok(None)
++        }
++    })
++}
++
++fn pair_rows(
++    model: &mut GlmModel,
++    tokens: &[u32],
++) -> Result<Vec<Row>> {
++    pair_rows_mode(model, tokens, true)
++}
++
++fn pair_rows_mode(
++    model: &mut GlmModel,
++    tokens: &[u32],
++    full: bool,
++) -> Result<Vec<Row>> {
++    objc2::rc::autoreleasepool(|_| {
++        let c = &model.config;
++        if model.cleanup_failed
++            || tokens.len() != 2
++            || tokens.iter().any(|&t| t as usize >= c.vocab)
++            || model.position.checked_add(2).is_none_or(|end| end > c.max_context)
++        {
++            return Err(Error::Invalid("T2 pair bounds"));
++        }
++        let decode = model.decode.as_mut().ok_or(Error::Invalid("T2 pair decode"))?;
++        let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("T2 bounded plan"))?;
++        if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
++            return Err(Error::Invalid("T2 pair policy"));
++        }
++        let mut values = Vec::with_capacity(2 * c.hidden * c.hc);
++        for &token in tokens {
++            let embedding = model.weights.row("token_embd.weight", token as usize)?;
++            if embedding.len() != c.hidden || embedding.iter().any(|v| !v.is_finite()) {
++                return Err(Error::Invalid("T2 pair embedding"));
++            }
++            for _ in 0..c.hc {
++                values.extend_from_slice(&embedding);
++            }
++        }
++        let mut graph = new_encoder_graph(decode)?;
++        let mut streams = graph.upload_into(&values)?;
++        let group = &plan.groups[0];
++        let banks = model.weights.encoder_indexed_group(&group.names, plan.budget)?;
++        if banks.registered_bytes() > group.bytes {
++            return Err(Error::Invalid("T2 pair inventory changed"));
++        }
++        for layer in group.start..group.end {
++            // Two legacy row projections; no MMA or dot reassociation.
++            streams = encode_layer(
++                &model.weights,
++                c,
++                decode,
++                layer,
++                &mut model.states[layer],
++                &mut graph,
++                &streams,
++                &banks,
++                2,
++                false,
++            )?;
++        }
++        let mut outputs = Vec::with_capacity(6);
++        for token in 0..2 {
++            let row = streams.slice(token * c.hidden * c.hc, c.hidden * c.hc)?;
++            let mean = glm_metal::stream_mean(&mut graph, &row, c.hidden, c.hc)?;
++            let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
++            let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
++            let greedy = graph.greedy_argmax(&logits)?;
++            outputs.extend([hidden, greedy]);
++            if full {
++                outputs.push(logits);
++            }
++        }
++        drop(banks);
++        let mut values = graph.finish(&outputs)?.into_iter();
++        let rows = vec![take_row(&mut values, c, full)?, take_row(&mut values, c, full)?];
++        for state in &model.states {
++            if let LayerState::Kda(state) = state
++                && let Some(metal) = &state.metal
++            {
++                metal.check_completed()?;
++            }
++        }
++        model.position += 2;
++        model.last_greedy = None;
++        Ok(rows)
++    })
++}
++
++fn compare_rows(
++    actual: &Row,
++    expected: &Row,
++) -> Result<()> {
++    if actual.choice != expected.choice
++        || !same(&actual.hidden, &expected.hidden)
++        || !same(&actual.logits, &expected.logits)
++    {
++        return Err(Error::Invalid("T2 complete row parity"));
++    }
++    Ok(())
++}
++
++fn compare_compact_rows(
++    actual: &Row,
++    expected: &Row,
++) -> Result<()> {
++    if actual.choice != expected.choice || !same(&actual.hidden, &expected.hidden) || !actual.logits.is_empty() {
++        return Err(Error::Invalid("T2 compact row parity"));
++    }
++    Ok(())
++}
++
++fn prefill(
++    model: &mut GlmModel,
++    tokens: &[u32],
++) -> Result<Row> {
++    model.reset();
++    let mut last = None;
++    for (i, &token) in tokens.iter().enumerate() {
++        last = serial_row(model, token, i + 1 == tokens.len())?;
++    }
++    last.ok_or(Error::Invalid("T2 empty prompt"))
++}
++
++fn gpu_seconds() -> f64 {
++    profile::snapshot().get("native.metal.gpu").map_or(0.0, |c| c.seconds)
++}
++
++fn median(values: &[f64]) -> Result<f64> {
++    if values.is_empty() || values.iter().any(|v| !v.is_finite() || *v < 0.0) {
++        return Err(Error::Invalid("T2 missing timings"));
++    }
++    let mut sorted = values.to_vec();
++    sorted.sort_by(f64::total_cmp);
++    let mid = sorted.len() / 2;
++    Ok(if sorted.len().is_multiple_of(2) {
++        (sorted[mid - 1] + sorted[mid]) * 0.5
++    } else {
++        sorted[mid]
++    })
++}
++
++fn probe() -> Result<Value> {
++    let mut bytes = Vec::new();
++    std::io::stdin().take(128 * 1024 + 1).read_to_end(&mut bytes)?;
++    if bytes.len() > 128 * 1024 {
++        return Err(Error::Invalid("T2 stdin bound"));
++    }
++    let request: Request = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("T2 stdin schema"))?;
++    if request.schema_version != 3
++        || request.cases.len() != 3
++        || request.continuation_tokens != 8
++        || request.rounds != 4
++        || request.context_tokens != 256
++        || request.corpus_sha256.len() != 64
++        || !request.corpus_sha256.bytes().all(|b| b.is_ascii_hexdigit())
++        || request.cases.iter().any(|c| !(12..=128).contains(&c.input_token_ids.len()))
++    {
++        return Err(Error::Invalid("T2 stdin admission"));
++    }
++    let dual_enabled = std::env::var_os("STARK_GLM53_T2_DUAL_INPUT").is_some_and(|v| v == "1");
++    if request.dual_input != dual_enabled {
++        return Err(Error::Invalid("T2 policy"));
++    }
++    let ids = request.cases.iter().map(|c| &c.input_token_ids).collect::<Vec<_>>();
++    if format!("{:x}", Sha256::digest(serde_json::to_vec(&ids).map_err(|_| Error::Invalid("T2 stdin schema"))?))
++        != request.corpus_sha256
++    {
++        return Err(Error::Invalid("T2 stdin admission"));
++    }
++    for name in [
++        "STARK_GLM53_ENCODER_BANKS",
++        "STARK_GLM53_RESIDENT_BANKS",
++        "STARK_GLM53_WIDE_ENCODER",
++        "STARK_GLM53_GPU_GREEDY",
++        "STARK_GLM53_DECODE_GRAPH",
++    ] {
++        if std::env::var_os(name).is_none_or(|v| v != "1") {
++            return Err(Error::Invalid("T2 policy"));
++        }
++    }
++    for name in [
++        "STARK_GLM53_GREEDY_OVERLAP",
++        "STARK_GLM53_PREFILL_MMA",
++        "STARK_GLM53_SCRATCH_HEAP",
++        "STARK_GLM53_PARALLEL_PROJECTIONS",
++        "STARK_GLM53_CONCURRENT_ENCODER",
++        "STARK_GLM53_PACKED_FAST_MATH",
++    ] {
++        if std::env::var_os(name).is_some_and(|v| v == "1") {
++            return Err(Error::Invalid("T2 policy"));
++        }
++    }
++    let path =
++        PathBuf::from(std::env::var_os("STARK_GLM53_T2_PROBE_MODEL_PATH").ok_or(Error::Invalid("T2 model path"))?);
++    let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json"))?)
++        .map_err(|_| Error::Invalid("T2 model config"))?;
++    let source: Value = serde_json::from_slice(&std::fs::read(path.join("native-source.json"))?)
++        .map_err(|_| Error::Invalid("T2 model provenance"))?;
++    if source["architecture"].as_str() != Some("glm5_next")
++        || source["weights_source"]["revision"].as_str() != Some("a38483c8cd5df544f53d70fb281afe97369d5ab6")
++        || source["metadata_source"]["revision"].as_str() != Some("04c4e9e95c5da8862dced7e5056455116f83a7e0")
++    {
++        return Err(Error::Invalid("T2 model provenance"));
++    }
++    let mut model = GlmModel::new(Weights::open(&path)?, &config)?;
++    if model.config.hidden != 4096
++        || model.config.hc != 4
++        || model.config.layer_types.len() != 45
++        || model.config.index_pool != 4
++        || !model.decode_graph_enabled
++        || request.cases.iter().any(|c| {
++            c.input_token_ids.iter().any(|&t| t as usize >= model.config.vocab)
++                || c.input_token_ids.len() + request.continuation_tokens + 1 > request.context_tokens
++        })
++    {
++        return Err(Error::Invalid("T2 model geometry"));
++    }
++    model.decode = Some(MetalDecode::new(&model.weights, &model.config, model.hyper_connections.as_deref())?);
++    // Match production ownership; no duplicate CPU mHC weight retention.
++    model.hyper_connections = None;
++    // Inventory only the rank-two projections actually routed through project()
++    // in the layer-major encoder. MLA projections remain serial and must not
++    // inflate the expected candidate count, even if a stored shape matches.
++    let mut projected_names = Vec::new();
++    for (layer, state) in model.states.iter().enumerate() {
++        let p = format!("blk.{layer}");
++        if matches!(state, LayerState::Kda(_)) {
++            for suffix in [
++                "attn_q.weight",
++                "attn_k.weight",
++                "attn_v.weight",
++                "ssm_beta.weight",
++                "ssm_f_a.weight",
++                "ssm_g_a.weight",
++                "ssm_f_b.weight",
++                "ssm_g_b.weight",
++                "attn_output.weight",
++            ] {
++                projected_names.push(format!("{p}.{suffix}"));
++            }
++        }
++        for suffix in if layer < model.config.dense_layers {
++            ["ffn_gate.weight", "ffn_up.weight", "ffn_down.weight", ""]
++        } else {
++            ["ffn_gate_inp.weight", "ffn_gate_shexp.weight", "ffn_up_shexp.weight", "ffn_down_shexp.weight"]
++        } {
++            if !suffix.is_empty() {
++                projected_names.push(format!("{p}.{suffix}"));
++            }
++        }
++    }
++    let dual_inventory = model.weights.t2_probe_dual_inventory(&projected_names)?;
++    let generation: Value = serde_json::from_slice(&std::fs::read(path.join("generation_config.json"))?)
++        .map_err(|_| Error::Invalid("T2 generation config"))?;
++    let eos = match &generation["eos_token_id"] {
++        Value::Number(n) => {
++            vec![n.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("T2 EOS config"))?]
++        },
++        Value::Array(values) => values
++            .iter()
++            .map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("T2 EOS config")))
++            .collect::<Result<Vec<_>>>()?,
++        _ => return Err(Error::Invalid("T2 EOS config")),
++    };
++    if eos.is_empty() || eos.iter().any(|&n| n as usize >= model.config.vocab) {
++        return Err(Error::Invalid("T2 EOS config"));
++    }
++    profile::enable(true);
++    profile::reset();
++    let mut memory = Memory::default();
++    memory.observe(&model)?;
++
++    // Gate the serial tap against the ordinary API before using it as a hidden
++    // reference. The ordinary API alone has no hidden-row return contract.
++    let initial = &request.cases[0].input_token_ids;
++    let mut tap_rows = Vec::with_capacity(8);
++    for &token in &initial[..8] {
++        tap_rows.push(serial_row(&mut model, token, true)?.ok_or(Error::Invalid("T2 tap"))?);
++    }
++    model.reset();
++    for (&token, expected) in initial[..8].iter().zip(&tap_rows) {
++        let actual = model.step(token)?;
++        if !same(&actual, &expected.logits) || choice(&actual)? != expected.choice {
++            return Err(Error::Invalid("T2 ordinary serial tap parity"));
++        }
++    }
++    drop(tap_rows);
++
++    // Every residue modulo the four-row MLA pool is tested explicitly. This
++    // catches pairs crossing compression boundaries after either row.
++    let mut pooled_pairs = 0usize;
++    for length in 8..12 {
++        let first = prefill(&mut model, &initial[..length])?.choice;
++        let first_ref = serial_row(&mut model, first, true)?.ok_or(Error::Invalid("T2 tap"))?;
++        let second = first_ref.choice;
++        let second_ref = serial_row(&mut model, second, true)?.ok_or(Error::Invalid("T2 tap"))?;
++        prefill(&mut model, &initial[..length])?;
++        let actual = pair_rows(&mut model, &[first, second])?;
++        compare_rows(&actual[0], &first_ref)?;
++        compare_rows(&actual[1], &second_ref)?;
++        pooled_pairs += 1;
++        memory.observe(&model)?;
++    }
++
++    let mut references = Vec::with_capacity(request.cases.len());
++    let mut continuation_hash = Sha256::new();
++    for case in &request.cases {
++        let mut pending = prefill(&mut model, &case.input_token_ids)?.choice;
++        let mut reference = Reference {
++            inputs: Vec::new(),
++            rows: Vec::new(),
++        };
++        for _ in 0..request.continuation_tokens {
++            // This fixed-length component protocol is qualified only when all
++            // eight authoritative rows precede EOS; never force generation
++            // past an ordinary stopping point to fill a favorable cost sample.
++            if eos.contains(&pending) {
++                return Err(Error::Invalid("T2 early EOS"));
++            }
++            reference.inputs.push(pending);
++            continuation_hash.update(pending.to_le_bytes());
++            let row = serial_row(&mut model, pending, true)?.ok_or(Error::Invalid("T2 tap"))?;
++            pending = row.choice;
++            reference.rows.push(row);
++        }
++        references.push(reference);
++    }
++
++    let mut compared_rows = 0usize;
++    let mut warm_static_state = None;
++    // Preserve every V1 complete-hidden/full-logit comparison before compact
++    // timing starts. Full parity remains a gate, never a sampled shortcut.
++    for round in 0..request.rounds {
++        for (case, reference) in request.cases.iter().zip(&references) {
++            for paired in if round.is_multiple_of(2) {
++                [false, true]
++            } else {
++                [true, false]
++            } {
++                prefill(&mut model, &case.input_token_ids)?;
++                for (inputs, expected) in reference.inputs.chunks_exact(2).zip(reference.rows.chunks_exact(2)) {
++                    memory.observe(&model)?;
++                    let actual = if paired {
++                        pair_rows(&mut model, inputs)?
++                    } else {
++                        vec![
++                            serial_row(&mut model, inputs[0], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row(&mut model, inputs[1], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                        ]
++                    };
++                    for (actual, expected) in actual.iter().zip(expected) {
++                        compare_rows(actual, expected)?;
++                    }
++                    compared_rows += 2;
++                    memory.observe(&model)?;
++                }
++            }
++        }
++        let current = model.weights.t2_probe_accounting()?;
++        let static_state = (current[3], current[4]);
++        if round == 0 {
++            warm_static_state = Some(static_state);
++        } else if warm_static_state != Some(static_state) {
++            return Err(Error::Invalid("T2 static cache growth after warmup"));
++        }
++    }
++
++    let mut serial_wall = Vec::new();
++    let mut pair_wall = Vec::new();
++    let mut serial_gpu = Vec::new();
++    let mut pair_gpu = Vec::new();
++    let mut compact_compared_rows = 0usize;
++    // First compact round warms its readback schedule; subsequent rounds keep
++    // V1's alternating serial/pair order. GPU work, finite obligations, status
++    // completion and KDA checks are unchanged. Only full-vocabulary host copy
++    // and duplicate CPU argmax are omitted from the measured return contract.
++    for round in 0..request.rounds {
++        for (case, reference) in request.cases.iter().zip(&references) {
++            for paired in if round.is_multiple_of(2) {
++                [false, true]
++            } else {
++                [true, false]
++            } {
++                prefill(&mut model, &case.input_token_ids)?;
++                for (inputs, expected) in reference.inputs.chunks_exact(2).zip(reference.rows.chunks_exact(2)) {
++                    memory.observe(&model)?;
++                    // Counter snapshots and all reference comparisons remain
++                    // outside wall timing, exactly as in V1.
++                    let gpu_before = gpu_seconds();
++                    let started = Instant::now();
++                    let actual = if paired {
++                        pair_rows_mode(&mut model, inputs, false)?
++                    } else {
++                        vec![
++                            serial_row_mode(&mut model, inputs[0], true, false)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row_mode(&mut model, inputs[1], true, false)?.ok_or(Error::Invalid("T2 tap"))?,
++                        ]
++                    };
++                    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
++                    let gpu_ms = (gpu_seconds() - gpu_before) * 1000.0;
++                    for (actual, expected) in actual.iter().zip(expected) {
++                        compare_compact_rows(actual, expected)?;
++                    }
++                    compact_compared_rows += 2;
++                    memory.observe(&model)?;
++                    if round > 0 {
++                        if paired {
++                            pair_wall.push(wall_ms);
++                            pair_gpu.push(gpu_ms);
++                        } else {
++                            serial_wall.push(wall_ms);
++                            serial_gpu.push(gpu_ms);
++                        }
++                    }
++                }
++            }
++        }
++        let current = model.weights.t2_probe_accounting()?;
++        if warm_static_state != Some((current[3], current[4])) {
++            return Err(Error::Invalid("T2 static cache growth after warmup"));
++        }
++    }
++    memory.observe(&model)?;
++    let counters = profile::snapshot();
++    if counters.contains_key("native.glm.prefill.q5_mma") || counters.contains_key("native.glm.prefill.q6_mma") {
++        return Err(Error::Invalid("T2 unexpected MMA"));
++    }
++    let pair_graphs = pooled_pairs + compared_rows / 4 + compact_compared_rows / 4;
++    let dual_counter = |name: &str| counters.get(name).map_or((0u64, 0u64), |counter| (counter.calls, counter.bytes));
++    let (q5_calls, q5_bytes) = dual_counter("native.glm.t2.dual_input.q5");
++    let (q6_calls, q6_bytes) = dual_counter("native.glm.t2.dual_input.q6");
++    for (actual, expected_per_pair) in [
++        (q5_calls, dual_inventory[0]),
++        (q5_bytes, dual_inventory[1]),
++        (q6_calls, dual_inventory[2]),
++        (q6_bytes, dual_inventory[3]),
++    ] {
++        let expected = if dual_enabled {
++            u64::try_from(expected_per_pair)
++                .ok()
++                .and_then(|n| n.checked_mul(pair_graphs as u64))
++                .ok_or(Error::Invalid("T2 dual coverage overflow"))?
++        } else {
++            0
++        };
++        if actual != expected {
++            return Err(Error::Invalid("T2 dual dispatch coverage"));
++        }
++    }
++    model.reset();
++    profile::enable(false);
++    Ok(serde_json::json!({"glm_t2_probe_result":true,"aggregate":{
++        "status":"target_pair_exact_dual_component_complete_no_rollback", "precision":"existing_safe_f32_legacy_projections",
++        "measurement_scope":"gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v3",
++        "dual_input":{"enabled":dual_enabled,"pair_graphs":pair_graphs,
++            "q5_dispatch_calls":q5_calls,"q5_encoded_weight_bytes":q5_bytes,
++            "q6_dispatch_calls":q6_calls,"q6_encoded_weight_bytes":q6_bytes,
++            "q5_calls_per_pair":dual_inventory[0],"q5_weight_bytes_per_pair":dual_inventory[1],
++            "q6_calls_per_pair":dual_inventory[2],"q6_weight_bytes_per_pair":dual_inventory[3]},
++        "counts":{"cases":request.cases.len(),"continuation_rows_per_case":request.continuation_tokens,
++            "rounds":request.rounds,"warmup_rounds":1,"ordinary_serial_alignment_rows":8,
++            "pooled_alignment_pairs":pooled_pairs,"pool_residues_tested":4,"complete_rows_compared":compared_rows,
++            "compact_rows_compared":compact_compared_rows,"timed_full_logit_readback_rows":0,
++            "measured_compact_serial_pairs":serial_wall.len(),"measured_compact_layer_major_pairs":pair_wall.len(),"rollback_calls":0},
++        "timing_ms":{"compact_serial_two_wall_total":serial_wall.iter().sum::<f64>(),"compact_layer_major_two_wall_total":pair_wall.iter().sum::<f64>(),
++            "compact_serial_two_gpu_total":serial_gpu.iter().sum::<f64>(),"compact_layer_major_two_gpu_total":pair_gpu.iter().sum::<f64>(),
++            "compact_serial_two_wall_median":median(&serial_wall)?,"compact_layer_major_two_wall_median":median(&pair_wall)?,
++            "compact_serial_two_gpu_median":median(&serial_gpu)?,"compact_layer_major_two_gpu_median":median(&pair_gpu)?},
++        "memory_gauges":memory, "hashes":{"corpus_sha256":request.corpus_sha256,
++            "authoritative_continuation_sha256":format!("{:x}",continuation_hash.finalize())},
++        "target_reserved_context_tokens":model.config.max_context
++    }}))
++}
++
++#[stark_test]
++#[ignore]
++fn glm_t2_verification_probe() {
++    match objc2::rc::autoreleasepool(|_| probe()) {
++        Ok(aggregate) => println!("{aggregate}"),
++        Err(error) => {
++            profile::enable(false);
++            let guard = match error {
++                Error::Invalid("T2 stdin bound") => "stdin_bound",
++                Error::Invalid("T2 stdin schema") => "stdin_schema",
++                Error::Invalid("T2 stdin admission") => "stdin_admission",
++                Error::Invalid("T2 policy" | "T2 serial policy" | "T2 pair policy" | "T2 unexpected MMA") => {
++                    "target_policy"
++                },
++                Error::Invalid(code) if code.contains("parity") || code.contains("tap") => "alignment_parity",
++                Error::Invalid(code) if code.contains("dual") => "dual_coverage",
++                Error::Invalid(code)
++                    if code.contains("cap")
++                        || code.contains("residency")
++                        || code.contains("memory")
++                        || code.contains("alloc")
++                        || code.contains("static cache") =>
++                {
++                    "memory_gate"
++                },
++                Error::Io(_) => "model_load",
++                _ => "probe_rejected",
++            };
++            println!(
++                "{}",
++                serde_json::json!({"glm_t2_probe_result":true,"aggregate":{
++                    "status":"rejected","rows":{"failure":{"guard":guard}}
++                }})
++            );
++            panic!("T2 aggregate probe failed; no private values are reported");
++        },
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_q5q6_dual_input_matvec.metal b/crates/stark-engine/src/engine/hybrid/packed_q5q6_dual_input_matvec.metal
+new file mode 100644
+index 00000000..8a57eab4
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/packed_q5q6_dual_input_matvec.metal
+@@ -0,0 +1,161 @@
++// SPDX-License-Identifier: MIT
++// Derived from Stark's Safe grouped Q5_K/Q6_K schedules, themselves adapted
++// from ggml-org/llama.cpp b11429, d81235049384534c167caea52b85a694f6103d14,
++// ggml/src/ggml-metal/kernels/mul_mv.metal (1622-1850).
++// Copyright (c) 2023-2026 The ggml authors. See LICENSE.ggml-hybrid.
++// Test-only: share encoded bytes/metadata between two input rows. Each row
++// retains the original F32 expressions, block/lane order and fallback choice.
++// Host admission requires ungrouped rank-two packed matrices and two inputs.
++
++kernel void hybrid_q5_grouped32_dual_input(
++    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
++    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint row = tile * 2 + simd_group;
++    if (row >= p.rows) return;
++    const ulong row_offset = ulong(row) * (p.columns >> 8) * hybrid_packed_block_bytes;
++    device const uchar *codes = codes_base + offsets.x;
++    const uint tid = lane >> 2;
++    const uint parity = lane & 3;
++    const uint quarter = tid >> 2;
++    const uint low_start = (tid & 3) * 8;
++    const uint low_offset = 48 + quarter * 32 + low_start;
++    const uint high_offset = 16 + low_start;
++    const uint input_start = quarter * 64 + low_start;
++    const uint g0 = quarter * 2;
++    float sums[2] = {0.0f, 0.0f};
++    bool reference_required[2] = {false, false};
++    for (uint block_index = parity; block_index < (p.columns >> 8); block_index += 4) {
++        device const uchar *block = codes + row_offset + ulong(block_index) * hybrid_packed_block_bytes;
++        float4 lower[2] = {float4(0.0f), float4(0.0f)};
++        float4 upper[2] = {float4(0.0f), float4(0.0f)};
++        float4 input_sum[2] = {float4(0.0f), float4(0.0f)};
++        #pragma clang loop unroll(full)
++        for (uint j = 0; j < 8; ++j) {
++            const uint low0 = block[low_offset + j];
++            const uint low1 = block[low_offset + j + 64];
++            const uint high = block[high_offset + j];
++            #pragma clang loop unroll(full)
++            for (uint token = 0; token < 2; ++token) {
++                device const float *x = input + ulong(token) * p.columns + block_index * 256 + input_start;
++                const float4 values = float4(x[j], x[j + 32], x[j + 128], x[j + 160]);
++                reference_required[token] = reference_required[token] || any(abs(values) > float4(1e20f));
++                input_sum[token] += values;
++                lower[token].x += values.x * float(low0 & 15);
++                lower[token].y += values.y * float(low0 >> 4);
++                lower[token].z += values.z * float(low1 & 15);
++                lower[token].w += values.w * float(low1 >> 4);
++                upper[token].x += high & (1u << g0) ? values.x : 0.0f;
++                upper[token].y += high & (1u << (g0 + 1)) ? values.y : 0.0f;
++                upper[token].z += high & (1u << (g0 + 4)) ? values.z : 0.0f;
++                upper[token].w += high & (1u << (g0 + 5)) ? values.w : 0.0f;
++            }
++        }
++        const uint2 sm0 = hybrid_scale_min(block + 4, g0);
++        const uint2 sm1 = hybrid_scale_min(block + 4, g0 + 1);
++        const uint2 sm2 = hybrid_scale_min(block + 4, g0 + 4);
++        const uint2 sm3 = hybrid_scale_min(block + 4, g0 + 5);
++        const float d = hybrid_grouped_half<false>(block);
++        const float dmin = hybrid_grouped_half<false>(block + 2);
++        #pragma clang loop unroll(full)
++        for (uint token = 0; token < 2; ++token) {
++            const float4 group_dot = lower[token] + 16.0f * upper[token];
++            sums[token] += d * (float(sm0.x) * group_dot.x + float(sm1.x) * group_dot.y
++                + float(sm2.x) * group_dot.z + float(sm3.x) * group_dot.w)
++                - dmin * (input_sum[token].x * float(sm0.y) + input_sum[token].y * float(sm1.y)
++                + input_sum[token].z * float(sm2.y) + input_sum[token].w * float(sm3.y));
++        }
++    }
++    #pragma clang loop unroll(full)
++    for (uint token = 0; token < 2; ++token) {
++        // Each token retains its own original guard. An extreme token must
++        // never force its bounded neighbor through another reduction path.
++        const bool fallback = simd_any(reference_required[token]);
++        const float total = fallback
++            ? hybrid_packed_block_dot(codes, input, row_offset, ulong(token) * p.columns, p.columns, lane)
++            : simd_sum(sums[token]);
++        if (lane == 0) output[ulong(token) * p.rows + row] = total;
++    }
++}
++
++kernel void hybrid_q6_grouped16_dual_input(
++    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
++    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
++    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
++    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
++    const uint first_row = tile * 4 + simd_group * 2;
++    if (first_row >= p.rows) return;
++    const ulong row_bytes = ulong(p.columns >> 8) * hybrid_packed_block_bytes;
++    const ulong first_offset = ulong(first_row) * row_bytes;
++    device const uchar *codes = codes_base + offsets.x;
++    const uint tid = lane >> 1;
++    const uint parity = lane & 1;
++    const uint half_block = tid >> 3;
++    const uint low_start = (tid & 7) * 4;
++    const uint scale_start = half_block * 8 + (low_start >> 4);
++    const uint input_start = half_block * 128 + low_start;
++    const uint low_offset = half_block * 64 + low_start;
++    const uint high_offset = 128 + half_block * 32 + low_start;
++    float sums[2][2] = {{0.0f, 0.0f}, {0.0f, 0.0f}};
++    bool reference_required[2] = {false, false};
++    for (uint block_index = parity; block_index < (p.columns >> 8); block_index += 2) {
++        float4 values[2][4];
++        #pragma clang loop unroll(full)
++        for (uint token = 0; token < 2; ++token) {
++            device const float *x = input + ulong(token) * p.columns + block_index * 256 + input_start;
++            #pragma clang loop unroll(full)
++            for (uint l = 0; l < 4; ++l) {
++                values[token][l] = float4(x[l], x[l + 32], x[l + 64], x[l + 96]);
++                reference_required[token] = reference_required[token] || any(abs(values[token][l]) > float4(1e20f));
++            }
++        }
++        device const uchar *first_block = codes + first_offset + ulong(block_index) * hybrid_packed_block_bytes;
++        #pragma clang loop unroll(full)
++        for (uint r = 0; r < 2; ++r) {
++            if (first_row + r >= p.rows) continue;
++            device const uchar *block = first_block + r * row_bytes;
++            float4 partial[2] = {float4(0.0f), float4(0.0f)};
++            #pragma clang loop unroll(full)
++            for (uint l = 0; l < 4; ++l) {
++                const uint low0 = block[low_offset + l];
++                const uint low1 = block[low_offset + l + 32];
++                const uint high = block[high_offset + l];
++                const int q0 = int((low0 & 15) | ((high & 0x03) << 4)) - 32;
++                const int q1 = int((low1 & 15) | ((high & 0x0c) << 2)) - 32;
++                const int q2 = int((low0 >> 4) | (high & 0x30)) - 32;
++                const int q3 = int((low1 >> 4) | ((high & 0xc0) >> 2)) - 32;
++                #pragma clang loop unroll(full)
++                for (uint token = 0; token < 2; ++token) {
++                    partial[token].x += values[token][l].x * float(q0);
++                    partial[token].y += values[token][l].y * float(q1);
++                    partial[token].z += values[token][l].z * float(q2);
++                    partial[token].w += values[token][l].w * float(q3);
++                }
++            }
++            const float s0 = float(as_type<char>(block[192 + scale_start]));
++            const float s1 = float(as_type<char>(block[194 + scale_start]));
++            const float s2 = float(as_type<char>(block[196 + scale_start]));
++            const float s3 = float(as_type<char>(block[198 + scale_start]));
++            const float d = hybrid_grouped_half<false>(block + 208);
++            #pragma clang loop unroll(full)
++            for (uint token = 0; token < 2; ++token) {
++                sums[token][r] += d * (partial[token].x * s0 + partial[token].y * s1
++                    + partial[token].z * s2 + partial[token].w * s3);
++            }
++        }
++    }
++    #pragma clang loop unroll(full)
++    for (uint token = 0; token < 2; ++token) {
++        const bool fallback = simd_any(reference_required[token]);
++        #pragma clang loop unroll(full)
++        for (uint r = 0; r < 2; ++r) {
++            if (first_row + r >= p.rows) continue;
++            const float total = fallback
++                ? hybrid_packed_block_dot(codes, input, first_offset + r * row_bytes,
++                    ulong(token) * p.columns, p.columns, lane)
++                : simd_sum(sums[token][r]);
++            if (lane == 0) output[ulong(token) * p.rows + first_row + r] = total;
++        }
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_dual_input_tests.rs b/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_dual_input_tests.rs
+new file mode 100644
+index 00000000..a6b0aca1
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal_kquant_dual_input_tests.rs
+@@ -0,0 +1,320 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Exact-order dual-input components against two admitted Safe scalar calls.
++
++use stark_engine_macros::stark_test;
++
++use super::*;
++
++fn dual_pipeline(kind: u32) -> Result<PipelineState> {
++    crate::engine::hybrid::weight_metal::decode_graph::dual_input::pipeline(kind)
++}
++
++fn encode_dual(
++    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
++    shape: Shape,
++    codes: &ProtocolObject<dyn MTLBuffer>,
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    offsets: [usize; 3],
++) -> Result<()> {
++    validate_views(shape, codes, input, output, offsets)?;
++    if shape.tokens != 2 {
++        return Err(Error::Invalid("dual component input count"));
++    }
++    let pipeline = dual_pipeline(shape.kind)?;
++    encoder.set_compute_pipeline_state(&pipeline);
++    encoder.set_buffer(Some(codes), 0, 0);
++    encoder.set_buffer(Some(input), offsets[1] * 4, 1);
++    encoder.set_buffer(Some(output), offsets[2] * 4, 2);
++    let p = [
++        shape.rows as u32,
++        shape.columns as u32,
++        shape.kind,
++        256,
++        weights::block_layout(shape.kind)?.1 as u32,
++        0,
++        0,
++        0,
++    ];
++    let packed_offsets = [offsets[0] as u32, 0, 0, 0];
++    encoder.set_bytes(NonNull::from(&p).cast(), std::mem::size_of_val(&p), 3);
++    encoder.set_bytes(NonNull::from(&packed_offsets).cast(), std::mem::size_of_val(&packed_offsets), 6);
++    encoder.dispatch_threadgroups(
++        MTLSize {
++            width: shape.rows.div_ceil(if shape.kind == 13 {
++                2
++            } else {
++                4
++            }),
++            height: 1,
++            depth: 1,
++        },
++        MTLSize {
++            width: 64,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
++fn run_dual(
++    shape: Shape,
++    codes: &[u8],
++    input: &[f32],
++    offsets: [usize; 3],
++) -> Result<Vec<f32>> {
++    shape.sizes()?;
++    if shape.tokens != 2 || codes.len() != shape.sizes()?.1 || input.len() != 2 * shape.columns {
++        return Err(Error::Invalid("dual component payload"));
++    }
++    objc2::rc::autoreleasepool(|_| {
++        let executor = executor()?;
++        let mut storage = vec![0xa7; offsets[0]];
++        storage.extend_from_slice(codes);
++        storage.extend_from_slice(&[0x4d; 19]);
++        let codes = buffer(executor, &storage)?;
++        let mut values = vec![f32::NAN; offsets[1]];
++        values.extend_from_slice(input);
++        values.extend_from_slice(&[f32::NAN; 3]);
++        let input = buffer(executor, bytemuck::cast_slice(&values))?;
++        let count = 2 * shape.rows;
++        let output = buffer(executor, bytemuck::cast_slice(&vec![7.25f32; offsets[2] + count + 3]))?;
++        let command = executor.queue.command_buffer().ok_or(Error::Invalid("dual component command"))?;
++        let encoder = command.compute_command_encoder().ok_or(Error::Invalid("dual component encoder"))?;
++        encode_dual(&encoder, shape, &codes, &input, &output, offsets)?;
++        encoder.end_encoding();
++        command.commit();
++        command.wait_until_completed();
++        if command.status() != MTLCommandBufferStatus::Completed {
++            return Err(Error::Invalid("dual component execution"));
++        }
++        let values =
++            unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), offsets[2] + count + 3) };
++        assert!(
++            values[..offsets[2]].iter().chain(&values[offsets[2] + count..]).all(|&v| v == 7.25),
++            "dual component output tail changed"
++        );
++        if values[offsets[2]..offsets[2] + count].iter().any(|v| !v.is_finite()) {
++            return Err(Error::Invalid("dual component nonfinite result"));
++        }
++        Ok(values[offsets[2]..offsets[2] + count].to_vec())
++    })
++}
++
++fn exact(
++    actual: &[f32],
++    expected: &[f32],
++) -> bool {
++    actual.len() == expected.len() && actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits())
++}
++
++#[stark_test]
++fn kquant_dual_input_basis_offsets_tails_and_source_f64() {
++    for kind in [13, 14] {
++        for (rows, columns) in [(1, 256), (3, 768), (5, 4096), (17, 8192)] {
++            let shape = Shape {
++                kind,
++                rows,
++                columns,
++                tokens: 2,
++            };
++            let codes = finite_codes(kind, rows, columns, rows + columns + kind as usize);
++            let mut dense = (0..2 * columns).map(|i| ((i * 31 % 149) as f32 - 74.0) * 0.0078125).collect::<Vec<_>>();
++            for (case, at) in [0, 15, 16, 31, 32, 63, 127, 128, 255, columns - 1].into_iter().enumerate() {
++                let mut basis = vec![0.0; 2 * columns];
++                basis[at] = 1.0;
++                basis[columns + (columns - 1 - at)] = -0.5;
++                for values in [&basis, &dense] {
++                    let source = run(shape, &codes, values, false).unwrap();
++                    for offsets in [[0, 0, 0], [1, 1, 1], [19, 3, 3]] {
++                        let actual = run_dual(shape, &codes, values, offsets).unwrap();
++                        assert!(exact(&actual, &source), "dual input changed admitted scalar bits");
++                        let (rrms, normalized, _) = numerical_errors(shape, &codes, values, &actual, &source, 16);
++                        assert!(rrms == 0.0 && normalized <= 2e-6, "dual input source/F64 gate failed");
++                    }
++                }
++                dense[(case * 43) % columns] *= -1.0;
++            }
++        }
++    }
++}
++
++#[stark_test]
++fn kquant_dual_input_independent_fallback_cancellation_and_subnormals() {
++    for kind in [13, 14] {
++        let shape = Shape {
++            kind,
++            rows: 17,
++            columns: 4096,
++            tokens: 2,
++        };
++        let codes = finite_codes(kind, shape.rows, shape.columns, 773 + kind as usize);
++        let bounded = (0..shape.columns)
++            .map(|i| {
++                let value = (1.0 + (i % 7) as f32 * f32::EPSILON)
++                    * if i % 2 == 0 {
++                        1.0
++                    } else {
++                        -1.0
++                    };
++                if i % 19 == 0 {
++                    value * 1.0e10
++                } else {
++                    value
++                }
++            })
++            .collect::<Vec<_>>();
++        let extreme = (0..shape.columns)
++            .map(|i| {
++                if i % 3 == 0 {
++                    1.0e21
++                } else {
++                    -3.0e20
++                }
++            })
++            .collect::<Vec<_>>();
++        let subnormal = (0..shape.columns).map(|i| f32::from_bits(1 + (i % 127) as u32)).collect::<Vec<_>>();
++        for (first, second) in
++            [(&extreme, &bounded), (&bounded, &extreme), (&bounded, &subnormal), (&subnormal, &bounded)]
++        {
++            let values = [first.as_slice(), second.as_slice()].concat();
++            let source = run(shape, &codes, &values, false).unwrap();
++            let actual = run_dual(shape, &codes, &values, [19, 3, 3]).unwrap();
++            assert!(exact(&actual, &source), "one dual input changed its neighbor's fallback or reduction bits");
++            let (rrms, normalized, _) = numerical_errors(shape, &codes, &values, &actual, &source, 16);
++            assert!(rrms == 0.0 && normalized <= 2e-6, "dual input mixed source/F64 gate failed");
++        }
++        // Zero-valued encoded weights must retain original-block behavior for
++        // MAX inputs. Factored intermediate input sums can overflow even when
++        // the original per-weight products are all exactly zero.
++        let mut zero = vec![0u8; weights::block_layout(kind).unwrap().1];
++        if kind == 14 {
++            zero[128..192].fill(0xaa);
++            zero[192..208].fill(1);
++            zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
++        } else {
++            zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
++            zero[4..16].fill(1);
++        }
++        let zero = zero.repeat(shape.rows * shape.columns / 256);
++        let maximum = vec![f32::MAX; shape.columns];
++        for (first, second) in [(&maximum, &bounded), (&bounded, &maximum)] {
++            let values = [first.as_slice(), second.as_slice()].concat();
++            let source = run(shape, &zero, &values, false).unwrap();
++            let actual = run_dual(shape, &zero, &values, [19, 3, 3]).unwrap();
++            assert!(
++                exact(&actual, &source) && actual.iter().all(|&v| v == 0.0),
++                "dual zero times MAX fallback changed original bits"
++            );
++        }
++    }
++}
++
++fn operation(
++    shape: Shape,
++    codes: &[u8],
++) -> MappedOperation<'static> {
++    let mut encoded = vec![0xa7; 19];
++    encoded.extend_from_slice(codes);
++    encoded.extend_from_slice(&[0xa7; 19]);
++    MappedOperation {
++        matrices: vec![MappedMatrix {
++            codes: MappedSlice {
++                buffer: buffer(executor().unwrap(), &encoded).unwrap(),
++                offset: 19,
++                length: codes.len(),
++                registered_length: encoded.len(),
++            },
++            planes: None,
++        }],
++        inputs: &[],
++        rows: shape.rows,
++        columns: shape.columns,
++        rows_per_batch: 0,
++        format: MatrixFormat::Packed(shape.kind),
++    }
++}
++
++#[stark_test]
++fn kquant_dual_input_actual_shapes_dispatch_and_failure_gates() {
++    for kind in [13, 14] {
++        for (rows, columns) in [(8192, 4096), (4096, 8192)] {
++            let shape = Shape {
++                kind,
++                rows,
++                columns,
++                tokens: 2,
++            };
++            let codes = finite_codes(kind, rows, columns, rows + columns + kind as usize);
++            let inputs = (0..2 * columns).map(|i| ((i * 17 % 113) as f32 - 56.0) * 0.015625).collect::<Vec<_>>();
++            let source = run(shape, &codes, &inputs, false).unwrap();
++            let direct = run_dual(shape, &codes, &inputs, [19, 3, 3]).unwrap();
++            assert!(exact(&direct, &source), "actual-shape dual kernel changed scalar bits");
++            let (rrms, normalized, _) = numerical_errors(shape, &codes, &inputs, &direct, &source, 16);
++            assert!(rrms == 0.0 && normalized <= 2e-6, "actual dual source/F64 gate failed");
++            let operation = operation(shape, &codes);
++            let qualified = executor().unwrap().device.name() == "Apple M5 Max"
++                && if kind == 13 {
++                    q5_grouped32_shape(operation.format, columns)
++                } else {
++                    q6_grouped16_shape(operation.format, columns)
++                };
++            let counter = if kind == 13 {
++                "native.glm.t2.dual_input.q5"
++            } else {
++                "native.glm.t2.dual_input.q6"
++            };
++            let previous = profile::enabled();
++            profile::enable(true);
++            let before = profile::snapshot().get(counter).map_or(0, |c| c.calls);
++            let mut graph = DecodeGraph::new().unwrap();
++            let input = graph.upload_into(&inputs).unwrap();
++            let output = graph.scratch(2 * rows).unwrap();
++            let encoded = graph.mapped_exact_dual_input(&operation, &input, &output, 2).unwrap();
++            assert_eq!(encoded, qualified, "dual runtime admission changed");
++            if !encoded {
++                profile::enable(previous);
++                continue;
++            }
++            let actual = graph.finish(&[output]).unwrap().remove(0);
++            assert!(exact(&actual, &source), "dual runtime changed scalar bits");
++            let after = profile::snapshot().get(counter).map_or(0, |c| c.calls);
++            profile::enable(previous);
++            assert_eq!(after - before, 1, "dual runtime dispatch counter missing");
++
++            for token in 0..2 {
++                for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++                    let mut bad = inputs.clone();
++                    bad[token * columns + 255] = poison;
++                    let mut graph = DecodeGraph::new().unwrap();
++                    let input = DeviceVector {
++                        buffer: buffer(executor().unwrap(), bytemuck::cast_slice(&bad)).unwrap(),
++                        offset: 0,
++                        len: bad.len(),
++                    };
++                    let output = graph.scratch(2 * rows).unwrap();
++                    assert!(graph.mapped_exact_dual_input(&operation, &input, &output, 2).unwrap());
++                    assert!(graph.finish(&[output]).is_err(), "dual runtime concealed nonfinite input");
++                }
++            }
++            let maximum = vec![f32::MAX; 2 * columns];
++            assert!(run(shape, &codes, &maximum, false).is_err(), "scalar overflow fixture must reject");
++            let mut graph = DecodeGraph::new().unwrap();
++            let input = graph.upload_into(&maximum).unwrap();
++            let output = graph.scratch(2 * rows).unwrap();
++            assert!(graph.mapped_exact_dual_input(&operation, &input, &output, 2).unwrap());
++            assert!(graph.finish(&[output]).is_err(), "dual runtime concealed finite-input overflow");
++            let mut graph = DecodeGraph::new().unwrap();
++            let input = graph.upload_into(&inputs).unwrap();
++            let output = graph.scratch(2 * rows).unwrap();
++            assert!(!graph.mapped_exact_dual_input(&operation, &input, &output, 1).unwrap(), "dual admitted one input");
++            let mut unsupported = operation;
++            unsupported.rows_per_batch = 1;
++            assert!(
++                !graph.mapped_exact_dual_input(&unsupported, &input, &output, 2).unwrap(),
++                "dual admitted indexed grouping"
++            );
++        }
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs b/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs
+new file mode 100644
+index 00000000..db0e64d3
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs
+@@ -0,0 +1,56 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Read-only test accounting over the unchanged encoder residency admission.
++
++use super::*;
++
++impl Weights {
++    pub(in crate::engine::hybrid) fn t2_probe_dual_inventory(
++        &self,
++        names: &[String],
++    ) -> Result<[usize; 4]> {
++        let mut totals = [0usize; 4];
++        for name in names {
++            let tensor = self.tensor(name)?;
++            if tensor.affine.is_some()
++                || tensor.shape.len() != 2
++                || !matches!(tensor.kind, 13 | 14)
++                || !matches!((tensor.shape[0], tensor.shape[1]), (8192, 4096) | (4096, 8192))
++            {
++                continue;
++            }
++            let at = if tensor.kind == 13 {
++                0
++            } else {
++                2
++            };
++            let bytes = tensor.shape[0]
++                .checked_mul(encoded_size(tensor.kind, tensor.shape[1])?)
++                .ok_or(Error::Invalid("T2 dual inventory size"))?;
++            totals[at] = totals[at].checked_add(1).ok_or(Error::Invalid("T2 dual inventory count"))?;
++            totals[at + 1] = totals[at + 1].checked_add(bytes).ok_or(Error::Invalid("T2 dual inventory size"))?;
++        }
++        if totals.iter().any(|&value| value == 0) {
++            return Err(Error::Invalid("T2 dual inventory empty"));
++        }
++        Ok(totals)
++    }
++
++    pub(in crate::engine::hybrid) fn t2_probe_accounting(&self) -> Result<[usize; 6]> {
++        let guard = self.encoder_residency.lock().map_err(|_| Error::Invalid("T2 residency lock"))?;
++        let r = guard.as_ref().ok_or(Error::Invalid("T2 residency admission missing"))?;
++        if r.failed {
++            return Err(Error::Invalid("T2 residency failed"));
++        }
++        let driver = r.driver.lock().map_err(|_| Error::Invalid("T2 residency driver lock"))?;
++        let actual = usize::try_from(driver.set.allocated_size()).map_err(|_| Error::Invalid("T2 allocation size"))?;
++        let required = r.required(r.bank_bytes, r.static_bytes, actual)?;
++        let (cap, dynamic) = (r.cap, r.dynamic_allowance);
++        drop(driver);
++        drop(guard);
++        let statics = self.static_views.lock().map_err(|_| Error::Invalid("T2 static cache lock"))?;
++        if statics.registered_bytes > statics.limit || statics.limit != MAX_STATIC_VIEW_BYTES {
++            return Err(Error::Invalid("T2 static cache exceeded existing bound"));
++        }
++        Ok([cap, required, actual, statics.registered_bytes, statics.entries.len(), dynamic])
++    }
++}
+diff --git a/scripts/probe_glm53_t2.py b/scripts/probe_glm53_t2.py
+new file mode 100644
+index 00000000..d58eb6d9
+--- /dev/null
++++ b/scripts/probe_glm53_t2.py
+@@ -0,0 +1,324 @@
++"""Private aggregate-only driver for the ignored two-token target probe.
++
++Prompts, IDs, full logits, and native process output remain in RAM. This driver
++writes only allowlisted counts, timings, hashes, source identity and guards.
++V3 preserves full-row validation outside compact timed intervals. Timed paths
++return GPU greedy choices and post-output-norm hidden rows, with unchanged GPU
++math and finite/status checks. They establish no speculative speedup, rollback
++cost, production memory admission, or explanation of V1's unmatched GPU delta.
++An explicit test-only flag selects the dual-row decoder; actual dispatch
++coverage must match the source inventory before candidate results are accepted.
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import hashlib
++import io
++import json
++import math
++import os
++import platform
++import re
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++
++SCOPE = "glm53_target_two_token_exact_dual_v3"
++TEST_NAME = b"stark_engine::engine::hybrid::glm::prefill_batch::t2_probe::glm_t2_verification_probe"
++SENTINEL = b'"glm_t2_probe_result"'
++CONTINUATION_TOKENS = 8
++CONTEXT_TOKENS = 256
++ROUNDS = 4
++PROMPTS = (
++    "Name three colors.",
++    "Give one sentence about a quiet garden.",
++    "What is 7 plus 5? Answer briefly.",
++)
++EXPECTED_COUNTS = {
++    "cases": 3, "continuation_rows_per_case": 8, "rounds": 4,
++    "warmup_rounds": 1, "ordinary_serial_alignment_rows": 8,
++    "pooled_alignment_pairs": 4, "pool_residues_tested": 4,
++    "complete_rows_compared": 192, "compact_rows_compared": 192,
++    "timed_full_logit_readback_rows": 0, "measured_compact_serial_pairs": 36,
++    "measured_compact_layer_major_pairs": 36, "rollback_calls": 0,
++}
++TIMING_KEYS = {
++    "compact_serial_two_wall_total", "compact_layer_major_two_wall_total",
++    "compact_serial_two_gpu_total", "compact_layer_major_two_gpu_total",
++    "compact_serial_two_wall_median", "compact_layer_major_two_wall_median",
++    "compact_serial_two_gpu_median", "compact_layer_major_two_gpu_median",
++}
++MEMORY_KEYS = {
++    "cap_bytes", "observed_required_peak_bytes", "residency_allocated_peak_bytes",
++    "static_registered_peak_bytes", "static_entries_peak", "dynamic_allowance_bytes",
++    "sampled_metal_peak_bytes", "graph_scratch_high_water_bytes",
++}
++HASH_KEYS = {"corpus_sha256", "authoritative_continuation_sha256"}
++DUAL_KEYS = {"enabled", "pair_graphs", "q5_dispatch_calls", "q5_encoded_weight_bytes",
++    "q6_dispatch_calls", "q6_encoded_weight_bytes", "q5_calls_per_pair", "q5_weight_bytes_per_pair",
++    "q6_calls_per_pair", "q6_weight_bytes_per_pair"}
++FAILURE_GUARDS = {
++    "stdin_bound", "stdin_schema", "stdin_admission", "target_policy",
++    "alignment_parity", "memory_gate", "model_load", "probe_rejected", "dual_coverage",
++}
++BOOLEAN_SELECTORS = (
++    "STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER",
++    "STARK_GLM53_BATCH_FINITE", "STARK_GLM53_Q4K_BLOCK", "STARK_GLM53_KQUANT_FACTORED",
++    "STARK_GLM53_Q6_GROUPED16", "STARK_GLM53_Q5_GROUPED32", "STARK_GLM53_Q4_GROUPED32",
++    "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_CONTROL_SPLIT", "STARK_GLM53_CONTROL_RMS_PROJECT",
++    "STARK_GLM53_CONTROL_SIMD", "STARK_GLM53_KDA_TRANSPOSED", "STARK_GLM53_KDA_FUSED_STATE",
++    "STARK_GLM53_KDA_PARALLEL_NORM", "STARK_GLM53_Q8_SHAPES", "STARK_GLM53_IQ4_VECTOR",
++    "STARK_GLM53_IQ_MULTIROW", "STARK_GLM53_IQ_GPU_BOUND", "STARK_GLM53_IQ_TYPED16",
++    "STARK_GLM53_IQ_SIGNED_FACTOR", "STARK_GLM53_IQ_FUSED_GATE_UP", "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
++    "STARK_GLM53_POLL_WAIT", "STARK_GLM53_SERIAL_FINITE_ORDER", "STARK_GLM53_UNRETAINED_GRAPH",
++    "STARK_GLM53_SCRATCH_HEAP", "STARK_GLM53_CONTROL_FUSED_PARALLEL", "STARK_GLM53_Q8_GROUPED8",
++    "STARK_GLM53_PARALLEL_RMS", "STARK_GLM53_RMS_PREFETCH", "STARK_GLM53_GREEDY_OVERLAP",
++    "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_PREFILL_QUEUED", "STARK_GLM53_PREFILL_MMA",
++    "STARK_GLM53_FINITE_SELECTIVE", "STARK_GLM53_PACKED_FAST_MATH", "STARK_GLM53_PARALLEL_PROJECTIONS",
++    "STARK_GLM53_CONCURRENT_ENCODER", "STARK_GLM53_BOUNDED_GRAPH", "STARK_GLM53_SERIAL_ROUTER",
++    "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS", "STARK_HYBRID_PACKED_REFERENCE",
++    "STARK_HYBRID_BYTE_LOADS", "STARK_HYBRID_VECTOR8", "STARK_HYBRID_SCALAR_UINT_LOADS",
++    "STARK_HYBRID_FACTORED_AFFINE", "STARK_HYBRID_SEPARATE_FINITE",
++    "STARK_GLM53_T2_DUAL_INPUT",
++)
++
++
++class ProbeError(Exception):
++    def __init__(self, stage: str, diagnostics: dict | None = None):
++        super().__init__(stage)
++        self.stage = stage
++        self.diagnostics = diagnostics
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def hash_value(value: object) -> str:
++    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
++
++
++def model_artifact_identity(model_path: Path) -> dict:
++    artifacts = {}
++    for name in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "native-source.json"):
++        path = model_path / name
++        if path.is_file():
++            artifacts[name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
++    if not {"config.json", "generation_config.json", "tokenizer.json", "native-source.json"} <= set(artifacts):
++        raise ProbeError("model_artifacts")
++    return artifacts
++
++
++def validate_aggregate(value: object) -> dict:
++    if not isinstance(value, dict) or set(value) != {"glm_t2_probe_result", "aggregate"} or value["glm_t2_probe_result"] is not True:
++        raise ProbeError("test_result")
++    aggregate = value["aggregate"]
++    if not isinstance(aggregate, dict):
++        raise ProbeError("test_result")
++    if aggregate.get("status") == "rejected":
++        if (
++            set(aggregate) != {"status", "rows"}
++            or not isinstance(aggregate["rows"], dict)
++            or set(aggregate["rows"]) != {"failure"}
++            or not isinstance(aggregate["rows"]["failure"], dict)
++            or set(aggregate["rows"]["failure"]) != {"guard"}
++            or aggregate["rows"]["failure"]["guard"] not in FAILURE_GUARDS
++        ):
++            raise ProbeError("test_result")
++        return aggregate
++    if set(aggregate) != {"status", "precision", "measurement_scope", "dual_input", "counts", "timing_ms", "memory_gauges", "hashes", "target_reserved_context_tokens"}:
++        raise ProbeError("test_result")
++    if aggregate["status"] != "target_pair_exact_dual_component_complete_no_rollback" or aggregate["precision"] != "existing_safe_f32_legacy_projections":
++        raise ProbeError("test_result")
++    if aggregate["measurement_scope"] != "gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v3":
++        raise ProbeError("test_result")
++    counts = aggregate["counts"]
++    if not isinstance(counts, dict) or set(counts) != set(EXPECTED_COUNTS) or any(type(counts[key]) is not int or counts[key] != expected for key, expected in EXPECTED_COUNTS.items()):
++        raise ProbeError("test_result")
++    dual = aggregate["dual_input"]
++    if not isinstance(dual, dict) or set(dual) != DUAL_KEYS or type(dual["enabled"]) is not bool or any(type(v) is not int or not 0 <= v <= 2**64 - 1 for k, v in dual.items() if k != "enabled"):
++        raise ProbeError("test_result")
++    pairs = counts["pooled_alignment_pairs"] + counts["complete_rows_compared"] // 4 + counts["compact_rows_compared"] // 4
++    if dual["pair_graphs"] != pairs or any(dual[key] < 1 for key in ("q5_calls_per_pair", "q5_weight_bytes_per_pair", "q6_calls_per_pair", "q6_weight_bytes_per_pair")):
++        raise ProbeError("test_result")
++    for actual, per_pair in (("q5_dispatch_calls", "q5_calls_per_pair"), ("q5_encoded_weight_bytes", "q5_weight_bytes_per_pair"), ("q6_dispatch_calls", "q6_calls_per_pair"), ("q6_encoded_weight_bytes", "q6_weight_bytes_per_pair")):
++        if dual[actual] != (pairs * dual[per_pair] if dual["enabled"] else 0):
++            raise ProbeError("test_result")
++    timing = aggregate["timing_ms"]
++    if not isinstance(timing, dict) or set(timing) != TIMING_KEYS or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in timing.values()):
++        raise ProbeError("test_result")
++    memory = aggregate["memory_gauges"]
++    if not isinstance(memory, dict) or set(memory) != MEMORY_KEYS or any(type(v) is not int or v < 0 for v in memory.values()):
++        raise ProbeError("test_result")
++    if memory["cap_bytes"] < 1 or memory["observed_required_peak_bytes"] > memory["cap_bytes"] or memory["sampled_metal_peak_bytes"] > memory["cap_bytes"] or memory["graph_scratch_high_water_bytes"] > 512 * 1024 * 1024:
++        raise ProbeError("test_result")
++    hashes = aggregate["hashes"]
++    if not isinstance(hashes, dict) or set(hashes) != HASH_KEYS or any(not isinstance(v, str) or len(v) != 64 or any(c not in "0123456789abcdef" for c in v) for v in hashes.values()):
++        raise ProbeError("test_result")
++    reserved = aggregate["target_reserved_context_tokens"]
++    if type(reserved) is not int or not CONTEXT_TOKENS <= reserved <= 4096:
++        raise ProbeError("test_result")
++    return aggregate
++
++
++def parse_test_result(output: bytes) -> dict:
++    """Accept only standalone JSON or pinned libtest-mimic 0.8.2 framing."""
++    if len(output) > 256 * 1024:
++        raise ProbeError("test_result")
++    prefix = re.compile(rb"test " + re.escape(TEST_NAME) + rb" * \.\.\. (?P<json>\{.*\})")
++
++    def unique_object(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                raise ProbeError("test_result")
++            result[key] = value
++        return result
++
++    results = []
++    try:
++        for line in output.splitlines():
++            stripped = line.strip()
++            if SENTINEL not in stripped:
++                continue
++            if stripped.startswith(b"{"):
++                candidate = stripped
++            else:
++                match = prefix.fullmatch(stripped)
++                if match is None:
++                    raise ProbeError("test_result")
++                candidate = match.group("json")
++            results.append(json.loads(candidate, object_pairs_hook=unique_object))
++        if len(results) != 1:
++            raise ProbeError("test_result")
++        return validate_aggregate(results[0])
++    except ProbeError:
++        raise
++    except BaseException:
++        raise ProbeError("test_result") from None
++
++
++def execution_selectors() -> dict:
++    values = {name: os.environ.get(name) == "1" for name in BOOLEAN_SELECTORS}
++    for name in ("STARK_GLM53_CONTROL_CHUNKS", "STARK_GLM53_BANK_GROUP_LAYERS", "STARK_GLM53_PREFILL_CHUNK"):
++        value = os.environ.get(name)
++        values[name] = value if value in {"4", "8", "16", "32", "45"} else "unset_or_invalid"
++    for name in ("STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER", "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_DECODE_GRAPH"):
++        if os.environ.get(name) != "1":
++            raise ProbeError("execution_policy")
++    for name in ("STARK_GLM53_GREEDY_OVERLAP", "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_SCRATCH_HEAP", "STARK_GLM53_PARALLEL_PROJECTIONS", "STARK_GLM53_CONCURRENT_ENCODER", "STARK_GLM53_PACKED_FAST_MATH"):
++        if os.environ.get(name) != "0":
++            raise ProbeError("execution_policy")
++    if os.environ.get("STARK_GLM53_T2_DUAL_INPUT") not in (None, "0", "1"):
++        raise ProbeError("execution_policy")
++    return values
++
++
++def run(args: argparse.Namespace) -> dict:
++    model_path = args.model_path.resolve(strict=True)
++    test_binary = args.test_binary.resolve(strict=True)
++    verified_weights = args.verified_weights.resolve(strict=True)
++    if not model_path.is_dir() or not test_binary.is_file():
++        raise ProbeError("arguments")
++    selectors = execution_selectors()
++    artifacts_before = model_artifact_identity(model_path)
++    try:
++        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
++            from benchmark_hybrid import weight_identity
++            from stark_convert.chat import load_template
++            from tokenizers import Tokenizer
++
++            weights_before = weight_identity(model_path, verified_weights)
++            codec, template = load_template(model_path)
++            tokenizer = Tokenizer.from_file(str(model_path / "tokenizer.json"))
++            rendered = [template.render(messages=[{"role": "user", "content": prompt}], tools=None,
++                add_generation_prompt=True, enable_thinking=True, bos_token=codec.get("bos_token") or "",
++                eos_token=codec.get("eos_token") or "") for prompt in PROMPTS]
++            inputs = [tokenizer.encode(prompt, add_special_tokens=False).ids for prompt in rendered]
++    except BaseException:
++        raise ProbeError("preflight") from None
++    if len(inputs) != 3 or any(not 12 <= len(ids) <= 128 for ids in inputs):
++        raise ProbeError("tokenization")
++    corpus_hash = hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode("ascii")).hexdigest()
++    request = {"schema_version": 3, "cases": [{"input_token_ids": ids} for ids in inputs],
++        "continuation_tokens": CONTINUATION_TOKENS, "rounds": ROUNDS, "context_tokens": CONTEXT_TOKENS,
++        "corpus_sha256": corpus_hash, "dual_input": selectors["STARK_GLM53_T2_DUAL_INPUT"]}
++    environment = os.environ.copy()
++    environment["STARK_GLM53_T2_PROBE_MODEL_PATH"] = str(model_path)
++    started = time.monotonic_ns()
++    try:
++        completed = subprocess.run([str(test_binary), "glm_t2_verification_probe", "--ignored", "--nocapture", "--test-threads=1"],
++            input=(json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"),
++            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, timeout=1800, check=False)
++    except subprocess.TimeoutExpired:
++        raise ProbeError("test_timeout") from None
++    except BaseException:
++        raise ProbeError("test_launch") from None
++    finally:
++        try:
++            if weight_identity(model_path, verified_weights) != weights_before:
++                raise ProbeError("weight_guard")
++            if model_artifact_identity(model_path) != artifacts_before:
++                raise ProbeError("artifact_guard")
++        except ProbeError:
++            raise
++        except BaseException:
++            raise ProbeError("weight_guard") from None
++    diagnostics = {"native_returncode": completed.returncode, "stdout_bytes": len(completed.stdout),
++        "stderr_bytes": len(completed.stderr), "sentinel_candidates": sum(SENTINEL in line for line in completed.stdout.splitlines())}
++    try:
++        aggregate = parse_test_result(completed.stdout)
++    except ProbeError:
++        raise ProbeError("test_result", diagnostics) from None
++    if aggregate.get("status") != "rejected" and aggregate["hashes"]["corpus_sha256"] != corpus_hash:
++        raise ProbeError("corpus_guard")
++    if aggregate.get("status") != "rejected" and aggregate["dual_input"]["enabled"] != selectors["STARK_GLM53_T2_DUAL_INPUT"]:
++        raise ProbeError("dual_coverage")
++    passed = completed.returncode == 0 and aggregate.get("status") != "rejected"
++    return {"schema_version": 3, "scope": SCOPE, "status": "complete" if passed else "failed",
++        "glm_t2_probe_result": True, "error_stage": None if passed else "test_rejected",
++        "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000,
++        "test_binary_sha256": sha256_file(test_binary), "driver_sha256": sha256_file(Path(__file__).resolve()),
++        "weight_guard_helper_sha256": sha256_file(Path(__file__).with_name("benchmark_hybrid.py")),
++        "execution_selectors": selectors, "execution_selector_sha256": hash_value(selectors),
++        "model_artifacts": artifacts_before, "model_artifacts_unchanged": True,
++        "weights": weights_before, "weights_unchanged": True,
++        "corpus_sha256": corpus_hash, "input_token_count": sum(map(len, inputs)),
++        "input_token_min": min(map(len, inputs)), "input_token_max": max(map(len, inputs)),
++        "context_tokens": CONTEXT_TOKENS, "continuation_tokens": CONTINUATION_TOKENS,
++        "hardware": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
++        "cost_scope": "compact_greedy_hidden_readback_full_parity_untimed_no_head_catchup_or_rollback",
++        "aggregate": aggregate}
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--test-binary", type=Path, required=True)
++    parser.add_argument("--model-path", type=Path, required=True)
++    parser.add_argument("--verified-weights", type=Path, required=True)
++    args = parser.parse_args()
++    try:
++        result = run(args)
++    except ProbeError as error:
++        result = {"schema_version": 3, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++            "error_stage": error.stage}
++        if error.diagnostics is not None:
++            result["native_structure"] = error.diagnostics
++    except BaseException:
++        result = {"schema_version": 3, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++            "error_stage": "driver"}
++    sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
++    sys.stdout.flush()
++    return 0 if result["status"] == "complete" else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/test_probe_glm53_t2.py b/scripts/test_probe_glm53_t2.py
+new file mode 100644
+index 00000000..14b2d6bd
+--- /dev/null
++++ b/scripts/test_probe_glm53_t2.py
+@@ -0,0 +1,119 @@
++"""Model-free boundary cases for the aggregate-only target-pair driver."""
++
++import copy
++import json
++
++import pytest
++
++import probe_glm53_t2 as probe
++
++
++def success(enabled=False):
++    pairs = 100
++    q5_calls, q5_bytes, q6_calls, q6_bytes = 68, 1_568_669_696, 68, 1_871_708_160
++    return {"glm_t2_probe_result": True, "aggregate": {
++        "status": "target_pair_exact_dual_component_complete_no_rollback",
++        "precision": "existing_safe_f32_legacy_projections",
++        "measurement_scope": "gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v3",
++        "dual_input": {"enabled": enabled, "pair_graphs": pairs,
++            "q5_dispatch_calls": pairs * q5_calls if enabled else 0,
++            "q5_encoded_weight_bytes": pairs * q5_bytes if enabled else 0,
++            "q6_dispatch_calls": pairs * q6_calls if enabled else 0,
++            "q6_encoded_weight_bytes": pairs * q6_bytes if enabled else 0,
++            "q5_calls_per_pair": q5_calls, "q5_weight_bytes_per_pair": q5_bytes,
++            "q6_calls_per_pair": q6_calls, "q6_weight_bytes_per_pair": q6_bytes},
++        "counts": dict(probe.EXPECTED_COUNTS),
++        "timing_ms": {name: 1.0 for name in probe.TIMING_KEYS},
++        "memory_gauges": dict({name: 0 for name in probe.MEMORY_KEYS}, cap_bytes=1_000_000),
++        "hashes": {name: "a" * 64 for name in probe.HASH_KEYS},
++        "target_reserved_context_tokens": 4096,
++    }}
++
++
++def rejected():
++    return {"glm_t2_probe_result": True, "aggregate": {
++        "status": "rejected", "rows": {"failure": {"guard": "alignment_parity"}},
++    }}
++
++
++def encoded(value):
++    return json.dumps(value, separators=(",", ":")).encode("ascii")
++
++
++def framed(value, padding=b""):
++    return b"test " + probe.TEST_NAME + padding + b" ... " + encoded(value) + b"\n"
++
++
++@pytest.mark.parametrize("source,expected", [
++    (lambda: encoded(success()), "target_pair_exact_dual_component_complete_no_rollback"),
++    (lambda: framed(success()), "target_pair_exact_dual_component_complete_no_rollback"),
++    (lambda: framed(success(), b"     "), "target_pair_exact_dual_component_complete_no_rollback"),
++    (lambda: encoded(success(True)), "target_pair_exact_dual_component_complete_no_rollback"),
++    (lambda: framed(success(True)), "target_pair_exact_dual_component_complete_no_rollback"),
++    (lambda: encoded(rejected()), "rejected"),
++    (lambda: framed(rejected()), "rejected"),
++])
++def test_accepts_only_supported_single_sentinel_framing(source, expected):
++    assert probe.parse_test_result(source())["status"] == expected
++
++
++def altered(section, key, value):
++    result = copy.deepcopy(success())
++    result["aggregate"][section][key] = value
++    return encoded(result)
++
++
++@pytest.mark.parametrize("source", [
++    lambda: b"test result: ok\n",
++    lambda: encoded(success()) + b"\n" + encoded(success()),
++    lambda: encoded(success()) + b" trailing",
++    lambda: b"test wrong_test ... " + encoded(success()),
++    lambda: b'{"glm_t2_probe_result":true,"aggregate":',
++    lambda: encoded(success()).replace(b'"cases":3', b'"cases":3,"cases":3'),
++    lambda: encoded(dict(success(), unexpected=True)),
++    lambda: altered("counts", "complete_rows_compared", 1),
++    lambda: altered("counts", "compact_rows_compared", 1),
++    lambda: altered("counts", "timed_full_logit_readback_rows", 2),
++    lambda: altered("dual_input", "enabled", True),
++    lambda: altered("dual_input", "q5_dispatch_calls", 1),
++    lambda: altered("dual_input", "q6_encoded_weight_bytes", 1),
++    lambda: altered("dual_input", "q5_calls_per_pair", 0),
++    lambda: altered("dual_input", "pair_graphs", 99),
++    lambda: altered("dual_input", "enabled", "1"),
++    lambda: altered("dual_input", "q5_weight_bytes_per_pair", 2**64),
++    lambda: altered("memory_gauges", "sampled_metal_peak_bytes", 1_000_001),
++    lambda: altered("hashes", "corpus_sha256", "not_a_hash"),
++])
++def test_rejects_missing_duplicate_malformed_or_unqualified_results(source):
++    with pytest.raises(probe.ProbeError) as error:
++        probe.parse_test_result(source())
++    assert error.value.stage == "test_result"
++
++
++def test_metadata_identity_detects_content_changes(tmp_path):
++    for name in ("config.json", "generation_config.json", "tokenizer.json", "native-source.json"):
++        (tmp_path / name).write_text("{}")
++    before = probe.model_artifact_identity(tmp_path)
++    (tmp_path / "tokenizer.json").write_text('{"changed":true}')
++    after = probe.model_artifact_identity(tmp_path)
++    assert before != after
++    assert before["config.json"] == after["config.json"]
++
++
++def test_execution_policy_requires_serial_legacy_math(monkeypatch):
++    for name in probe.BOOLEAN_SELECTORS:
++        monkeypatch.setenv(name, "0")
++    for name in ("STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER", "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_DECODE_GRAPH"):
++        monkeypatch.setenv(name, "1")
++    assert probe.execution_selectors()["STARK_GLM53_PREFILL_MMA"] is False
++    monkeypatch.setenv("STARK_GLM53_PREFILL_MMA", "1")
++    with pytest.raises(probe.ProbeError) as error:
++        probe.execution_selectors()
++    assert error.value.stage == "execution_policy"
++    monkeypatch.setenv("STARK_GLM53_PREFILL_MMA", "0")
++    monkeypatch.setenv("STARK_GLM53_T2_DUAL_INPUT", "1")
++    assert probe.execution_selectors()["STARK_GLM53_T2_DUAL_INPUT"] is True
++    monkeypatch.setenv("STARK_GLM53_T2_DUAL_INPUT", "true")
++    with pytest.raises(probe.ProbeError) as error:
++        probe.execution_selectors()
++    assert error.value.stage == "execution_policy"

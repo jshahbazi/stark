@@ -32,3 +32,7 @@ The recorded precision policy is `existing_safe_f32_legacy_projections`. No new 
 The small measured sample does not answer whether T2 improves a full request after head catch-up and associated overhead. A diagnostic of the differing target cost is pending. Any follow-up must separately measure those costs and preserve the exact reference and guard protocol before drawing a broader conclusion.
 
 The compact-timer v2 follow-up is recorded separately in [compact-v2.md](compact-v2.md) and [its aggregate JSON](compact-v2.json); the v1 results above remain unchanged.
+
+## T2 v3 and v4c follow-up records
+
+The exact dual-input candidate and its two unqualified ABBA attempts are recorded in [dual-input-v3.md](dual-input-v3.md) and [the aggregate JSON](dual-input-v3.json). The separate v4c deadline-screened attempt is recorded in [screened-v4c.md](screened-v4c.md) and [its aggregate JSON](screened-v4c.json). Both records include canonical source patches that reconstruct from base `b4f1836d97c9fcfb154d803ba93f96b8255d18e4`. V1 and v2 records remain unchanged.

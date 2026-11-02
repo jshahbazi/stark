@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "record": "2026-11-02-glm53-main-refresh",
+  "merge": {
+    "upstream": "origin/main",
+    "upstream_commit": "23abde2ff041ee5a4b0e313a3793a0a4cb6fad00",
+    "merge_commit": "cd03dc7c44bb7dbf44711b797634fb3d864e4b12",
+    "tree": "8fe66daa6baa23e5aaebdf4fd49e3ea4d97ac49b",
+    "conflict_resolution": "Checked input.get(reused..len - 1) before ingest_prefix; retained Qwen restore/capture and GLM batch/native profile behavior.",
+    "independent_review": "Independent source review found no actionable issue."
+  },
+  "checks": {
+    "rust_toolchain": "1.98.1",
+    "formatting_toolchain": "nightly-2026-10-01",
+    "formatting": "passed",
+    "repository_policy": "passed",
+    "diff_check": "passed",
+    "native_wrapper_shell": "passed",
+    "generate_test": {
+      "passed": 112,
+      "ignored": 2,
+      "receipt": "merge-main-23abde2f-generate-test.json",
+      "receipt_sha256": "002675ac799484677a3382471bc0c5abd8866d10f75ce1beb173815c58e70ccc"
+    },
+    "generate_release_build": {
+      "passed": true,
+      "receipt": "merge-main-23abde2f-generate-build.json",
+      "receipt_sha256": "c4beb5a2774ec0866605780cc7fd249ec16aedc99ef7327c088f6e83d15ae6c7",
+      "binary_sha256": "2693e02093a65b59c398cb492bba17ffa38fa701b0aaecb5d7a29e33439f652a"
+    },
+    "score_test": {
+      "suite_pass_totals": [1, 25, 25],
+      "note": "Separate suite outputs; no combined unique-test count asserted.",
+      "receipt": "merge-main-23abde2f-score-test.json",
+      "receipt_sha256": "fd30447bdd42db107ed9c81c158285aba1bb0098946c25a6b1f5efac5021dd30"
+    },
+    "score_release_build": {
+      "passed": true,
+      "receipt": "merge-main-23abde2f-score-build.json",
+      "receipt_sha256": "16aad45d2e6a77ad6fa47fb2a2ce01d6e1f4218a53f0c9dcfb9220eab534558e",
+      "binary_sha256": "26443ddde42b239d6c3419f9d1319079dca9c56a2112ed4b0cfaef58726e32ec"
+    },
+    "python_checks": {
+      "passed": 9,
+      "receipt": "merge-main-23abde2f-python-checks.json",
+      "receipt_sha256": "2bd0b1b967ffc90ea6a7821bc3257c00c7238949b8b3784c51327270669b5487"
+    },
+    "source_binding": {
+      "index_tree": "8fe66daa6baa23e5aaebdf4fd49e3ea4d97ac49b",
+      "worktree_matched_index_before_and_after": true
+    }
+  },
+  "native_smoke": {
+    "receipt": "native-smoke-merged-23abde2f.json",
+    "receipt_sha256": "51a2513e4479bf74502cc479c7f0f04a7326f311a961678bc5c39b965be3b5e4",
+    "passed": true,
+    "screened": false,
+    "scope": "serialized_native_text_greedy",
+    "context_tokens": 512,
+    "input_tokens": 14,
+    "requested_output_tokens": 32,
+    "warmup_replays": 1,
+    "measured_replays": 1,
+    "repeat_exact": true,
+    "input_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+    "output_sha256": "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c",
+    "sealed_v48_output_match": true,
+    "performance_claim": null,
+    "weights": {
+      "receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb",
+      "prior_content_hashes_reused": true,
+      "size_mtime_inode_checked_before_and_after": true,
+      "rehash_performed": false
+    }
+  },
+  "qualification": {
+    "t8_record_changed": false,
+    "t8_qualified_record_remains_prior": true,
+    "mtp_v7_and_shared_bound_candidates": "unqualified; no production enablement"
+  },
+  "privacy": {
+    "raw_prompts_responses_token_ids_or_logs_published": false,
+    "aggregate_metrics_and_hashes_only": true
+  }
+}
