@@ -39,11 +39,12 @@ struct ConnectionDetailsView: View {
         ScrollView {
         VStack(alignment: .leading, spacing: 16) {
             Text("Connect to Stark").font(.title2.weight(.semibold))
-            Text("For OpenWork, use the connection button below. For other applications, choose OpenAI-compatible or Custom OpenAI in their provider settings.")
+            Text("For OpenWork and OpenCode Desktop, use the connection buttons below. For other applications, choose OpenAI-compatible or Custom OpenAI in their provider settings.")
                 .font(.callout).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
-            OpenWorkConnectionView(connection: engine.openWorkConnection)
+            OpenWorkConnectionView(connection: engine.desktopConnections.openWork)
+            OpenCodeConnectionView(connection: engine.desktopConnections.openCode)
             Divider()
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
             HStack {
@@ -105,7 +106,7 @@ struct ConnectionDetailsView: View {
                         }
                         Button("Cancel", role: .cancel) {}
                     } message: {
-                        Text("Apps using a copied API key will need the replacement. Managed OpenWork connections refresh automatically. A Keychain storage failure keeps the existing key working.")
+                        Text("Apps using a copied API key will need the replacement. Managed OpenWork and OpenCode connections refresh automatically. A Keychain storage failure keeps the existing key working.")
                     }
             }
             Divider()
@@ -194,6 +195,43 @@ private struct OpenWorkConnectionView: View {
             Text("Uses a private connection on this Mac. Your API key stays in Stark's Keychain.")
                 .font(.caption).foregroundStyle(.secondary)
             Text("If you previously added a provider named stark manually in OpenWork, remove that provider in OpenWork's settings first.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct OpenCodeConnectionView: View {
+    @ObservedObject var connection: OpenCodeConnectionController
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("OpenCode").font(.headline)
+                Spacer()
+                if connection.disconnectPending {
+                    Button("Retry Disconnect") { connection.disconnect() }.disabled(connection.busy)
+                } else if connection.approved {
+                    Button("Reconnect") { connection.connect() }.disabled(connection.busy)
+                    Button("Disconnect") { connection.disconnect() }.disabled(connection.busy)
+                } else {
+                    Button("Connect to OpenCode") { connection.connect() }.disabled(connection.busy)
+                }
+            }
+            Text(connection.message).font(.callout).fixedSize(horizontal: false, vertical: true)
+            if let engine = connection.pendingEngine {
+                HStack {
+                    Text("OpenCode engine started \(Date(timeIntervalSince1970: TimeInterval(engine.seconds)).formatted(date: .abbreviated, time: .shortened)) is waiting.")
+                        .font(.callout).fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Button("Deny") { connection.deny() }.disabled(connection.busy)
+                    Button("Allow") { connection.allow() }.disabled(connection.busy)
+                }
+            }
+            Text("Uses OpenCode Desktop's background engine and a private connection on this Mac. Stark asks once for each new engine. The terminal opencode command is not managed; give it the copied API key instead.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("OpenCode's engine keeps running after OpenCode quits. If Stark does not appear in OpenCode, quit OpenCode, run opencode service stop in Terminal, reopen OpenCode and choose Allow.")
+                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Text("If you previously added a provider named stark manually in OpenCode, remove that provider in OpenCode's settings first.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
     }

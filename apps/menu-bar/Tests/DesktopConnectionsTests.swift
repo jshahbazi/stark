@@ -49,6 +49,11 @@ struct DesktopConnectionsTests {
     private static let nextSession = String(repeating: "2", count: 32)
 
     static func main() {
+        if CommandLine.arguments.count >= 2, CommandLine.arguments.dropFirst().contains("child-wait") {
+            // Synthetic child for launch-environment checks; it never reads its input.
+            Thread.sleep(forTimeInterval: 10)
+            exit(0)
+        }
         do {
             guard CommandLine.arguments.count == 2 else { throw CheckFailure() }
             switch CommandLine.arguments[1] {
@@ -71,6 +76,16 @@ struct DesktopConnectionsTests {
             case "broker-deadline": try brokerDeadline()
             case "broker-write": try brokerWrite()
             case "broker-cleanup": try brokerCleanup()
+            case "opencode-approval": try openCodeApproval()
+            case "opencode-pending": try openCodePending()
+            case "opencode-deny": try openCodeDeny()
+            case "opencode-disabled": try openCodeDisabled()
+            case "opencode-revoke": try openCodeRevoke()
+            case "opencode-prune": try openCodePrune()
+            case "opencode-engine-path": try openCodeEnginePath()
+            case "opencode-config-directory": try openCodeConfigDirectory()
+            case "launch-environment": try launchEnvironment()
+            case "coordinator": try coordinator()
             default: throw CheckFailure()
             }
             exit(0)
@@ -100,9 +115,9 @@ struct DesktopConnectionsTests {
         "com.starkengine.menubar.validation.desktop-connections." + UUID().uuidString
     }
 
-    private static func broker(_ service: String, application: @escaping () -> OpenWorkApplicationIdentity? = { nil },
-                               handler: @escaping DesktopConnectionBroker.Handler = { _, _, reply in reply(.failure(.backend)) }) -> DesktopConnectionBroker {
-        DesktopConnectionBroker(service: service, application: application, handler: handler)
+    private static func broker(_ service: String, applications: @escaping () -> [DesktopApplicationIdentity] = { [] },
+                               handler: @escaping DesktopConnectionBroker.Handler = { _, _, _, reply in reply(.failure(.backend)) }) -> DesktopConnectionBroker {
+        DesktopConnectionBroker(service: service, applications: applications, handler: handler)
     }
 
     private static func cleanup(_ path: String) {
@@ -169,15 +184,15 @@ struct DesktopConnectionsTests {
                                        sendWorks: Bool = true,
                                        _ body: (OpenWorkConnectionController, ResultBox<[[String: Any]]>, () -> TimeInterval, (TimeInterval) -> Void) throws -> Void) throws {
         let service = namespace()
-        let path = broker(service).path
         let packets = ResultBox<[[String: Any]]>()
         packets.set([])
         var now: TimeInterval = 1000
         let value = OpenWorkConnectionController(service: service,
             storage: DesktopConnectionApprovalStore(service: service, storage: mock), clock: { now },
             send: { packet in packets.set((packets.value ?? []) + [packet]); return sendWorks },
-            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] })
-        defer { value.shutdown(); pump(); cleanup(path) }
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
+        defer { value.shutdown(); pump() }
         value.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
         try wait { mock.reads > 0 && value.message != "OpenWork is not connected." || value.approved }
         try body(value, packets, { now }, { now = $0 })
@@ -223,7 +238,8 @@ struct DesktopConnectionsTests {
             try check(responses.isEmpty && packets.value?.count == 1)
             let packet = packets.value![0]
             try check(packet["command"] as? String == "grant_api_client" && packet["ttl_seconds"] as? Int == 120)
-            try check(packet["client_id"] as? String == current.clientID)
+            try check(packet["client_id"] as? String == current.clientID(.openWork))
+            try check(current.clientID(.openWork) == "openwork.\(current.pid).\(current.seconds).\(current.microseconds)")
             try check(APICredentialStore.valid(packet["api_key"] as? String ?? ""))
             acknowledge(controller, packet, session: nextSession)
             try check(responses.count == 2 && responses.allSatisfy { token($0) == nil })
@@ -304,6 +320,7 @@ struct DesktopConnectionsTests {
             try check(!controller.approved && !controller.clientActive)
             try check(revoke["command"] as? String == "revoke_api_clients")
             try check(revoke["api_key"] == nil && revoke["client_id"] == nil)
+            try check(revoke["client_prefix"] as? String == "openwork." && revoke.count == 4)
             acknowledge(controller, revoke, ok: !revokeFails)
             try wait { !controller.busy }
             try check(!controller.approved)
@@ -413,9 +430,11 @@ struct DesktopConnectionsTests {
 
     private static func brokerAuth() throws {
         let own = try peer()
-        for application: OpenWorkApplicationIdentity? in [nil, OpenWorkApplicationIdentity(process: own, bundleURL: URL(fileURLWithPath: "/private/synthetic/OpenWork.app"))] {
+        let openWork = DesktopApplicationIdentity(client: .openWork, process: own, bundleURL: URL(fileURLWithPath: "/private/synthetic/OpenWork.app"))
+        let openCode = DesktopApplicationIdentity(client: .openCode, process: own, bundleURL: URL(fileURLWithPath: "/private/synthetic/OpenCode.app"))
+        for applications in [[], [openWork], [openCode], [openWork, openCode]] {
             var calls = 0
-            let value = broker(namespace(), application: { application }, handler: { _, _, reply in calls += 1; reply(.failure(.backend)) })
+            let value = broker(namespace(), applications: { applications }, handler: { _, _, _, reply in calls += 1; reply(.failure(.backend)) })
             defer { value.stop(); pump(); cleanup(value.path) }
             try value.start()
             let box = ResultBox<Result<[String: Any], Error>>()
@@ -597,5 +616,397 @@ struct DesktopConnectionsTests {
         try wait { box.value != nil }
         let response = try box.value!.get()
         try check(response["api_key"] == nil)
+    }
+
+    // MARK: OpenCode
+
+    private static func approvals(_ mock: MockApprovalStorage) throws -> OpenCodeEngineApprovals {
+        try OpenCodeEngineApprovalStore(service: namespace(), storage: mock).load()
+    }
+
+    private static func openCodeStorage(enabled: Bool, engines: [String] = []) -> MockApprovalStorage {
+        let mock = MockApprovalStorage()
+        mock.value = OpenCodeEngineApprovalStore.encode(OpenCodeEngineApprovals(enabled: enabled, engines: engines))
+        return mock
+    }
+
+    private static func withOpenCode(_ mock: MockApprovalStorage,
+                                     _ body: (OpenCodeConnectionController, ResultBox<[[String: Any]]>) throws -> Void) throws {
+        let service = namespace()
+        let packets = ResultBox<[[String: Any]]>()
+        packets.set([])
+        let value = OpenCodeConnectionController(service: service,
+            storage: OpenCodeEngineApprovalStore(service: service, storage: mock), clock: { 1000 },
+            send: { packet in packets.set((packets.value ?? []) + [packet]); return true },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
+        defer { value.shutdown(); pump() }
+        value.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
+        try wait { mock.reads > 0 }
+        pump(0.1)
+        try body(value, packets)
+    }
+
+    private static func acknowledge(_ controller: OpenCodeConnectionController, _ packet: [String: Any], ok: Bool = true) {
+        controller.receiveAcknowledgement(["event": "api_client", "request_id": packet["request_id"] as? String ?? "",
+                                          "ok": ok, "api_session": firstSession])
+    }
+
+    private static func notConnected(_ result: Result<[String: Any], DesktopConnectionError>?) -> Bool {
+        guard case .success(let value) = result else { return false }
+        return value.count == 2 && value["status"] as? String == "not_connected" && value["api_key"] == nil
+    }
+
+    private static func openCodeApproval() throws {
+        let mock = MockApprovalStorage()
+        let store = OpenCodeEngineApprovalStore(service: namespace(), storage: mock)
+        try check(try store.load() == OpenCodeEngineApprovals())
+        let engines = ["123.1700000000.42", "99999.1700000001.999999"]
+        try store.save(OpenCodeEngineApprovals(enabled: true, engines: engines))
+        try check(mock.adds == 1 && String(data: mock.value!, encoding: .utf8)
+                  == "opencode:5NZ4Q7NXJ4:ai.opencode.desktop:v1:enabled:123.1700000000.42,99999.1700000001.999999")
+        try check(try store.load() == OpenCodeEngineApprovals(enabled: true, engines: engines))
+        try store.save(OpenCodeEngineApprovals(enabled: true))
+        try check(try store.load() == OpenCodeEngineApprovals(enabled: true))
+        try store.save(OpenCodeEngineApprovals())
+        try check(String(data: mock.value!, encoding: .utf8) == "opencode:5NZ4Q7NXJ4:ai.opencode.desktop:v1:revoked")
+        try check(try store.load() == OpenCodeEngineApprovals() && mock.replacements == 2)
+        for invalid in [OpenCodeEngineApprovals(enabled: false, engines: ["1.2.3"]),
+                        OpenCodeEngineApprovals(enabled: true, engines: (0..<9).map { "\($0 + 2).1.1" }),
+                        OpenCodeEngineApprovals(enabled: true, engines: ["1.2"])] {
+            do { try store.save(invalid); throw CheckFailure() }
+            catch APICredentialError.storage {}
+        }
+        let prefix = "opencode:5NZ4Q7NXJ4:ai.opencode.desktop:v1:"
+        for corrupt in ["synthetic invalid approval", prefix, prefix + "approved", prefix + "enabled:1.2",
+                        prefix + "enabled:1.2.3,1.2.3", prefix + "enabled:1.2.3,", prefix + "enabled:a.2.3",
+                        prefix + "enabled:1.2.1234567", prefix + "enabled:" + (0..<9).map { "\($0 + 2).1.1" }.joined(separator: ","),
+                        "openwork:F5DJWB4CCV:com.differentai.openwork:v1:approved",
+                        "opencode:F5DJWB4CCV:ai.opencode.desktop:v1:enabled:1.2.3"] {
+            mock.value = Data(corrupt.utf8)
+            do { _ = try store.load(); throw CheckFailure() }
+            catch APICredentialError.corrupt {}
+        }
+        try store.save(OpenCodeEngineApprovals(enabled: true, engines: ["5.6.7"]))
+        try check(try store.load().engines == ["5.6.7"])
+        mock.readStatus = errSecDecode
+        try store.save(OpenCodeEngineApprovals(enabled: true, engines: ["5.6.8"]))
+        try check(try store.load().engines == ["5.6.8"])
+        for (status, expected) in [(errSecInteractionNotAllowed, APICredentialError.locked), (errSecAuthFailed, .denied)] {
+            let locked = openCodeStorage(enabled: true, engines: ["5.6.7"])
+            locked.readStatus = status
+            let lockedStore = OpenCodeEngineApprovalStore(service: namespace(), storage: locked)
+            do { _ = try lockedStore.load(); throw CheckFailure() }
+            catch let error as APICredentialError { try check(error == expected) }
+            do { try lockedStore.save(OpenCodeEngineApprovals()); throw CheckFailure() }
+            catch let error as APICredentialError { try check(error == expected) }
+            try check(locked.adds == 0 && locked.replacements == 0)
+        }
+    }
+
+    private static func openCodePending() throws {
+        let mock = openCodeStorage(enabled: true, engines: ["1.1.1"])
+        try withOpenCode(mock) { controller, packets in
+            let current = try peer()
+            try check(controller.approved && controller.pendingEngine == nil)
+            var status: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { status = $0 }
+            try check(notConnected(status) && controller.pendingEngine == current)
+            try check(controller.message.contains("asking to use Stark"))
+            var connection: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("connection", peer: current) { connection = $0 }
+            guard case .failure(.unapproved) = connection else { throw CheckFailure() }
+            try check((packets.value ?? []).isEmpty && token(connection) == nil)
+            controller.allow()
+            try wait { !controller.busy }
+            try check(controller.pendingEngine == nil && controller.message.contains("allowed"))
+            // The stale engine is dropped; the allowed one is persisted.
+            try check(try approvals(mock) == OpenCodeEngineApprovals(enabled: true, engines: [current.instanceID]))
+            var granted: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("connection", peer: current) { granted = $0 }
+            let packet = packets.value!.last!
+            try check(packet["command"] as? String == "grant_api_client" && packet["ttl_seconds"] as? Int == 120)
+            try check(packet["client_id"] as? String == "opencode." + current.instanceID)
+            acknowledge(controller, packet)
+            try check(token(granted) == packet["api_key"] as? String && controller.clientActive)
+            guard case .success(let details) = granted else { throw CheckFailure() }
+            try check(details["status"] as? String == "connected" && details["api_session"] as? String == firstSession)
+            var refreshed: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { refreshed = $0 }
+            guard case .success(let value) = refreshed else { throw CheckFailure() }
+            try check(value["status"] as? String == "connected" && value["api_key"] == nil)
+        }
+    }
+
+    private static func openCodeDeny() throws {
+        let mock = openCodeStorage(enabled: true)
+        try withOpenCode(mock) { controller, packets in
+            let current = try peer()
+            controller.handle("status", peer: current) { _ in }
+            try check(controller.pendingEngine == current)
+            controller.deny()
+            try check(controller.pendingEngine == nil && controller.message.contains("denied"))
+            var status: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { status = $0 }
+            try check(notConnected(status) && controller.pendingEngine == nil)
+            controller.allow()
+            try check(!controller.busy && (packets.value ?? []).isEmpty)
+            try check(try approvals(mock) == OpenCodeEngineApprovals(enabled: true))
+            let stopped = DesktopProcessIdentity(pid: 0, parent: 0, seconds: 0, microseconds: 0)
+            controller.handle("status", peer: stopped) { _ in }
+            try check(controller.pendingEngine == nil)
+        }
+    }
+
+    private static func openCodeDisabled() throws {
+        for mock in [MockApprovalStorage(), openCodeStorage(enabled: false)] {
+            try withOpenCode(mock) { controller, packets in
+                let current = try peer()
+                try check(!controller.approved && controller.message == "OpenCode is not connected.")
+                var status: Result<[String: Any], DesktopConnectionError>?
+                controller.handle("status", peer: current) { status = $0 }
+                try check(notConnected(status) && controller.pendingEngine == nil)
+                var connection: Result<[String: Any], DesktopConnectionError>?
+                controller.handle("connection", peer: current) { connection = $0 }
+                guard case .failure(.unapproved) = connection else { throw CheckFailure() }
+                try check((packets.value ?? []).isEmpty && mock.adds == 0 && mock.replacements == 0)
+            }
+        }
+        let corrupt = MockApprovalStorage()
+        corrupt.value = Data("synthetic invalid approval".utf8)
+        try withOpenCode(corrupt) { controller, _ in
+            try check(!controller.approved && controller.message.contains("approval is invalid"))
+            try check(controller.message.contains("API key has not changed"))
+        }
+        // Connect never saves over approvals that are still being read.
+        let saved = openCodeStorage(enabled: true, engines: ["1.1.1"])
+        let service = namespace()
+        let early = OpenCodeConnectionController(service: service,
+            storage: OpenCodeEngineApprovalStore(service: service, storage: saved), send: { _ in true },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
+        defer { early.shutdown(); pump() }
+        early.connect()
+        try check(early.message.contains("Start Stark's local API"))
+        early.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
+        early.connect()
+        try check(!early.busy && early.message.contains("still reading"))
+        try wait { early.approved }
+        try check(try approvals(saved).engines == ["1.1.1"] && saved.adds == 0 && saved.replacements == 0)
+    }
+
+    private static func openCodeRevoke() throws {
+        let current = try peer()
+        let mock = openCodeStorage(enabled: true, engines: [current.instanceID])
+        try withOpenCode(mock) { controller, packets in
+            var response: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("connection", peer: current) { response = $0 }
+            acknowledge(controller, packets.value!.last!)
+            try check(token(response) != nil && controller.clientActive)
+            var waiting: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("connection", peer: current) { waiting = $0 }
+            try check(waiting != nil)
+            controller.disconnect()
+            let revoke = packets.value!.last!
+            try check(revoke["command"] as? String == "revoke_api_clients" && revoke["client_prefix"] as? String == "opencode.")
+            try check(revoke["client_id"] == nil && revoke["api_key"] == nil && revoke.count == 4)
+            try check(!controller.approved && !controller.clientActive && controller.disconnectPending)
+            acknowledge(controller, revoke)
+            try wait { !controller.busy }
+            try check(!controller.disconnectPending && controller.message == "OpenCode disconnected.")
+            try check(String(data: mock.value!, encoding: .utf8) == "opencode:5NZ4Q7NXJ4:ai.opencode.desktop:v1:revoked")
+            var status: Result<[String: Any], DesktopConnectionError>?
+            controller.handle("status", peer: current) { status = $0 }
+            try check(notConnected(status) && controller.pendingEngine == nil)
+        }
+        let pending = openCodeStorage(enabled: true, engines: [current.instanceID])
+        try withOpenCode(pending) { controller, packets in
+            controller.disconnect()
+            try wait({ !controller.busy }, timeout: 3)
+            try check(controller.disconnectPending && controller.message.contains("disconnection is pending"))
+            controller.disconnect()
+            acknowledge(controller, packets.value!.last!)
+            try wait { !controller.busy }
+            try check(!controller.disconnectPending && controller.message == "OpenCode disconnected.")
+        }
+    }
+
+    private static func spawn(_ arguments: [String], environment: [String]) throws -> pid_t {
+        var pid: pid_t = 0
+        let argv = arguments.map { strdup($0) } + [nil]
+        let envp = environment.map { strdup($0) } + [nil]
+        defer { (argv + envp).forEach { free($0) } }
+        guard posix_spawn(&pid, arguments[0], nil, nil, argv, envp) == 0 else { throw CheckFailure() }
+        return pid
+    }
+
+    private static func reap(_ pid: pid_t) {
+        var status: Int32 = 0
+        _ = kill(pid, SIGKILL)
+        _ = waitpid(pid, &status, 0)
+    }
+
+    private static func child(_ arguments: [String] = [], environment: [String] = [], leading: [String] = []) throws -> pid_t {
+        try spawn([CommandLine.arguments[0]] + leading + ["child-wait"] + arguments, environment: ["PATH=/usr/bin:/bin"] + environment)
+    }
+
+    private static func openCodePrune() throws {
+        var children: [pid_t] = []
+        defer { children.forEach(reap) }
+        for _ in 0..<9 { children.append(try child()) }
+        let ids = try children.map { pid -> String in
+            guard let identity = DesktopProcessIdentity.read(pid) else { throw CheckFailure() }
+            return identity.instanceID
+        }
+        try check(Set(ids).count == 9 && ids.allSatisfy { DesktopProcessIdentity.isRunning(instanceID: $0) })
+        try check(OpenCodeEngineApprovalStore.approving(ids[8], after: Array(ids[0..<8])) == Array(ids[1...8]))
+        try check(OpenCodeEngineApprovalStore.approving(ids[8], after: ["1.1.1", ids[0], ids[8]]) == [ids[0], ids[8]])
+        try check(OpenCodeEngineApprovalStore.approving(ids[0], after: []) == [ids[0]])
+        try check(!DesktopProcessIdentity.isRunning(instanceID: "1.1.1") && !DesktopProcessIdentity.isRunning(instanceID: "x"))
+        reap(children[0])
+        try check(!DesktopProcessIdentity.isRunning(instanceID: ids[0]))
+        try check(OpenCodeEngineApprovalStore.approving(ids[2], after: [ids[0], ids[1]]) == [ids[1], ids[2]])
+    }
+
+    private static func openCodeEnginePath() throws {
+        guard let temporary = realpath(FileManager.default.temporaryDirectory.path, nil) else { throw CheckFailure() }
+        let base = URL(fileURLWithPath: String(cString: temporary), isDirectory: true)
+            .appendingPathComponent("stark-engine-path-\(UUID().uuidString)", isDirectory: true)
+        free(temporary)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let root = base.appendingPathComponent("cli", isDirectory: true)
+        let outside = base.appendingPathComponent("outside", isDirectory: true)
+        func file(_ relative: String, under folder: URL = root) throws -> String {
+            let url = folder.appendingPathComponent(relative)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("synthetic".utf8).write(to: url)
+            return url.path
+        }
+        try check(DesktopClientPeer.isStagedOpenCodeEngine(try file("2.2.5-arm64/opencode-cli"), root: root))
+        try check(DesktopClientPeer.isStagedOpenCodeEngine(try file(String(repeating: "a", count: 64) + "/opencode-cli"), root: root))
+        try check(DesktopClientPeer.isStagedOpenCodeEngine(try file("v_1.x-y/opencode-cli"), root: root))
+        for relative in ["opencode-cli", "2.2.5-arm64/nested/opencode-cli", "2.2.5-arm64/opencode", "bad stage/opencode-cli",
+                         String(repeating: "a", count: 65) + "/opencode-cli", "2.2.5+arm64/opencode-cli"] {
+            try check(!DesktopClientPeer.isStagedOpenCodeEngine(try file(relative), root: root))
+        }
+        try check(!DesktopClientPeer.isStagedOpenCodeEngine(root.appendingPathComponent("missing/opencode-cli").path, root: root))
+        try check(!DesktopClientPeer.isStagedOpenCodeEngine(try file("2.2.5-arm64/opencode-cli", under: outside), root: root))
+        try check(symlink(outside.appendingPathComponent("2.2.5-arm64").path, root.appendingPathComponent("linked").path) == 0)
+        try check(!DesktopClientPeer.isStagedOpenCodeEngine(root.appendingPathComponent("linked/opencode-cli").path, root: root))
+        try check(!DesktopClientPeer.isStagedOpenCodeEngine(try file("2.2.5-arm64/opencode-cli"), root: base.appendingPathComponent("absent")))
+        guard let home = DesktopClientPeer.userHome() else { throw CheckFailure() }
+        try check(DesktopClientPeer.openCodeEngineRoot(profile: nil)?.path
+                  == home.appendingPathComponent("Library/Application Support/ai.opencode.desktop/cli").path)
+        try check(DesktopClientPeer.openCodeEngineRoot(profile: base)?.path == base.appendingPathComponent("opencode-desktop/desktop/cli").path)
+    }
+
+    private static func openCodeConfigDirectory() throws {
+        guard let home = DesktopClientPeer.userHome() else { throw CheckFailure() }
+        let cases: [(DesktopLaunchEnvironment, String)] = [
+            (DesktopLaunchEnvironment(configDirectory: "/synthetic/config", xdgConfigHome: "/synthetic/xdg", home: "/synthetic/home"), "/synthetic/config"),
+            (DesktopLaunchEnvironment(xdgConfigHome: "/synthetic/xdg", home: "/synthetic/home"), "/synthetic/xdg/opencode"),
+            (DesktopLaunchEnvironment(home: "/synthetic/home"), "/synthetic/home/.config/opencode"),
+            (DesktopLaunchEnvironment(), home.appendingPathComponent(".config/opencode").path),
+        ]
+        for (environment, expected) in cases {
+            try check(DesktopClientPeer.openCodeConfigDirectory(environment)?.path == expected)
+        }
+    }
+
+    private static func launchEnvironment() throws {
+        func read(arguments: [String] = [], _ environment: [String], leading: [String] = []) throws -> (DesktopLaunchEnvironment?, DesktopLaunchEnvironment?) {
+            let pid = try child(arguments, environment: environment, leading: leading)
+            defer { reap(pid) }
+            return (DesktopClientPeer.launchEnvironment(pid, client: .openWork), DesktopClientPeer.launchEnvironment(pid, client: .openCode))
+        }
+        let paths = ["OPENCODE_CONFIG_DIR=/synthetic/config", "XDG_CONFIG_HOME=/synthetic/xdg", "HOME=/synthetic/home"]
+        let (openWork, openCode) = try read(paths)
+        try check(openWork == DesktopLaunchEnvironment(configDirectory: "/synthetic/config"))
+        try check(openCode == DesktopLaunchEnvironment(configDirectory: "/synthetic/config", xdgConfigHome: "/synthetic/xdg", home: "/synthetic/home"))
+        let (_, unset) = try read(["XDG_CONFIG_HOME=", "OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT=", "DYLD_FRAMEWORK_PATH=", "BUN_INSPECT="])
+        try check(unset == DesktopLaunchEnvironment())
+        // OpenCode's engine refuses loader and inspector variables; OpenWork's checks are unchanged.
+        for variable in ["DYLD_FRAMEWORK_PATH=/synthetic/missing", "DYLD_LIBRARY_PATH=/synthetic/missing", "BUN_INSPECT=1", "BUN_BE_BUN=1",
+                         "BUN_INSPECT_CONNECT_TO=ws://127.0.0.1:9", "BUN_INSPECT_PRELOAD=/synthetic/preload.js",
+                         "OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT=9222", "XDG_CONFIG_HOME=relative", "HOME=relative"] {
+            let (work, code) = try read([variable])
+            try check(work != nil && code == nil)
+        }
+        for variable in ["NODE_OPTIONS=--require /synthetic/x.js", "BUN_OPTIONS=--preload /synthetic/x.js", "ELECTRON_RUN_AS_NODE=1",
+                         "OPENCODE_CONFIG_DIR=relative", "OPENCODE_CONFIG_DIR="] {
+            let (work, code) = try read([variable])
+            try check(work == nil && code == nil)
+        }
+        for argument in ["--inspect", "--inspect-brk=9229", "--preload", "-e", "--eval", "--require=x", "--remote-debugging-port=9222"] {
+            let (work, code) = try read(arguments: [argument], [])
+            try check(work == nil && code == nil)
+        }
+        let (work, code) = try read(arguments: ["serve", "--service"], [])
+        try check(work != nil && code == DesktopLaunchEnvironment())
+        // Only `serve --service` as the first two arguments marks Desktop's background engine.
+        let (_, service) = try read(paths, leading: ["serve", "--service"])
+        try check(service == DesktopLaunchEnvironment(configDirectory: "/synthetic/config", xdgConfigHome: "/synthetic/xdg",
+                                                      home: "/synthetic/home", service: true))
+        for leading in [["serve"], ["--service", "serve"], ["run", "--service"], ["serve", "--stdio"]] {
+            let (_, other) = try read([], leading: leading)
+            try check(other == DesktopLaunchEnvironment())
+        }
+    }
+
+    private static func coordinator() throws {
+        let service = namespace()
+        let current = try peer()
+        let openWorkMock = MockApprovalStorage(approved: true)
+        let openCodeMock = openCodeStorage(enabled: true, engines: [current.instanceID])
+        let packets = ResultBox<[[String: Any]]>()
+        packets.set([])
+        let connections = DesktopConnections(service: service,
+            openWorkStorage: DesktopConnectionApprovalStore(service: service, storage: openWorkMock),
+            openCodeStorage: OpenCodeEngineApprovalStore(service: service, storage: openCodeMock),
+            send: { packet in packets.set((packets.value ?? []) + [packet]); return true },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] })
+        let expectedPath = broker(service).path
+        defer { connections.shutdown(); pump(); cleanup(expectedPath) }
+        try check(connections.brokerPath == nil)
+        connections.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
+        try check(connections.brokerPath == expectedPath)
+        var info = stat()
+        try check(lstat(expectedPath, &info) == 0 && info.st_mode & S_IFMT == S_IFSOCK && info.st_mode & 0o777 == 0o600)
+        try wait { connections.openWork.approved && connections.openCode.approved }
+        var work: Result<[String: Any], DesktopConnectionError>?
+        var code: Result<[String: Any], DesktopConnectionError>?
+        connections.openWork.handle("connection", peer: current) { work = $0 }
+        connections.openCode.handle("connection", peer: current) { code = $0 }
+        let grants = packets.value!
+        try check(grants.count == 2 && grants.map { $0["client_id"] as? String ?? "" }
+                  == ["openwork." + current.instanceID, "opencode." + current.instanceID])
+        let ack: ([String: Any]) -> [String: Any] = { ["event": "api_client", "request_id": $0["request_id"] as? String ?? "",
+                                                       "ok": true, "api_session": firstSession] }
+        connections.receiveAcknowledgement(ack(grants[1]))
+        try check(work == nil && token(code) == grants[1]["api_key"] as? String)
+        connections.receiveAcknowledgement(ack(grants[0]))
+        try check(token(work) == grants[0]["api_key"] as? String)
+        // An unverified peer on the shared socket gets no capability from either client.
+        let box = ResultBox<Result<[String: Any], Error>>()
+        DispatchQueue.global().async { box.set(Result { try socketReply(expectedPath) }) }
+        try wait { box.value != nil }
+        let response = try box.value!.get()
+        try check(response["api_key"] == nil && response["status"] as? String == "unapproved")
+        connections.openCode.disconnect()
+        let revoke = packets.value!.last!
+        try check(revoke["client_prefix"] as? String == "opencode.")
+        connections.receiveAcknowledgement(ack(revoke))
+        try wait { !connections.openCode.busy }
+        try check(connections.openCode.message == "OpenCode disconnected.")
+        try check(connections.openWork.approved && connections.openWork.clientActive)
+        try check(openWorkMock.value == MockApprovalStorage.allowed)
+        connections.receiveConnection(["api_session": nextSession, "base_url": "http://127.0.0.1:8000/v1"])
+        try check(connections.brokerPath == expectedPath)
+        connections.shutdown()
+        pump()
+        try check(connections.brokerPath == nil && access(expectedPath, F_OK) != 0)
+        var late: Result<[String: Any], DesktopConnectionError>?
+        connections.openWork.handle("connection", peer: current) { late = $0 }
+        try check(token(late) == nil)
     }
 }

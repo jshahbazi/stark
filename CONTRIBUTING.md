@@ -107,6 +107,8 @@ The OpenWork connector source is maintained in the separate `stark-openwork` rep
 
 The accepted native client identity is OpenWork's signed macOS app (`com.differentai.openwork`, Team ID `F5DJWB4CCV`) with its signed `opencode2` sidecar. This identity check does not sandbox third-party plugins running in the same OpenWork process. Keep that trust boundary explicit in user documentation. Cover Connect, Disconnect/revocation, reconnect after port changes, preserving unrelated JSONC settings, and cleanup on failure in installer/controller tests. Treat helper-based client runs as historical evidence; only a fresh helperless run can qualify the managed connector, and should be recorded separately with versions, hashes and aggregate results rather than prompt/response data.
 
+OpenCode Desktop (`ai.opencode.desktop`, Team ID `5NZ4Q7NXJ4`) is a second managed client sharing the same connector entry and broker socket. Its detached `opencode-cli` engine has no app ancestry, so Stark accepts only the signed engine running from OpenCode Desktop's staging folder as its `serve --service` background engine, with the configuration the running, verified Desktop app gives it, and the user approves each engine instance once. Keep the standalone or Homebrew `opencode` CLI on the copied-key path. Each client's grants carry its own client ID prefix (`openwork.` or `opencode.`), and Disconnect revokes only that prefix; keep client IDs unique per engine instance.
+
 ## Commits and pull requests
 
 Use Conventional Commits. Push authorized work to its branch; open a pull request only when asked. CI must pass `CI completed` and `Security completed` before merge, with the branch up to date with `main`.

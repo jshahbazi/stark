@@ -10,71 +10,45 @@ final class OpenWorkConnectionController: ObservableObject {
     @Published private(set) var clientActive = false
     @Published private(set) var disconnectPending = false
 
-    private let service: String
     private let storage: DesktopConnectionApprovalStore
-    private let send: ([String: Any]) -> Bool
+    private let capabilities: DesktopClientCapabilities
     private let snapshot: () -> [String: Any]
-    private let clock: () -> TimeInterval
+    private let brokerPath: () -> String?
     private let queue = DispatchQueue(label: "stark.openwork.setup", qos: .userInitiated)
-    private var apiSession = ""
+    private var apiSession: String { capabilities.apiSession }
     private var closing = false
     private var approvalLoaded = false
     private var approvalLoading = false
     private var lastBaseURL = ""
     private var operation = UUID()
-    private var broker: DesktopConnectionBroker?
     private var installedDirectory: URL?
-    private var capabilities: [String: Capability] = [:]
-    private var waiting: [String: [DesktopConnectionBroker.Reply]] = [:]
-    private var acknowledgements: [String: (Bool) -> Void] = [:]
-
-    private struct Capability {
-        let peer: DesktopProcessIdentity
-        let token: String
-        let session: String
-        let refreshed: TimeInterval
-    }
 
     init(service: String, storage: DesktopConnectionApprovalStore? = nil,
          clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-         send: @escaping ([String: Any]) -> Bool, snapshot: @escaping () -> [String: Any]) {
-        self.service = service
+         send: @escaping ([String: Any]) -> Bool, snapshot: @escaping () -> [String: Any],
+         brokerPath: @escaping () -> String?) {
         self.storage = storage ?? DesktopConnectionApprovalStore(service: service)
-        self.send = send
+        self.capabilities = DesktopClientCapabilities(client: .openWork, limit: 16, clock: clock, send: send)
         self.snapshot = snapshot
-        self.clock = clock
+        self.brokerPath = brokerPath
     }
 
     func receiveConnection(_ event: [String: Any]) {
         guard !closing, let session = event["api_session"] as? String, session.count == 32,
               event["base_url"] as? String != nil else { return }
-        if session != apiSession {
-            failPending()
-            capabilities.removeAll()
-            apiSession = session
-        }
+        capabilities.update(session: session)
         let baseURL = event["base_url"] as? String ?? ""
         if !lastBaseURL.isEmpty, lastBaseURL != baseURL, approved {
             clientActive = false
             message = "Stark's port changed. Choose Reconnect, then reopen OpenWork."
         }
         lastBaseURL = baseURL
-        if broker == nil {
-            let next = DesktopConnectionBroker(service: service, application: { [weak self] in
-                OpenWorkApplicationIdentity.running(configurationRoot: self?.testProfileDirectory)
-            }, handler: { [weak self] method, peer, reply in
-                guard let self else { reply(.failure(.unavailable)); return }
-                self.handle(method, peer: peer, reply: reply)
-            })
-            do { try next.start(); broker = next }
-            catch { message = "Stark could not start its private OpenWork connection. Reopen Stark and try again." }
-        }
+        if brokerPath() == nil { message = "Stark could not start its private OpenWork connection. Reopen Stark and try again." }
         if !approvalLoaded { loadApproval() }
     }
 
     func receiveAcknowledgement(_ event: [String: Any]) {
-        guard let id = event["request_id"] as? String, let completion = acknowledgements.removeValue(forKey: id) else { return }
-        completion(!closing && event["ok"] as? Bool == true && event["api_session"] as? String == apiSession)
+        capabilities.receiveAcknowledgement(event)
     }
 
     private func loadApproval() {
@@ -98,6 +72,9 @@ final class OpenWorkConnectionController: ObservableObject {
                     self.message = allowed ? "OpenWork is authorized. Select Stark in OpenWork." : "OpenWork is not connected."
                 case .failure(let error): self.message = Self.storageMessage(error)
                 }
+                if self.brokerPath() == nil {
+                    self.message = "Stark could not start its private OpenWork connection. Reopen Stark and try again."
+                }
             }
         }
     }
@@ -116,38 +93,15 @@ final class OpenWorkConnectionController: ObservableObject {
         guard !apiSession.isEmpty, snapshot()["api_base_url"] as? String != "" else { reply(.failure(.backend)); return }
         if method == "status" { reply(.success(status())); return }
         guard method == "connection", peer.isCurrent else { reply(.failure(.identity)); return }
-        capabilities = capabilities.filter { $0.value.session == apiSession && $0.value.peer.isCurrent }
-        let client = peer.clientID
-        let now = clock()
-        if let current = capabilities[client], now - current.refreshed < 30 {
-            reply(.success(connection(current.token)))
-            clientActive = true
-            message = "Connected to OpenWork."
-            return
-        }
-        if waiting[client] != nil { waiting[client]?.append(reply); return }
-        guard capabilities.count < 16 || capabilities[client] != nil else { reply(.failure(.busy)); return }
-        let token: String
-        do { token = try capabilities[client]?.token ?? APICredentialStore.randomKey() }
-        catch { reply(.failure(.backend)); return }
-        let expected = apiSession
-        waiting[client] = [reply]
-        control(["command": "grant_api_client", "api_session": expected,
-                 "client_id": client, "api_key": token, "ttl_seconds": 120]) { [weak self] accepted in
-            guard let self else { return }
-            let callbacks = self.waiting.removeValue(forKey: client) ?? []
-            guard accepted, self.approved, expected == self.apiSession, peer.isCurrent else {
-                for callback in callbacks { callback(.failure(.backend)) }
-                return
+        capabilities.issue(to: peer, approved: { [weak self] in self?.approved == true }) { [weak self] result in
+            guard let self else { reply(.failure(.unavailable)); return }
+            switch result {
+            case .success(let token):
+                self.clientActive = true
+                self.message = "Connected to OpenWork."
+                reply(.success(self.connection(token)))
+            case .failure(let error): reply(.failure(error))
             }
-            self.capabilities[client] = Capability(peer: peer, token: token, session: expected,
-                                                 refreshed: self.clock())
-#if STARK_CONNECTION_VALIDATION
-            ConnectionPrivacyAudit.remember(token)
-#endif
-            self.clientActive = true
-            self.message = "Connected to OpenWork."
-            for callback in callbacks { callback(.success(self.connection(token))) }
         }
     }
 
@@ -157,20 +111,8 @@ final class OpenWorkConnectionController: ObservableObject {
         return value
     }
 
-    private func control(_ value: [String: Any], completion: @escaping (Bool) -> Void) {
-        guard !closing, acknowledgements.count < 16 else { completion(false); return }
-        let id = UUID().uuidString
-        var payload = value
-        payload["request_id"] = id
-        acknowledgements[id] = completion
-        guard send(payload) else { acknowledgements.removeValue(forKey: id)?(false); return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.acknowledgements.removeValue(forKey: id)?(false)
-        }
-    }
-
     func connect() {
-        guard !busy, !closing, !disconnectPending, broker != nil, !apiSession.isEmpty,
+        guard !busy, !closing, !disconnectPending, brokerPath() != nil, !apiSession.isEmpty,
               let base = snapshot()["api_base_url"] as? String, !base.isEmpty else {
             message = "Start Stark's local API with Retry API, then connect OpenWork."
             return
@@ -180,12 +122,13 @@ final class OpenWorkConnectionController: ObservableObject {
         operation = UUID()
         message = "Waiting for OpenWork."
         let identifier = operation
-        if let application = OpenWorkApplicationIdentity.running(configurationRoot: testProfileDirectory) {
+        if let application = DesktopApplicationIdentity.running(.openWork, configurationRoot: testProfileDirectory) {
             install(in: application, baseURL: base, operation: identifier, attempt: 0)
             return
         }
-        guard let url = testApplicationURL ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: OpenWorkApplicationIdentity.bundleID),
-              Self.verifyApplication(url) else {
+        guard let url = DesktopConnectionTesting.application(.openWork)
+                ?? NSWorkspace.shared.urlForApplication(withBundleIdentifier: DesktopClient.openWork.bundleID),
+              DesktopClientPeer.verifyApplication(url, client: .openWork) else {
             busy = false; message = "Install the official OpenWork macOS app, open a local workspace, then connect again."
             return
         }
@@ -206,7 +149,7 @@ final class OpenWorkConnectionController: ObservableObject {
 
     private func waitForApplication(baseURL: String, operation: UUID, attempt: Int) {
         guard self.operation == operation, !closing else { return }
-        if let application = OpenWorkApplicationIdentity.running(configurationRoot: testProfileDirectory) {
+        if let application = DesktopApplicationIdentity.running(.openWork, configurationRoot: testProfileDirectory) {
             install(in: application, baseURL: baseURL, operation: operation, attempt: 0)
         } else if attempt < 40 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -215,9 +158,8 @@ final class OpenWorkConnectionController: ObservableObject {
         } else { busy = false; message = "Open a local workspace in OpenWork, then connect again." }
     }
 
-    private func install(in application: OpenWorkApplicationIdentity, baseURL: String, operation: UUID, attempt: Int) {
-        guard self.operation == operation, !closing, let connectorDirectory, let broker else { return }
-        let path = broker.path
+    private func install(in application: DesktopApplicationIdentity, baseURL: String, operation: UUID, attempt: Int) {
+        guard self.operation == operation, !closing, let connectorDirectory, let path = brokerPath() else { return }
         let storage = storage
         let testRoot = testProfileDirectory
         queue.async { [weak self] in
@@ -254,7 +196,8 @@ final class OpenWorkConnectionController: ObservableObject {
                             self.message = "This model has no declared context limit. Run a model with a known context limit to use it in OpenWork."
                         }
                     case .failure(let error):
-                        self.message = (error as? OpenWorkConnectorInstallError)?.message ?? Self.storageMessage(error)
+                        self.message = (error as? OpenWorkConnectorInstallError)?.message(DesktopClient.openWork.displayName)
+                            ?? Self.storageMessage(error)
                     }
                 } else if attempt < 40 {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
@@ -274,9 +217,7 @@ final class OpenWorkConnectionController: ObservableObject {
         approved = false
         disconnectPending = true
         clientActive = false
-        capabilities.removeAll()
-        for callbacks in waiting.values { for callback in callbacks { callback(.failure(.unapproved)) } }
-        waiting.removeAll()
+        capabilities.clear(.unapproved)
         operation = UUID()
         let expected = operation
         let expectedSession = apiSession
@@ -304,24 +245,15 @@ final class OpenWorkConnectionController: ObservableObject {
                 }
             }
         }
+        // Revoke only OpenWork's grants; OpenCode keeps its connection.
         if apiSession.isEmpty { finish(true) }
-        else { control(["command": "revoke_api_clients", "api_session": apiSession], completion: finish) }
+        else { capabilities.revoke(completion: finish) }
     }
 
     func shutdown() {
         closing = true
         operation = UUID()
-        failPending()
-        capabilities.removeAll()
-        broker?.stop(); broker = nil
-    }
-
-    private func failPending() {
-        let callbacks = Array(acknowledgements.values)
-        acknowledgements.removeAll()
-        for callback in callbacks { callback(false) }
-        for callbacks in waiting.values { for callback in callbacks { callback(.failure(.backend)) } }
-        waiting.removeAll()
+        capabilities.shutdown()
     }
 
     private var connectorDirectory: URL? {
@@ -344,28 +276,9 @@ final class OpenWorkConnectionController: ObservableObject {
         return URL(fileURLWithPath: String(cString: resolved), isDirectory: true)
     }
 
-    private static func verifyApplication(_ url: URL) -> Bool {
-        var code: SecStaticCode?
-        var requirement: SecRequirement?
-        let source = "anchor apple generic and identifier \"com.differentai.openwork\" and certificate leaf[subject.OU] = \"F5DJWB4CCV\""
-        return SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess
-            && SecRequirementCreateWithString(source as CFString, [], &requirement) == errSecSuccess
-            && code.map { SecStaticCodeCheckValidity($0, SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckNestedCode), requirement) == errSecSuccess } == true
-    }
-
     // Test bundles can isolate the official, unchanged OpenWork release's HOME
     // and data paths. No test option changes signing, peer checks or authorization.
-    private var testProfileDirectory: URL? {
-        guard Bundle.main.bundleIdentifier?.hasPrefix("com.starkengine.menubar.validation.") == true,
-              let path = Bundle.main.object(forInfoDictionaryKey: "StarkOpenWorkTestProfile") as? String,
-              path.hasPrefix("/") else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true)
-    }
-    private var testApplicationURL: URL? {
-        guard testProfileDirectory != nil,
-              let path = Bundle.main.object(forInfoDictionaryKey: "StarkOpenWorkTestApplication") as? String else { return nil }
-        return URL(fileURLWithPath: path, isDirectory: true)
-    }
+    private var testProfileDirectory: URL? { DesktopConnectionTesting.profile }
     private static func testEnvironment(_ root: URL) throws -> [String: String] {
         let locations = ["HOME": "home", "USERPROFILE": "home", "XDG_CONFIG_HOME": "xdg/config", "XDG_DATA_HOME": "xdg/data",
                          "XDG_CACHE_HOME": "xdg/cache", "XDG_STATE_HOME": "xdg/state", "OPENWORK_ELECTRON_USERDATA": "electron/user-data",

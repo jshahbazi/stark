@@ -1,7 +1,7 @@
 """Native coordinator/broker checks use injected approval storage and private sockets.
 
 Run through the locked converter environment. No production Keychain item or
-OpenWork profile is read or modified; the socket namespaces are disposable.
+OpenWork or OpenCode profile is read or modified; the socket namespaces are disposable.
 """
 
 from __future__ import annotations
@@ -31,6 +31,16 @@ SCENARIOS = (
     "broker-deadline",
     "broker-write",
     "broker-cleanup",
+    "opencode-approval",
+    "opencode-pending",
+    "opencode-deny",
+    "opencode-disabled",
+    "opencode-revoke",
+    "opencode-prune",
+    "opencode-engine-path",
+    "opencode-config-directory",
+    "launch-environment",
+    "coordinator",
 )
 
 
@@ -78,6 +88,8 @@ class DesktopConnectionsTests(unittest.TestCase):
                 str(sources / "DesktopConnectionBroker.swift"),
                 str(sources / "OpenWorkConnectorInstaller.swift"),
                 str(sources / "OpenWorkConnectionController.swift"),
+                str(sources / "OpenCodeConnectionController.swift"),
+                str(sources / "DesktopConnections.swift"),
                 str(ROOT / "apps/menu-bar/Tests/DesktopConnectionsTests.swift"),
                 "-o",
                 str(cls.executable),

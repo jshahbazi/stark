@@ -4,25 +4,30 @@ import Foundation
 enum OpenWorkConnectorInstallError: Error {
     case unsafePath, unsafeFile, invalidConfiguration, conflict, concurrentChange, storage, durability
 
-    var message: String {
+    var message: String { message("OpenWork") }
+
+    /// `client` is the display name of the managed client being connected.
+    func message(_ client: String) -> String {
         switch self {
         case .unsafePath, .unsafeFile:
-            return "OpenWork's settings location is unsafe. Check its ownership and permissions, then reconnect."
+            return "\(client)'s settings location is unsafe. Check its ownership and permissions, then reconnect."
         case .invalidConfiguration:
-            return "OpenWork's settings are invalid or too large. Fix them in OpenWork, then reconnect."
+            return "\(client)'s settings are invalid or too large. Fix them in \(client), then reconnect."
         case .conflict:
             return "A different Stark connector is already configured. Remove that connector before reconnecting."
         case .concurrentChange:
-            return "OpenWork's settings changed during connection. Close its settings editor and try again."
+            return "\(client)'s settings changed during connection. Close its settings editor and try again."
         case .storage:
-            return "Stark could not save the OpenWork connection. Check the settings folder and try again."
+            return "Stark could not save the \(client) connection. Check the settings folder and try again."
         case .durability:
-            return "The connection settings were written, but saving them could not be confirmed. Reopen OpenWork and check the connection."
+            return "The connection settings were written, but saving them could not be confirmed. Reopen \(client) and check the connection."
         }
     }
 }
 
 /// Edits only public plugin metadata. No credentials or client auth files enter this type.
+/// OpenWork and OpenCode share one entry: the same package, socket and marker,
+/// so installing for one client finds the other's entry already in place.
 struct OpenWorkConnectorInstaller {
     static let ownershipMarker = "com.starkengine.openwork/v1"
     static let maximumConfigurationBytes = 256 * 1024
