@@ -471,6 +471,15 @@ pub(crate) trait GenerationBackend {
     fn prefix_cache_supported(&self) -> bool {
         false
     }
+    /// Reused prompt tokens are a multiple of this prefill chunk length, itself
+    /// a multiple of `PREFILL_CHUNK_TOKENS`.
+    fn prefix_cache_chunk_tokens(&self) -> usize {
+        prefix_cache::PREFILL_CHUNK_TOKENS
+    }
+    /// What a retained state must match, as reported in readiness.
+    fn prefix_cache_key(&self) -> &'static str {
+        prefix_cache::KEY
+    }
     /// Prompt tokens the next text `generate` will reuse for `input`. A text
     /// generation with a scope retains its state; any other drops the entry.
     fn prefix_cache_plan(
@@ -549,7 +558,12 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         {
             return Err("invalid_model_config");
         }
-        let prefix_cache = prefix_cache.then(|| backend.prefix_cache_supported());
+        let prefix_cache = prefix_cache.then(|| {
+            let chunk = backend.prefix_cache_chunk_tokens();
+            backend.prefix_cache_supported()
+                && chunk >= prefix_cache::PREFILL_CHUNK_TOKENS
+                && chunk.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS)
+        });
         Ok(Self {
             backend,
             mtp,
@@ -626,7 +640,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             None => self.backend.prefix_cache_plan(input, options),
             Some(_) => 0,
         };
-        if reused >= input_tokens || !reused.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS) {
+        if reused >= input_tokens || !reused.is_multiple_of(self.backend.prefix_cache_chunk_tokens()) {
             return Err("invalid_generation_output");
         }
         let report_reuse = self.prefix_cache_enabled();
@@ -1017,8 +1031,8 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "stop_sequences":true,"cancellation":"pipe-v1"});
     if let Some(enabled) = worker.prefix_cache {
         readiness["prefix_cache"] = json!({"supported":enabled,"enabled":enabled,
-            "chunk_tokens":prefix_cache::PREFILL_CHUNK_TOKENS,"idle_seconds":prefix_cache::IDLE_SECONDS,
-            "key":prefix_cache::KEY});
+            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
+            "key":worker.backend.prefix_cache_key()});
         if enabled {
             readiness["state_policy"] = json!(prefix_cache::POLICY);
             readiness["operations"] = json!(["tokenize", "decode", "generate", "reset_cache"]);
@@ -1172,6 +1186,8 @@ mod tests {
         prefix_entry: Option<prefix_cache::PrefixEntry<usize>>,
         prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
         state_allocations: usize,
+        prefix_chunk: usize,
+        prefix_reuse_override: Option<usize>,
     }
 
     struct FakePreparedImage {
@@ -1302,11 +1318,18 @@ mod tests {
             self.prefix_supported
         }
 
+        fn prefix_cache_chunk_tokens(&self) -> usize {
+            self.prefix_chunk
+        }
+
         fn prefix_cache_plan(
             &self,
             input: &[u32],
             options: &GenerationOptions,
         ) -> usize {
+            if let Some(reused) = self.prefix_reuse_override {
+                return reused;
+            }
             self.prefix_entry
                 .as_ref()
                 .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
@@ -1439,6 +1462,8 @@ mod tests {
             prefix_entry: None,
             prefix_pending: None,
             state_allocations: 0,
+            prefix_chunk: prefix_cache::PREFILL_CHUNK_TOKENS,
+            prefix_reuse_override: None,
         })
         .unwrap()
     }
@@ -2656,6 +2681,36 @@ mod tests {
                 "key":"model-instance+context-tokens+cache-scope"})
         );
         assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));
+    }
+
+    #[test]
+    fn prefix_cache_reports_the_backend_chunk_and_rejects_misaligned_reuse() {
+        let coarse = || {
+            let mut backend = prefix_worker(true).backend;
+            backend.prefix_chunk = 4096;
+            GenerationWorker::new_with_options(backend, None, true).unwrap()
+        };
+        assert_eq!(readiness(&mut coarse())["prefix_cache"]["chunk_tokens"], 4096);
+        let mut aligned = coarse();
+        aligned.backend.prefix_reuse_override = Some(4096);
+        assert_eq!(reused(&mut aligned, 8_000), 4096);
+        // A backend contradicting its own grid or the input length fences the worker.
+        for reuse in [2048, 8_000] {
+            let mut worker = coarse();
+            worker.backend.prefix_reuse_override = Some(reuse);
+            let mut output = Vec::new();
+            let request = serde_json::to_vec(&cached_request(8_000, Some(SCOPE))).unwrap();
+            assert_eq!(worker.process_line(&request, &mut output), Err("native_operation_failed"), "{reuse}");
+            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["error"], "invalid_generation_output");
+            assert_eq!(worker.backend.generation_calls, 0);
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+        for chunk in [0, 512, 1536] {
+            let mut backend = prefix_worker(true).backend;
+            backend.prefix_chunk = chunk;
+            let mut invalid = GenerationWorker::new_with_options(backend, None, true).unwrap();
+            assert_eq!(readiness(&mut invalid)["prefix_cache"]["enabled"], false, "{chunk}");
+        }
     }
 
     #[test]

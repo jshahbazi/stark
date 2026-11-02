@@ -222,6 +222,7 @@ class Worker:
             self._launch_worker_sha256 = None
         self.media = None
         self.prefix_cache = False
+        self.prefix_chunk_tokens = None
         command = [str(executable), "--model-path", str(model)]
         try:
             config = read_model_config(Path(model))
@@ -400,6 +401,7 @@ class Worker:
                 self._ready_seen = True
                 self.mtp = mtp_capabilities(reply)
                 self.prefix_cache = prefix_cache_enabled(reply)
+                self.prefix_chunk_tokens = reply["prefix_cache"]["chunk_tokens"] if self.prefix_cache else None
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
@@ -773,13 +775,20 @@ def _read_image_file(path: Path) -> ImageData:
 
 
 def prefix_cache_enabled(ready):
-    """Accept consecutive prefix reuse only from a complete readiness contract."""
+    """Accept consecutive prefix reuse only from a complete readiness contract.
+
+    Reused counts are multiples of the backend's prefill chunk, itself a
+    multiple of 1,024 tokens.
+    """
     settings = ready.get("prefix_cache")
+    chunk = settings.get("chunk_tokens") if isinstance(settings, dict) else None
     return (
         ready.get("state_policy") == "consecutive-prefix-v1"
         and isinstance(settings, dict)
         and settings.get("enabled") is True
-        and settings.get("chunk_tokens") == 1024
+        and type(chunk) is int
+        and 1024 <= chunk <= 65536
+        and chunk % 1024 == 0
         and "reset_cache" in (ready.get("operations") or [])
     )
 

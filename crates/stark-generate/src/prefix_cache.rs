@@ -43,7 +43,15 @@ pub(crate) fn parse_scope(value: &str) -> Option<CacheScope> {
 /// so only these rows are computed identically for any longer prompt that
 /// shares them.
 pub(crate) fn reusable_prefill_rows(prompt_tokens: usize) -> usize {
-    prompt_tokens.saturating_sub(1) / PREFILL_CHUNK_TOKENS * PREFILL_CHUNK_TOKENS
+    chunk_boundary(prompt_tokens, PREFILL_CHUNK_TOKENS)
+}
+
+/// The start of a prompt's final prefill chunk on a grid of `chunk` tokens.
+pub(crate) fn chunk_boundary(
+    prompt_tokens: usize,
+    chunk: usize,
+) -> usize {
+    prompt_tokens.saturating_sub(1) / chunk * chunk
 }
 
 pub(crate) struct PrefixEntry<S> {
@@ -81,6 +89,50 @@ impl<S> PrefixEntry<S> {
         }
         let common = self.prefix.iter().zip(input).take_while(|(cached, token)| cached == token).count();
         common.min(reusable_prefill_rows(input.len())) / PREFILL_CHUNK_TOKENS * PREFILL_CHUNK_TOKENS
+    }
+}
+
+/// A state valid only at the end of its prefix, such as a recurrent-state
+/// snapshot taken at a prefill chunk boundary. A request reuses the whole
+/// prefix or nothing, and must leave at least two prompt tokens to prefill so
+/// its final token takes the same route as on a fresh state.
+pub(crate) struct BoundaryEntry<S> {
+    pub state: S,
+    scope: CacheScope,
+    context_tokens: u32,
+    prefix: Vec<u32>,
+}
+
+impl<S> BoundaryEntry<S> {
+    pub(crate) fn new(
+        state: S,
+        scope: CacheScope,
+        context_tokens: u32,
+        prefix: &[u32],
+    ) -> Self {
+        Self {
+            state,
+            scope,
+            context_tokens,
+            prefix: prefix.to_vec(),
+        }
+    }
+
+    pub(crate) fn reusable(
+        &self,
+        input: &[u32],
+        context_tokens: u32,
+        scope: Option<&CacheScope>,
+    ) -> usize {
+        let fits = input.len().checked_sub(2).is_some_and(|limit| self.prefix.len() <= limit);
+        if scope != Some(&self.scope)
+            || context_tokens != self.context_tokens
+            || !fits
+            || !input.starts_with(&self.prefix)
+        {
+            return 0;
+        }
+        self.prefix.len()
     }
 }
 
@@ -211,6 +263,37 @@ mod tests {
         assert_eq!(entry.reusable(&diverged, 40_960, Some(&SCOPE)), 5 * CHUNK);
         diverged[3] = u32::MAX;
         assert_eq!(entry.reusable(&diverged, 40_960, Some(&SCOPE)), 0);
+    }
+
+    #[test]
+    fn chunk_boundaries_start_the_final_chunk() {
+        assert_eq!(chunk_boundary(0, 4096), 0);
+        assert_eq!(chunk_boundary(4096, 4096), 0);
+        assert_eq!(chunk_boundary(4097, 4096), 4096);
+        assert_eq!(chunk_boundary(18_544, 4096), 16_384);
+        assert_eq!(chunk_boundary(18_544, CHUNK), reusable_prefill_rows(18_544));
+    }
+
+    #[test]
+    fn boundary_entries_reuse_their_whole_prefix_or_nothing() {
+        let boundary = 4 * 4096;
+        let entry = BoundaryEntry::new((), SCOPE, 40_960, &prompt(boundary));
+        assert_eq!(entry.reusable(&prompt(20_000), 40_960, Some(&SCOPE)), boundary);
+        // At least two prompt tokens remain to prefill.
+        assert_eq!(entry.reusable(&prompt(boundary + 2), 40_960, Some(&SCOPE)), boundary);
+        assert_eq!(entry.reusable(&prompt(boundary + 1), 40_960, Some(&SCOPE)), 0);
+        assert_eq!(entry.reusable(&prompt(boundary), 40_960, Some(&SCOPE)), 0);
+        assert_eq!(entry.reusable(&prompt(3), 40_960, Some(&SCOPE)), 0);
+        // A snapshot cannot rewind: any divergence before the boundary misses.
+        let mut diverged = prompt(20_000);
+        diverged[boundary - 1] = u32::MAX;
+        assert_eq!(entry.reusable(&diverged, 40_960, Some(&SCOPE)), 0);
+        diverged[boundary - 1] = (boundary - 1) as u32;
+        diverged[boundary] = u32::MAX;
+        assert_eq!(entry.reusable(&diverged, 40_960, Some(&SCOPE)), boundary);
+        assert_eq!(entry.reusable(&prompt(20_000), 40_960, None), 0);
+        assert_eq!(entry.reusable(&prompt(20_000), 40_960, Some(&[8; 16])), 0);
+        assert_eq!(entry.reusable(&prompt(20_000), 32_768, Some(&SCOPE)), 0);
     }
 
     #[test]

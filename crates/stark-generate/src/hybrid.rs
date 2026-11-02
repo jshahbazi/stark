@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, finite_guard, profile};
+use stark_engine::engine::hybrid::{Model, PrefixSnapshot, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
@@ -11,12 +11,16 @@ use crate::{
         GeneratedTokens, GenerationBackend, GenerationOptions, MtpCapabilities, ProgressCallback, Sampling,
         TextCallback, collect_tokens_controlled, native_result_after_cleanup,
     },
+    prefix_cache::{self, BoundaryEntry},
     text_stop::StopFilter,
 };
 
 mod mtp;
 #[path = "hybrid_nucleus.rs"]
 mod nucleus;
+
+/// Recurrent snapshots also depend on whether the draft head ran in prefill.
+const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-selection";
 
 pub(crate) struct HybridBackend {
     model: Model,
@@ -25,6 +29,11 @@ pub(crate) struct HybridBackend {
     probability_mapper: ProbabilityMapper,
     nucleus_sampler: nucleus::NucleusSampler,
     last_mtp: Option<serde_json::Value>,
+    /// Published snapshot of the previous request's last full prefill chunk
+    /// boundary. The model's own caches hold the rows below it.
+    prefix_cache: Option<BoundaryEntry<PrefixSnapshot>>,
+    /// The last successful request's snapshot, until its reply is written.
+    pending_prefix: Option<BoundaryEntry<PrefixSnapshot>>,
 }
 
 const PARALLEL_PROBABILITY_MIN_CANDIDATES: usize = 65_536;
@@ -176,17 +185,46 @@ impl HybridBackend {
             probability_mapper: ProbabilityMapper::default(),
             nucleus_sampler: nucleus::NucleusSampler::default(),
             last_mtp: None,
+            prefix_cache: None,
+            pending_prefix: None,
         })
     }
 
+    /// Where a scoped request captures its snapshot: the start of its final
+    /// prefill chunk.
+    fn prefix_boundary(
+        &self,
+        input: &[u32],
+        options: &GenerationOptions,
+    ) -> Option<usize> {
+        options.cache_scope?;
+        let chunk = self.model.prefix_chunk_tokens()?;
+        Some(prefix_cache::chunk_boundary(input.len(), chunk)).filter(|&boundary| boundary > 0)
+    }
+
+    /// Resumes `reused` prompt tokens from `retained` and captures the state
+    /// at `capture` before ingesting the rest. Restore time counts toward the
+    /// first-token stage.
+    #[allow(clippy::too_many_arguments)]
     fn generate_inner(
         &mut self,
         input: &[u32],
+        reused: usize,
+        retained: Option<&PrefixSnapshot>,
+        capture: Option<usize>,
         options: &GenerationOptions,
         mut on_text: Option<&mut TextCallback<'_>>,
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         let started = Instant::now();
+        if reused > 0 {
+            let snapshot =
+                retained.filter(|snapshot| snapshot.position() == reused).ok_or("native_generation_failed")?;
+            self.model.restore_prefix(snapshot).map_err(|_| "native_generation_failed")?;
+        }
+        if let Some(position) = capture.filter(|&position| position > reused) {
+            self.model.capture_prefix_at(position).map_err(|_| "native_generation_failed")?;
+        }
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
         let gpu_greedy = options.mtp_drafts == 0
@@ -204,7 +242,7 @@ impl HybridBackend {
         }
         let mut logits = Vec::new();
         let mut greedy_token = None;
-        for (index, &token) in input.iter().enumerate() {
+        for (index, &token) in input.iter().enumerate().skip(reused) {
             if cancelled()? {
                 return Err("generation_cancelled");
             }
@@ -356,6 +394,10 @@ impl GenerationBackend for HybridBackend {
         on_progress: Option<&mut ProgressCallback<'_>>,
     ) -> Result<GeneratedTokens, &'static str> {
         self.nucleus_sampler.clear();
+        let reused = self.prefix_cache_plan(input, options);
+        // A miss drops the snapshot; the next prefill overwrites the rows.
+        let retained = self.prefix_cache.take().map(|entry| entry.state);
+        self.pending_prefix = None;
         let _activity = stark_engine::engine::hybrid::activity::InferenceActivity::begin()
             .map_err(|_| "inference_activity_unavailable")?;
         if self.profile_output.is_some() {
@@ -367,7 +409,21 @@ impl GenerationBackend for HybridBackend {
         if self.profile_output.as_ref().is_some_and(|output| output.failed) {
             return Err("native_profile_output_failed");
         }
-        let result = self.generate_inner(input, options, on_text, on_progress);
+        let boundary = self.prefix_boundary(input, options);
+        let mut result = self.generate_inner(input, reused, retained.as_ref(), boundary, options, on_text, on_progress);
+        if let Ok(generated) = result.as_mut() {
+            generated.reused_input_tokens = reused;
+            // A request that ended on the retained boundary keeps its snapshot.
+            let snapshot = self
+                .model
+                .take_prefix_snapshot()
+                .or_else(|| retained.filter(|_| boundary == Some(reused)))
+                .filter(|snapshot| Some(snapshot.position()) == boundary);
+            if let (Some(snapshot), Some(scope), Some(boundary)) = (snapshot, options.cache_scope, boundary) {
+                self.pending_prefix =
+                    Some(BoundaryEntry::new(snapshot, scope, options.context_tokens, &input[..boundary]));
+            }
+        }
         if self.model.supports_mtp() {
             self.last_mtp = Some(serde_json::json!({
                 "enabled":options.mtp_drafts > 0,
@@ -414,6 +470,41 @@ impl GenerationBackend for HybridBackend {
     }
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()
+    }
+    fn prefix_cache_supported(&self) -> bool {
+        self.model.prefix_chunk_tokens().is_some_and(|chunk| {
+            chunk >= prefix_cache::PREFILL_CHUNK_TOKENS && chunk.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS)
+        })
+    }
+    fn prefix_cache_chunk_tokens(&self) -> usize {
+        self.model.prefix_chunk_tokens().unwrap_or(prefix_cache::PREFILL_CHUNK_TOKENS)
+    }
+    fn prefix_cache_key(&self) -> &'static str {
+        PREFIX_CACHE_KEY
+    }
+    fn prefix_cache_plan(
+        &self,
+        input: &[u32],
+        options: &GenerationOptions,
+    ) -> usize {
+        match &self.prefix_cache {
+            Some(entry) if !self.model.is_fenced() && entry.state.mtp_enabled() == (options.mtp_drafts > 0) => {
+                entry.reusable(input, options.context_tokens, options.cache_scope.as_ref())
+            },
+            _ => 0,
+        }
+    }
+    fn publish_prefix_cache(&mut self) {
+        if let Some(entry) = self.pending_prefix.take() {
+            self.prefix_cache = Some(entry);
+        }
+    }
+    fn clear_prefix_cache(&mut self) {
+        self.prefix_cache = None;
+        self.pending_prefix = None;
+    }
+    fn prefix_cache_retained(&self) -> bool {
+        self.prefix_cache.is_some() || self.pending_prefix.is_some()
     }
 }
 

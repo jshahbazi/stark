@@ -430,7 +430,11 @@ maximum and retain the 4,096-output-token cap; the upstream advertised maximum
 context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish
 available memory for every context or concurrent application.
 
-Generation uses fresh state for every request. Scoring serializes the complete
+Generation uses fresh state for every request unless the worker is started
+with `--prefix-cache`. Then the mixed-precision Qwen3.8 backend can resume a
+request from a recurrent-state snapshot of the previous request's shared
+prompt prefix ([prefix reuse](GENERATION.md#prefix-reuse)); GLM, Flint and the
+F32 Qwen graph keep fresh state. Scoring serializes the complete
 token sequence, clears recurrent state after success or failure, and retains
 only the existing optional cache of identical immediately consecutive inputs
 with the same context size. No cache persists across worker restarts. Generic

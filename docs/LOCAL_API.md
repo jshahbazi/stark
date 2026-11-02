@@ -165,7 +165,12 @@ The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read tas
 
 ### Prefix reuse
 
-Each request is tokenized in full. For eligible text models (full-attention models such as Qwen3 dense), the worker can then reuse the attention cache of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder. A later step of an agent conversation therefore waits only for its new messages plus at most about 1,024 tokens. Reuse follows the worker's 1,024-token prefill grid, so outputs are identical to processing the whole prompt; the [generation contract](GENERATION.md#prefix-reuse) describes the rules and the [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) the measurements.
+Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
+
+- Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
+- The native Qwen3.8 backend resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. A later step waits for its new messages plus at most about 4,096 tokens, provided nothing before that point changed; an earlier change processes the whole prompt. MTP must be on or off for both requests.
+
+Reuse follows the worker's prefill grid, so outputs are identical to processing the whole prompt. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md) and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) the measurements.
 
 The cache holds one entry, in worker memory only. It is never written to disk, logged or returned. Each principal has its own random, in-memory scope:
 
@@ -182,7 +187,7 @@ A request never reuses another principal's entry, so first-token timing cannot r
 - after 600 seconds without requests
 - when the model stops or changes
 
-It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. No more than one request's state is held at a time.
+It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
 
 ## Error codes
 

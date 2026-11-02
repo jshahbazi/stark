@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from stark_convert.chat import prefix_cache_enabled
-from stark_convert.desktop import Desktop
+from stark_convert.desktop import Desktop, valid_reuse
 from stark_convert.generation_eta import GenerationEstimates, progress_frame
 from stark_convert.local_api import APIError, LocalAPI
 
@@ -138,6 +138,16 @@ def test_readiness_contract_requires_every_field():
         {"prefix_cache": None},
     ):
         assert not prefix_cache_enabled({**READY, **change})
+
+
+def test_backend_chunk_sets_the_reuse_grid():
+    hybrid = {**READY, "prefix_cache": {**READY["prefix_cache"], "chunk_tokens": 4096}}
+    assert prefix_cache_enabled(hybrid)
+    for chunk in (0, 512, 1536, 2048.0, True, "4096", 131072, None):
+        assert not prefix_cache_enabled({**READY, "prefix_cache": {**READY["prefix_cache"], "chunk_tokens": chunk}})
+    assert valid_reuse({"reused_input_tokens": 8192}, 9000, 4096)
+    assert not valid_reuse({"reused_input_tokens": 1024}, 9000, 4096)
+    assert valid_reuse({"reused_input_tokens": 1024}, 9000)
 
 
 def test_text_workers_request_reuse_and_playground_scope_follows_the_conversation(desktop, model, log):
