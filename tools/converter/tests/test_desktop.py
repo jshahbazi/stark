@@ -238,14 +238,19 @@ def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
         desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
 
 
-@pytest.fixture
-def tool_desktop(desktop, model, monkeypatch):
+@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1"])
+def tool_desktop(desktop, model, monkeypatch, request):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
     running(desktop, model)
     seen = []
+    parser = request.param
     reply = {
-        "text": '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>',
+        "text": (
+            '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
+            if parser == "qwen3-hermes-v1"
+            else "<tool_call>\n<function=lookup>\n<parameter=value>\n3\n</parameter>\n</function>\n</tool_call>"
+        ),
         "input_tokens": 24,
         "output_tokens": 17,
         "finish_reason": "eos",
@@ -266,7 +271,7 @@ def tool_desktop(desktop, model, monkeypatch):
 
     monkeypatch.setattr(desktop.worker, "request", request)
     desktop.worker.streaming = True
-    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: "qwen3-hermes-v1")
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: parser)
     desktop.template = ImmutableSandboxedEnvironment().from_string("{{ tools | tojson }};{{ messages | tojson }}")
     payload = {
         "messages": [{"role": "user", "content": "synthetic fixture"}],
@@ -300,6 +305,69 @@ def test_tool_calls_render_and_replay_complete_history(tool_desktop):
     assert rendered[-2]["tool_calls"][0]["function"]["arguments"] == {"value": 3}
     assert rendered[-1]["tool_call_id"] == call["id"] and rendered[-1]["content"] == "6"
     assert desktop.job is None and desktop.api_queue == []
+
+
+def test_xml_schema_rejection_precedes_queue_and_worker_dispatch(tool_desktop):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, seen, _ = tool_desktop
+    if desktop.settings_summary()["tool_parser"] == "qwen3-hermes-v1":
+        pytest.skip("Hermes arguments carry their JSON types directly")
+    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = {"type": None}
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload)
+    assert error.value.code == "tool_schema_unsupported"
+    assert not seen and desktop.job is None and desktop.api_queue == []
+
+
+def test_unused_untyped_hint_preserves_normal_tool_requests(tool_desktop):
+    desktop, payload, seen, _ = tool_desktop
+    payload["tools"][0]["function"]["parameters"]["properties"]["unused"] = {
+        "description": "Synthetic unconstrained optional value"
+    }
+    result = desktop.api_complete(payload)
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    assert desktop.job is None and desktop.api_queue == []
+
+
+def test_unused_schemas_do_not_block_none_or_named_tool_choice(tool_desktop):
+    desktop, payload, seen, reply = tool_desktop
+    payload["tools"].append(
+        {"type": "function", "function": {"name": "unused", "parameters": {"properties": {"x": {}}}}}
+    )
+    payload["tool_choice"] = {"type": "function", "function": {"name": "lookup"}}
+    assert desktop.api_complete(payload)["choices"][0]["finish_reason"] == "tool_calls"
+    assert [tool["function"]["name"] for tool in json.loads(seen[0]["text"].split(";", 1)[0])] == ["lookup"]
+    reply["text"] = "Synthetic text without tool calls."
+    payload["tool_choice"] = "none"
+    assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == reply["text"]
+    assert json.loads(seen[2]["text"].split(";", 1)[0]) is None
+    assert desktop.job is None and desktop.api_queue == []
+
+
+def test_tool_capabilities_follow_parser_and_chat_mode(tool_desktop, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, seen, reply = tool_desktop
+    parser = desktop.settings_summary()["tool_parser"]
+    assert desktop.api_models()[0]["tool_calling"] is True
+    assert desktop.api_status()["capabilities"]["tool_parser"] == parser
+    desktop.active_mode = "decision"
+    assert desktop.api_models() == []
+    assert desktop.settings_summary()["tools"] is False
+    assert desktop.api_status()["capabilities"]["tool_parser"] is None
+    desktop.active_mode = "chat"
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: None)
+    assert desktop.api_models()[0]["tool_calling"] is False
+    assert desktop.api_status()["capabilities"]["tool_choices"] == []
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload)
+    assert error.value.code == "tools_unsupported"
+    assert not seen and desktop.job is None and desktop.api_queue == []
+    reply["text"] = "Ordinary chat remains available."
+    payload.pop("tools")
+    assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == reply["text"]
 
 
 @pytest.mark.parametrize(
@@ -347,6 +415,74 @@ def test_tool_failure_releases_request_and_never_delivers_partial_calls(tool_des
             assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == "synthetic retry"
     if failure == "worker":
         assert desktop.worker is None
+
+
+@pytest.mark.parametrize("terminal", ["worker_fault", "cancelled", "reply"])
+def test_active_model_replacement_is_classified_without_closing_new_worker(tool_desktop, monkeypatch, terminal):
+    from unittest.mock import Mock
+
+    from stark_convert.chat import ChatCancelled
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    old_worker, old_model = desktop.worker, desktop.active_model
+    replacement = Mock(spec=["close"])
+
+    def infer(*args, **kwargs):
+        with desktop.lock:
+            desktop.epoch += 1
+            desktop.worker = replacement
+            desktop.active_model = "synthetic-replacement"
+        if terminal == "worker_fault":
+            raise ValueError("Synthetic old-worker failure")
+        if terminal == "cancelled":
+            raise ChatCancelled("Synthetic old-worker cancellation")
+        return dict(reply)
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    delivered = []
+    try:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=delivered.append)
+        assert error.value.status == 503 and error.value.code == "model_changed"
+        assert desktop.worker is replacement and desktop.active_model == "synthetic-replacement"
+        replacement.close.assert_not_called()
+        assert desktop.job is None and desktop.api_queue == [] and delivered == []
+    finally:
+        # The synthetic replacement owns no process. Restore the fixture's real
+        # private worker so its normal teardown can reap that process.
+        desktop.worker, desktop.active_model = old_worker, old_model
+
+
+@pytest.mark.parametrize(
+    "reason,expected_status,expected_code",
+    [
+        (None, 499, "request_cancelled"),
+        ("deadline", 504, "request_timeout"),
+    ],
+)
+def test_same_model_worker_fault_after_cancellation_keeps_cancellation_category(
+    tool_desktop, monkeypatch, reason, expected_status, expected_code
+):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, _ = tool_desktop
+    control = threading.Event()
+    control.reason = reason
+    process = desktop.worker.process
+
+    def infer(*args, **kwargs):
+        control.set()
+        raise ValueError("Synthetic interrupted worker failure")
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, cancelled=control)
+    assert error.value.status == expected_status and error.value.code == expected_code
+    assert desktop.worker is None and process.poll() is not None
+    assert desktop.job is None and desktop.api_queue == []
 
 
 def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_desktop):
@@ -681,7 +817,7 @@ def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
     identifier = running(desktop, model)
     with pytest.raises(APIError) as failed:
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "failure fixture"}]})
-    assert failed.value.status == 503
+    assert failed.value.status == 503 and failed.value.code == "generation_failed"
     assert desktop.job is None
     assert desktop.worker is None
     assert not any(e["event"] == "metrics" for e in events(desktop))
@@ -724,7 +860,7 @@ def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
             {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
             on_delta=disconnected,
         )
-    assert failed.value.status == 503
+    assert failed.value.status == 499 and failed.value.code == "request_cancelled"
     assert desktop.worker is None
     assert desktop.job is None
     assert process.poll() is not None

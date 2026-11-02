@@ -24,7 +24,14 @@ from urllib.parse import urlsplit
 from jinja2.exceptions import TemplateError
 
 from .api_request import parse_chat_request
-from .api_tools import ToolTextStream, parse_tool_output, render_tools, template_messages, tool_parser_for
+from .api_tools import (
+    ToolTextStream,
+    parse_tool_output,
+    render_tools,
+    template_messages,
+    tool_parser_for,
+    validate_parser_tools,
+)
 from .chat import (
     ChatCancelled,
     ChatError,
@@ -1929,9 +1936,11 @@ class Desktop:
             if tool_request and parser is None:
                 raise APIError(
                     400,
-                    "This model's chat template has no qualified tool parser. Use a supported Qwen3 model.",
+                    "This model's chat template has no supported tool parser. Run a model with tool support in Stark.",
                     "tools_unsupported",
                 )
+            rendered_tools = render_tools(request)
+            validate_parser_tools(rendered_tools or [], parser)
             public_id = api_model_id(active)
             if request["model"] not in (None, public_id, self.active_model, active["name"]):
                 raise APIError(
@@ -1992,19 +2001,19 @@ class Desktop:
                 epoch=epoch,
                 image=request["image"],
                 mtp=enabled_mtp,
-                tools=render_tools(request),
+                tools=rendered_tools,
                 estimate_key=estimate_key,
                 cache_scope=cache_scope,
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
-                    raise APIError(503, "Request stopped. Run a model and retry.", "request_stopped")
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed")
                 if cancelled.is_set():
                     raise cancellation_error(cancelled)
                 message, finish_reason = (
                     parse_tool_output(
                         reply["text"],
-                        request["tools"],
+                        rendered_tools or [],
                         parser=parser,
                         finish_reason=reply.get("finish_reason"),
                         parallel_tool_calls=request["parallel_tool_calls"],
@@ -2050,6 +2059,9 @@ class Desktop:
                 "usage": usage,
             }
         except ChatCancelled:
+            with self.lock:
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed") from None
             raise cancellation_error(cancelled) from None
         except ChatImageError as error:
             if error.code == "context_overflow":
@@ -2073,8 +2085,11 @@ class Desktop:
             raise
         except BaseException:
             with self.lock:
-                if epoch == self.epoch and self.worker is worker and self.active_model == identifier:
-                    self.close_worker()
+                if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
+                    raise APIError(503, "Model changed or stopped during this request.", "model_changed") from None
+                self.close_worker()
+                if cancelled.is_set():
+                    raise cancellation_error(cancelled) from None
             raise APIError(503, "Generation failed. Run the model again in Stark.", "generation_failed") from None
         finally:
             with self.lock:

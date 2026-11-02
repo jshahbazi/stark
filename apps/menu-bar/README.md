@@ -18,7 +18,7 @@ The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs t
 
 For release DMGs containing **Install Stark**, open the image and choose that launcher. It verifies and stages the complete app before asking the running copy to quit. It prefers the current running Stark location, including `~/Applications`, then an existing `/Applications` copy, then an existing `~/Applications` copy, or a writable Applications folder. It quits, replaces and launches the exact selected destination, and shows either success or the specific failure. Models remain installed; active chats stop. The Keychain API credential and saved endpoint are reused by subsequent launches. Older DMGs use drag-and-drop; after copying `Stark.app`, quit the running old app before opening the installed app. Drag-copying alone does not stop an older running copy.
 
-Local builds are ad-hoc signed; they are not notarized and cannot be installed by the updater. Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
+Local builds are ad-hoc signed; they are not notarized and cannot be installed by the updater. Moving between an ad-hoc build and a signed installed app changes the private OpenWork socket namespace. Choose **Connect to OpenWork** to repair the Stark-owned public connection entry, then quit OpenWork completely and reopen it when instructed. Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
 Local apps display **Development build NUMBER**. The build number is a UTC
 timestamp with microseconds by default; `--build-number NUMBER` supplies a unique

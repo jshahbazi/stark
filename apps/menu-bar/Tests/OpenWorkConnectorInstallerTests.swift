@@ -2,8 +2,11 @@ import Darwin
 import Foundation
 
 private enum CheckError: Error { case failed, injected }
-private func check(_ condition: @autoclosure () throws -> Bool) throws {
-    if try !condition() { throw CheckError.failed }
+private func check(_ condition: @autoclosure () throws -> Bool, line: UInt = #line) throws {
+    if try !condition() {
+        fputs("installer_check_failed_\(line)\n", stderr)
+        throw CheckError.failed
+    }
 }
 
 private final class Fixture {
@@ -41,12 +44,12 @@ private final class Fixture {
     func noTemporaryFiles() throws -> Bool {
         try !FileManager.default.contentsOfDirectory(atPath: config.path).contains { $0.hasSuffix(".tmp") }
     }
-    func ownedEntry(socket: String? = nil, baseURL: String? = nil, extra: Bool = false) throws -> String {
+    func ownedEntry(socket: String? = nil, baseURL: String? = nil, package: String? = nil, extra: Bool = false) throws -> String {
         var options: [String: Any] = ["socketPath": socket ?? self.socket,
                                        "starkConnector": OpenWorkConnectorInstaller.ownershipMarker,
                                        "expectedBaseURL": baseURL ?? apiBaseURL]
         if extra { options["userSetting"] = true }
-        let value: [String: Any] = ["package": connector.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+        let value: [String: Any] = ["package": package ?? connector.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
                                     "options": options]
         return String(data: try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]),
                       encoding: .utf8)!
@@ -298,6 +301,82 @@ struct OpenWorkConnectorInstallerTests {
             let otherPort = OpenWorkConnectorInstaller(configDirectory: fixture.config, connectorDirectory: fixture.connector,
                                                         socketPath: fixture.socket, apiBaseURL: "http://127.0.0.1:18134/v1")
             try check(try otherPort.remove())
+            try check(!(try fixture.installer.remove()))
+        case "namespace-reconnect":
+            let oldSocket = "/private/tmp/stark-\(geteuid())-0123456789abcdef/openwork.sock"
+            let entry = try fixture.ownedEntry(socket: oldSocket)
+            try fixture.write("{\"plugins\":[\(entry)],\"unrelated\":\"\(oldSocket)\"}")
+            try check(try fixture.installer.install())
+            try check((try fixture.text()).contains("\"socketPath\":\"\(fixture.socket)\""))
+            try check((try fixture.text()).hasSuffix(",\"unrelated\":\"\(oldSocket)\"}"))
+            try check(!(try fixture.installer.install()))
+        case "app-location-migration":
+            // No old app directory exists: upgrades can already have removed it.
+            let oldPackage = "file:///Users/Example/Old%20Applications/Stark.app/Contents/Resources/OpenWorkConnector"
+            let entry = try fixture.ownedEntry(package: oldPackage)
+            try fixture.write("{\"plugins\":[\(entry)],\"unrelated\":\"\(oldPackage)\"}")
+            try check(try fixture.installer.install())
+            let parsed = try JSONSerialization.jsonObject(with: Data(fixture.text().utf8)) as! [String: Any]
+            let plugins = parsed["plugins"] as! [[String: Any]]
+            let installed = URL(string: plugins[0]["package"] as! String)!
+            try check(installed.standardizedFileURL.path == fixture.connector.standardizedFileURL.path)
+            try check((try fixture.text()).hasSuffix(",\"unrelated\":\"\(oldPackage)\"}"))
+            try check(!(try fixture.installer.install()))
+        case "combined-migration":
+            let oldPackage = "file:///removed/Stark.app/Contents/Resources/OpenWorkConnector"
+            let oldSocket = "/tmp/stark-\(geteuid())-fedcba9876543210/openwork.sock"
+            let entry = try fixture.ownedEntry(socket: oldSocket, baseURL: "http://127.0.0.1:8000/v1", package: oldPackage)
+                .replacingOccurrences(of: "\"socketPath\":", with: "\"socketPath\" /* keep socket comment */ :")
+            let unrelated = "\"unrelated\":{\"package\":\"\(oldPackage)\",\"socketPath\":\"\(oldSocket)\"}"
+            try fixture.write("// keep opening\n{\"plugins\":[\"other\",/* keep plugin comment */\(entry),],\(unrelated)}// keep end\n")
+            try check(try fixture.installer.install())
+            let result = try fixture.text()
+            for text in ["// keep opening", "/* keep socket comment */", "/* keep plugin comment */", "// keep end", unrelated, "\"other\""] {
+                try check(result.contains(text))
+            }
+            try check(!(try fixture.installer.install()))
+            try check(try fixture.noTemporaryFiles())
+        case "migration-conflicts":
+            let validSocket = "/private/tmp/stark-\(geteuid())-0123456789abcdef/openwork.sock"
+            let validPackage = "file:///removed/Stark.app/Contents/Resources/OpenWorkConnector"
+            for package in ["https://example.invalid/Stark.app/Contents/Resources/OpenWorkConnector",
+                            "file://example.invalid/old/Stark.app/Contents/Resources/OpenWorkConnector",
+                            "file:///old/Other.app/Contents/Resources/OpenWorkConnector",
+                            "file:///old/Stark.app/Contents/Resources/other",
+                            "file:///old/Stark.app/Contents/Resources/OpenWorkConnector?x=1",
+                            "file:///old/Stark.app/Contents/Resources/OpenWorkConnector#fragment",
+                            "file:///old/Stark.app/Contents/Resources/OpenWorkConnector/server.js"] {
+                let entry = try fixture.ownedEntry(socket: validSocket, package: package)
+                let source = "{\"plugins\":[\(entry)]}"
+                try fixture.write(source)
+                try rejected(.conflict) { _ = try fixture.installer.install() }
+                try check(try fixture.text() == source)
+            }
+            for socket in ["/private/tmp/stark-\(geteuid() + 1)-0123456789abcdef/openwork.sock",
+                           "/private/tmp/stark-\(geteuid())-0123456789ABCDEF/openwork.sock",
+                           "/private/tmp/stark-\(geteuid())-0123456789abcde/openwork.sock",
+                           "/private/tmp/stark-\(geteuid())-0123456789abcdef/other.sock"] {
+                let entry = try fixture.ownedEntry(socket: socket, package: validPackage)
+                let source = "{\"plugins\":[\(entry)]}"
+                try fixture.write(source)
+                try rejected(.conflict) { _ = try fixture.installer.install() }
+                try check(try fixture.text() == source)
+            }
+            let future = try fixture.ownedEntry(socket: validSocket, package: validPackage)
+                .replacingOccurrences(of: OpenWorkConnectorInstaller.ownershipMarker, with: "com.starkengine.openwork/v2")
+            try fixture.write("{\"plugins\":[\(future)]}")
+            try rejected(.conflict) { _ = try fixture.installer.install() }
+            let old = try fixture.ownedEntry(socket: validSocket, package: validPackage)
+            let current = try fixture.ownedEntry()
+            try fixture.write("{\"plugins\":[\(old),\(current)]}")
+            try rejected(.conflict) { _ = try fixture.installer.install() }
+        case "remove-stale":
+            let old = try fixture.ownedEntry(socket: "/private/tmp/stark-\(geteuid())-0123456789abcdef/openwork.sock",
+                                             package: "file:///removed/Stark.app/Contents/Resources/OpenWorkConnector")
+            try fixture.write("{\"plugins\":[\"other\",\(old)],\"unrelated\":true}")
+            try check(try fixture.installer.remove())
+            try check((try fixture.text()).contains("\"other\""))
+            try check((try fixture.text()).contains("\"unrelated\":true"))
             try check(!(try fixture.installer.remove()))
         case "invalid-base-url":
             for base in ["http://127.0.0.1/v1", "https://127.0.0.1:8000/v1", "http://localhost:8000/v1",

@@ -34,6 +34,11 @@ SCENARIOS = (
     "installer-lock",
     "invalid-socket",
     "port-reconnect",
+    "namespace-reconnect",
+    "app-location-migration",
+    "combined-migration",
+    "migration-conflicts",
+    "remove-stale",
     "invalid-base-url",
 )
 

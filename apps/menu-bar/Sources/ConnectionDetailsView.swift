@@ -44,6 +44,9 @@ struct ConnectionDetailsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Text(engine.apiMessage).font(.callout)
             OpenWorkConnectionView(connection: engine.openWorkConnection)
+            Text("OpenWork lists the model currently running in Chat mode. The Model ID menu below only previews connection settings; use Manage Models to run a different model.")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Divider()
             field("Base URL", value: engine.apiBaseURL, placeholder: "Unavailable")
             HStack {
