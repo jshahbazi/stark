@@ -73,6 +73,8 @@ These observations are not performance-qualified and do not establish a regressi
 
 The screened v46c control, v47 T4 candidate, and v48 T8 candidate now provide a qualified 96-token comparison. The opt-in wrapper recipe selects v48 T8; engine-wide defaults remain off. The [rejected Q5 MMA study](../archive/experiments/glm53-q5-mma-20261102/README.md) remains a separate prototype history; v48's Q5+Q6 route is measured only within the bounded experimental recipe. No whole-model equivalence, answer-quality result, or general throughput floor is claimed.
 
+[MTP feasibility and head-cost profiling](../archive/experiments/glm53-mtp-feasibility-20261102/README.md) are recorded separately. Those test-only component probes establish no speculative throughput improvement.
+
 ## Source and aggregate records
 
 The v46 and v47 builds start from GLM branch merge `13de5d4`, which incorporates main `81f8b264`. Its build passed 96 generator-library tests. The v47 candidate has tracked diff SHA-256 `0f6105eea93f594c4181bdae7f7932554ebca491af9cdc3b64009f09fa9f327d` and hybrid source bundle SHA-256 `d082a80c8d935d405703300f9af0567c72531c79b233b0a1e0d32f32e6f4420c`. Executable builds are bound separately by the receipts below.

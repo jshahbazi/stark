@@ -1,0 +1,202 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "status": "test_only_profile; no_runtime_speedup_claim",
+  "scope": "warm-decode one-step MTP component timing profile; same 3-case feasibility corpus as v3",
+  "agreement": {
+    "cases": 3,
+    "comparisons": 24,
+    "agreements": 23,
+    "case_rows": [
+      {"case": 0, "agreements": 8, "comparisons": 8},
+      {"case": 1, "agreements": 7, "comparisons": 8},
+      {"case": 2, "agreements": 8, "comparisons": 8}
+    ],
+    "prompt_rows": 59,
+    "eos_cases": 0,
+    "target_rollback_calls": 0,
+    "target_logit_parity_gate_rows": 8,
+    "shifted_cache_alignment_gate_rows": 8,
+    "four_gguf_weight_identity_guard_passed": true,
+    "same_as_v3_continuation_sha256": "d8cd412f3a6ba2233f609a873fa434f558f6646344eb651003138b8bba35c3b2",
+    "corpus_sha256": "82c1bb1e02a5315c24317475a305f5a8798523cab5c45ceda5764baf8c19ffc4"
+  },
+  "headline_per_comparison": {
+    "head_total_scope": "inclusive",
+    "decode_head_wall_ms": 18.569333375,
+    "head_total_inclusive_reported_gpu_ms": 2.574751730814,
+    "head_profile_timer_total_wall_ms": 18.568861041667,
+    "decode_wall_minus_profile_timer_wall_ms": 0.000472333333,
+    "serial_target_with_hidden_tap_wall_ms": 32.601659666667,
+    "serial_target_with_hidden_tap_reported_gpu_ms": 29.113418405662,
+    "v3_comparison": {
+      "same_agreements_and_continuation_hash": true,
+      "v3_head_wall_ms": 18.485260291667,
+      "v3_head_reported_gpu_ms": 2.561111115938,
+      "head_wall_change_percent": 0.454811,
+      "head_reported_gpu_change_percent": 0.532605,
+      "target_wall_change_percent": 3.550243,
+      "target_timing_attribution": "unpaired drift; do not attribute to v4 instrumentation"
+    }
+  },
+  "profile_phase_scope": {
+    "disjoint_main_wall_phases": [
+      "prepare",
+      "norm_mla_encode",
+      "norm_mla_wait_readback",
+      "projection_blocking",
+      "cpu_router",
+      "selected_mapping_admission",
+      "mapped_ffn_compute_wait",
+      "final_readout_encode",
+      "final_readout_wait_readback",
+      "validation_observe",
+      "selected_owner_release",
+      "autorelease_drain"
+    ],
+    "inclusive_nested_subspans": [
+      "projection_submit_return_inclusive",
+      "ffn_submit_return_inclusive"
+    ],
+    "aggregation_rule": "Do not add inclusive subspans to the disjoint wall phases. head_total_inclusive is the separate inclusive total.",
+    "unresolved_boundary": "submit-to-GPU-start/residency delay versus wait wake latency is not distinguished by this profile."
+  },
+  "phases": {
+    "autorelease_drain": {"calls": 24, "wall_total_ms": 0.002416, "reported_gpu_total_ms": 0.0},
+    "cpu_router": {"calls": 24, "wall_total_ms": 0.21075, "reported_gpu_total_ms": 0.0},
+    "ffn_submit_return_inclusive": {"calls": 24, "wall_total_ms": 372.6510399999999, "reported_gpu_total_ms": 30.936583352740854},
+    "final_readout_encode": {"calls": 24, "wall_total_ms": 1.7228740000000005, "reported_gpu_total_ms": 0.0},
+    "final_readout_wait_readback": {"calls": 24, "wall_total_ms": 27.480834000000005, "reported_gpu_total_ms": 15.915499912807718},
+    "head_total_inclusive": {"calls": 24, "wall_total_ms": 445.65266499999996, "reported_gpu_total_ms": 61.79404153954238},
+    "mapped_ffn_compute_wait": {"calls": 24, "wall_total_ms": 375.97666899999996, "reported_gpu_total_ms": 30.936583352740854},
+    "norm_mla_encode": {"calls": 24, "wall_total_ms": 2.306918, "reported_gpu_total_ms": 0.0},
+    "norm_mla_wait_readback": {"calls": 24, "wall_total_ms": 21.708626000000002, "reported_gpu_total_ms": 13.920541619881988},
+    "prepare": {"calls": 24, "wall_total_ms": 4.562626000000002, "reported_gpu_total_ms": 0.0},
+    "projection_blocking": {"calls": 24, "wall_total_ms": 6.034584999999999, "reported_gpu_total_ms": 1.0214166541118175},
+    "projection_submit_return_inclusive": {"calls": 24, "wall_total_ms": 4.433833999999999, "reported_gpu_total_ms": 1.0214166541118175},
+    "selected_mapping_admission": {"calls": 24, "wall_total_ms": 2.0647100000000003, "reported_gpu_total_ms": 0.0},
+    "selected_owner_release": {"calls": 24, "wall_total_ms": 0.9216669999999999, "reported_gpu_total_ms": 0.0},
+    "validation_observe": {"calls": 120, "wall_total_ms": 1.9830420000000004, "reported_gpu_total_ms": 0.0}
+  },
+  "phase_analysis_per_comparison": {
+    "mapped_ffn_compute_wait_wall_ms": 15.665694541667,
+    "mapped_ffn_compute_wait_reported_gpu_ms": 1.289024306364,
+    "ffn_submit_return_inclusive_wall_ms": 15.527126666667,
+    "ffn_submit_return_inclusive_reported_gpu_ms": 1.289024306364,
+    "ffn_submit_return_wall_minus_reported_gpu_gap_ms": 14.238102360302,
+    "selected_mapping_admission_wall_ms_per_head": 0.086029583333,
+    "validation_observe_wall_ms_per_head": 0.08262675,
+    "head_total_wall_minus_reported_gpu_gap_ms": 15.994109310852,
+    "submit_return_gap_percent_of_head_total_gap": 89.020914,
+    "disjoint_wall_phase_sum_ms_total": 444.975717,
+    "inclusive_head_total_wall_ms_total": 445.652665,
+    "unaccounted_wall_residual_ms_total": 0.676948,
+    "unaccounted_wall_residual_ms_per_comparison": 0.028206,
+    "disjoint_reported_gpu_phase_sum_ms_total": 61.794041539542,
+    "inclusive_head_total_reported_gpu_ms_total": 61.794041539542,
+    "interpretation": "The inclusive submit-return span is nested and must not be added to the disjoint mapped-FFN phase. Wall residual reflects local destruction/instrumentation gaps; the profile does not identify submit-to-GPU-start/residency delay separately from wait wake latency."
+  },
+  "other_timing": {
+    "cold_full_head_wall_including_lazy_pipeline_compile_ms": 101.571458,
+    "first_measured_prefill_cache_row_wall_ms": 1.568083,
+    "these_are_not_steady_state_speculative_throughput": true
+  },
+  "memory_gauges": {
+    "selected_calls": 33,
+    "released_owner_checks": 33,
+    "selected_live_bytes_at_return": 0,
+    "selected_registered_peak_bytes": 73269248,
+    "static_cache_entries_peak": 609,
+    "sampled_metal_allocated_peak_bytes": 106012295168,
+    "admitted_cap_bytes": 109676289225,
+    "projected_production_cap_margin_bytes": 371913609,
+    "projection_is_production_admission": false
+  },
+  "precision_policy": "existing_safe_f32_graph_quant_weights_cpu_f32_router",
+  "source_and_receipts": {
+    "base": "379e5c79d1cfae249e947740732b783b1a6fec82",
+    "source_freeze_sha256": "c513dfa73405b60aaea2fdff82811a4cca14b4dfa08189bfece374ddfd0c5f24",
+    "source_files": {
+      "crates/stark-engine/src/engine/hybrid/glm.rs": "a8e01ba5ebf2ea0dc3be7f52b83848ce8c5415e3f264913fb9ab19f803dc0121",
+      "crates/stark-engine/src/engine/hybrid/glm_metal.rs": "0455437e4f89c519592b5a404ac3be1b63cf975a4027eeca92c45268506228ee",
+      "crates/stark-engine/src/engine/hybrid/weights.rs": "d15bb4ebd1623a6e6fb2a802780baed883cff24536ab57409d5d5bc1b431239f",
+      "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs": "943ba4378e31ad8a68c13d7e18488893f01460ff6f89bfba9b4656d77ceb5f8f",
+      "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs": "8e543ae1cf93158c8e6a92dcfc3b79823820b3bf44dfa07f3298a51facb3d86d",
+      "scripts/probe_glm53_mtp.py": "6e2866ef15b5c40226183eeae96bfda0ab94a9fada2978c0ee91091cff91f584",
+      "crates/stark-engine/src/engine/hybrid/profile.rs": "31a6845a88feec3815bb73170d05d48740527e33c6e29039ae97e6dc877d8e6e",
+      "crates/stark-engine/src/engine/hybrid/weight_metal.rs": "78d5b33a02638a2d75b578315428243c68a7f5af133e909de31ebad715271835",
+      "crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs": "7c4a9d529a72cac9dc83fde4dbae798cc7db88e2326ed553a542fb8e15ed3cfb"
+    },
+    "build_receipt_sha256": "a53560cfb1c37d0ba29717d0c53690c2744a7b526fdc8559c7cbd4ee0fb3050c",
+    "build_version": "v4",
+    "build_exit_code": 0,
+    "build_toolchain": "nightly-2026-10-01",
+    "build_mode": "release --no-run; no model or GPU work in the build step",
+    "source_unchanged_during_build": true,
+    "build_log_sha256": "0292fb65dbd14cd72d6032d6799a54deef50f91a81cd9f63da8ede1ed82d0264",
+    "result_receipt_sha256": "8c318b7fa713a78a3da5184c11bdaaac1b3e0c4d18a355f81e5b91016621990c",
+    "guard_receipt_sha256": "d777bf06b7f64356d6921392001a3a5463f8e25504b0da8a2e2cb2d614b380ec",
+    "guard_source_before_after_passed": true,
+    "guard_weights_unchanged": true,
+    "guarded_gguf_shards": 4,
+    "guard_model_call_started": true,
+    "guard_driver_exit_code": 0,
+    "guard_model_call_elapsed_ms": 28632,
+    "guard_method": "prior content hashes plus current size/mtime/inode; no payload rehash",
+    "guard_raw_process_output_persisted": false,
+    "driver_sha256": "6e2866ef15b5c40226183eeae96bfda0ab94a9fada2978c0ee91091cff91f584",
+    "engine_test_binary_sha256": "ff4a3751e26ce0d2479fa5d3a1509de3ee929113536e7ee11687e56a16959741",
+    "parser_v4_receipt_sha256": "d3766f99590eab4e2ad7068c079d681e3e4f790bf935f18b70d9be09d27f892a",
+    "profile_source_note_sha256": "dd81e34fa748cdcf7c2f8ad492bd288d6243b6500c2c4d90addae1f8f698a87b",
+    "canonical_source_patch": {
+      "public_path": "profile-v4.patch",
+      "sha256": "231845e605bb864920e4a2df049b5e28fa89cf69726bd2d20251f7502cc5d67a",
+      "bytes": 63660,
+      "base": "379e5c79d1cfae249e947740732b783b1a6fec82",
+      "source_file_count": 9,
+      "new_file_count": 4,
+      "modified_file_count": 5,
+      "generation_command": "git diff --no-ext-diff --no-textconv --full-index --binary HEAD -- <nine frozen source paths>",
+      "diff_external_disabled": true,
+      "textconv_disabled": true,
+      "external_difft_formatted_sections_present": false,
+      "full_file_hash_forward_proof_count": 9,
+      "all_forward_source_hashes_match_v4_freeze": true,
+      "reverse_check_passed": true,
+      "declared_paths": [
+        "crates/stark-engine/src/engine/hybrid/glm.rs",
+        "crates/stark-engine/src/engine/hybrid/glm_metal.rs",
+        "crates/stark-engine/src/engine/hybrid/profile.rs",
+        "crates/stark-engine/src/engine/hybrid/weight_metal.rs",
+        "crates/stark-engine/src/engine/hybrid/weights.rs",
+        "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs",
+        "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs",
+        "scripts/probe_glm53_mtp.py",
+        "crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs"
+      ],
+      "new_file_paths": [
+        "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs",
+        "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs",
+        "scripts/probe_glm53_mtp.py",
+        "crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs"
+      ]
+    },
+    "sealed_evidence_archive": {
+      "private_worktree": "glm53-mtp-probe/stark",
+      "path": "runtime/mtp-probe-v4-evidence.tgz",
+      "sha256": "1750767839fae360df91493012189a84dc9f74ec4065d9214b97a530bbaf3fa9",
+      "bytes": 32124359,
+      "members": 32,
+      "unchanged": true,
+      "manifest_forward_source_hashes": 9,
+      "manifest_reverse_check_passed": true,
+      "only_patch_written_to_public_directory": true
+    }
+  },
+  "follow_up": {
+    "v5_test_only_poll_vs_blocking_comparison": "planned, not executed",
+    "t2": "CPU build in progress; no T2 timing or runtime result claimed",
+    "runtime_speedup_claimed": false
+  },
+  "public_data_policy": "Aggregate timings, call counts, hashes, source revisions, and precision policy only; no prompts, responses, token IDs, logits, probability arrays, or raw logs."
+}
