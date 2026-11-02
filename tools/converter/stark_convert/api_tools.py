@@ -478,11 +478,35 @@ def _tool_prefix_safe(prefix):
             return False
         cursor = closing + len("</think>")
     prefix = "".join(visible)
-    if "```" in prefix or "<think" in prefix or "</think" in prefix:
+    if any(marker in prefix for marker in ("```", "~~~", "<!--", "<think", "</think")):
+        return False
+    if re.search(r"^[ \t]*>|</?(?:pre|code|blockquote|q)(?=[\s/>])", prefix, re.IGNORECASE | re.MULTILINE):
+        # Conservatively reject structural quotation/code contexts even when
+        # closed before the call. Plain comparisons and similarly named tags
+        # are distinct. This bounded check never interprets intent from prose.
         return False
     quote = None
+    code_ticks = 0
     escaped = False
-    for index, character in enumerate(prefix):
+    index = 0
+    while index < len(prefix):
+        character = prefix[index]
+        if code_ticks or (character == "`" and quote is None):
+            if character == "`":
+                end = index + 1
+                while end < len(prefix) and prefix[end] == "`":
+                    end += 1
+                width = end - index
+                if not code_ticks:
+                    code_ticks = width
+                elif width == code_ticks:
+                    code_ticks = 0
+                index = end
+            else:
+                index += 1
+            # Inline code closes only on a matching run. Quotes and backslash
+            # escapes inside it cannot turn an example into an executable call.
+            continue
         if escaped:
             escaped = False
         elif quote and character == "\\":
@@ -497,11 +521,12 @@ def _tool_prefix_safe(prefix):
             )
             if character == quote and not apostrophe:
                 quote = None
-        elif character in {'"', "`", "“"}:
+        elif character in {'"', "“"}:
             quote = "”" if character == "“" else character
         elif character in {"'", "‘"} and (index == 0 or not prefix[index - 1].isalnum()):
             quote = "’" if character == "‘" else character
-    return quote is None
+        index += 1
+    return quote is None and code_ticks == 0
 
 
 def _xml_parameter_value(body, types, invalid, parser):
