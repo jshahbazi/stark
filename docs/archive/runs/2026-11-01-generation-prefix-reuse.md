@@ -39,7 +39,9 @@ memory.
 ## Prefix reuse
 
 Design and rules are in [generation](../../GENERATION.md#prefix-reuse) and the
-[local API](../../LOCAL_API.md#prefix-reuse).
+[local API](../../LOCAL_API.md#prefix-reuse). The
+[repository policy](../../../AGENTS.md) was amended to permit this cache in
+`c2cac1383052dce517a19ea2d1d282c0a25624b0`.
 
 **Exact by construction.** Reuse stops at a 1,024-token prefill chunk boundary
 below the new prompt's final chunk. Only rows from the previous prompt's full,
@@ -174,9 +176,6 @@ New model-free tests cover:
   resident while idle, for at most 600 seconds.
 - **Ineligible models.** Native hybrid, recurrent, sliding-window and image
   models are unaffected and keep fresh state.
-- **Policy amendment not applied.** The `AGENTS.md` amendment permitting this
-  cache was approved by the user, but the automated permission policy blocked
-  the agent from editing `AGENTS.md`. It must be applied separately.
 
 ## Where long-prompt prefill time goes
 
