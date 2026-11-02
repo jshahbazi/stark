@@ -247,7 +247,7 @@ final class OpenWorkConnectionController: ObservableObject {
                         self.installedDirectory = directory
                         self.approved = true
                         self.message = changed
-                            ? "Reopen OpenWork to finish connecting, then select Stark."
+                            ? "Quit and reopen OpenWork to finish connecting, then select Stark and the running model. Closing its window is not enough."
                             : "OpenWork is authorized. Select Stark in OpenWork."
                         if let models = self.snapshot()["models"] as? [[String: Any]],
                            models.contains(where: { $0["context_capacity_known"] as? Bool == false }) {

@@ -102,10 +102,15 @@ struct OpenWorkConnectorInstaller {
                 let samePackage = item.property("package")?.string.map(Self.normalizePackage) == Self.normalizePackage(package)
                 let oldSource = item.property("source")?.string.map(Self.normalizePackage) == Self.normalizePackage(package)
                 let stringPackage = item.string.map(Self.normalizePackage) == Self.normalizePackage(package)
-                if marker == Self.ownershipMarker || samePackage || oldSource || stringPackage {
-                    guard marker == Self.ownershipMarker, samePackage, item.exactKeys(["package", "options"]),
+                if marker?.hasPrefix("com.starkengine.openwork/") == true || samePackage || oldSource || stringPackage {
+                    guard marker == Self.ownershipMarker,
+                          let previousPackage = item.property("package")?.string,
+                          Self.localPackageURL(previousPackage) != nil,
+                          samePackage || Self.bundledStarkConnector(previousPackage),
+                          item.exactKeys(["package", "options"]),
                           let options = item.property("options"), options.exactKeys(["socketPath", "starkConnector", "expectedBaseURL"]),
-                          options.property("socketPath")?.string == socketPath,
+                          let previousSocket = options.property("socketPath")?.string,
+                          previousSocket == socketPath || Self.starkBrokerSocket(previousSocket),
                           let expectedBase = options.property("expectedBaseURL")?.string,
                           Self.validAPIBaseURL(expectedBase) else {
                         throw OpenWorkConnectorInstallError.conflict
@@ -116,10 +121,19 @@ struct OpenWorkConnectorInstaller {
             guard owned.count <= 1 else { throw OpenWorkConnectorInstallError.conflict }
             if let index = owned.first {
                 if !removing {
-                    let expected = items[index].property("options")!.property("expectedBaseURL")!
-                    if expected.string == apiBaseURL { return false }
-                    let value = try JSONSerialization.data(withJSONObject: apiBaseURL, options: [.fragmentsAllowed, .withoutEscapingSlashes])
-                    edits.append((expected.range, value))
+                    let node = items[index]
+                    let options = node.property("options")!
+                    // These are our exact, public v1 fields. Refresh stale app
+                    // locations/namespaces without touching unrelated JSONC or
+                    // requiring an old app/socket to still exist after upgrade.
+                    for (field, replacement) in [(node.property("package")!, package),
+                                                  (options.property("socketPath")!, socketPath),
+                                                  (options.property("expectedBaseURL")!, apiBaseURL)] {
+                        if field.string == replacement { continue }
+                        let value = try JSONSerialization.data(withJSONObject: replacement, options: [.fragmentsAllowed, .withoutEscapingSlashes])
+                        edits.append((field.range, value))
+                    }
+                    if edits.isEmpty { return false }
                 } else {
                     edits.append((items[index].range, Data()))
                     if index < commas.count { edits.append((commas[index]..<(commas[index] + 1), Data())) }
@@ -246,6 +260,31 @@ struct OpenWorkConnectorInstaller {
         guard let url = URL(string: value), url.isFileURL, url.host == nil || url.host == "",
               url.query == nil, url.fragment == nil else { return value }
         return url.standardizedFileURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// The v1 marker is reserved for Stark's bundled connector. Recognize its
+    /// former resource location even after that app has been moved or removed.
+    /// Never read or execute the old package while repairing public metadata.
+    private static func bundledStarkConnector(_ value: String) -> Bool {
+        guard let url = localPackageURL(value) else { return false }
+        return Array(url.standardizedFileURL.pathComponents.suffix(4)) == ["Stark.app", "Contents", "Resources", "OpenWorkConnector"]
+    }
+
+    private static func localPackageURL(_ value: String) -> URL? {
+        guard value.utf8.count <= 4096, let url = URL(string: value), url.isFileURL,
+              [nil, ""].contains(url.host), url.user == nil, url.password == nil, url.port == nil,
+              url.query == nil, url.fragment == nil, url.path.hasPrefix("/"),
+              !url.path.utf8.contains(0) else { return nil }
+        return url
+    }
+
+    private static func starkBrokerSocket(_ value: String) -> Bool {
+        for prefix in ["/private/tmp/stark-\(geteuid())-", "/tmp/stark-\(geteuid())-"] {
+            guard value.hasPrefix(prefix), value.hasSuffix("/openwork.sock") else { continue }
+            let hash = value.dropFirst(prefix.count).dropLast("/openwork.sock".count)
+            return hash.utf8.count == 16 && hash.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+        }
+        return false
     }
 
     private static func validAPIBaseURL(_ value: String) -> Bool {
