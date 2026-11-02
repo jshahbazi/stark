@@ -9,6 +9,7 @@ import json
 import math
 import os
 import re
+import secrets
 import select
 import shutil
 import signal
@@ -133,6 +134,11 @@ def metric(reply, key):
     return value if valid else None
 
 
+def valid_reuse(reply, input_tokens, chunk_tokens=1024):
+    reused = reply.get("reused_input_tokens")
+    return type(reused) is int and 0 <= reused < input_tokens and reused % chunk_tokens == 0
+
+
 def metrics(reply):
     fields = {
         key: metric(reply, key)
@@ -244,6 +250,11 @@ class Desktop:
         self.codec = None
         self.messages = []
         self.image_identity = None
+        # Opaque, in-memory prefix-reuse scopes: one per Playground
+        # conversation and per API principal. They never leave this process.
+        self.chat_cache_scope = secrets.token_hex(16)
+        self.api_cache_scopes = {}
+        self.prefix_reset_pending = False
         self.attachments = None
         self.context = None
         # None tracks each loaded model's maximum; retain custom requests across clamps.
@@ -1303,6 +1314,8 @@ class Desktop:
             self.api_vocab = ready.get("vocab_size", 0)
             self.active_model = identifier
             self.active_mode = mode
+            self.api_cache_scopes = {}
+            self.prefix_reset_pending = False
             self.reset()
             self.emit("ready", epoch, model_id=identifier, mode=mode, **self.settings_summary())
             self.status("ready", "Ready", epoch)
@@ -1412,6 +1425,7 @@ class Desktop:
                 system = (self.codec or {}).get("default_system_prompt")
             self.messages = [{"role": "system", "content": system}] if system else []
             self.image_identity = None
+            self.chat_cache_scope = secrets.token_hex(16)
 
     def generate(self, epoch, text, reference=None, request_id=None):
         with self.lock:
@@ -1431,6 +1445,7 @@ class Desktop:
                 raise DesktopError("Resupply the conversation image or start a new chat.")
             history = list(self.messages)
             maximum, thinking = self.maximum, self.thinking
+            cache_scope = getattr(self, "chat_cache_scope", None)
             capability, default_mtp = self.mtp_settings()
             enabled_mtp = default_mtp and reference is None
             drafts = self.resolve_request_mtp(enabled_mtp, capability, reference)
@@ -1469,6 +1484,7 @@ class Desktop:
                 mtp=enabled_mtp,
                 on_progress=on_progress,
                 estimate_key=estimate_key,
+                cache_scope=cache_scope,
             )
         except (MediaError, ChatImageError) as error:
             raise DesktopError(str(error)) from None
@@ -1532,11 +1548,15 @@ class Desktop:
         tools=None,
         on_progress=None,
         estimate_key=None,
+        cache_scope=None,
     ):
         with self.lock:
             if epoch is not None and epoch != self.epoch:
                 raise APIError(503, "Model changed or stopped before this request started.", "model_changed")
             worker, template, codec = self.worker, self.template, self.codec
+            prefix_cache = getattr(worker, "prefix_cache", False) is True
+            reset_prefix = getattr(self, "prefix_reset_pending", False) and prefix_cache
+            self.prefix_reset_pending = False
             dispatch_epoch, identifier = self.epoch, self.active_model
             if worker is None or template is None:
                 raise APIError(503, "Run a model before sending a prompt.", "model_not_loaded")
@@ -1590,6 +1610,9 @@ class Desktop:
                     on_progress({**self.generation_estimates.estimate(estimate_key, value), **progress_counts(value)})
 
         progress_options = {"on_progress": progress} if on_progress is not None and worker.streaming else {}
+        if reset_prefix:
+            if worker.request({"operation": "reset_cache"}, cancelled=cancelled).get("cache_reset") is not True:
+                raise ValueError
 
         try:
             prompt = template.render(
@@ -1655,6 +1678,8 @@ class Desktop:
         }
         if capability["supported"]:
             request["mtp_drafts"] = drafts
+        if prefix_cache and cache_scope is not None:
+            request["cache_scope"] = cache_scope
         if stop:
             request["stop"] = stop
         if on_delta is not None:
@@ -1664,9 +1689,48 @@ class Desktop:
             reply = worker.request(request, cancelled=cancelled)
         if not isinstance(reply.get("text"), str) or "error" in reply:
             raise ValueError
+        if prefix_cache and not valid_reuse(reply, count, getattr(worker, "prefix_chunk_tokens", None) or 1024):
+            raise ValueError
         if capability["supported"]:
             self.validate_mtp_reply(reply, capability, drafts)
         return reply
+
+    def api_cache_scope(self, principal):
+        """Return the random reuse scope for one API session and credential."""
+        api = getattr(self, "api", None)
+        if api is None or not isinstance(principal, tuple) or len(principal) != 2:
+            return None
+        session = api.api_session
+        # Scopes of earlier API sessions can never match again.
+        scopes = {key: value for key, value in getattr(self, "api_cache_scopes", {}).items() if key[0] == session}
+        self.api_cache_scopes = scopes
+        if principal[0] != session:
+            return None
+        return scopes.setdefault(principal, secrets.token_hex(16))
+
+    def reset_prefix_cache(self, api_session=None, client_id=None):
+        """Forget API scopes and release the worker's retained prefix state."""
+        with self.lock:
+
+            def kept(key):
+                if api_session is None or key[0] != api_session:
+                    return api_session is not None
+                return client_id is not None and key[1] != client_id
+
+            self.api_cache_scopes = {
+                key: value for key, value in getattr(self, "api_cache_scopes", {}).items() if kept(key)
+            }
+            worker = self.worker
+            if worker is None or getattr(worker, "prefix_cache", False) is not True:
+                return
+            if self.job is not None:
+                self.prefix_reset_pending = True
+                return
+            try:
+                if worker.request({"operation": "reset_cache"}).get("cache_reset") is not True:
+                    raise ValueError
+            except (ChatError, ValueError, OSError):
+                self.prefix_reset_pending = True
 
     @staticmethod
     def resolve_request_mtp(enabled, capability, image):
@@ -1709,7 +1773,11 @@ class Desktop:
         # Bind a changed port before releasing the working listener.
         old = self.api
         if old is not None:
+            previous_session = old.api_session
             old.update_key(key)
+            if old.api_session != previous_session:
+                # A new key starts a new API session; release the old principals' state.
+                self.reset_prefix_cache()
         if old is not None and self.api_port == port:
             self.emit("connection", base_url=f"http://127.0.0.1:{port}/v1", api_session=old.api_session)
             return
@@ -1739,6 +1807,7 @@ class Desktop:
         self.api, self.api_port = replacement, urlsplit(details["base_url"]).port
         if old is not None:
             old.close()
+            self.reset_prefix_cache()
         self.emit("connection", base_url=details["base_url"], api_session=details["api_session"])
 
     def api_client_command(self, payload):
@@ -1779,6 +1848,7 @@ class Desktop:
                 )
             else:
                 api.revoke_clients(payload["api_session"], payload.get("client_id"))
+                self.reset_prefix_cache(payload["api_session"], payload.get("client_id"))
             result["ok"] = True
         except APIError as error:
             result["error_code"] = error.code
@@ -1932,6 +2002,7 @@ class Desktop:
                 stop=request["stop"],
                 mtp_drafts=drafts,
             )
+            cache_scope = self.api_cache_scope(getattr(cancelled, "cache_principal", None))
             candidate = template_messages(messages) if tool_request else [dict(m) for m in messages]
             system = (self.codec or {}).get("default_system_prompt")
             if system and not any(m["role"] == "system" for m in candidate):
@@ -1961,6 +2032,7 @@ class Desktop:
                 tools=rendered_tools,
                 on_progress=on_progress,
                 estimate_key=estimate_key,
+                cache_scope=cache_scope,
             )
             with self.lock:
                 if epoch != self.epoch or self.worker is not worker or self.active_model != identifier:
@@ -1996,6 +2068,13 @@ class Desktop:
                 self.generation_estimates.record(estimate_key, reply)
             prompt_tokens = metric(reply, "input_tokens") or 0
             completion_tokens = metric(reply, "output_tokens") or 0
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            }
+            if type(reply.get("reused_input_tokens")) is int:
+                usage["prompt_tokens_details"] = {"cached_tokens": reply["reused_input_tokens"]}
             return {
                 "id": "chatcmpl-" + uuid.uuid4().hex,
                 "object": "chat.completion",
@@ -2008,11 +2087,7 @@ class Desktop:
                         "finish_reason": finish_reason,
                     }
                 ],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                },
+                "usage": usage,
             }
         except ChatCancelled:
             with self.lock:

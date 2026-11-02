@@ -135,6 +135,36 @@ impl<B: Backend> TransformerState<B> {
 
         Ok(())
     }
+
+    /// Keep the first `context_length` rows of every owned layer state.
+    /// Checks every layer before changing any, so a refusal leaves the state
+    /// intact. Image requests shift rotary positions and are never rewound.
+    pub(crate) fn rewind(
+        &mut self,
+        context_length: u32,
+    ) -> bool {
+        let owned = || {
+            self.layer_states.iter().filter_map(|state| match state {
+                TransformerLayerStateType::Owned(state) => Some(state),
+                TransformerLayerStateType::Shared(_) => None,
+            })
+        };
+        if self.rotary_position_delta.is_some()
+            || context_length > self.context_length
+            || !owned().all(|state| state.can_rewind(context_length))
+        {
+            return false;
+        }
+        for state in &mut self.layer_states {
+            if let TransformerLayerStateType::Owned(state) = state
+                && !state.rewind(context_length)
+            {
+                return false;
+            }
+        }
+        self.context_length = context_length;
+        true
+    }
 }
 
 #[derive(Debug, Error)]
@@ -260,6 +290,14 @@ impl<B: Backend> Transformer<B> {
                 (None, None) => None,
             }
         })
+    }
+
+    /// Every owned layer cache can be rewound; shared KV layers own no state.
+    pub(crate) fn prefix_reuse_supported(&self) -> bool {
+        !self.multimodal_positions_supported
+            && self.layers.iter().all(|(layer, _rope_index)| {
+                layer.kv_source_layer_index.is_some() || layer.mixer.prefix_reuse_supported()
+            })
     }
 
     pub fn prefill_cache_layer_count(&self) -> usize {

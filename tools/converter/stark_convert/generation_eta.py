@@ -13,18 +13,36 @@ def nonnegative(value):
     return type(value) in (int, float) and math.isfinite(value) and value >= 0
 
 
+_PROGRESS_FIELDS = {
+    "event",
+    "input_tokens",
+    "sampled_tokens",
+    "output_token_budget",
+    "elapsed_seconds",
+    "prefill_seconds",
+}
+
+
+def processed_tokens(value):
+    """Prompt tokens prefilled natively, excluding a reused prefix."""
+    return value["input_tokens"] - value.get("reused_input_tokens", 0)
+
+
 def progress_frame(value, previous=None):
     """Validate native progress without accepting content-bearing extra fields."""
     if (
         not isinstance(value, dict)
-        or set(value)
-        != {"event", "input_tokens", "sampled_tokens", "output_token_budget", "elapsed_seconds", "prefill_seconds"}
+        or set(value) not in (_PROGRESS_FIELDS, _PROGRESS_FIELDS | {"reused_input_tokens"})
         or value["event"] != "progress"
     ):
         return None
     for key in ("input_tokens", "sampled_tokens", "output_token_budget"):
         if type(value[key]) is not int or not 0 <= value[key] <= 0xFFFFFFFF:
             return None
+    if "reused_input_tokens" in value and (
+        type(value["reused_input_tokens"]) is not int or not 0 <= value["reused_input_tokens"] < value["input_tokens"]
+    ):
+        return None
     if value["output_token_budget"] == 0 or value["sampled_tokens"] > value["output_token_budget"]:
         return None
     elapsed, prefill = value["elapsed_seconds"], value["prefill_seconds"]
@@ -36,7 +54,10 @@ def progress_frame(value, previous=None):
     elif not nonnegative(prefill) or prefill > elapsed:
         return None
     if previous is not None and (
-        any(value[key] != previous[key] for key in ("input_tokens", "output_token_budget"))
+        any(
+            value.get(key) != previous.get(key)
+            for key in ("input_tokens", "output_token_budget", "reused_input_tokens")
+        )
         or value["sampled_tokens"] < previous["sampled_tokens"]
         or elapsed < previous["elapsed_seconds"]
         or (previous["prefill_seconds"] is not None and prefill != previous["prefill_seconds"])
@@ -47,7 +68,7 @@ def progress_frame(value, previous=None):
 
 @dataclass(frozen=True)
 class Measurement:
-    input_tokens: int
+    processed_tokens: int
     sampled_tokens: int
     prefill_seconds: float
     seconds_per_token: float | None
@@ -66,6 +87,10 @@ class GenerationEstimates:
         if "error" in reply:
             return
         input_tokens = reply.get("input_tokens")
+        reused = reply.get("reused_input_tokens", 0)
+        if type(input_tokens) is int and type(reused) is int and 0 <= reused < input_tokens:
+            # Prefill time scales with the tokens actually processed.
+            input_tokens -= reused
         sampled = reply.get("sampled_tokens", reply.get("output_tokens"))
         prefill, decode = reply.get("prefill_seconds"), reply.get("decode_seconds")
         if (
@@ -88,17 +113,17 @@ class GenerationEstimates:
     def estimate(self, key, progress):
         count, budget = progress["sampled_tokens"], progress["output_token_budget"]
         elapsed, prefill = progress["elapsed_seconds"], progress["prefill_seconds"]
-        inputs = progress["input_tokens"]
+        inputs = processed_tokens(progress)
         # Compare similar prompt sizes; linear scaling becomes misleading across
         # very different allocation/context regimes even within one model load.
         samples = [
             sample
             for sample in self.history.get(key, ())
-            if 0.5 <= max(inputs, 1) / max(sample.input_tokens, 1) <= 2.0
+            if 0.5 <= max(inputs, 1) / max(sample.processed_tokens, 1) <= 2.0
         ]
         ttft_low = ttft_high = remaining_low = remaining_high = None
         predicted_prefill = [
-            sample.prefill_seconds * max(inputs, 1) / max(sample.input_tokens, 1) for sample in samples
+            sample.prefill_seconds * max(inputs, 1) / max(sample.processed_tokens, 1) for sample in samples
         ]
         if prefill is None and predicted_prefill:
             ttft_low = min(predicted_prefill) * 0.65
