@@ -727,6 +727,37 @@ impl BoundedBankGroup<'_> {
         graph.try_iq2_gate_up(&gate, gate_format, gate_shape, &up, up_format, up_shape, indices, selected, input, limit)
     }
 
+    /// Share only a fresh input-bound reduction between these two GEMVs.
+    /// Both names remain subject to this encoder group's existing admission.
+    pub(super) fn encode_indexed_pair(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        names: [&str; 2],
+        indices: &super::weight_metal::DeviceVector,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+    ) -> Result<[super::weight_metal::DeviceVector; 2]> {
+        if names.iter().any(|name| !self.names.contains(*name)) {
+            return Err(Error::Invalid("paired bank is outside bounded command group"));
+        }
+        if !self.encoder_registry || !graph.iq_shared_bound_enabled() {
+            return Ok([
+                self.encode_indexed_matvec(graph, names[0], indices, selected, input, false)?,
+                self.encode_indexed_matvec(graph, names[1], indices, selected, input, false)?,
+            ]);
+        }
+        if self.registered_bytes > self.budget {
+            return Err(Error::Invalid("paired banks exceed admitted encoder budget"));
+        }
+        let (gate, gate_shape) = self.weights.indexed_geometry(names[0], selected)?;
+        let (up, up_shape) = self.weights.indexed_geometry(names[1], selected)?;
+        let gate_format = self.weights.matrix_format(gate)?;
+        let up_format = self.weights.matrix_format(up)?;
+        let gate = self.weights.encoder_bank_matrix(names[0], gate)?;
+        let up = self.weights.encoder_bank_matrix(names[1], up)?;
+        graph.indexed_pair((&gate, gate_format, gate_shape), (&up, up_format, up_shape), indices, selected, input)
+    }
+
     pub(super) fn encode_indexed_matvec(
         &self,
         graph: &mut super::weight_metal::DecodeGraph,
@@ -3253,8 +3284,91 @@ mod tests {
         assert!(group.try_encode_iq2_gate_up(&mut graph, "gate", "outside", &indices, 1, &input, 11.0).is_err());
         assert!(group.try_encode_iq2_gate_up(&mut graph, "outside", "up", &indices, 1, &input, 11.0).is_err());
         assert!(group.try_encode_iq2_gate_up(&mut graph, "gate", "up", &indices, 1, &input, 11.0).unwrap().is_none());
+        assert!(group.encode_indexed_pair(&mut graph, ["gate", "outside"], &indices, 1, &input).is_err());
+        assert!(group.encode_indexed_pair(&mut graph, ["outside", "up"], &indices, 1, &input).is_err());
+        let [gate, up] = group.encode_indexed_pair(&mut graph, ["gate", "up"], &indices, 1, &input).unwrap();
         assert_eq!(group.registered_bytes(), budget);
-        graph.finish(&[]).unwrap();
+        let result = graph.finish(&[gate, up]).unwrap();
+        assert!(result.iter().all(|row| row.iter().all(|&value| value == 0.0)), "paired fallback changed F32 result");
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    #[ignore]
+    fn iq_shared_bound_encoder_pair_retains_mappings_after_weights_drop() {
+        use super::super::weight_metal::{DecodeGraph, MatrixFormat, iq_bound_schedule};
+        assert!(iq_bound_schedule(MatrixFormat::Packed(17), 2048), "requires IQ_GPU_BOUND1");
+        let fixture = Fixture::new();
+        let shape = [4usize, 13, 2048];
+        let count = shape[0] * shape[1] * shape[2] / 256 * 74;
+        let mut header = b"GGUF".to_vec();
+        header.extend(3u32.to_le_bytes());
+        header.extend(2u64.to_le_bytes());
+        header.extend(0u64.to_le_bytes());
+        // Keep each bank offset GGUF-aligned even for the tail-row geometry.
+        let up_offset = (count + 31) & !31;
+        for (name, offset) in [("gate", 0usize), ("up", up_offset)] {
+            header.extend((name.len() as u64).to_le_bytes());
+            header.extend(name.as_bytes());
+            header.extend(3u32.to_le_bytes());
+            for dim in [shape[2], shape[1], shape[0]] {
+                header.extend((dim as u64).to_le_bytes());
+            }
+            header.extend(17u32.to_le_bytes());
+            header.extend((offset as u64).to_le_bytes());
+        }
+        while !header.len().is_multiple_of(32) {
+            header.push(0);
+        }
+        let mut payload = vec![0u8; up_offset + count];
+        for offset in [0, up_offset] {
+            for block in payload[offset..offset + count].chunks_exact_mut(74) {
+                block[..2].copy_from_slice(&half::f16::from_f32(0.00390625).to_bits().to_le_bytes());
+            }
+        }
+        header.extend(payload);
+        fs::write(fixture.0.join("model.gguf"), header).unwrap();
+        let (pending, mapping, expected) = objc2::rc::autoreleasepool(|_| {
+            let weights = Weights::open(&fixture.0).unwrap();
+            let names = vec!["gate".to_owned(), "up".to_owned()];
+            let budget = weights.bounded_bank_bytes(&names).unwrap();
+            assert!(weights.indexed_group_with_budget(&names, budget - 1, true).is_err());
+            let mapping = Arc::downgrade(&weights.files[0]);
+            let group = weights.indexed_group_with_budget(&names, budget, true).unwrap();
+            let source = DecodeGraph::upload(&vec![0.25; 2048]).unwrap();
+            let ids = DecodeGraph::upload(&[f32::from_bits(3), f32::from_bits(1), f32::from_bits(3)]).unwrap();
+            let mut reference = DecodeGraph::new().unwrap();
+            let gate = group.encode_indexed_matvec(&mut reference, "gate", &ids, 3, &source, false).unwrap();
+            let up = group.encode_indexed_matvec(&mut reference, "up", &ids, 3, &source, false).unwrap();
+            let expected = reference.finish(&[gate, up]).unwrap();
+            let mut graph = DecodeGraph::new_unretained().unwrap();
+            assert!(graph.iq_shared_bound_enabled(), "requires IQ_SHARED_BOUND1");
+            let output = group.encode_indexed_pair(&mut graph, ["gate", "up"], &ids, 3, &source).unwrap();
+            assert_eq!(group.registered_bytes(), budget);
+            graph.validate_queued_submission().unwrap();
+            let pending = graph.submit(&output).unwrap();
+            drop(group);
+            drop(weights);
+            drop(source);
+            drop(ids);
+            assert!(mapping.upgrade().is_some(), "paired pending graph lost mmap owner");
+            (pending, mapping, expected)
+        });
+        let actual = objc2::rc::autoreleasepool(|_| pending.wait().unwrap());
+        assert!(
+            actual
+                .iter()
+                .zip(&expected)
+                .all(|(a, b)| { a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()) }),
+            "mapped shared-bound pair changed source bits"
+        );
+        for _ in 0..100 {
+            if mapping.upgrade().is_none() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(mapping.upgrade().is_none(), "completed paired graph retained expert mapping");
     }
 
     #[cfg(feature = "metal")]

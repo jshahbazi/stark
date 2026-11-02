@@ -263,8 +263,8 @@ fn encode_layer(
             )? {
                 active
             } else {
-                let gate = banks.encode_indexed_matvec(graph, &gate_name, &indices, c.active_experts, &norm, false)?;
-                let up = banks.encode_indexed_matvec(graph, &up_name, &indices, c.active_experts, &norm, false)?;
+                let [gate, up] =
+                    banks.encode_indexed_pair(graph, [&gate_name, &up_name], &indices, c.active_experts, &norm)?;
                 graph.swiglu(&gate, &up, Some(c.swiglu_limit))?
             };
             let down = banks.encode_indexed_matvec(

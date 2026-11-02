@@ -890,9 +890,8 @@ fn encode_metal_layer(
                 if decode.parallel_projections {
                     graph.begin_projection_level()?;
                 }
-                let gate =
-                    banks.encode_indexed_matvec(&mut graph, &gate_name, &indices, c.active_experts, &norm, false)?;
-                let up = banks.encode_indexed_matvec(&mut graph, &up_name, &indices, c.active_experts, &norm, false)?;
+                let [gate, up] =
+                    banks.encode_indexed_pair(&mut graph, [&gate_name, &up_name], &indices, c.active_experts, &norm)?;
                 if decode.parallel_projections {
                     graph.end_projection_level()?;
                 }

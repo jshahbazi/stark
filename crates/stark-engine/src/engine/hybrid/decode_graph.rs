@@ -132,6 +132,7 @@ pub(crate) struct DecodeGraph {
     separate_finite: bool,
     parallel_rms: bool,
     rms_prefetch: bool,
+    iq_shared_bound: bool,
     phase_timing: bool,
 }
 
@@ -282,6 +283,7 @@ impl DecodeGraph {
                 separate_finite: std::env::var_os("STARK_HYBRID_SEPARATE_FINITE").is_some_and(|value| value == "1"),
                 parallel_rms: std::env::var_os("STARK_GLM53_PARALLEL_RMS").is_some_and(|value| value == "1"),
                 rms_prefetch: std::env::var_os("STARK_GLM53_RMS_PREFETCH").is_some_and(|value| value == "1"),
+                iq_shared_bound: std::env::var_os("STARK_GLM53_IQ_SHARED_BOUND").is_some_and(|value| value == "1"),
                 phase_timing,
             })
         })
@@ -1163,6 +1165,57 @@ impl DecodeGraph {
         input: &DeviceVector,
         batched: bool,
     ) -> Result<DeviceVector> {
+        Self::validate_indexed(matrix, format, shape, indices, selected, input, batched)?;
+        self.indexed_with_bound(matrix, format, shape, indices, selected, input, batched, None)
+    }
+
+    pub fn iq_shared_bound_enabled(&self) -> bool {
+        self.iq_shared_bound && !self.projection_level
+    }
+
+    /// Two unchanged GEMVs consume one immutable input argument. The bound is
+    /// local to this call and cannot be reused after any intervening write.
+    pub fn indexed_pair(
+        &mut self,
+        gate: (&MappedMatrix, MatrixFormat, [usize; 3]),
+        up: (&MappedMatrix, MatrixFormat, [usize; 3]),
+        indices: &DeviceVector,
+        selected: usize,
+        input: &DeviceVector,
+    ) -> Result<[DeviceVector; 2]> {
+        if !self.iq_shared_bound_enabled()
+            || gate.2 != up.2
+            || !iq_bound_schedule(gate.1, gate.2[2])
+            || !iq_bound_schedule(up.1, up.2[2])
+        {
+            return Ok([
+                self.indexed(gate.0, gate.1, gate.2, indices, selected, input, false)?,
+                self.indexed(up.0, up.1, up.2, indices, selected, input, false)?,
+            ]);
+        }
+        // Validate both views before any pair dispatch. Each GEMV retains its
+        // original PSO selection, finite checks, offsets and output geometry.
+        for (matrix, format, shape) in [gate, up] {
+            Self::validate_indexed(matrix, format, shape, indices, selected, input, false)?;
+        }
+        let bounds = self.iq_input_bounds(input, gate.2[2], 1)?;
+        let output = [
+            self.indexed_with_bound(gate.0, gate.1, gate.2, indices, selected, input, false, Some(&bounds))?,
+            self.indexed_with_bound(up.0, up.1, up.2, indices, selected, input, false, Some(&bounds))?,
+        ];
+        profile::record("native.metal.graph.iq_shared_bound_pair", 0.0, 1);
+        Ok(output)
+    }
+
+    fn validate_indexed(
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        shape: [usize; 3],
+        indices: &DeviceVector,
+        selected: usize,
+        input: &DeviceVector,
+        batched: bool,
+    ) -> Result<()> {
         let [experts, rows, columns] = shape;
         if experts == 0
             || rows == 0
@@ -1181,9 +1234,6 @@ impl DecodeGraph {
         }
         input.validate()?;
         indices.validate()?;
-        let output =
-            self.scratch(rows.checked_mul(selected).ok_or(Error::Invalid("decode indexed output overflow"))?)?;
-        let executor = executor()?;
         MappedOperation {
             matrices: vec![matrix.clone()],
             inputs: &[],
@@ -1193,19 +1243,46 @@ impl DecodeGraph {
             format,
         }
         .parameters_for_input(columns)?;
+        Ok(())
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "validated indexed operation plus a pair-local bound")]
+    fn indexed_with_bound(
+        &mut self,
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        shape: [usize; 3],
+        indices: &DeviceVector,
+        selected: usize,
+        input: &DeviceVector,
+        batched: bool,
+        shared_bounds: Option<&DeviceVector>,
+    ) -> Result<DeviceVector> {
+        let [experts, rows, columns] = shape;
+        let output =
+            self.scratch(rows.checked_mul(selected).ok_or(Error::Invalid("decode indexed output overflow"))?)?;
+        let executor = executor()?;
         let iq_bound = iq_bound_schedule(format, columns);
         let iq_typed16 = iq_typed16_schedule(format, columns, matrix.codes.offset);
         let iq_factor = iq_signed_factor_schedule(format, columns, matrix.codes.offset);
         let bounds = if iq_bound {
-            Some(self.iq_input_bounds(
-                input,
-                columns,
-                if batched {
-                    selected
-                } else {
-                    1
-                },
-            )?)
+            Some(if let Some(bounds) = shared_bounds {
+                bounds.validate()?;
+                if batched || bounds.len != 1 {
+                    return Err(Error::Invalid("shared IQ bound requires one unbatched input"));
+                }
+                bounds.clone()
+            } else {
+                self.iq_input_bounds(
+                    input,
+                    columns,
+                    if batched {
+                        selected
+                    } else {
+                        1
+                    },
+                )?
+            })
         } else {
             None
         };
@@ -1297,6 +1374,7 @@ impl DecodeGraph {
                 depth: 1,
             },
         );
+        profile::record("native.metal.graph.indexed_matvec", 0.0, 1);
         self.resources.extend([
             matrix.codes.buffer.clone(),
             input.buffer.clone(),
@@ -1439,6 +1517,7 @@ impl DecodeGraph {
         // This dependency remains necessary inside a projection level, where
         // ordinary independent matvec dispatches intentionally omit barriers.
         self.finite_order_barrier();
+        profile::record("native.metal.graph.iq_bound_prepass", 0.0, batches);
         Ok(bounds)
     }
 
@@ -2762,3 +2841,7 @@ mod tests {
 #[cfg(test)]
 #[path = "decode_graph_iq_fused_tests.rs"]
 mod iq_fused_route_tests;
+
+#[cfg(test)]
+#[path = "decode_graph_iq_shared_bound_tests.rs"]
+mod iq_shared_bound_tests;
