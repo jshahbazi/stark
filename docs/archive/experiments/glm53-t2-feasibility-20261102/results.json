@@ -1,0 +1,140 @@
+{
+  "schema_version": 1,
+  "experiment": "glm53_t2_feasibility_2026_11_02",
+  "status": "measured_component_feasibility_only",
+  "qualification": {
+    "model_wide_speedup_claimed": false,
+    "head_catch_up_measured": false,
+    "rollback_measured": false,
+    "runtime_admission_established": false,
+    "production_readiness_claimed": false,
+    "diagnosis_of_difference_from_prior_mtp_greedy_protocol": "pending; protocol difference is not a causal regression claim"
+  },
+  "source": {
+    "base_revision": "b4f1836d97c9fcfb154d803ba93f96b8255d18e4",
+    "source_freeze_receipt_sha256": "17056778607b7b3add25d078d7e28810d61af4260fef9bc82210362894df79ca",
+    "source_archive_sha256": "349ed42ec3dac17f16959e01e35029e791e32bd26a7b54f9572a771dfd695970",
+    "source_archive_bytes": 53108,
+    "production_changes": "none_cfg_test_wiring_only",
+    "frozen_embedded_patch_sha256": "c126d36f8de2462b9adf29e298618110c6cb58b1d676d4eb987dffc5f323be3c",
+    "public_canonical_patch": {
+      "path": "prototype.patch",
+      "sha256": "70f4202e9a31a994a461c71c74d083a5fb66b127905066d47fefc04c310dc95d",
+      "bytes": 47007,
+      "generation": "git diff from a disposable checkout at the pinned base with external diff and textconv disabled, using the exact six files from source.tar.gz",
+      "declared_source_paths": 6,
+      "new_file_sections": 4,
+      "forward_reconstruction_all_six_frozen_hashes": "passed",
+      "reverse_application_clean_base": "passed",
+      "contents": "source code and authored fixed test fixtures only; no binaries, runtime receipts, model payloads, runtime request/response payloads, token vectors, or probability data"
+    },
+    "frozen_files": {
+      "crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs": {
+        "bytes": 14553,
+        "sha256": "b26426e519619c7f564db866e24c16740a34e19cb8ae9e64f409280470911b7e"
+      },
+      "crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs": {
+        "bytes": 23471,
+        "sha256": "4f3a804064028f4dceb4f80a8caa8ca73648060fc0237c9c8182d6966f115fbe"
+      },
+      "crates/stark-engine/src/engine/hybrid/weights.rs": {
+        "bytes": 192881,
+        "sha256": "8190d8def72b5d9b69a257e175cd9171ce1670b9ce29404e7bd68c781791d6fc"
+      },
+      "crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs": {
+        "bytes": 1302,
+        "sha256": "09154c86590fca23d6f8cd733263d1d2c6994e00e2b6e92e1ce9e3b4f5911ca6"
+      },
+      "scripts/probe_glm53_t2.py": {
+        "bytes": 15202,
+        "sha256": "17c7d055a4666202dedc7c24ad4ac94572d8e8187c8da5fa24f1627d1fc24418"
+      },
+      "scripts/test_probe_glm53_t2.py": {
+        "bytes": 3641,
+        "sha256": "c997b3bb01db0da1a563c0f8f6e883ca0a84d02d7083620aca7be36829ca49a2"
+      }
+    },
+    "precision_policy": "existing_safe_f32_legacy_projections"
+  },
+  "validation": {
+    "parser_fixture": {
+      "passed": 17,
+      "seconds": 0.05,
+      "receipt_sha256": "70ee925bf93c019c81645c16fa2543b524a566104cf2bab31d3d5a2af8476178",
+      "native_compilation": false,
+      "model_gpu_execution": false
+    },
+    "release_no_run_build": {
+      "exit_code": 0,
+      "toolchain": "nightly-2026-10-01",
+      "cargo_reported_duration": "3m25s",
+      "native_tests_invoked": false,
+      "receipt_sha256": "aa65b83567d070889ecc1177e08dc5491a7dd353fac11c911c947c5366db4075",
+      "sealed_binary_bytes": 47817440,
+      "sealed_binary_sha256": "5126afa655d445d20c9b72d668a4c4a1e900da243c95d48896d96bad08dc9081"
+    },
+    "guarded_gpu_attempt": {
+      "status": "complete",
+      "guard_passed": true,
+      "guard_pre_sha256": "414604fffe90c6f48f1f87c677bcefca8109029fe7698ffb879a2cc1231723e0",
+      "guard_receipt_sha256": "5b9951d2057927221317bfb277328855d60a793aa7fa3bb996f2667ed3e90608",
+      "result_receipt_sha256": "330e8cd28c0025df915dcbfd1e151506b4c8201709f821a59e5a66028a5118ae",
+      "elapsed_ms": 53382,
+      "frozen_source_unchanged": true,
+      "model_artifacts_unchanged": true,
+      "weights_unchanged": true,
+      "processes_stopped": true
+    }
+  },
+  "protocol": {
+    "cases": 3,
+    "target_reserved_context_tokens": 4096,
+    "context_tokens": 256,
+    "continuation_tokens_per_case": 8,
+    "warmup_rounds": 1,
+    "measured_rounds": 4,
+    "ordinary_serial_alignment_rows": 8,
+    "pool_residues_tested": 4,
+    "pooled_alignment_pairs": 4,
+    "complete_hidden_and_logit_comparisons": 192,
+    "comparisons_bitwise_equal": true,
+    "measured_serial_pairs": 36,
+    "measured_layer_major_pairs": 36,
+    "rollback_calls": 0,
+    "cost_scope": "full logits, hidden-state readback, greedy readback, and CPU finite/argmax; excludes head catch-up and rollback"
+  },
+  "timing_ms": {
+    "serial_two_gpu_median": 65.72679166856688,
+    "layer_major_two_gpu_median": 59.16143750073388,
+    "gpu_median_reduction_percent": 9.988855383264967,
+    "serial_two_wall_median": 73.082854,
+    "layer_major_two_wall_median": 67.88089550000001,
+    "wall_median_reduction_percent": 7.117891838214185,
+    "serial_two_gpu_total": 2378.0216248414945,
+    "layer_major_two_gpu_total": 2175.3423333284445,
+    "serial_two_wall_total": 2644.089876000001,
+    "layer_major_two_wall_total": 2480.3086270000003
+  },
+  "memory_bytes": {
+    "graph_scratch_high_water": 80740352,
+    "observed_required_peak": 108692065600,
+    "cap": 109676289225,
+    "sampled_metal_peak": 105772580864,
+    "residency_allocated_peak": 105444425728,
+    "dynamic_allowance": 1066257728,
+    "static_registered_peak": 6408552448,
+    "static_entries_peak": 594
+  },
+  "aggregate_hashes": {
+    "corpus_sha256": "82c1bb1e02a5315c24317475a305f5a8798523cab5c45ceda5764baf8c19ffc4",
+    "authoritative_continuation_sha256": "367926849e86f952fc60e2e35b30b35f67b2d6974bfc8ba67a0232a4c407af4d",
+    "execution_selector_sha256": "97ddef222b78145a93612cbe128f84b694c0000e1f4694ab278ff06ed25470ac",
+    "driver_sha256": "17c7d055a4666202dedc7c24ad4ac94572d8e8187c8da5fa24f1627d1fc24418",
+    "weight_guard_helper_sha256": "c7727f9d07180f7b37e05644852982dc0ad70818aea853537fae256257d7ecb4",
+    "wrapper_sha256": "556cb0f7d96bf0286f2da26ee4f6cbddbfd5831fbd66fb01701a29c63a6af6f4"
+  },
+  "hardware": {
+    "architecture": "arm64",
+    "macos": "26.7.1"
+  }
+}

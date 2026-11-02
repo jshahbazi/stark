@@ -1,0 +1,1049 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs b/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
+index 371fd8fcbbea91ea0210190b358242861ff926e8..d75401c00cd73cd4b21eae014946fd8a2c311169 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_prefill_batch.rs
+@@ -340,3 +340,7 @@ fn encode_kda_batch(
+ #[cfg(test)]
+ #[path = "glm_prefill_batch_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path = "glm_t2_probe.rs"]
++mod t2_probe;
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..dc1a0df920b16d8a340addebedf72c8da8b59e78
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+@@ -0,0 +1,582 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Ignored target-pair parity/cost probe. No speculative runtime or rollback.
++//!
++//! The pair reuses the production layer-major encoder with MMA disabled. The
++//! serial tap uses the same existing GLM Metal layer and final readout math;
++//! eight full logit rows first gate that tap against the ordinary serial API.
++
++use std::{io::Read, path::PathBuf, time::Instant};
++
++use serde::Deserialize;
++use sha2::{Digest, Sha256};
++use stark_engine_macros::stark_test;
++
++use super::*;
++use crate::engine::hybrid::{glm_metal, profile, weight_metal::allocated_bytes};
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Case {
++    input_token_ids: Vec<u32>,
++}
++
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Request {
++    schema_version: usize,
++    cases: Vec<Case>,
++    continuation_tokens: usize,
++    rounds: usize,
++    context_tokens: usize,
++    corpus_sha256: String,
++}
++
++struct Row {
++    hidden: Vec<f32>,
++    logits: Vec<f32>,
++    choice: u32,
++}
++
++struct Reference {
++    inputs: Vec<u32>,
++    rows: Vec<Row>,
++}
++
++#[derive(Default, serde::Serialize)]
++struct Memory {
++    cap_bytes: usize,
++    observed_required_peak_bytes: usize,
++    residency_allocated_peak_bytes: usize,
++    static_registered_peak_bytes: usize,
++    static_entries_peak: usize,
++    dynamic_allowance_bytes: usize,
++    sampled_metal_peak_bytes: usize,
++    graph_scratch_high_water_bytes: usize,
++}
++
++impl Memory {
++    fn observe(
++        &mut self,
++        model: &GlmModel,
++    ) -> Result<()> {
++        let [cap, required, actual, statics, entries, dynamic] = model.weights.t2_probe_accounting()?;
++        self.cap_bytes = cap;
++        self.observed_required_peak_bytes = self.observed_required_peak_bytes.max(required);
++        self.residency_allocated_peak_bytes = self.residency_allocated_peak_bytes.max(actual);
++        self.static_registered_peak_bytes = self.static_registered_peak_bytes.max(statics);
++        self.static_entries_peak = self.static_entries_peak.max(entries);
++        self.dynamic_allowance_bytes = dynamic;
++        self.sampled_metal_peak_bytes = self.sampled_metal_peak_bytes.max(allocated_bytes()?);
++        let counters = profile::snapshot();
++        if let Some(counter) = counters.get("native.metal.allocated_bytes") {
++            self.sampled_metal_peak_bytes = self.sampled_metal_peak_bytes.max(counter.max_bytes as usize);
++        }
++        if let Some(counter) = counters.get("native.metal.graph.scratch_high_water") {
++            self.graph_scratch_high_water_bytes = self.graph_scratch_high_water_bytes.max(counter.max_bytes as usize);
++        }
++        if self.sampled_metal_peak_bytes > cap || self.graph_scratch_high_water_bytes > 512 * 1024 * 1024 {
++            return Err(Error::Invalid("T2 memory cap"));
++        }
++        Ok(())
++    }
++}
++
++fn same(
++    a: &[f32],
++    b: &[f32],
++) -> bool {
++    a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits())
++}
++
++fn choice(values: &[f32]) -> Result<u32> {
++    if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
++        return Err(Error::Invalid("T2 greedy values"));
++    }
++    let mut best = 0;
++    for i in 1..values.len() {
++        if values[i] > values[best] {
++            best = i;
++        }
++    }
++    Ok(best as u32)
++}
++
++fn take_row(
++    rows: &mut impl Iterator<Item = Vec<f32>>,
++    c: &Config,
++) -> Result<Row> {
++    let hidden = rows.next().ok_or(Error::Invalid("T2 hidden row"))?;
++    let index = rows.next().ok_or(Error::Invalid("T2 greedy row"))?;
++    let logits = rows.next().ok_or(Error::Invalid("T2 logit row"))?;
++    if hidden.len() != c.hidden
++        || hidden.iter().any(|v| !v.is_finite())
++        || index.len() != 1
++        || !index[0].is_finite()
++        || index[0] < 0.0
++        || index[0].fract() != 0.0
++        || index[0] as f64 >= c.vocab as f64
++        || logits.len() != c.vocab
++    {
++        return Err(Error::Invalid("T2 readout values"));
++    }
++    let selected = index[0] as u32;
++    if choice(&logits)? != selected {
++        return Err(Error::Invalid("T2 greedy parity"));
++    }
++    Ok(Row {
++        hidden,
++        logits,
++        choice: selected,
++    })
++}
++
++/// Serial source-equivalent target with full readout and a post-output-norm tap.
++/// No test layer-trace readbacks are inserted into this timing path.
++fn serial_row(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++) -> Result<Option<Row>> {
++    objc2::rc::autoreleasepool(|_| {
++        let c = &model.config;
++        if model.cleanup_failed || token as usize >= c.vocab || model.position >= c.max_context {
++            return Err(Error::Invalid("T2 serial bounds"));
++        }
++        let decode = model.decode.as_mut().ok_or(Error::Invalid("T2 serial decode"))?;
++        let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("T2 bounded plan"))?;
++        if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
++            return Err(Error::Invalid("T2 serial policy"));
++        }
++        let embedding = model.weights.row("token_embd.weight", token as usize)?;
++        let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
++        let mut graph = new_encoder_graph(decode)?;
++        let group = &plan.groups[0];
++        let banks = model.weights.encoder_indexed_group(&group.names, plan.budget)?;
++        if banks.registered_bytes() > group.bytes {
++            return Err(Error::Invalid("T2 serial inventory changed"));
++        }
++        for layer in group.start..group.end {
++            (graph, streams) = encode_metal_layer(
++                &model.weights,
++                c,
++                decode,
++                layer,
++                &mut model.states[layer],
++                graph,
++                streams,
++                Some(&banks),
++            )?;
++        }
++        let mut outputs = Vec::new();
++        if readout {
++            let mean = glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
++            let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
++            let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
++            let greedy = graph.greedy_argmax(&logits)?;
++            outputs.extend([hidden, greedy, logits]);
++        } else {
++            graph.check_finite(&streams)?;
++        }
++        drop(banks);
++        let mut rows = graph.finish(&outputs)?.into_iter();
++        for state in &model.states {
++            if let LayerState::Kda(state) = state
++                && let Some(metal) = &state.metal
++            {
++                metal.check_completed()?;
++            }
++        }
++        model.position += 1;
++        model.last_greedy = None;
++        if readout {
++            take_row(&mut rows, c).map(Some)
++        } else {
++            Ok(None)
++        }
++    })
++}
++
++fn pair_rows(
++    model: &mut GlmModel,
++    tokens: &[u32],
++) -> Result<Vec<Row>> {
++    objc2::rc::autoreleasepool(|_| {
++        let c = &model.config;
++        if model.cleanup_failed
++            || tokens.len() != 2
++            || tokens.iter().any(|&t| t as usize >= c.vocab)
++            || model.position.checked_add(2).is_none_or(|end| end > c.max_context)
++        {
++            return Err(Error::Invalid("T2 pair bounds"));
++        }
++        let decode = model.decode.as_mut().ok_or(Error::Invalid("T2 pair decode"))?;
++        let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("T2 bounded plan"))?;
++        if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
++            return Err(Error::Invalid("T2 pair policy"));
++        }
++        let mut values = Vec::with_capacity(2 * c.hidden * c.hc);
++        for &token in tokens {
++            let embedding = model.weights.row("token_embd.weight", token as usize)?;
++            if embedding.len() != c.hidden || embedding.iter().any(|v| !v.is_finite()) {
++                return Err(Error::Invalid("T2 pair embedding"));
++            }
++            for _ in 0..c.hc {
++                values.extend_from_slice(&embedding);
++            }
++        }
++        let mut graph = new_encoder_graph(decode)?;
++        let mut streams = graph.upload_into(&values)?;
++        let group = &plan.groups[0];
++        let banks = model.weights.encoder_indexed_group(&group.names, plan.budget)?;
++        if banks.registered_bytes() > group.bytes {
++            return Err(Error::Invalid("T2 pair inventory changed"));
++        }
++        for layer in group.start..group.end {
++            // Two legacy row projections; no MMA or dot reassociation.
++            streams = encode_layer(
++                &model.weights,
++                c,
++                decode,
++                layer,
++                &mut model.states[layer],
++                &mut graph,
++                &streams,
++                &banks,
++                2,
++                false,
++            )?;
++        }
++        let mut outputs = Vec::with_capacity(6);
++        for token in 0..2 {
++            let row = streams.slice(token * c.hidden * c.hc, c.hidden * c.hc)?;
++            let mean = glm_metal::stream_mean(&mut graph, &row, c.hidden, c.hc)?;
++            let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
++            let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
++            let greedy = graph.greedy_argmax(&logits)?;
++            outputs.extend([hidden, greedy, logits]);
++        }
++        drop(banks);
++        let mut values = graph.finish(&outputs)?.into_iter();
++        let rows = vec![take_row(&mut values, c)?, take_row(&mut values, c)?];
++        for state in &model.states {
++            if let LayerState::Kda(state) = state
++                && let Some(metal) = &state.metal
++            {
++                metal.check_completed()?;
++            }
++        }
++        model.position += 2;
++        model.last_greedy = None;
++        Ok(rows)
++    })
++}
++
++fn compare_rows(
++    actual: &Row,
++    expected: &Row,
++) -> Result<()> {
++    if actual.choice != expected.choice
++        || !same(&actual.hidden, &expected.hidden)
++        || !same(&actual.logits, &expected.logits)
++    {
++        return Err(Error::Invalid("T2 complete row parity"));
++    }
++    Ok(())
++}
++
++fn prefill(
++    model: &mut GlmModel,
++    tokens: &[u32],
++) -> Result<Row> {
++    model.reset();
++    let mut last = None;
++    for (i, &token) in tokens.iter().enumerate() {
++        last = serial_row(model, token, i + 1 == tokens.len())?;
++    }
++    last.ok_or(Error::Invalid("T2 empty prompt"))
++}
++
++fn gpu_seconds() -> f64 {
++    profile::snapshot().get("native.metal.gpu").map_or(0.0, |c| c.seconds)
++}
++
++fn median(values: &[f64]) -> Result<f64> {
++    if values.is_empty() || values.iter().any(|v| !v.is_finite() || *v < 0.0) {
++        return Err(Error::Invalid("T2 missing timings"));
++    }
++    let mut sorted = values.to_vec();
++    sorted.sort_by(f64::total_cmp);
++    let mid = sorted.len() / 2;
++    Ok(if sorted.len().is_multiple_of(2) {
++        (sorted[mid - 1] + sorted[mid]) * 0.5
++    } else {
++        sorted[mid]
++    })
++}
++
++fn probe() -> Result<Value> {
++    let mut bytes = Vec::new();
++    std::io::stdin().take(128 * 1024 + 1).read_to_end(&mut bytes)?;
++    if bytes.len() > 128 * 1024 {
++        return Err(Error::Invalid("T2 stdin bound"));
++    }
++    let request: Request = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("T2 stdin schema"))?;
++    if request.schema_version != 1
++        || request.cases.len() != 3
++        || request.continuation_tokens != 8
++        || request.rounds != 4
++        || request.context_tokens != 256
++        || request.corpus_sha256.len() != 64
++        || !request.corpus_sha256.bytes().all(|b| b.is_ascii_hexdigit())
++        || request.cases.iter().any(|c| !(12..=128).contains(&c.input_token_ids.len()))
++    {
++        return Err(Error::Invalid("T2 stdin admission"));
++    }
++    let ids = request.cases.iter().map(|c| &c.input_token_ids).collect::<Vec<_>>();
++    if format!("{:x}", Sha256::digest(serde_json::to_vec(&ids).map_err(|_| Error::Invalid("T2 stdin schema"))?))
++        != request.corpus_sha256
++    {
++        return Err(Error::Invalid("T2 stdin admission"));
++    }
++    for name in [
++        "STARK_GLM53_ENCODER_BANKS",
++        "STARK_GLM53_RESIDENT_BANKS",
++        "STARK_GLM53_WIDE_ENCODER",
++        "STARK_GLM53_GPU_GREEDY",
++        "STARK_GLM53_DECODE_GRAPH",
++    ] {
++        if std::env::var_os(name).is_none_or(|v| v != "1") {
++            return Err(Error::Invalid("T2 policy"));
++        }
++    }
++    for name in [
++        "STARK_GLM53_GREEDY_OVERLAP",
++        "STARK_GLM53_PREFILL_MMA",
++        "STARK_GLM53_SCRATCH_HEAP",
++        "STARK_GLM53_PARALLEL_PROJECTIONS",
++        "STARK_GLM53_CONCURRENT_ENCODER",
++        "STARK_GLM53_PACKED_FAST_MATH",
++    ] {
++        if std::env::var_os(name).is_some_and(|v| v == "1") {
++            return Err(Error::Invalid("T2 policy"));
++        }
++    }
++    let path =
++        PathBuf::from(std::env::var_os("STARK_GLM53_T2_PROBE_MODEL_PATH").ok_or(Error::Invalid("T2 model path"))?);
++    let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json"))?)
++        .map_err(|_| Error::Invalid("T2 model config"))?;
++    let source: Value = serde_json::from_slice(&std::fs::read(path.join("native-source.json"))?)
++        .map_err(|_| Error::Invalid("T2 model provenance"))?;
++    if source["architecture"].as_str() != Some("glm5_next")
++        || source["weights_source"]["revision"].as_str() != Some("a38483c8cd5df544f53d70fb281afe97369d5ab6")
++        || source["metadata_source"]["revision"].as_str() != Some("04c4e9e95c5da8862dced7e5056455116f83a7e0")
++    {
++        return Err(Error::Invalid("T2 model provenance"));
++    }
++    let mut model = GlmModel::new(Weights::open(&path)?, &config)?;
++    if model.config.hidden != 4096
++        || model.config.hc != 4
++        || model.config.layer_types.len() != 45
++        || model.config.index_pool != 4
++        || !model.decode_graph_enabled
++        || request.cases.iter().any(|c| {
++            c.input_token_ids.iter().any(|&t| t as usize >= model.config.vocab)
++                || c.input_token_ids.len() + request.continuation_tokens + 1 > request.context_tokens
++        })
++    {
++        return Err(Error::Invalid("T2 model geometry"));
++    }
++    model.decode = Some(MetalDecode::new(&model.weights, &model.config, model.hyper_connections.as_deref())?);
++    // Match production ownership; no duplicate CPU mHC weight retention.
++    model.hyper_connections = None;
++    let generation: Value = serde_json::from_slice(&std::fs::read(path.join("generation_config.json"))?)
++        .map_err(|_| Error::Invalid("T2 generation config"))?;
++    let eos = match &generation["eos_token_id"] {
++        Value::Number(n) => {
++            vec![n.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("T2 EOS config"))?]
++        },
++        Value::Array(values) => values
++            .iter()
++            .map(|v| v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or(Error::Invalid("T2 EOS config")))
++            .collect::<Result<Vec<_>>>()?,
++        _ => return Err(Error::Invalid("T2 EOS config")),
++    };
++    if eos.is_empty() || eos.iter().any(|&n| n as usize >= model.config.vocab) {
++        return Err(Error::Invalid("T2 EOS config"));
++    }
++    profile::enable(true);
++    profile::reset();
++    let mut memory = Memory::default();
++    memory.observe(&model)?;
++
++    // Gate the serial tap against the ordinary API before using it as a hidden
++    // reference. The ordinary API alone has no hidden-row return contract.
++    let initial = &request.cases[0].input_token_ids;
++    let mut tap_rows = Vec::with_capacity(8);
++    for &token in &initial[..8] {
++        tap_rows.push(serial_row(&mut model, token, true)?.ok_or(Error::Invalid("T2 tap"))?);
++    }
++    model.reset();
++    for (&token, expected) in initial[..8].iter().zip(&tap_rows) {
++        let actual = model.step(token)?;
++        if !same(&actual, &expected.logits) || choice(&actual)? != expected.choice {
++            return Err(Error::Invalid("T2 ordinary serial tap parity"));
++        }
++    }
++    drop(tap_rows);
++
++    // Every residue modulo the four-row MLA pool is tested explicitly. This
++    // catches pairs crossing compression boundaries after either row.
++    let mut pooled_pairs = 0usize;
++    for length in 8..12 {
++        let first = prefill(&mut model, &initial[..length])?.choice;
++        let first_ref = serial_row(&mut model, first, true)?.ok_or(Error::Invalid("T2 tap"))?;
++        let second = first_ref.choice;
++        let second_ref = serial_row(&mut model, second, true)?.ok_or(Error::Invalid("T2 tap"))?;
++        prefill(&mut model, &initial[..length])?;
++        let actual = pair_rows(&mut model, &[first, second])?;
++        compare_rows(&actual[0], &first_ref)?;
++        compare_rows(&actual[1], &second_ref)?;
++        pooled_pairs += 1;
++        memory.observe(&model)?;
++    }
++
++    let mut references = Vec::with_capacity(request.cases.len());
++    let mut continuation_hash = Sha256::new();
++    for case in &request.cases {
++        let mut pending = prefill(&mut model, &case.input_token_ids)?.choice;
++        let mut reference = Reference {
++            inputs: Vec::new(),
++            rows: Vec::new(),
++        };
++        for _ in 0..request.continuation_tokens {
++            // This fixed-length component protocol is qualified only when all
++            // eight authoritative rows precede EOS; never force generation
++            // past an ordinary stopping point to fill a favorable cost sample.
++            if eos.contains(&pending) {
++                return Err(Error::Invalid("T2 early EOS"));
++            }
++            reference.inputs.push(pending);
++            continuation_hash.update(pending.to_le_bytes());
++            let row = serial_row(&mut model, pending, true)?.ok_or(Error::Invalid("T2 tap"))?;
++            pending = row.choice;
++            reference.rows.push(row);
++        }
++        references.push(reference);
++    }
++
++    let mut serial_wall = Vec::new();
++    let mut pair_wall = Vec::new();
++    let mut serial_gpu = Vec::new();
++    let mut pair_gpu = Vec::new();
++    let mut compared_rows = 0usize;
++    let mut warm_static_state = None;
++    // First round warms the exact pair schedule; remaining rounds alternate
++    // schedule order. Reset/prompt replay/parity comparisons are outside cost.
++    for round in 0..request.rounds {
++        for (case, reference) in request.cases.iter().zip(&references) {
++            for paired in if round.is_multiple_of(2) {
++                [false, true]
++            } else {
++                [true, false]
++            } {
++                prefill(&mut model, &case.input_token_ids)?;
++                for (inputs, expected) in reference.inputs.chunks_exact(2).zip(reference.rows.chunks_exact(2)) {
++                    memory.observe(&model)?;
++                    let gpu_before = gpu_seconds();
++                    let started = Instant::now();
++                    let actual = if paired {
++                        pair_rows(&mut model, inputs)?
++                    } else {
++                        vec![
++                            serial_row(&mut model, inputs[0], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row(&mut model, inputs[1], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                        ]
++                    };
++                    let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
++                    let gpu_ms = (gpu_seconds() - gpu_before) * 1000.0;
++                    for (actual, expected) in actual.iter().zip(expected) {
++                        compare_rows(actual, expected)?;
++                    }
++                    compared_rows += 2;
++                    memory.observe(&model)?;
++                    if round > 0 {
++                        if paired {
++                            pair_wall.push(wall_ms);
++                            pair_gpu.push(gpu_ms);
++                        } else {
++                            serial_wall.push(wall_ms);
++                            serial_gpu.push(gpu_ms);
++                        }
++                    }
++                }
++            }
++        }
++        let current = model.weights.t2_probe_accounting()?;
++        let static_state = (current[3], current[4]);
++        if round == 0 {
++            warm_static_state = Some(static_state);
++        } else if warm_static_state != Some(static_state) {
++            return Err(Error::Invalid("T2 static cache growth after warmup"));
++        }
++    }
++    memory.observe(&model)?;
++    let counters = profile::snapshot();
++    if counters.contains_key("native.glm.prefill.q5_mma") || counters.contains_key("native.glm.prefill.q6_mma") {
++        return Err(Error::Invalid("T2 unexpected MMA"));
++    }
++    model.reset();
++    profile::enable(false);
++    Ok(serde_json::json!({"glm_t2_probe_result":true,"aggregate":{
++        "status":"target_pair_component_complete_no_rollback", "precision":"existing_safe_f32_legacy_projections",
++        "counts":{"cases":request.cases.len(),"continuation_rows_per_case":request.continuation_tokens,
++            "rounds":request.rounds,"warmup_rounds":1,"ordinary_serial_alignment_rows":8,
++            "pooled_alignment_pairs":pooled_pairs,"pool_residues_tested":4,"complete_rows_compared":compared_rows,
++            "measured_serial_pairs":serial_wall.len(),"measured_layer_major_pairs":pair_wall.len(),"rollback_calls":0},
++        "timing_ms":{"serial_two_wall_total":serial_wall.iter().sum::<f64>(),"layer_major_two_wall_total":pair_wall.iter().sum::<f64>(),
++            "serial_two_gpu_total":serial_gpu.iter().sum::<f64>(),"layer_major_two_gpu_total":pair_gpu.iter().sum::<f64>(),
++            "serial_two_wall_median":median(&serial_wall)?,"layer_major_two_wall_median":median(&pair_wall)?,
++            "serial_two_gpu_median":median(&serial_gpu)?,"layer_major_two_gpu_median":median(&pair_gpu)?},
++        "memory_gauges":memory, "hashes":{"corpus_sha256":request.corpus_sha256,
++            "authoritative_continuation_sha256":format!("{:x}",continuation_hash.finalize())},
++        "target_reserved_context_tokens":model.config.max_context
++    }}))
++}
++
++#[stark_test]
++#[ignore]
++fn glm_t2_verification_probe() {
++    match objc2::rc::autoreleasepool(|_| probe()) {
++        Ok(aggregate) => println!("{aggregate}"),
++        Err(error) => {
++            profile::enable(false);
++            let guard = match error {
++                Error::Invalid("T2 stdin bound") => "stdin_bound",
++                Error::Invalid("T2 stdin schema") => "stdin_schema",
++                Error::Invalid("T2 stdin admission") => "stdin_admission",
++                Error::Invalid("T2 policy" | "T2 serial policy" | "T2 pair policy" | "T2 unexpected MMA") => {
++                    "target_policy"
++                },
++                Error::Invalid(code) if code.contains("parity") || code.contains("tap") => "alignment_parity",
++                Error::Invalid(code)
++                    if code.contains("cap")
++                        || code.contains("residency")
++                        || code.contains("memory")
++                        || code.contains("alloc")
++                        || code.contains("static cache") =>
++                {
++                    "memory_gate"
++                },
++                Error::Io(_) => "model_load",
++                _ => "probe_rejected",
++            };
++            println!(
++                "{}",
++                serde_json::json!({"glm_t2_probe_result":true,"aggregate":{
++                    "status":"rejected","rows":{"failure":{"guard":guard}}
++                }})
++            );
++            panic!("T2 aggregate probe failed; no private values are reported");
++        },
++    }
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weights.rs b/crates/stark-engine/src/engine/hybrid/weights.rs
+index 73217deb40cca71576122692e805663588490a9e..046591c26e4c8a5de0b71298b047c6eed37b83fd 100644
+--- a/crates/stark-engine/src/engine/hybrid/weights.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights.rs
+@@ -45,6 +45,10 @@ const MAX_SELECTED_BYTES: usize = 256 * 1024 * 1024;
+ const MAX_BATCH_WEIGHT_BYTES: usize = 2 * 1024 * 1024 * 1024;
+ #[cfg(feature = "metal")]
+ const MAX_STATIC_VIEW_BYTES: usize = 8 * 1024 * 1024 * 1024;
++
++#[cfg(all(test, feature = "metal"))]
++#[path = "weights_t2_probe.rs"]
++mod t2_probe;
+ #[cfg(feature = "metal")]
+ fn require_wide_encoder_flags(
+     encoder: bool,
+diff --git a/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs b/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f31a1906ae5600e090a8ef9ec04edfbe19439773
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weights_t2_probe.rs
+@@ -0,0 +1,25 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Read-only test accounting over the unchanged encoder residency admission.
++
++use super::*;
++
++impl Weights {
++    pub(in crate::engine::hybrid) fn t2_probe_accounting(&self) -> Result<[usize; 6]> {
++        let guard = self.encoder_residency.lock().map_err(|_| Error::Invalid("T2 residency lock"))?;
++        let r = guard.as_ref().ok_or(Error::Invalid("T2 residency admission missing"))?;
++        if r.failed {
++            return Err(Error::Invalid("T2 residency failed"));
++        }
++        let driver = r.driver.lock().map_err(|_| Error::Invalid("T2 residency driver lock"))?;
++        let actual = usize::try_from(driver.set.allocated_size()).map_err(|_| Error::Invalid("T2 allocation size"))?;
++        let required = r.required(r.bank_bytes, r.static_bytes, actual)?;
++        let (cap, dynamic) = (r.cap, r.dynamic_allowance);
++        drop(driver);
++        drop(guard);
++        let statics = self.static_views.lock().map_err(|_| Error::Invalid("T2 static cache lock"))?;
++        if statics.registered_bytes > statics.limit || statics.limit != MAX_STATIC_VIEW_BYTES {
++            return Err(Error::Invalid("T2 static cache exceeded existing bound"));
++        }
++        Ok([cap, required, actual, statics.registered_bytes, statics.entries.len(), dynamic])
++    }
++}
+diff --git a/scripts/probe_glm53_t2.py b/scripts/probe_glm53_t2.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..84ca251655fd827152ab7075f487866aed9d1673
+--- /dev/null
++++ b/scripts/probe_glm53_t2.py
+@@ -0,0 +1,300 @@
++"""Private aggregate-only driver for the ignored two-token target probe.
++
++Prompts, IDs, full logits, and native process output remain in RAM. This driver
++writes only allowlisted counts, timings, hashes, source identity and guards.
++The component timings include full logits/hidden readback; they establish no
++speculative speedup, rollback cost, or production memory admission.
++"""
++
++from __future__ import annotations
++
++import argparse
++import contextlib
++import hashlib
++import io
++import json
++import math
++import os
++import platform
++import re
++import subprocess
++import sys
++import time
++from pathlib import Path
++
++
++SCOPE = "glm53_target_two_token_feasibility"
++TEST_NAME = b"stark_engine::engine::hybrid::glm::prefill_batch::t2_probe::glm_t2_verification_probe"
++SENTINEL = b'"glm_t2_probe_result"'
++CONTINUATION_TOKENS = 8
++CONTEXT_TOKENS = 256
++ROUNDS = 4
++PROMPTS = (
++    "Name three colors.",
++    "Give one sentence about a quiet garden.",
++    "What is 7 plus 5? Answer briefly.",
++)
++EXPECTED_COUNTS = {
++    "cases": 3, "continuation_rows_per_case": 8, "rounds": 4,
++    "warmup_rounds": 1, "ordinary_serial_alignment_rows": 8,
++    "pooled_alignment_pairs": 4, "pool_residues_tested": 4,
++    "complete_rows_compared": 192, "measured_serial_pairs": 36,
++    "measured_layer_major_pairs": 36, "rollback_calls": 0,
++}
++TIMING_KEYS = {
++    "serial_two_wall_total", "layer_major_two_wall_total",
++    "serial_two_gpu_total", "layer_major_two_gpu_total",
++    "serial_two_wall_median", "layer_major_two_wall_median",
++    "serial_two_gpu_median", "layer_major_two_gpu_median",
++}
++MEMORY_KEYS = {
++    "cap_bytes", "observed_required_peak_bytes", "residency_allocated_peak_bytes",
++    "static_registered_peak_bytes", "static_entries_peak", "dynamic_allowance_bytes",
++    "sampled_metal_peak_bytes", "graph_scratch_high_water_bytes",
++}
++HASH_KEYS = {"corpus_sha256", "authoritative_continuation_sha256"}
++FAILURE_GUARDS = {
++    "stdin_bound", "stdin_schema", "stdin_admission", "target_policy",
++    "alignment_parity", "memory_gate", "model_load", "probe_rejected",
++}
++BOOLEAN_SELECTORS = (
++    "STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER",
++    "STARK_GLM53_BATCH_FINITE", "STARK_GLM53_Q4K_BLOCK", "STARK_GLM53_KQUANT_FACTORED",
++    "STARK_GLM53_Q6_GROUPED16", "STARK_GLM53_Q5_GROUPED32", "STARK_GLM53_Q4_GROUPED32",
++    "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_CONTROL_SPLIT", "STARK_GLM53_CONTROL_RMS_PROJECT",
++    "STARK_GLM53_CONTROL_SIMD", "STARK_GLM53_KDA_TRANSPOSED", "STARK_GLM53_KDA_FUSED_STATE",
++    "STARK_GLM53_KDA_PARALLEL_NORM", "STARK_GLM53_Q8_SHAPES", "STARK_GLM53_IQ4_VECTOR",
++    "STARK_GLM53_IQ_MULTIROW", "STARK_GLM53_IQ_GPU_BOUND", "STARK_GLM53_IQ_TYPED16",
++    "STARK_GLM53_IQ_SIGNED_FACTOR", "STARK_GLM53_IQ_FUSED_GATE_UP", "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
++    "STARK_GLM53_POLL_WAIT", "STARK_GLM53_SERIAL_FINITE_ORDER", "STARK_GLM53_UNRETAINED_GRAPH",
++    "STARK_GLM53_SCRATCH_HEAP", "STARK_GLM53_CONTROL_FUSED_PARALLEL", "STARK_GLM53_Q8_GROUPED8",
++    "STARK_GLM53_PARALLEL_RMS", "STARK_GLM53_RMS_PREFETCH", "STARK_GLM53_GREEDY_OVERLAP",
++    "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_PREFILL_QUEUED", "STARK_GLM53_PREFILL_MMA",
++    "STARK_GLM53_FINITE_SELECTIVE", "STARK_GLM53_PACKED_FAST_MATH", "STARK_GLM53_PARALLEL_PROJECTIONS",
++    "STARK_GLM53_CONCURRENT_ENCODER", "STARK_GLM53_BOUNDED_GRAPH", "STARK_GLM53_SERIAL_ROUTER",
++    "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS", "STARK_HYBRID_PACKED_REFERENCE",
++    "STARK_HYBRID_BYTE_LOADS", "STARK_HYBRID_VECTOR8", "STARK_HYBRID_SCALAR_UINT_LOADS",
++    "STARK_HYBRID_FACTORED_AFFINE", "STARK_HYBRID_SEPARATE_FINITE",
++)
++
++
++class ProbeError(Exception):
++    def __init__(self, stage: str, diagnostics: dict | None = None):
++        super().__init__(stage)
++        self.stage = stage
++        self.diagnostics = diagnostics
++
++
++def sha256_file(path: Path) -> str:
++    digest = hashlib.sha256()
++    with path.open("rb") as stream:
++        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
++            digest.update(chunk)
++    return digest.hexdigest()
++
++
++def hash_value(value: object) -> str:
++    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode("ascii")).hexdigest()
++
++
++def model_artifact_identity(model_path: Path) -> dict:
++    artifacts = {}
++    for name in ("config.json", "generation_config.json", "tokenizer.json", "tokenizer_config.json", "chat_template.jinja", "native-source.json"):
++        path = model_path / name
++        if path.is_file():
++            artifacts[name] = {"bytes": path.stat().st_size, "sha256": sha256_file(path)}
++    if not {"config.json", "generation_config.json", "tokenizer.json", "native-source.json"} <= set(artifacts):
++        raise ProbeError("model_artifacts")
++    return artifacts
++
++
++def validate_aggregate(value: object) -> dict:
++    if not isinstance(value, dict) or set(value) != {"glm_t2_probe_result", "aggregate"} or value["glm_t2_probe_result"] is not True:
++        raise ProbeError("test_result")
++    aggregate = value["aggregate"]
++    if not isinstance(aggregate, dict):
++        raise ProbeError("test_result")
++    if aggregate.get("status") == "rejected":
++        if (
++            set(aggregate) != {"status", "rows"}
++            or not isinstance(aggregate["rows"], dict)
++            or set(aggregate["rows"]) != {"failure"}
++            or not isinstance(aggregate["rows"]["failure"], dict)
++            or set(aggregate["rows"]["failure"]) != {"guard"}
++            or aggregate["rows"]["failure"]["guard"] not in FAILURE_GUARDS
++        ):
++            raise ProbeError("test_result")
++        return aggregate
++    if set(aggregate) != {"status", "precision", "counts", "timing_ms", "memory_gauges", "hashes", "target_reserved_context_tokens"}:
++        raise ProbeError("test_result")
++    if aggregate["status"] != "target_pair_component_complete_no_rollback" or aggregate["precision"] != "existing_safe_f32_legacy_projections":
++        raise ProbeError("test_result")
++    counts = aggregate["counts"]
++    if not isinstance(counts, dict) or set(counts) != set(EXPECTED_COUNTS) or any(type(counts[key]) is not int or counts[key] != expected for key, expected in EXPECTED_COUNTS.items()):
++        raise ProbeError("test_result")
++    timing = aggregate["timing_ms"]
++    if not isinstance(timing, dict) or set(timing) != TIMING_KEYS or any(type(v) not in (int, float) or not math.isfinite(v) or v < 0 for v in timing.values()):
++        raise ProbeError("test_result")
++    memory = aggregate["memory_gauges"]
++    if not isinstance(memory, dict) or set(memory) != MEMORY_KEYS or any(type(v) is not int or v < 0 for v in memory.values()):
++        raise ProbeError("test_result")
++    if memory["cap_bytes"] < 1 or memory["observed_required_peak_bytes"] > memory["cap_bytes"] or memory["sampled_metal_peak_bytes"] > memory["cap_bytes"] or memory["graph_scratch_high_water_bytes"] > 512 * 1024 * 1024:
++        raise ProbeError("test_result")
++    hashes = aggregate["hashes"]
++    if not isinstance(hashes, dict) or set(hashes) != HASH_KEYS or any(not isinstance(v, str) or len(v) != 64 or any(c not in "0123456789abcdef" for c in v) for v in hashes.values()):
++        raise ProbeError("test_result")
++    reserved = aggregate["target_reserved_context_tokens"]
++    if type(reserved) is not int or not CONTEXT_TOKENS <= reserved <= 4096:
++        raise ProbeError("test_result")
++    return aggregate
++
++
++def parse_test_result(output: bytes) -> dict:
++    """Accept only standalone JSON or pinned libtest-mimic 0.8.2 framing."""
++    if len(output) > 256 * 1024:
++        raise ProbeError("test_result")
++    prefix = re.compile(rb"test " + re.escape(TEST_NAME) + rb" * \.\.\. (?P<json>\{.*\})")
++
++    def unique_object(pairs):
++        result = {}
++        for key, value in pairs:
++            if key in result:
++                raise ProbeError("test_result")
++            result[key] = value
++        return result
++
++    results = []
++    try:
++        for line in output.splitlines():
++            stripped = line.strip()
++            if SENTINEL not in stripped:
++                continue
++            if stripped.startswith(b"{"):
++                candidate = stripped
++            else:
++                match = prefix.fullmatch(stripped)
++                if match is None:
++                    raise ProbeError("test_result")
++                candidate = match.group("json")
++            results.append(json.loads(candidate, object_pairs_hook=unique_object))
++        if len(results) != 1:
++            raise ProbeError("test_result")
++        return validate_aggregate(results[0])
++    except ProbeError:
++        raise
++    except BaseException:
++        raise ProbeError("test_result") from None
++
++
++def execution_selectors() -> dict:
++    values = {name: os.environ.get(name) == "1" for name in BOOLEAN_SELECTORS}
++    for name in ("STARK_GLM53_CONTROL_CHUNKS", "STARK_GLM53_BANK_GROUP_LAYERS", "STARK_GLM53_PREFILL_CHUNK"):
++        value = os.environ.get(name)
++        values[name] = value if value in {"4", "8", "16", "32", "45"} else "unset_or_invalid"
++    for name in ("STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER", "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_DECODE_GRAPH"):
++        if os.environ.get(name) != "1":
++            raise ProbeError("execution_policy")
++    for name in ("STARK_GLM53_GREEDY_OVERLAP", "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_SCRATCH_HEAP", "STARK_GLM53_PARALLEL_PROJECTIONS", "STARK_GLM53_CONCURRENT_ENCODER", "STARK_GLM53_PACKED_FAST_MATH"):
++        if os.environ.get(name) != "0":
++            raise ProbeError("execution_policy")
++    return values
++
++
++def run(args: argparse.Namespace) -> dict:
++    model_path = args.model_path.resolve(strict=True)
++    test_binary = args.test_binary.resolve(strict=True)
++    verified_weights = args.verified_weights.resolve(strict=True)
++    if not model_path.is_dir() or not test_binary.is_file():
++        raise ProbeError("arguments")
++    selectors = execution_selectors()
++    artifacts_before = model_artifact_identity(model_path)
++    try:
++        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
++            from benchmark_hybrid import weight_identity
++            from stark_convert.chat import load_template
++            from tokenizers import Tokenizer
++
++            weights_before = weight_identity(model_path, verified_weights)
++            codec, template = load_template(model_path)
++            tokenizer = Tokenizer.from_file(str(model_path / "tokenizer.json"))
++            rendered = [template.render(messages=[{"role": "user", "content": prompt}], tools=None,
++                add_generation_prompt=True, enable_thinking=True, bos_token=codec.get("bos_token") or "",
++                eos_token=codec.get("eos_token") or "") for prompt in PROMPTS]
++            inputs = [tokenizer.encode(prompt, add_special_tokens=False).ids for prompt in rendered]
++    except BaseException:
++        raise ProbeError("preflight") from None
++    if len(inputs) != 3 or any(not 12 <= len(ids) <= 128 for ids in inputs):
++        raise ProbeError("tokenization")
++    corpus_hash = hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode("ascii")).hexdigest()
++    request = {"schema_version": 1, "cases": [{"input_token_ids": ids} for ids in inputs],
++        "continuation_tokens": CONTINUATION_TOKENS, "rounds": ROUNDS, "context_tokens": CONTEXT_TOKENS,
++        "corpus_sha256": corpus_hash}
++    environment = os.environ.copy()
++    environment["STARK_GLM53_T2_PROBE_MODEL_PATH"] = str(model_path)
++    started = time.monotonic_ns()
++    try:
++        completed = subprocess.run([str(test_binary), "glm_t2_verification_probe", "--ignored", "--nocapture", "--test-threads=1"],
++            input=(json.dumps(request, separators=(",", ":")) + "\n").encode("ascii"),
++            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment, timeout=1800, check=False)
++    except subprocess.TimeoutExpired:
++        raise ProbeError("test_timeout") from None
++    except BaseException:
++        raise ProbeError("test_launch") from None
++    finally:
++        try:
++            if weight_identity(model_path, verified_weights) != weights_before:
++                raise ProbeError("weight_guard")
++            if model_artifact_identity(model_path) != artifacts_before:
++                raise ProbeError("artifact_guard")
++        except ProbeError:
++            raise
++        except BaseException:
++            raise ProbeError("weight_guard") from None
++    diagnostics = {"native_returncode": completed.returncode, "stdout_bytes": len(completed.stdout),
++        "stderr_bytes": len(completed.stderr), "sentinel_candidates": sum(SENTINEL in line for line in completed.stdout.splitlines())}
++    try:
++        aggregate = parse_test_result(completed.stdout)
++    except ProbeError:
++        raise ProbeError("test_result", diagnostics) from None
++    if aggregate.get("status") != "rejected" and aggregate["hashes"]["corpus_sha256"] != corpus_hash:
++        raise ProbeError("corpus_guard")
++    passed = completed.returncode == 0 and aggregate.get("status") != "rejected"
++    return {"schema_version": 1, "scope": SCOPE, "status": "complete" if passed else "failed",
++        "glm_t2_probe_result": True, "error_stage": None if passed else "test_rejected",
++        "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000,
++        "test_binary_sha256": sha256_file(test_binary), "driver_sha256": sha256_file(Path(__file__).resolve()),
++        "weight_guard_helper_sha256": sha256_file(Path(__file__).with_name("benchmark_hybrid.py")),
++        "execution_selectors": selectors, "execution_selector_sha256": hash_value(selectors),
++        "model_artifacts": artifacts_before, "model_artifacts_unchanged": True,
++        "weights": weights_before, "weights_unchanged": True,
++        "corpus_sha256": corpus_hash, "input_token_count": sum(map(len, inputs)),
++        "input_token_min": min(map(len, inputs)), "input_token_max": max(map(len, inputs)),
++        "context_tokens": CONTEXT_TOKENS, "continuation_tokens": CONTINUATION_TOKENS,
++        "hardware": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
++        "cost_scope": "full_logits_hidden_and_greedy_readback_no_head_catchup_or_rollback",
++        "aggregate": aggregate}
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--test-binary", type=Path, required=True)
++    parser.add_argument("--model-path", type=Path, required=True)
++    parser.add_argument("--verified-weights", type=Path, required=True)
++    args = parser.parse_args()
++    try:
++        result = run(args)
++    except ProbeError as error:
++        result = {"schema_version": 1, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++            "error_stage": error.stage}
++        if error.diagnostics is not None:
++            result["native_structure"] = error.diagnostics
++    except BaseException:
++        result = {"schema_version": 1, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++            "error_stage": "driver"}
++    sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
++    sys.stdout.flush()
++    return 0 if result["status"] == "complete" else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/test_probe_glm53_t2.py b/scripts/test_probe_glm53_t2.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..045166e2bce44a8d89ea836a3d92d39a997201f4
+--- /dev/null
++++ b/scripts/test_probe_glm53_t2.py
+@@ -0,0 +1,91 @@
++"""Model-free boundary cases for the aggregate-only target-pair driver."""
++
++import copy
++import json
++
++import pytest
++
++import probe_glm53_t2 as probe
++
++
++def success():
++    return {"glm_t2_probe_result": True, "aggregate": {
++        "status": "target_pair_component_complete_no_rollback",
++        "precision": "existing_safe_f32_legacy_projections",
++        "counts": dict(probe.EXPECTED_COUNTS),
++        "timing_ms": {name: 1.0 for name in probe.TIMING_KEYS},
++        "memory_gauges": dict({name: 0 for name in probe.MEMORY_KEYS}, cap_bytes=1_000_000),
++        "hashes": {name: "a" * 64 for name in probe.HASH_KEYS},
++        "target_reserved_context_tokens": 4096,
++    }}
++
++
++def rejected():
++    return {"glm_t2_probe_result": True, "aggregate": {
++        "status": "rejected", "rows": {"failure": {"guard": "alignment_parity"}},
++    }}
++
++
++def encoded(value):
++    return json.dumps(value, separators=(",", ":")).encode("ascii")
++
++
++def framed(value, padding=b""):
++    return b"test " + probe.TEST_NAME + padding + b" ... " + encoded(value) + b"\n"
++
++
++@pytest.mark.parametrize("source,expected", [
++    (lambda: encoded(success()), "target_pair_component_complete_no_rollback"),
++    (lambda: framed(success()), "target_pair_component_complete_no_rollback"),
++    (lambda: framed(success(), b"     "), "target_pair_component_complete_no_rollback"),
++    (lambda: encoded(rejected()), "rejected"),
++    (lambda: framed(rejected()), "rejected"),
++])
++def test_accepts_only_supported_single_sentinel_framing(source, expected):
++    assert probe.parse_test_result(source())["status"] == expected
++
++
++def altered(section, key, value):
++    result = copy.deepcopy(success())
++    result["aggregate"][section][key] = value
++    return encoded(result)
++
++
++@pytest.mark.parametrize("source", [
++    lambda: b"test result: ok\n",
++    lambda: encoded(success()) + b"\n" + encoded(success()),
++    lambda: encoded(success()) + b" trailing",
++    lambda: b"test wrong_test ... " + encoded(success()),
++    lambda: b'{"glm_t2_probe_result":true,"aggregate":',
++    lambda: encoded(success()).replace(b'"cases":3', b'"cases":3,"cases":3'),
++    lambda: encoded(dict(success(), unexpected=True)),
++    lambda: altered("counts", "complete_rows_compared", 1),
++    lambda: altered("memory_gauges", "sampled_metal_peak_bytes", 1_000_001),
++    lambda: altered("hashes", "corpus_sha256", "not_a_hash"),
++])
++def test_rejects_missing_duplicate_malformed_or_unqualified_results(source):
++    with pytest.raises(probe.ProbeError) as error:
++        probe.parse_test_result(source())
++    assert error.value.stage == "test_result"
++
++
++def test_metadata_identity_detects_content_changes(tmp_path):
++    for name in ("config.json", "generation_config.json", "tokenizer.json", "native-source.json"):
++        (tmp_path / name).write_text("{}")
++    before = probe.model_artifact_identity(tmp_path)
++    (tmp_path / "tokenizer.json").write_text('{"changed":true}')
++    after = probe.model_artifact_identity(tmp_path)
++    assert before != after
++    assert before["config.json"] == after["config.json"]
++
++
++def test_execution_policy_requires_serial_legacy_math(monkeypatch):
++    for name in probe.BOOLEAN_SELECTORS:
++        monkeypatch.setenv(name, "0")
++    for name in ("STARK_GLM53_ENCODER_BANKS", "STARK_GLM53_RESIDENT_BANKS", "STARK_GLM53_WIDE_ENCODER", "STARK_GLM53_GPU_GREEDY", "STARK_GLM53_DECODE_GRAPH"):
++        monkeypatch.setenv(name, "1")
++    assert probe.execution_selectors()["STARK_GLM53_PREFILL_MMA"] is False
++    monkeypatch.setenv("STARK_GLM53_PREFILL_MMA", "1")
++    with pytest.raises(probe.ProbeError) as error:
++        probe.execution_selectors()
++    assert error.value.stage == "execution_policy"
