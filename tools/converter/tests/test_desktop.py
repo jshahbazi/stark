@@ -817,7 +817,7 @@ def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
     identifier = running(desktop, model)
     with pytest.raises(APIError) as failed:
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "failure fixture"}]})
-    assert failed.value.status == 503
+    assert failed.value.status == 503 and failed.value.code == "generation_failed"
     assert desktop.job is None
     assert desktop.worker is None
     assert not any(e["event"] == "metrics" for e in events(desktop))
@@ -860,7 +860,7 @@ def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
             {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
             on_delta=disconnected,
         )
-    assert failed.value.status == 503
+    assert failed.value.status == 499 and failed.value.code == "request_cancelled"
     assert desktop.worker is None
     assert desktop.job is None
     assert process.poll() is not None
