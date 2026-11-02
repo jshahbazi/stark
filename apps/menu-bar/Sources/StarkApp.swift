@@ -935,6 +935,9 @@ struct GenerationTimingProgress {
     let firstTokenRange: ClosedRange<Double>?
     let remainingRange: ClosedRange<Double>?
     let calibrated: Bool
+    // Prompt counts are optional; reuse appears only from workers that retain a prefix.
+    let inputTokens: Int?
+    let reusedInputTokens: Int?
     let receivedAt: Date
 
     init?(_ event: [String: Any], receivedAt: Date = Date()) {
@@ -950,21 +953,35 @@ struct GenerationTimingProgress {
             guard event[key] == nil || event[key] is NSNull || Self.seconds(event[key]) != nil else { return nil }
         }
         let first = Self.seconds(event["ttft_seconds"])
+        let input = Self.count(event["input_tokens"]), reused = Self.count(event["reused_input_tokens"])
         guard (sampled == 0 && first == nil) || (sampled > 0 && first != nil && first! <= elapsed),
+              event["input_tokens"] == nil || input != nil,
+              event["reused_input_tokens"] == nil || (reused != nil && input != nil && reused! < input!),
               Self.validRange(event["ttft_lower_seconds"], event["ttft_upper_seconds"]),
               Self.validRange(event["remaining_lower_seconds"], event["remaining_upper_seconds"]) else { return nil }
         sampledTokens = sampled; outputTokenBudget = budget; elapsedSeconds = elapsed
         firstTokenSeconds = first
         firstTokenRange = Self.range(event["ttft_lower_seconds"], event["ttft_upper_seconds"])
         remainingRange = Self.range(event["remaining_lower_seconds"], event["remaining_upper_seconds"])
-        calibrated = calibration.boolValue; self.receivedAt = receivedAt
+        calibrated = calibration.boolValue; inputTokens = input; reusedInputTokens = reused
+        self.receivedAt = receivedAt
     }
 
     func firstTokenDetail(at now: Date) -> String {
         if let actual = firstTokenSeconds { return Self.duration(actual) }
-        guard let estimate = firstTokenRange else { return "Measuring…" }
-        if elapsedSeconds + age(at: now) > estimate.upperBound { return "Taking longer than estimated…" }
-        return "About " + Self.durationRange(estimate)
+        let waited = elapsedSeconds + age(at: now)
+        let live = Self.duration(waited) + " so far"
+        guard let estimate = firstTokenRange else { return live }
+        if waited > estimate.upperBound { return live + ", longer than estimated" }
+        return live + ", about " + Self.durationRange(estimate)
+    }
+
+    var tokenDetail: String { sampledTokens.formatted() + " of up to " + outputTokenBudget.formatted() }
+
+    var promptDetail: String? {
+        guard let input = inputTokens else { return nil }
+        guard let reused = reusedInputTokens else { return input.formatted() }
+        return input.formatted() + " (" + reused.formatted() + " reused)"
     }
 
     func completionDetail(at now: Date) -> String {
@@ -994,7 +1011,7 @@ struct GenerationTimingProgress {
         return number.doubleValue
     }
 
-    private static func count(_ value: Any?) -> Int? {
+    static func count(_ value: Any?) -> Int? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
               number.int64Value >= 0, number.compare(NSNumber(value: number.int64Value)) == .orderedSame,
               let result = Int(exactly: number.int64Value) else { return nil }
@@ -1020,7 +1037,11 @@ final class EngineController: ObservableObject {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
-            if state != "generating" { generationProgress = nil }
+            if state != "generating" {
+                generationProgress = nil
+                if let id = apiProgressID { retiredAPIProgressID = id }
+                apiProgressID = nil
+            }
         }
     }
     @Published var message = "Starting Stark…"
@@ -1054,6 +1075,7 @@ final class EngineController: ObservableObject {
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
     @Published private(set) var firstTokenSeconds: Double?
+    @Published private(set) var reusedInputTokens: Int?
     @Published private(set) var generationProgress: GenerationTimingProgress?
     @Published private(set) var gpuMemoryBytes: Int64?
     @Published var inputTokens = 0
@@ -1083,6 +1105,9 @@ final class EngineController: ObservableObject {
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
     private var pendingMessageID: UUID?
+    // Random backend identifiers for connected-application requests; never client identities.
+    private var apiProgressID: String?
+    private var retiredAPIProgressID: String?
     private var pendingOptions: ChatOptions?
     private var pendingDecisionAnswers: [String]?
     private var attachmentStaging: AttachmentStaging?
@@ -1128,6 +1153,13 @@ final class EngineController: ObservableObject {
     }
     var hasPlaygroundGeneration: Bool {
         mode == .chat && loadedMode == .chat && state == "generating" && pendingMessageID != nil
+    }
+    // The serialized worker runs either a Playground message or a connected-application request.
+    var hasAPIGeneration: Bool {
+        loadedMode == .chat && !loadedID.isEmpty && state == "generating" && pendingMessageID == nil
+    }
+    var reusedPromptDetail: String? {
+        reusedInputTokens.map { $0.formatted() + " of " + inputTokens.formatted() + " prompt tokens reused" }
     }
     var modelReady: Bool { state == "ready" && !busy && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var modelControlID: String {
@@ -1403,15 +1435,22 @@ final class EngineController: ObservableObject {
         case "metrics":
             applyMetrics(event)
         case "generation_progress":
-            guard mode == .chat, loadedMode == .chat, state == "generating",
-                  let expected = pendingMessageID, event["id"] as? String != nil,
-                  UUID(uuidString: event["id"] as? String ?? "") == expected,
+            guard loadedMode == .chat, state == "generating", let id = event["id"] as? String,
                   !loadedID.isEmpty, event["model"] as? String == loadedID,
                   let progress = GenerationTimingProgress(event) else { return }
+            if event["source"] as? String == "api" {
+                guard hasAPIGeneration, Self.apiProgressIdentifier(id), id != retiredAPIProgressID else { return }
+                if id != apiProgressID { apiProgressID = id; generationProgress = nil }
+            } else {
+                guard event["source"] == nil, mode == .chat, let expected = pendingMessageID,
+                      UUID(uuidString: id) == expected else { return }
+            }
             if let previous = generationProgress {
                 guard progress.elapsedSeconds >= previous.elapsedSeconds,
                       progress.sampledTokens >= previous.sampledTokens,
                       progress.outputTokenBudget == previous.outputTokenBudget,
+                      progress.inputTokens == previous.inputTokens,
+                      progress.reusedInputTokens == previous.reusedInputTokens,
                       previous.firstTokenSeconds == nil || progress.firstTokenSeconds == previous.firstTokenSeconds else { return }
             }
             generationProgress = progress
@@ -1447,6 +1486,13 @@ final class EngineController: ObservableObject {
                 removalError = event["message"] as? String ?? "Could not remove this model. Try again."
                 removalRequestID = nil; removingModelID = nil; removalAction = nil
                 if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
+                return
+            }
+            if let requestID = requestID, let pending = pendingMessageID, UUID(uuidString: requestID) == pending {
+                // The backend settles the worker state with a following status event
+                // or, for a rejected send, with the running operation's own status.
+                errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+                discardPendingMessage()
                 return
             }
             if let requestID = requestID, requestID != activeInstallRequestID { return }
@@ -1489,6 +1535,11 @@ final class EngineController: ObservableObject {
         inputSpeed = rate(event["input_tokens_per_second"])
         outputSpeed = rate(event["output_tokens_per_second"])
         firstTokenSeconds = GenerationTimingProgress.seconds(event["prefill_seconds"])
+        reusedInputTokens = GenerationTimingProgress.count(event["reused_input_tokens"]).flatMap { $0 < inputTokens ? $0 : nil }
+    }
+
+    private static func apiProgressIdentifier(_ value: String) -> Bool {
+        value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 
     private func rate(_ value: Any?) -> Double? {
@@ -1962,7 +2013,7 @@ final class EngineController: ObservableObject {
     private func clearConversation() {
         messages.removeAll(); pendingMessageID = nil
         finishReason = ""; inputSpeed = nil; outputSpeed = nil
-        generationProgress = nil; firstTokenSeconds = nil
+        generationProgress = nil; firstTokenSeconds = nil; reusedInputTokens = nil
         inputTokens = 0; outputTokens = 0
         draftImage = nil; conversationImage = nil; imageProgress = ""
         attachmentLoading = false
@@ -2021,10 +2072,13 @@ struct SpeedView: View {
                 Text("First token: " + GenerationTimingProgress.duration(firstToken))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             }
+            if let reused = engine.reusedPromptDetail {
+                Text(reused).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-        .help("Last request. Input uses time to first token, including setup. Output measures subsequent sampled tokens. A dash means no measurement is available.")
+        .help("Last request, from the Playground or a connected application. Input uses time to first token, including setup. Output measures subsequent sampled tokens. A dash means no measurement is available.")
     }
     private func metric(_ title: String, _ value: Double?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -2044,6 +2098,10 @@ struct GenerationTimingView: View {
             VStack(alignment: .leading, spacing: 5) {
                 detail("Time to first token", engine.generationProgress?.firstTokenDetail(at: timeline.date) ?? "Waiting for generation…")
                 detail("Estimated completion", engine.generationProgress?.completionDetail(at: timeline.date) ?? "Learning timing…")
+                if let progress = engine.generationProgress {
+                    detail("Tokens sampled", progress.tokenDetail)
+                    if let prompt = progress.promptDetail { detail("Prompt tokens", prompt) }
+                }
             }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
         .help("Timing starts when generation begins, after waiting and prompt preparation. Completion is an estimate that adjusts as tokens arrive; response length and other GPU activity can change it.")
@@ -2094,6 +2152,7 @@ struct MenuView: View {
                 StatusLine(engine: engine)
                 GPUMemoryView(engine: engine)
             }
+            if engine.hasAPIGeneration { GenerationTimingView(engine: engine) }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
             if engine.mode == .chat {
@@ -2898,7 +2957,7 @@ struct ChatContentView: View {
                                         .font(.callout).foregroundStyle(.secondary)
                                     Button("Cancel", action: engine.stop)
                                 }
-                                if engine.hasPlaygroundGeneration { GenerationTimingView(engine: engine) }
+                                if engine.hasPlaygroundGeneration || engine.hasAPIGeneration { GenerationTimingView(engine: engine) }
                             }.padding(.horizontal, 4)
                         }
                         Color.clear.frame(height: 1).id("latest")

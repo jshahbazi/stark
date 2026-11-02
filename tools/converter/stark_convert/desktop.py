@@ -140,7 +140,7 @@ def valid_reuse(reply, input_tokens, chunk_tokens=1024):
 
 
 def metrics(reply):
-    return {
+    fields = {
         key: metric(reply, key)
         for key in (
             "input_tokens",
@@ -152,6 +152,26 @@ def metrics(reply):
             "generation_seconds",
         )
     }
+    reused = reused_input_tokens(reply)
+    if reused is not None:
+        fields["reused_input_tokens"] = reused
+    return fields
+
+
+def reused_input_tokens(value):
+    """A worker-reported reused prompt-prefix count, absent from workers without reuse."""
+    reused, total = value.get("reused_input_tokens"), value.get("input_tokens")
+    valid = type(reused) is int and type(total) is int and 0 <= reused < total
+    return reused if valid else None
+
+
+def progress_counts(frame):
+    """Prompt counts from a validated worker progress frame; never content."""
+    counts = {"input_tokens": frame["input_tokens"]}
+    reused = reused_input_tokens(frame)
+    if reused is not None:
+        counts["reused_input_tokens"] = reused
+    return counts
 
 
 def converter_progress(value):
@@ -1558,8 +1578,9 @@ class Desktop:
             raise APIError(
                 503, "This worker needs an update for streaming. Rebuild or reinstall Stark.", "streaming_unavailable"
             )
-        # Playground needs token progress without exposing partial response text.
-        # Retain compatibility with older workers which only return final metrics.
+        # The app shows token progress for Playground chats and API requests
+        # without exposing partial response text. Retain compatibility with
+        # older workers which only return final metrics.
         if on_progress is not None and worker.streaming and on_delta is None:
 
             def on_delta(_text):
@@ -1586,7 +1607,7 @@ class Desktop:
                 if cancelled is not None and cancelled.is_set():
                     raise OSError("Request cancelled.")
                 if on_progress is not None:
-                    on_progress(self.generation_estimates.estimate(estimate_key, value))
+                    on_progress({**self.generation_estimates.estimate(estimate_key, value), **progress_counts(value)})
 
         progress_options = {"on_progress": progress} if on_progress is not None and worker.streaming else {}
         if reset_prefix:
@@ -1987,6 +2008,13 @@ class Desktop:
             if system and not any(m["role"] == "system" for m in candidate):
                 candidate.insert(0, {"role": "system", "content": system})
             self.status("generating", "Generating for connected application…", epoch)
+        # A random per-request identifier lets the app fence progress without
+        # receiving client identities, credentials or request content.
+        progress_id = uuid.uuid4().hex
+
+        def on_progress(value):
+            self.emit("generation_progress", epoch, source="api", id=progress_id, model=identifier, **value)
+
         try:
             tool_stream = ToolTextStream(on_delta) if tool_request and on_delta is not None else None
             reply = self.infer(
@@ -2002,6 +2030,7 @@ class Desktop:
                 image=request["image"],
                 mtp=enabled_mtp,
                 tools=rendered_tools,
+                on_progress=on_progress,
                 estimate_key=estimate_key,
                 cache_scope=cache_scope,
             )
@@ -2010,6 +2039,9 @@ class Desktop:
                     raise APIError(503, "Model changed or stopped during this request.", "model_changed")
                 if cancelled.is_set():
                     raise cancellation_error(cancelled)
+                # Generation finished; its counts and timings stay valid even
+                # when the reply then fails tool parsing or client delivery.
+                self.emit("metrics", epoch, **metrics(reply))
                 message, finish_reason = (
                     parse_tool_output(
                         reply["text"],
@@ -2034,7 +2066,6 @@ class Desktop:
                         # failed client write must not unload the aligned model.
                         raise APIError(499, "Request cancelled.", "request_cancelled") from None
                 self.generation_estimates.record(estimate_key, reply)
-                self.emit("metrics", epoch, **metrics(reply))
             prompt_tokens = metric(reply, "input_tokens") or 0
             completion_tokens = metric(reply, "output_tokens") or 0
             usage = {

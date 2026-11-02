@@ -71,7 +71,7 @@ class FakeWorker:
         self.text_calls.append(payload)
         return {"token_count": 7, "token_ids": [1] * 7}
 
-    def request_image(self, prompt, image, options, on_delta=None, cancelled=None):
+    def request_image(self, prompt, image, options, on_delta=None, cancelled=None, on_progress=None):
         self.image_calls.append(
             {
                 "prompt": prompt,
@@ -82,6 +82,17 @@ class FakeWorker:
                 "cancelled": cancelled,
             }
         )
+        if on_progress is not None:
+            on_progress(
+                {
+                    "event": "progress",
+                    "input_tokens": 17,
+                    "sampled_tokens": 0,
+                    "output_token_budget": options["max_new_tokens"],
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+            )
         if self.outcomes:
             result = self.outcomes.pop(0)
             if isinstance(result, BaseException):

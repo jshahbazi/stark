@@ -203,6 +203,12 @@ A request never reuses another principal's entry, so first-token timing cannot r
 
 It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
 
+## Progress in Stark
+
+While a completion runs, the Stark menu and Playground show that a connected application is generating, the time to the first token (counting up, then the measured value), an estimated completion range, the tokens sampled so far against the output budget, and the prompt token count. When the worker reports reused prompt-prefix tokens, the prompt line also shows how many were reused; workers without prefix reuse omit it. Buffered requests are streamed from the worker internally for this purpose; the HTTP response is unchanged. When generation finishes, the menu's last-request readout shows the input and output rates and the first-token time, including for requests whose tool calls then fail strict parsing.
+
+These app events carry counts and timings, a random per-request identifier and the loaded model's library identifier only. They never contain prompts, responses, tool arguments, client identifiers, capability scopes or keys, and they are not written to disk. The worker serves one request at a time, so a request's progress ends before the next request starts, and progress from a stopped or replaced model is discarded. Completion estimates use the same bounded, in-memory calibration as Playground chats, with separate profiles per model load and request settings; see the [generation contract](GENERATION.md#generate).
+
 ## Error codes
 
 Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is `authentication_error` for 401, `rate_limit_error` for 429, `server_error` for 5xx and `invalid_request_error` otherwise.
