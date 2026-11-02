@@ -1730,7 +1730,7 @@ class Desktop:
         valid_fields = (
             set(payload) == fields | {"api_key", "ttl_seconds"}
             if grant
-            else set(payload) in (fields, fields - {"client_id"})
+            else set(payload) in (fields, fields - {"client_id"}, fields - {"client_id"} | {"client_prefix"})
         )
         result = {"request_id": request_id if valid_id else "", "ok": False}
         api = self.api
@@ -1741,6 +1741,7 @@ class Desktop:
                 or not isinstance(payload.get("api_session"), str)
                 or re.fullmatch(r"[a-f0-9]{32}", payload["api_session"]) is None
                 or ("client_id" in payload and payload["client_id"] is None)
+                or ("client_prefix" in payload and payload["client_prefix"] is None)
             ):
                 raise APIError(400, "Invalid API client command.", "invalid_api_client_command")
             if api is None:
@@ -1750,7 +1751,7 @@ class Desktop:
                     payload["client_id"], payload["api_key"], payload["ttl_seconds"], payload["api_session"]
                 )
             else:
-                api.revoke_clients(payload["api_session"], payload.get("client_id"))
+                api.revoke_clients(payload["api_session"], payload.get("client_id"), payload.get("client_prefix"))
             result["ok"] = True
         except APIError as error:
             result["error_code"] = error.code

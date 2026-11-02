@@ -24,7 +24,8 @@ from urllib.parse import unquote, urlsplit
 MAX_TEXT_BODY_BYTES = 1024 * 1024
 MAX_IMAGE_BODY_BYTES = 6 * 1024 * 1024
 MAX_PENDING_BODY_BYTES = 24 * 1024 * 1024
-MAX_API_CLIENTS = 16
+# OpenWork (16) plus OpenCode Desktop (8) managed capabilities share this admission table.
+MAX_API_CLIENTS = 24
 MAX_API_CLIENT_TTL_SECONDS = 120
 _CLIENT_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}\Z")
 _API_SESSION = re.compile(r"[a-f0-9]{32}\Z")
@@ -250,19 +251,25 @@ class LocalAPI:
             # work. Explicit revoke still reaches requests from retired tokens.
             self._clients[client_id] = _ClientGrant(digest, now + ttl_seconds)
 
-    def _revoke_clients_locked(self, client_id=None):
+    def _revoke_clients_locked(self, client_id=None, client_prefix=None):
         clients = set(self._clients) | set(self._client_requests) if client_id is None else {client_id}
+        if client_prefix is not None:
+            clients = {identifier for identifier in clients if identifier.startswith(client_prefix)}
         for identifier in clients:
             self._clients.pop(identifier, None)
             for cancelled in self._client_requests.pop(identifier, ()):
                 cancelled.set()
 
-    def revoke_clients(self, api_session: str, client_id: str | None = None) -> None:
-        if client_id is not None and (not isinstance(client_id, str) or _CLIENT_ID.fullmatch(client_id) is None):
+    def revoke_clients(self, api_session: str, client_id: str | None = None, client_prefix: str | None = None) -> None:
+        """Revoke one client, every client sharing a managed-client prefix, or all clients."""
+        if (client_id is not None and client_prefix is not None) or any(
+            value is not None and (not isinstance(value, str) or _CLIENT_ID.fullmatch(value) is None)
+            for value in (client_id, client_prefix)
+        ):
             raise APIError(400, "Invalid API client revocation.", "invalid_api_client_command")
         with self._lock:
             self._require_session_locked(api_session)
-            self._revoke_clients_locked(client_id)
+            self._revoke_clients_locked(client_id, client_prefix)
 
     def _release_client(self, client_id, cancelled):
         if client_id is None:
