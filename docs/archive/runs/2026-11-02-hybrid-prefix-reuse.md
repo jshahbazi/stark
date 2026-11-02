@@ -42,7 +42,9 @@ at, one command buffer per pass.
 
 Readiness reports `chunk_tokens: 4096` and the key
 `model-instance+context-tokens+cache-scope+mtp-selection`. Lifetime,
-invalidation and privacy rules are those of the converted-model cache.
+invalidation and privacy rules are those of the converted-model cache. The
+[repository policy](../../../AGENTS.md) was extended to cover recurrent-state
+snapshots in `7fce4c89`.
 
 ## Environment
 
@@ -195,8 +197,6 @@ comparison above covers the same property end to end.
 - **One checkpoint.** Only the Lily-format checkpoint was run. The official
   mixed-affine and Uzu-converted Qwen3.8 artifacts take the same code path,
   including the official holdout, but were not measured.
-- **Policy wording.** The `AGENTS.md` amendment speaks of reusing attention
-  KV state. Snapshot reuse of recurrent state needs its wording extended.
 
 ## Privacy
 
