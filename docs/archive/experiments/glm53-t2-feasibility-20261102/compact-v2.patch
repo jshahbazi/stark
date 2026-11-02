@@ -1,0 +1,405 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+index dc1a0df920b16d8a340addebedf72c8da8b59e78..57ef92c24eba1b159f6496337c956669356f304a 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_t2_probe.rs
+@@ -4,6 +4,7 @@
+ //! The pair reuses the production layer-major encoder with MMA disabled. The
+ //! serial tap uses the same existing GLM Metal layer and final readout math;
+ //! eight full logit rows first gate that tap against the ordinary serial API.
++//! V2 keeps all full-row gates outside compact greedy+hidden timing intervals.
+ 
+ use std::{io::Read, path::PathBuf, time::Instant};
+ 
+@@ -104,10 +105,15 @@ fn choice(values: &[f32]) -> Result<u32> {
+ fn take_row(
+     rows: &mut impl Iterator<Item = Vec<f32>>,
+     c: &Config,
++    full: bool,
+ ) -> Result<Row> {
+     let hidden = rows.next().ok_or(Error::Invalid("T2 hidden row"))?;
+     let index = rows.next().ok_or(Error::Invalid("T2 greedy row"))?;
+-    let logits = rows.next().ok_or(Error::Invalid("T2 logit row"))?;
++    let logits = if full {
++        rows.next().ok_or(Error::Invalid("T2 logit row"))?
++    } else {
++        Vec::new()
++    };
+     if hidden.len() != c.hidden
+         || hidden.iter().any(|v| !v.is_finite())
+         || index.len() != 1
+@@ -115,12 +121,12 @@ fn take_row(
+         || index[0] < 0.0
+         || index[0].fract() != 0.0
+         || index[0] as f64 >= c.vocab as f64
+-        || logits.len() != c.vocab
++        || (full && logits.len() != c.vocab)
+     {
+         return Err(Error::Invalid("T2 readout values"));
+     }
+     let selected = index[0] as u32;
+-    if choice(&logits)? != selected {
++    if full && choice(&logits)? != selected {
+         return Err(Error::Invalid("T2 greedy parity"));
+     }
+     Ok(Row {
+@@ -136,6 +142,15 @@ fn serial_row(
+     model: &mut GlmModel,
+     token: u32,
+     readout: bool,
++) -> Result<Option<Row>> {
++    serial_row_mode(model, token, readout, true)
++}
++
++fn serial_row_mode(
++    model: &mut GlmModel,
++    token: u32,
++    readout: bool,
++    full: bool,
+ ) -> Result<Option<Row>> {
+     objc2::rc::autoreleasepool(|_| {
+         let c = &model.config;
+@@ -173,7 +188,10 @@ fn serial_row(
+             let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+             let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
+             let greedy = graph.greedy_argmax(&logits)?;
+-            outputs.extend([hidden, greedy, logits]);
++            outputs.extend([hidden, greedy]);
++            if full {
++                outputs.push(logits);
++            }
+         } else {
+             graph.check_finite(&streams)?;
+         }
+@@ -189,7 +207,7 @@ fn serial_row(
+         model.position += 1;
+         model.last_greedy = None;
+         if readout {
+-            take_row(&mut rows, c).map(Some)
++            take_row(&mut rows, c, full).map(Some)
+         } else {
+             Ok(None)
+         }
+@@ -199,6 +217,14 @@ fn serial_row(
+ fn pair_rows(
+     model: &mut GlmModel,
+     tokens: &[u32],
++) -> Result<Vec<Row>> {
++    pair_rows_mode(model, tokens, true)
++}
++
++fn pair_rows_mode(
++    model: &mut GlmModel,
++    tokens: &[u32],
++    full: bool,
+ ) -> Result<Vec<Row>> {
+     objc2::rc::autoreleasepool(|_| {
+         let c = &model.config;
+@@ -253,11 +279,14 @@ fn pair_rows(
+             let hidden = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+             let logits = model.weights.encode_matvec(&mut graph, "output.weight", &hidden)?;
+             let greedy = graph.greedy_argmax(&logits)?;
+-            outputs.extend([hidden, greedy, logits]);
++            outputs.extend([hidden, greedy]);
++            if full {
++                outputs.push(logits);
++            }
+         }
+         drop(banks);
+         let mut values = graph.finish(&outputs)?.into_iter();
+-        let rows = vec![take_row(&mut values, c)?, take_row(&mut values, c)?];
++        let rows = vec![take_row(&mut values, c, full)?, take_row(&mut values, c, full)?];
+         for state in &model.states {
+             if let LayerState::Kda(state) = state
+                 && let Some(metal) = &state.metal
+@@ -284,6 +313,16 @@ fn compare_rows(
+     Ok(())
+ }
+ 
++fn compare_compact_rows(
++    actual: &Row,
++    expected: &Row,
++) -> Result<()> {
++    if actual.choice != expected.choice || !same(&actual.hidden, &expected.hidden) || !actual.logits.is_empty() {
++        return Err(Error::Invalid("T2 compact row parity"));
++    }
++    Ok(())
++}
++
+ fn prefill(
+     model: &mut GlmModel,
+     tokens: &[u32],
+@@ -321,7 +360,7 @@ fn probe() -> Result<Value> {
+         return Err(Error::Invalid("T2 stdin bound"));
+     }
+     let request: Request = serde_json::from_slice(&bytes).map_err(|_| Error::Invalid("T2 stdin schema"))?;
+-    if request.schema_version != 1
++    if request.schema_version != 2
+         || request.cases.len() != 3
+         || request.continuation_tokens != 8
+         || request.rounds != 4
+@@ -465,14 +504,54 @@ fn probe() -> Result<Value> {
+         references.push(reference);
+     }
+ 
++    let mut compared_rows = 0usize;
++    let mut warm_static_state = None;
++    // Preserve every V1 complete-hidden/full-logit comparison before compact
++    // timing starts. Full parity remains a gate, never a sampled shortcut.
++    for round in 0..request.rounds {
++        for (case, reference) in request.cases.iter().zip(&references) {
++            for paired in if round.is_multiple_of(2) {
++                [false, true]
++            } else {
++                [true, false]
++            } {
++                prefill(&mut model, &case.input_token_ids)?;
++                for (inputs, expected) in reference.inputs.chunks_exact(2).zip(reference.rows.chunks_exact(2)) {
++                    memory.observe(&model)?;
++                    let actual = if paired {
++                        pair_rows(&mut model, inputs)?
++                    } else {
++                        vec![
++                            serial_row(&mut model, inputs[0], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row(&mut model, inputs[1], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                        ]
++                    };
++                    for (actual, expected) in actual.iter().zip(expected) {
++                        compare_rows(actual, expected)?;
++                    }
++                    compared_rows += 2;
++                    memory.observe(&model)?;
++                }
++            }
++        }
++        let current = model.weights.t2_probe_accounting()?;
++        let static_state = (current[3], current[4]);
++        if round == 0 {
++            warm_static_state = Some(static_state);
++        } else if warm_static_state != Some(static_state) {
++            return Err(Error::Invalid("T2 static cache growth after warmup"));
++        }
++    }
++
+     let mut serial_wall = Vec::new();
+     let mut pair_wall = Vec::new();
+     let mut serial_gpu = Vec::new();
+     let mut pair_gpu = Vec::new();
+-    let mut compared_rows = 0usize;
+-    let mut warm_static_state = None;
+-    // First round warms the exact pair schedule; remaining rounds alternate
+-    // schedule order. Reset/prompt replay/parity comparisons are outside cost.
++    let mut compact_compared_rows = 0usize;
++    // First compact round warms its readback schedule; subsequent rounds keep
++    // V1's alternating serial/pair order. GPU work, finite obligations, status
++    // completion and KDA checks are unchanged. Only full-vocabulary host copy
++    // and duplicate CPU argmax are omitted from the measured return contract.
+     for round in 0..request.rounds {
+         for (case, reference) in request.cases.iter().zip(&references) {
+             for paired in if round.is_multiple_of(2) {
+@@ -483,22 +562,24 @@ fn probe() -> Result<Value> {
+                 prefill(&mut model, &case.input_token_ids)?;
+                 for (inputs, expected) in reference.inputs.chunks_exact(2).zip(reference.rows.chunks_exact(2)) {
+                     memory.observe(&model)?;
++                    // Counter snapshots and all reference comparisons remain
++                    // outside wall timing, exactly as in V1.
+                     let gpu_before = gpu_seconds();
+                     let started = Instant::now();
+                     let actual = if paired {
+-                        pair_rows(&mut model, inputs)?
++                        pair_rows_mode(&mut model, inputs, false)?
+                     } else {
+                         vec![
+-                            serial_row(&mut model, inputs[0], true)?.ok_or(Error::Invalid("T2 tap"))?,
+-                            serial_row(&mut model, inputs[1], true)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row_mode(&mut model, inputs[0], true, false)?.ok_or(Error::Invalid("T2 tap"))?,
++                            serial_row_mode(&mut model, inputs[1], true, false)?.ok_or(Error::Invalid("T2 tap"))?,
+                         ]
+                     };
+                     let wall_ms = started.elapsed().as_secs_f64() * 1000.0;
+                     let gpu_ms = (gpu_seconds() - gpu_before) * 1000.0;
+                     for (actual, expected) in actual.iter().zip(expected) {
+-                        compare_rows(actual, expected)?;
++                        compare_compact_rows(actual, expected)?;
+                     }
+-                    compared_rows += 2;
++                    compact_compared_rows += 2;
+                     memory.observe(&model)?;
+                     if round > 0 {
+                         if paired {
+@@ -513,10 +594,7 @@ fn probe() -> Result<Value> {
+             }
+         }
+         let current = model.weights.t2_probe_accounting()?;
+-        let static_state = (current[3], current[4]);
+-        if round == 0 {
+-            warm_static_state = Some(static_state);
+-        } else if warm_static_state != Some(static_state) {
++        if warm_static_state != Some((current[3], current[4])) {
+             return Err(Error::Invalid("T2 static cache growth after warmup"));
+         }
+     }
+@@ -528,15 +606,17 @@ fn probe() -> Result<Value> {
+     model.reset();
+     profile::enable(false);
+     Ok(serde_json::json!({"glm_t2_probe_result":true,"aggregate":{
+-        "status":"target_pair_component_complete_no_rollback", "precision":"existing_safe_f32_legacy_projections",
++        "status":"target_pair_compact_component_complete_no_rollback", "precision":"existing_safe_f32_legacy_projections",
++        "measurement_scope":"gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v2",
+         "counts":{"cases":request.cases.len(),"continuation_rows_per_case":request.continuation_tokens,
+             "rounds":request.rounds,"warmup_rounds":1,"ordinary_serial_alignment_rows":8,
+             "pooled_alignment_pairs":pooled_pairs,"pool_residues_tested":4,"complete_rows_compared":compared_rows,
+-            "measured_serial_pairs":serial_wall.len(),"measured_layer_major_pairs":pair_wall.len(),"rollback_calls":0},
+-        "timing_ms":{"serial_two_wall_total":serial_wall.iter().sum::<f64>(),"layer_major_two_wall_total":pair_wall.iter().sum::<f64>(),
+-            "serial_two_gpu_total":serial_gpu.iter().sum::<f64>(),"layer_major_two_gpu_total":pair_gpu.iter().sum::<f64>(),
+-            "serial_two_wall_median":median(&serial_wall)?,"layer_major_two_wall_median":median(&pair_wall)?,
+-            "serial_two_gpu_median":median(&serial_gpu)?,"layer_major_two_gpu_median":median(&pair_gpu)?},
++            "compact_rows_compared":compact_compared_rows,"timed_full_logit_readback_rows":0,
++            "measured_compact_serial_pairs":serial_wall.len(),"measured_compact_layer_major_pairs":pair_wall.len(),"rollback_calls":0},
++        "timing_ms":{"compact_serial_two_wall_total":serial_wall.iter().sum::<f64>(),"compact_layer_major_two_wall_total":pair_wall.iter().sum::<f64>(),
++            "compact_serial_two_gpu_total":serial_gpu.iter().sum::<f64>(),"compact_layer_major_two_gpu_total":pair_gpu.iter().sum::<f64>(),
++            "compact_serial_two_wall_median":median(&serial_wall)?,"compact_layer_major_two_wall_median":median(&pair_wall)?,
++            "compact_serial_two_gpu_median":median(&serial_gpu)?,"compact_layer_major_two_gpu_median":median(&pair_gpu)?},
+         "memory_gauges":memory, "hashes":{"corpus_sha256":request.corpus_sha256,
+             "authoritative_continuation_sha256":format!("{:x}",continuation_hash.finalize())},
+         "target_reserved_context_tokens":model.config.max_context
+diff --git a/scripts/probe_glm53_t2.py b/scripts/probe_glm53_t2.py
+index 84ca251655fd827152ab7075f487866aed9d1673..0ad1d533a277be3d403be448d9f85b9eb91fcc4d 100644
+--- a/scripts/probe_glm53_t2.py
++++ b/scripts/probe_glm53_t2.py
+@@ -2,8 +2,10 @@
+ 
+ Prompts, IDs, full logits, and native process output remain in RAM. This driver
+ writes only allowlisted counts, timings, hashes, source identity and guards.
+-The component timings include full logits/hidden readback; they establish no
+-speculative speedup, rollback cost, or production memory admission.
++V2 preserves full-row validation outside compact timed intervals. Timed paths
++return GPU greedy choices and post-output-norm hidden rows, with unchanged GPU
++math and finite/status checks. They establish no speculative speedup, rollback
++cost, production memory admission, or explanation of V1's unmatched GPU delta.
+ """
+ 
+ from __future__ import annotations
+@@ -23,7 +25,7 @@ import time
+ from pathlib import Path
+ 
+ 
+-SCOPE = "glm53_target_two_token_feasibility"
++SCOPE = "glm53_target_two_token_compact_v2"
+ TEST_NAME = b"stark_engine::engine::hybrid::glm::prefill_batch::t2_probe::glm_t2_verification_probe"
+ SENTINEL = b'"glm_t2_probe_result"'
+ CONTINUATION_TOKENS = 8
+@@ -38,14 +40,15 @@ EXPECTED_COUNTS = {
+     "cases": 3, "continuation_rows_per_case": 8, "rounds": 4,
+     "warmup_rounds": 1, "ordinary_serial_alignment_rows": 8,
+     "pooled_alignment_pairs": 4, "pool_residues_tested": 4,
+-    "complete_rows_compared": 192, "measured_serial_pairs": 36,
+-    "measured_layer_major_pairs": 36, "rollback_calls": 0,
++    "complete_rows_compared": 192, "compact_rows_compared": 192,
++    "timed_full_logit_readback_rows": 0, "measured_compact_serial_pairs": 36,
++    "measured_compact_layer_major_pairs": 36, "rollback_calls": 0,
+ }
+ TIMING_KEYS = {
+-    "serial_two_wall_total", "layer_major_two_wall_total",
+-    "serial_two_gpu_total", "layer_major_two_gpu_total",
+-    "serial_two_wall_median", "layer_major_two_wall_median",
+-    "serial_two_gpu_median", "layer_major_two_gpu_median",
++    "compact_serial_two_wall_total", "compact_layer_major_two_wall_total",
++    "compact_serial_two_gpu_total", "compact_layer_major_two_gpu_total",
++    "compact_serial_two_wall_median", "compact_layer_major_two_wall_median",
++    "compact_serial_two_gpu_median", "compact_layer_major_two_gpu_median",
+ }
+ MEMORY_KEYS = {
+     "cap_bytes", "observed_required_peak_bytes", "residency_allocated_peak_bytes",
+@@ -125,9 +128,11 @@ def validate_aggregate(value: object) -> dict:
+         ):
+             raise ProbeError("test_result")
+         return aggregate
+-    if set(aggregate) != {"status", "precision", "counts", "timing_ms", "memory_gauges", "hashes", "target_reserved_context_tokens"}:
++    if set(aggregate) != {"status", "precision", "measurement_scope", "counts", "timing_ms", "memory_gauges", "hashes", "target_reserved_context_tokens"}:
+         raise ProbeError("test_result")
+-    if aggregate["status"] != "target_pair_component_complete_no_rollback" or aggregate["precision"] != "existing_safe_f32_legacy_projections":
++    if aggregate["status"] != "target_pair_compact_component_complete_no_rollback" or aggregate["precision"] != "existing_safe_f32_legacy_projections":
++        raise ProbeError("test_result")
++    if aggregate["measurement_scope"] != "gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v2":
+         raise ProbeError("test_result")
+     counts = aggregate["counts"]
+     if not isinstance(counts, dict) or set(counts) != set(EXPECTED_COUNTS) or any(type(counts[key]) is not int or counts[key] != expected for key, expected in EXPECTED_COUNTS.items()):
+@@ -226,7 +231,7 @@ def run(args: argparse.Namespace) -> dict:
+     if len(inputs) != 3 or any(not 12 <= len(ids) <= 128 for ids in inputs):
+         raise ProbeError("tokenization")
+     corpus_hash = hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode("ascii")).hexdigest()
+-    request = {"schema_version": 1, "cases": [{"input_token_ids": ids} for ids in inputs],
++    request = {"schema_version": 2, "cases": [{"input_token_ids": ids} for ids in inputs],
+         "continuation_tokens": CONTINUATION_TOKENS, "rounds": ROUNDS, "context_tokens": CONTEXT_TOKENS,
+         "corpus_sha256": corpus_hash}
+     environment = os.environ.copy()
+@@ -259,7 +264,7 @@ def run(args: argparse.Namespace) -> dict:
+     if aggregate.get("status") != "rejected" and aggregate["hashes"]["corpus_sha256"] != corpus_hash:
+         raise ProbeError("corpus_guard")
+     passed = completed.returncode == 0 and aggregate.get("status") != "rejected"
+-    return {"schema_version": 1, "scope": SCOPE, "status": "complete" if passed else "failed",
++    return {"schema_version": 2, "scope": SCOPE, "status": "complete" if passed else "failed",
+         "glm_t2_probe_result": True, "error_stage": None if passed else "test_rejected",
+         "elapsed_ms": (time.monotonic_ns() - started) // 1_000_000,
+         "test_binary_sha256": sha256_file(test_binary), "driver_sha256": sha256_file(Path(__file__).resolve()),
+@@ -271,7 +276,7 @@ def run(args: argparse.Namespace) -> dict:
+         "input_token_min": min(map(len, inputs)), "input_token_max": max(map(len, inputs)),
+         "context_tokens": CONTEXT_TOKENS, "continuation_tokens": CONTINUATION_TOKENS,
+         "hardware": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
+-        "cost_scope": "full_logits_hidden_and_greedy_readback_no_head_catchup_or_rollback",
++        "cost_scope": "compact_greedy_hidden_readback_full_parity_untimed_no_head_catchup_or_rollback",
+         "aggregate": aggregate}
+ 
+ 
+@@ -284,12 +289,12 @@ def main() -> int:
+     try:
+         result = run(args)
+     except ProbeError as error:
+-        result = {"schema_version": 1, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++        result = {"schema_version": 2, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
+             "error_stage": error.stage}
+         if error.diagnostics is not None:
+             result["native_structure"] = error.diagnostics
+     except BaseException:
+-        result = {"schema_version": 1, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
++        result = {"schema_version": 2, "scope": SCOPE, "status": "failed", "glm_t2_probe_result": False,
+             "error_stage": "driver"}
+     sys.stdout.write(json.dumps(result, sort_keys=True, separators=(",", ":")) + "\n")
+     sys.stdout.flush()
+diff --git a/scripts/test_probe_glm53_t2.py b/scripts/test_probe_glm53_t2.py
+index 045166e2bce44a8d89ea836a3d92d39a997201f4..3262bf1739216e613bc391a49304c521ff4c94f1 100644
+--- a/scripts/test_probe_glm53_t2.py
++++ b/scripts/test_probe_glm53_t2.py
+@@ -10,8 +10,9 @@ import probe_glm53_t2 as probe
+ 
+ def success():
+     return {"glm_t2_probe_result": True, "aggregate": {
+-        "status": "target_pair_component_complete_no_rollback",
++        "status": "target_pair_compact_component_complete_no_rollback",
+         "precision": "existing_safe_f32_legacy_projections",
++        "measurement_scope": "gpu_greedy_and_post_output_norm_hidden_full_parity_untimed_v2",
+         "counts": dict(probe.EXPECTED_COUNTS),
+         "timing_ms": {name: 1.0 for name in probe.TIMING_KEYS},
+         "memory_gauges": dict({name: 0 for name in probe.MEMORY_KEYS}, cap_bytes=1_000_000),
+@@ -35,9 +36,9 @@ def framed(value, padding=b""):
+ 
+ 
+ @pytest.mark.parametrize("source,expected", [
+-    (lambda: encoded(success()), "target_pair_component_complete_no_rollback"),
+-    (lambda: framed(success()), "target_pair_component_complete_no_rollback"),
+-    (lambda: framed(success(), b"     "), "target_pair_component_complete_no_rollback"),
++    (lambda: encoded(success()), "target_pair_compact_component_complete_no_rollback"),
++    (lambda: framed(success()), "target_pair_compact_component_complete_no_rollback"),
++    (lambda: framed(success(), b"     "), "target_pair_compact_component_complete_no_rollback"),
+     (lambda: encoded(rejected()), "rejected"),
+     (lambda: framed(rejected()), "rejected"),
+ ])
+@@ -60,6 +61,8 @@ def altered(section, key, value):
+     lambda: encoded(success()).replace(b'"cases":3', b'"cases":3,"cases":3'),
+     lambda: encoded(dict(success(), unexpected=True)),
+     lambda: altered("counts", "complete_rows_compared", 1),
++    lambda: altered("counts", "compact_rows_compared", 1),
++    lambda: altered("counts", "timed_full_logit_readback_rows", 2),
+     lambda: altered("memory_gauges", "sampled_metal_peak_bytes", 1_000_001),
+     lambda: altered("hashes", "corpus_sha256", "not_a_hash"),
+ ])

@@ -30,3 +30,5 @@ The recorded precision policy is `existing_safe_f32_legacy_projections`. No new 
 ## Follow-up
 
 The small measured sample does not answer whether T2 improves a full request after head catch-up and associated overhead. A diagnostic of the differing target cost is pending. Any follow-up must separately measure those costs and preserve the exact reference and guard protocol before drawing a broader conclusion.
+
+The compact-timer v2 follow-up is recorded separately in [compact-v2.md](compact-v2.md) and [its aggregate JSON](compact-v2.json); the v1 results above remain unchanged.
