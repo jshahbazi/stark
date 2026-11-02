@@ -1,0 +1,1827 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+index 274fd10e..175530c1 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -55,0 +56,4 @@ mod iq_fused_gate_up_tests;
++#[cfg(test)]
++#[path = "weight_metal_q5_special_mma_tests.rs"]
++mod q5_special_mma_tests;
++
+@@ -713,0 +718,5 @@ fn executor() -> Result<&'static Executor> {
++            {
++                source.push_str(include_str!("packed_q5_special_mma_reference.metal"));
++                source.push_str(include_str!("packed_q5_special_mma.metal"));
++            }
++            #[cfg(test)]
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma.metal b/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma.metal
+new file mode 100644
+index 00000000..0568cce0
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma.metal
+@@ -0,0 +1,302 @@
++// SPDX-License-Identifier: Apache-2.0
++// Adapted from ggml-org/llama.cpp dde879bc4f954b809892fd0d660515f42536394a,
++// ggml/src/ggml-metal/kernels/mul_mv_mma.metal:317-494. Copyright (c)
++// 2023-2026 The ggml authors. See LICENSE.ggml-hybrid. Test-only experiment.
++// Exact integer F16 A fragments, original F32 B values, F32 accumulation and
++// affine reconstruction. Byte-safe metadata conversion preserves stored F16
++// subnormals. Affine factoring changes rounding; no bit-equivalence claim.
++// Guarded mode admits modest finite coefficients and inputs, then rejects
++// cancellation using an affine L1 bound. Every rejection uniformly replays
++// the archived generic F32 MMA. Raw mode is a diagnostic required to expose
++// the legal zero-coefficient counterexample; it is never a runtime selector.
++// The source-input fallback below preserves Stark's existing Apache-2.0
++// packed_q5_grouped32_matvec.metal chronology; upstream MIT notices remain above.
++
++constant uint hybrid_q5_special_guarded [[function_constant(81)]];
++
++inline float hybrid_q5_special_source_dot(device const uchar *codes,device const float *input,
++    ulong row_offset,ulong input_offset,uint columns,uint lane) {
++    const uint tid=lane>>2,parity=lane&3,quarter=tid>>2,low_start=(tid&3)*8;
++    const uint low_offset=48+quarter*32+low_start,high_offset=16+low_start;
++    const uint input_start=quarter*64+low_start,g0=quarter*2;
++    float sum=0.0f;bool reference_required=false;
++    for (uint block_index=parity;block_index<(columns>>8);block_index+=4) {
++        device const uchar *block=codes+row_offset+ulong(block_index)*176;
++        device const float *x=input+input_offset+block_index*256+input_start;
++        float4 lower=float4(0.0f),upper=float4(0.0f),input_sum=float4(0.0f);
++        #pragma clang loop unroll(full)
++        for (uint j=0;j<8;++j) {
++            const float4 values=float4(x[j],x[j+32],x[j+128],x[j+160]);
++            reference_required=reference_required||any(abs(values)>float4(1e20f));
++            input_sum+=values;
++            const uint low0=block[low_offset+j],low1=block[low_offset+j+64],high=block[high_offset+j];
++            lower.x+=values.x*float(low0&15);lower.y+=values.y*float(low0>>4);
++            lower.z+=values.z*float(low1&15);lower.w+=values.w*float(low1>>4);
++            upper.x+=high&(1u<<g0)?values.x:0.0f;upper.y+=high&(1u<<(g0+1))?values.y:0.0f;
++            upper.z+=high&(1u<<(g0+4))?values.z:0.0f;upper.w+=high&(1u<<(g0+5))?values.w:0.0f;
++        }
++        const uint2 sm0=hybrid_scale_min(block+4,g0),sm1=hybrid_scale_min(block+4,g0+1);
++        const uint2 sm2=hybrid_scale_min(block+4,g0+4),sm3=hybrid_scale_min(block+4,g0+5);
++        const float4 group_dot=lower+16.0f*upper;
++        sum+=hybrid_half(block)*(float(sm0.x)*group_dot.x+float(sm1.x)*group_dot.y
++            +float(sm2.x)*group_dot.z+float(sm3.x)*group_dot.w)
++            -hybrid_half(block+2)*(input_sum.x*float(sm0.y)+input_sum.y*float(sm1.y)
++            +input_sum.z*float(sm2.y)+input_sum.w*float(sm3.y));
++    }
++    if (simd_any(reference_required)) return hybrid_packed_block_dot(codes,input,row_offset,input_offset,columns,lane);
++    return simd_sum(sum);
++}
++
++inline half2 hybrid_q5_special_integer(ushort2 q) {
++    return as_type<half2>(q | ushort(0x6400)) - half(1024.0h);
++}
++inline void hybrid_q5_special_fragments(uint q, uint h, thread half2 *lo, thread half2 *hi) {
++    const ushort2 qw = as_type<ushort2>(q), hw = as_type<ushort2>(h);
++    lo[0] = hybrid_q5_special_integer((qw & 0x000f) | ((hw << 4) & 0x0010));
++    lo[1] = hybrid_q5_special_integer(((qw >> 8) & 0x000f) | ((hw >> 4) & 0x0010));
++    hi[0] = hybrid_q5_special_integer((qw & 0x00f0) | ((hw << 7) & 0x0100));
++    hi[1] = hybrid_q5_special_integer(((qw >> 8) & 0x00f0) | ((hw >> 1) & 0x0100));
++}
++
++template<uint NT, uint RT>
++inline void hybrid_q5_special_impl(device const uchar *codes_base,
++    device const float *input_base, device float *output_base, constant uint *p,
++    device atomic_uint *failure, device atomic_uint *counters, threadgroup float *red,
++    threadgroup atomic_uint *fallback, threadgroup atomic_uint *reference,
++    uint2 tile, uint lane, uint sg) {
++    const uint nsg = hybrid_q5_reference_mma_nsg;
++    const uint rows = p[0], columns = p[1], tokens = p[2];
++    const uint fm = hybrid_q5_reference_mma_fm(lane), fn = hybrid_q5_reference_mma_fn(lane);
++    const uint first_row = tile.x * (8 * NT), first_token = tile.y * (8 * RT);
++    const uint tid = sg * 32 + lane;
++    device const uchar *codes = codes_base + p[3];
++    device const float *input = input_base + p[4];
++    device float *output = output_base + p[5];
++    const ulong row_bytes = ulong(columns / 256) * 176;
++    if (tid == 0) atomic_store_explicit(fallback, 0u, memory_order_relaxed);
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    // Counters: specialized TGs, metadata generic fallback, input source
++    // fallback, cancellation generic fallback, total fallback. No values escape.
++    if (hybrid_q5_special_guarded) {
++        const uint count = min(uint(8 * NT), rows - first_row) * (columns / 256);
++        for (uint at = tid; at < count; at += nsg * 32) {
++            const uint row = first_row + at / (columns / 256);
++            device const uchar *block = codes + ulong(row) * row_bytes + ulong(at % (columns / 256)) * 176;
++            const float d = hybrid_half(block), dm = hybrid_half(block + 2);
++            bool risky = !isfinite(d) || !isfinite(dm);
++            #pragma clang loop unroll(full)
++            for (uint j = 0; j < 8; ++j) {
++                const uint2 sm = hybrid_scale_min(block + 4, j);
++                risky = risky || abs(d * float(sm.x) * 31.0f) > 1.0f || abs(dm * float(sm.y)) > 1.0f;
++            }
++            if (risky) atomic_fetch_or_explicit(fallback, 1u, memory_order_relaxed);
++        }
++    }
++    const uint input_count = min(uint(8 * RT), tokens - first_token) * columns;
++    for (uint at = tid; at < input_count; at += nsg * 32) {
++        const float x = input[ulong(first_token) * columns + at];
++        const uint abs_bits = as_type<uint>(x) & 0x7fffffffu;
++        // Classify tiny/subnormal inputs by their IEEE bits: floating-point
++        // comparisons can themselves flush subnormals. The 1e-30 floor also
++        // keeps products with the smallest nonzero Q5 coefficient away from
++        // F32 underflow. Zero is admitted. This is an experimental envelope.
++        if (abs_bits >= 0x7f800000u || abs_bits > as_type<uint>(1e20f)
++            || (abs_bits != 0u && abs_bits < as_type<uint>(1e-30f)))
++            atomic_fetch_or_explicit(fallback, 2u, memory_order_relaxed);
++        if (abs_bits >= 0x7f800000u) atomic_store_explicit(failure,1u,memory_order_relaxed);
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    uint reason = atomic_load_explicit(fallback, memory_order_relaxed);
++    if (reason) {
++        if (tid == 0) {
++            if (reason & 1u) atomic_fetch_add_explicit(counters + 1, 1u, memory_order_relaxed);
++            if (reason & 2u) atomic_fetch_add_explicit(counters + 2, 1u, memory_order_relaxed);
++            atomic_fetch_add_explicit(counters + 4, 1u, memory_order_relaxed);
++        }
++        if (reason & 2u) {
++            // Preserve original chronology for subnormal inputs as well as
++            // extreme/nonfinite inputs. Generic v1 MMA has an extreme guard,
++            // but its ordinary MMA reduction does not promise subnormal parity.
++            for (uint flat = sg; flat < (8 * NT) * (8 * RT); flat += nsg) {
++                const uint row = first_row + flat % (8 * NT), token = first_token + flat / (8 * NT);
++                if (row < rows && token < tokens) {
++                    const float total = hybrid_q5_special_source_dot(codes,input,ulong(row)*row_bytes,ulong(token)*columns,columns,lane);
++                    if (lane == 0) {
++                        if (!isfinite(total)) atomic_store_explicit(failure,1u,memory_order_relaxed);
++                        output[ulong(token)*rows+row] = total;
++                    }
++                }
++            }
++        } else hybrid_q5_reference_mma_impl<NT, RT>(codes_base,input_base,output_base,p,failure,red,reference,tile,lane,sg);
++        return;
++    }
++    float acc[RT][NT][2] = {};
++    float magnitude[RT][NT][2] = {};
++    for (uint ip = sg; ip < columns / 64; ip += nsg) {
++        const uint pair = ip % 4;
++        float2 xs[RT][2][2][2];
++        float c[RT][2][2], absolute_c[RT][2][2];
++        #pragma clang loop unroll(full)
++        for (uint rt = 0; rt < RT; ++rt) {
++            #pragma clang loop unroll(full)
++            for (uint e = 0; e < 2; ++e) {
++                const uint token = min(first_token + 8 * rt + fn + e, tokens - 1);
++                const ulong base = ulong(token) * columns + ip * 64 + 8 * (fm / 2) + 2 * (fm % 2);
++                #pragma clang loop unroll(full)
++                for (uint h = 0; h < 2; ++h) {
++                    xs[rt][e][h][0] = float2(input[base + h * 32], input[base + h * 32 + 1]);
++                    xs[rt][e][h][1] = float2(input[base + h * 32 + 4], input[base + h * 32 + 5]);
++                    float u = xs[rt][e][h][0].x + xs[rt][e][h][0].y + xs[rt][e][h][1].x + xs[rt][e][h][1].y;
++                    float absolute = abs(xs[rt][e][h][0].x) + abs(xs[rt][e][h][0].y)
++                        + abs(xs[rt][e][h][1].x) + abs(xs[rt][e][h][1].y);
++                    u += simd_shuffle_xor(u, 2); absolute += simd_shuffle_xor(absolute, 2);
++                    u += simd_shuffle_xor(u, 4); absolute += simd_shuffle_xor(absolute, 4);
++                    u += simd_shuffle_xor(u, 16); absolute += simd_shuffle_xor(absolute, 16);
++                    c[rt][e][h] = u; absolute_c[rt][e][h] = absolute;
++                }
++            }
++        }
++        #pragma clang loop unroll(full)
++        for (uint t = 0; t < NT; ++t) {
++            const uint row = min(first_row + 8 * t + fm, rows - 1);
++            device const uchar *block = codes + ulong(row) * row_bytes + ulong(ip / 4) * 176;
++            const float d = hybrid_half(block), dm = hybrid_half(block + 2);
++            const uint q0 = hybrid_u32(block + 48 + pair * 32 + 4 * fn);
++            const uint q1 = hybrid_u32(block + 52 + pair * 32 + 4 * fn);
++            const uint h0 = hybrid_u32(block + 16 + 4 * fn) >> (2 * pair);
++            const uint h1 = hybrid_u32(block + 20 + 4 * fn) >> (2 * pair);
++            half2 a[2][2][2];
++            hybrid_q5_special_fragments(q0,h0,a[0][0],a[1][0]);
++            hybrid_q5_special_fragments(q1,h1,a[0][1],a[1][1]);
++            #pragma clang loop unroll(full)
++            for (uint hh = 0; hh < 2; ++hh) {
++                simdgroup_float8x8 mp[RT];
++                #pragma clang loop unroll(full)
++                for (uint rt = 0; rt < RT; ++rt) mp[rt] = make_filled_simdgroup_matrix<float,8>(0.0f);
++                #pragma clang loop unroll(full)
++                for (uint s = 0; s < 4; ++s) {
++                    simdgroup_half8x8 ma;
++                    ma.thread_elements()[0] = a[hh][s / 2][s % 2].x;
++                    ma.thread_elements()[1] = a[hh][s / 2][s % 2].y;
++                    #pragma clang loop unroll(full)
++                    for (uint rt = 0; rt < RT; ++rt) {
++                        simdgroup_float8x8 mb;
++                        mb.thread_elements()[0] = s % 2 == 0 ? xs[rt][0][hh][s / 2].x : xs[rt][0][hh][s / 2].y;
++                        mb.thread_elements()[1] = s % 2 == 0 ? xs[rt][1][hh][s / 2].x : xs[rt][1][hh][s / 2].y;
++                        simdgroup_multiply_accumulate(mp[rt],ma,mb,mp[rt]);
++                    }
++                }
++                const uint2 sm = hybrid_scale_min(block + 4, 2 * pair + hh);
++                const float unscaled = d * float(sm.x), dsc = unscaled * (hh == 0 ? 1.0f : 1.0f / 16.0f);
++                const float dmn = dm * float(sm.y);
++                #pragma clang loop unroll(full)
++                for (uint rt = 0; rt < RT; ++rt) {
++                    acc[rt][t][0] = fma(dsc,mp[rt].thread_elements()[0],fma(-dmn,c[rt][0][hh],acc[rt][t][0]));
++                    acc[rt][t][1] = fma(dsc,mp[rt].thread_elements()[1],fma(-dmn,c[rt][1][hh],acc[rt][t][1]));
++                    if (hybrid_q5_special_guarded) {
++                        const float coefficient_bound = abs(unscaled) * 31.0f + abs(dmn);
++                        magnitude[rt][t][0] += coefficient_bound * absolute_c[rt][0][hh];
++                        magnitude[rt][t][1] += coefficient_bound * absolute_c[rt][1][hh];
++                    }
++                }
++            }
++        }
++    }
++    #pragma clang loop unroll(full)
++    for (uint rt = 0; rt < RT; ++rt) {
++        #pragma clang loop unroll(full)
++        for (uint t = 0; t < NT; ++t) {
++            red[((sg * RT + rt) * NT + t) * 64 + 2 * lane] = acc[rt][t][0];
++            red[((sg * RT + rt) * NT + t) * 64 + 2 * lane + 1] = acc[rt][t][1];
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    float candidate[RT][NT][2] = {};
++    if (sg == 0) {
++        #pragma clang loop unroll(full)
++        for (uint rt = 0; rt < RT; ++rt) {
++            #pragma clang loop unroll(full)
++            for (uint t = 0; t < NT; ++t) {
++                for (uint split = 0; split < nsg; ++split) {
++                    candidate[rt][t][0] += red[((split * RT + rt) * NT + t) * 64 + 2 * lane];
++                    candidate[rt][t][1] += red[((split * RT + rt) * NT + t) * 64 + 2 * lane + 1];
++                }
++            }
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (hybrid_q5_special_guarded) {
++        #pragma clang loop unroll(full)
++        for (uint rt = 0; rt < RT; ++rt) {
++            #pragma clang loop unroll(full)
++            for (uint t = 0; t < NT; ++t) {
++                red[((sg * RT + rt) * NT + t) * 64 + 2 * lane] = magnitude[rt][t][0];
++                red[((sg * RT + rt) * NT + t) * 64 + 2 * lane + 1] = magnitude[rt][t][1];
++            }
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if (sg == 0) {
++            #pragma clang loop unroll(full)
++            for (uint rt = 0; rt < RT; ++rt) {
++                #pragma clang loop unroll(full)
++                for (uint t = 0; t < NT; ++t) {
++                    #pragma clang loop unroll(full)
++                    for (uint e = 0; e < 2; ++e) {
++                        const uint row = first_row + 8 * t + fm, token = first_token + 8 * rt + fn + e;
++                        float bound = 0.0f;
++                        for (uint split = 0; split < nsg; ++split)
++                            bound += red[((split * RT + rt) * NT + t) * 64 + 2 * lane + e];
++                        if (row < rows && token < tokens && (!isfinite(candidate[rt][t][e]) || !isfinite(bound)
++                            || (bound > 0.0f && abs(candidate[rt][t][e]) <= 2e-6f * bound)))
++                            atomic_fetch_or_explicit(fallback, 4u, memory_order_relaxed);
++                    }
++                }
++            }
++        }
++        threadgroup_barrier(mem_flags::mem_threadgroup);
++        if (atomic_load_explicit(fallback,memory_order_relaxed)) {
++            if (tid == 0) {
++                atomic_fetch_add_explicit(counters + 3,1u,memory_order_relaxed);
++                atomic_fetch_add_explicit(counters + 4,1u,memory_order_relaxed);
++            }
++            hybrid_q5_reference_mma_impl<NT,RT>(codes_base,input_base,output_base,p,failure,red,reference,tile,lane,sg);
++            return;
++        }
++    }
++    if (tid == 0) atomic_fetch_add_explicit(counters,1u,memory_order_relaxed);
++    if (sg == 0) {
++        #pragma clang loop unroll(full)
++        for (uint rt = 0; rt < RT; ++rt) {
++            #pragma clang loop unroll(full)
++            for (uint t = 0; t < NT; ++t) {
++                #pragma clang loop unroll(full)
++                for (uint e = 0; e < 2; ++e) {
++                    const uint row = first_row + 8 * t + fm, token = first_token + 8 * rt + fn + e;
++                    if (row < rows && token < tokens) {
++                        const float value = candidate[rt][t][e];
++                        if (!isfinite(value)) atomic_store_explicit(failure,1u,memory_order_relaxed);
++                        output[ulong(token) * rows + row] = value;
++                    }
++                }
++            }
++        }
++    }
++}
++
++#define HYBRID_Q5_SPECIAL(NT,RT) \
++kernel void hybrid_q5_special_nt##NT##_rt##RT(device const uchar *codes [[buffer(0)]], \
++    device const float *input [[buffer(1)]], device float *output [[buffer(2)]], \
++    constant uint *p [[buffer(3)]], device atomic_uint *failure [[buffer(4)]], \
++    device atomic_uint *counters [[buffer(5)]], threadgroup float *red [[threadgroup(0)]], \
++    uint2 tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]], \
++    uint sg [[simdgroup_index_in_threadgroup]]) { \
++    threadgroup atomic_uint fallback, reference; \
++    hybrid_q5_special_impl<NT,RT>(codes,input,output,p,failure,counters,red,&fallback,&reference,tile,lane,sg); \
++}
++HYBRID_Q5_SPECIAL(1,1)
++HYBRID_Q5_SPECIAL(2,1)
++HYBRID_Q5_SPECIAL(4,1)
++HYBRID_Q5_SPECIAL(1,2)
++HYBRID_Q5_SPECIAL(2,2)
++HYBRID_Q5_SPECIAL(4,2)
++#undef HYBRID_Q5_SPECIAL
+diff --git a/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma_reference.metal b/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma_reference.metal
+new file mode 100644
+index 00000000..9490ae8a
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/packed_q5_special_mma_reference.metal
+@@ -0,0 +1,163 @@
++// SPDX-License-Identifier: MIT
++// Adapted from ggml-org/llama.cpp, revision
++// dde879bc4f954b809892fd0d660515f42536394a,
++// ggml/src/ggml-metal/kernels/mul_mv_mma.metal (generic F32 kernel,
++// lane mapping, clamped tails and K-slice reduction).
++// Copyright (c) 2023-2026 The ggml authors. See LICENSE.ggml-hybrid.
++// Original Stark adaptations: checked same-weight [token,K] views, existing
++// byte-safe hybrid_quant dequantization, sticky status, and uniform original
++// block-dot fallback for extreme inputs. Activations and every MMA fragment
++// and accumulator remain F32. MMA/K-slice reduction changes sum association.
++// The Apple lane mapping is implementation-defined: basis/tail tests on the
++// admitted 32-lane device/compiler are required before any runtime admission.
++// This entire file is included only under cfg(test).
++
++constant uint hybrid_q5_reference_mma_nsg [[function_constant(80)]];
++
++inline uint hybrid_q5_reference_mma_fm(uint lane) {
++    return ((lane / 4) & 4) + ((lane / 2) % 4);
++}
++inline uint hybrid_q5_reference_mma_fn(uint lane) {
++    return ((lane / 4) & 2) * 2 + (lane % 2) * 2;
++}
++
++template<uint NT, uint RT>
++inline void hybrid_q5_reference_mma_impl(device const uchar *codes_base,
++    device const float *input_base, device float *output_base,
++    constant uint *p, device atomic_uint *failure,
++    threadgroup float *red, threadgroup atomic_uint *reference,
++    uint2 tile, uint lane, uint sg) {
++    const uint nsg = hybrid_q5_reference_mma_nsg;
++    const uint rows = p[0], columns = p[1], tokens = p[2];
++    device const uchar *codes = codes_base + p[3];
++    device const float *input = input_base + p[4];
++    device float *output = output_base + p[5];
++    const uint fm = hybrid_q5_reference_mma_fm(lane);
++    const uint fn = hybrid_q5_reference_mma_fn(lane);
++    const uint first_row = tile.x * (8 * NT);
++    const uint first_token = tile.y * (8 * RT);
++    const uint tid = sg * 32 + lane;
++    const ulong row_bytes = ulong(columns / 256) * hybrid_packed_block_bytes;
++    if (tid == 0) atomic_store_explicit(reference, 0u, memory_order_relaxed);
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++
++    simdgroup_float8x8 accum[RT][NT];
++    #pragma clang loop unroll(full)
++    for (uint rt = 0; rt < RT; ++rt) {
++        #pragma clang loop unroll(full)
++        for (uint t = 0; t < NT; ++t) {
++            accum[rt][t] = make_filled_simdgroup_matrix<float, 8>(0.0f);
++        }
++    }
++    bool extreme = false;
++    bool nonfinite = false;
++    for (uint chunk = sg; chunk < columns / 64; chunk += nsg) {
++        simdgroup_float8x8 b[RT][8];
++        #pragma clang loop unroll(full)
++        for (uint rt = 0; rt < RT; ++rt) {
++            const uint token0 = min(first_token + rt * 8 + fn, tokens - 1);
++            const uint token1 = min(first_token + rt * 8 + fn + 1, tokens - 1);
++            const uint at = chunk * 64 + 16 * (fm / 2) + 8 * (fm % 2);
++            const ulong base0 = ulong(token0) * columns + at;
++            const ulong base1 = ulong(token1) * columns + at;
++            #pragma clang loop unroll(full)
++            for (uint s = 0; s < 8; ++s) {
++                const float x0 = input[base0 + s];
++                const float x1 = input[base1 + s];
++                extreme = extreme || abs(x0) > 1e20f || abs(x1) > 1e20f;
++                nonfinite = nonfinite || !isfinite(x0) || !isfinite(x1);
++                b[rt][s].thread_elements()[0] = x0;
++                b[rt][s].thread_elements()[1] = x1;
++            }
++        }
++        // A lane's two elements address logical K columns fn and fn+1.
++        // Each lane dequantizes the contiguous 16-value segment starting at
++        // chunk*64 + (fn/2)*16. The first/second MMA elements take its first
++        // and second eight values. Existing Stark byte reads preserve Q5/Q6
++        // storage and avoid upstream typed-pointer alignment assumptions.
++        const uint ci = chunk * 4 + fn / 2;
++        #pragma clang loop unroll(full)
++        for (uint t = 0; t < NT; ++t) {
++            const uint row = min(first_row + t * 8 + fm, rows - 1);
++            const uint first = ci * 16;
++            device const uchar *block = codes + ulong(row) * row_bytes
++                + ulong(first / 256) * hybrid_packed_block_bytes;
++            float4x4 weights;
++            #pragma clang loop unroll(full)
++            for (uint j = 0; j < 16; ++j) {
++                weights[j / 4][j % 4] = hybrid_quant(block, hybrid_packed_kind, first % 256 + j);
++            }
++            #pragma clang loop unroll(full)
++            for (uint s = 0; s < 8; ++s) {
++                simdgroup_float8x8 a;
++                a.thread_elements()[0] = weights[s / 4][s % 4];
++                a.thread_elements()[1] = weights[s / 4 + 2][s % 4];
++                #pragma clang loop unroll(full)
++                for (uint rt = 0; rt < RT; ++rt) {
++                    simdgroup_multiply_accumulate(accum[rt][t], a, b[rt][s], accum[rt][t]);
++                }
++            }
++        }
++    }
++    if (extreme || nonfinite) atomic_store_explicit(reference, 1u, memory_order_relaxed);
++    if (nonfinite) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    if (atomic_load_explicit(reference, memory_order_relaxed)) {
++        // Uniform across all SIMD groups, including clamped output tails.
++        // Re-evaluate each real output with the original block helper so an
++        // MMA overflow cannot conceal or invent the zero*MAX contract.
++        for (uint flat = sg; flat < (8 * NT) * (8 * RT); flat += nsg) {
++            const uint row = first_row + flat % (8 * NT);
++            const uint token = first_token + flat / (8 * NT);
++            if (row < rows && token < tokens) {
++                const float total = hybrid_packed_block_dot(codes, input,
++                    ulong(row) * row_bytes, ulong(token) * columns, columns, lane);
++                if (lane == 0) {
++                    if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++                    output[ulong(token) * rows + row] = total;
++                }
++            }
++        }
++        return;
++    }
++    #pragma clang loop unroll(full)
++    for (uint rt = 0; rt < RT; ++rt) {
++        #pragma clang loop unroll(full)
++        for (uint t = 0; t < NT; ++t) {
++            red[((sg * RT + rt) * NT + t) * 64 + 2 * lane] = accum[rt][t].thread_elements()[0];
++            red[((sg * RT + rt) * NT + t) * 64 + 2 * lane + 1] = accum[rt][t].thread_elements()[1];
++        }
++    }
++    threadgroup_barrier(mem_flags::mem_threadgroup);
++    for (uint index = tid; index < RT * NT * 64; index += nsg * 32) {
++        float sum = 0.0f;
++        for (uint split = 0; split < nsg; ++split) sum += red[split * RT * NT * 64 + index];
++        const uint rt = index / (NT * 64);
++        const uint t = (index / 64) % NT;
++        const uint owner_lane = (index % 64) / 2;
++        const uint row = first_row + t * 8 + hybrid_q5_reference_mma_fm(owner_lane);
++        const uint token = first_token + rt * 8 + hybrid_q5_reference_mma_fn(owner_lane) + index % 2;
++        if (row < rows && token < tokens) {
++            if (!isfinite(sum)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
++            output[ulong(token) * rows + row] = sum;
++        }
++    }
++}
++
++#define HYBRID_KQUANT_MMA(NT, RT) \
++kernel void hybrid_q5_reference_mma_nt##NT##_rt##RT( \
++    device const uchar *codes [[buffer(0)]], device const float *input [[buffer(1)]], \
++    device float *output [[buffer(2)]], constant uint *p [[buffer(3)]], \
++    device atomic_uint *failure [[buffer(4)]], threadgroup float *red [[threadgroup(0)]], \
++    uint2 tile [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]], \
++    uint sg [[simdgroup_index_in_threadgroup]]) { \
++    threadgroup atomic_uint reference; \
++    hybrid_q5_reference_mma_impl<NT, RT>(codes, input, output, p, failure, red, &reference, tile, lane, sg); \
++}
++HYBRID_KQUANT_MMA(1, 1)
++HYBRID_KQUANT_MMA(2, 1)
++HYBRID_KQUANT_MMA(4, 1)
++HYBRID_KQUANT_MMA(1, 2)
++HYBRID_KQUANT_MMA(2, 2)
++HYBRID_KQUANT_MMA(4, 2)
++#undef HYBRID_KQUANT_MMA
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_tests.rs b/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_tests.rs
+new file mode 100644
+index 00000000..993f8a13
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_tests.rs
+@@ -0,0 +1,1035 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Test-only Q5 integer-fragment MMA, guarded against measured scale extremes
++//! and cancellation, with the exact archived v1 F32 generic MMA as reference.
++//!
++//! Scheduling/lane mapping and host admission derive from MIT llama.cpp
++//! dde879bc4f954b809892fd0d660515f42536394a: kernels/mul_mv_mma.metal
++//! (SHA256 115e843e70a6b5f8b6d4dc691a14706fadf6e9929b7f661989b5d7ae3d7716f9),
++//! ggml-metal-common.cpp:46-140 and ggml-metal-device.cpp:846-960.
++//! Stored weights and byte-safe dequantization remain Stark's. F32 MMA/K-slice
++//! reductions change association and are checked against both v39 Safe kernels
++//! and F64 products of both source-decoded F32 and mathematical GGUF weights.
++//! No runtime selector or
++//! activation downcast is introduced. The Q5 half-fragment specialization is
++//! intentionally excluded from this initial matching-precision experiment.
++
++use stark_engine_macros::stark_test;
++
++use super::*;
++
++#[derive(Clone, Copy)]
++struct Shape {
++    kind: u32,
++    rows: usize,
++    columns: usize,
++    tokens: usize,
++}
++
++impl Shape {
++    fn sizes(self) -> Result<(usize, usize)> {
++        if !matches!(self.kind, 13 | 14)
++            || self.rows == 0
++            || self.columns == 0
++            || !self.columns.is_multiple_of(256)
++            || !(2..=16).contains(&self.tokens)
++            || self.tokens.checked_mul(self.columns).is_none_or(|n| n > 8_000_000)
++            || self.tokens.checked_mul(self.rows).is_none_or(|n| n > 8_000_000)
++        {
++            return Err(Error::Invalid("few-row MMA shape admission"));
++        }
++        let (_, block_bytes) = weights::block_layout(self.kind)?;
++        let row_bytes = self.columns / 256 * block_bytes;
++        let bytes = self.rows.checked_mul(row_bytes).ok_or(Error::Invalid("few-row MMA weight size overflow"))?;
++        Ok((row_bytes, bytes))
++    }
++}
++
++#[derive(Clone, Copy)]
++struct MmaGeometry {
++    nsg: usize,
++    nt: usize,
++    rt: usize,
++    shared_bytes: usize,
++}
++
++fn halve_to_limit(
++    mut value: usize,
++    limit: usize,
++) -> usize {
++    while value > 1 && value > limit {
++        value /= 2;
++    }
++    value
++}
++
++fn initial_geometry(shape: Shape) -> Result<MmaGeometry> {
++    shape.sizes()?;
++    let rt = shape.tokens.div_ceil(8);
++    let nsg = halve_to_limit(
++        if shape.rows <= 64 {
++            32
++        } else if shape.rows <= 6144 {
++            16
++        } else {
++            8
++        },
++        shape.columns / 64,
++    );
++    let nt = halve_to_limit(4, (16_384 / (nsg * rt * 256)).min(shape.rows / (128 * 8)));
++    Ok(MmaGeometry {
++        nsg,
++        nt,
++        rt,
++        shared_bytes: nsg * nt * rt * 256,
++    })
++}
++
++fn mma_pipeline(shape: Shape) -> Result<(PipelineState, MmaGeometry)> {
++    let executor = executor()?;
++    let mut geometry = initial_geometry(shape)?;
++    loop {
++        let constants = MTLFunctionConstantValues::new();
++        for (index, value) in
++            [(0, shape.kind), (4, 256), (5, weights::block_layout(shape.kind)?.1 as u32), (80, geometry.nsg as u32)]
++        {
++            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
++        }
++        let name = format!("hybrid_q5_reference_mma_nt{}_rt{}", geometry.nt, geometry.rt);
++        let function = executor
++            .library
++            .new_function_with_name_constant_values(&name, &constants)
++            .map_err(|_| Error::Unsupported("few-row MMA function unavailable"))?;
++        let pipeline = executor
++            .device
++            .new_compute_pipeline_state_with_function(&function)
++            .map_err(|_| Error::Unsupported("few-row MMA pipeline unavailable"))?;
++        if pipeline.thread_execution_width() != 32 {
++            return Err(Error::Unsupported("few-row MMA requires the qualified Apple 32-lane layout"));
++        }
++        if pipeline.max_total_threads_per_threadgroup() < geometry.nsg * 32 {
++            if geometry.nsg == 1 {
++                return Err(Error::Unsupported("few-row MMA pipeline thread limit"));
++            }
++            geometry.nsg /= 2;
++            geometry.shared_bytes = geometry.nsg * geometry.nt * geometry.rt * 256;
++            continue;
++        }
++        if geometry.shared_bytes + pipeline.static_threadgroup_memory_length()
++            > executor.device.max_threadgroup_memory_length()
++        {
++            return Err(Error::Unsupported("few-row MMA threadgroup memory limit"));
++        }
++        return Ok((pipeline, geometry));
++    }
++}
++
++fn serial_pipeline(kind: u32) -> Result<PipelineState> {
++    let executor = executor()?;
++    match kind {
++        13 => executor.cached_pipeline(
++            MatrixFormat::Packed(kind),
++            "hybrid_q5_grouped32_matvec",
++            &executor.q5_grouped32_pipelines,
++        ),
++        14 => executor.cached_pipeline(
++            MatrixFormat::Packed(kind),
++            "hybrid_q6_grouped16_matvec",
++            &executor.q6_grouped16_pipelines,
++        ),
++        _ => Err(Error::Invalid("few-row MMA source format")),
++    }
++}
++
++fn validate_views(
++    shape: Shape,
++    codes: &ProtocolObject<dyn MTLBuffer>,
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    offsets: [usize; 3],
++) -> Result<()> {
++    let (_, code_bytes) = shape.sizes()?;
++    for (offset, bytes, length) in [
++        (offsets[0], code_bytes, codes.length()),
++        (
++            offsets[1].checked_mul(4).ok_or(Error::Invalid("MMA input offset overflow"))?,
++            shape.tokens * shape.columns * 4,
++            input.length(),
++        ),
++        (
++            offsets[2].checked_mul(4).ok_or(Error::Invalid("MMA output offset overflow"))?,
++            shape.tokens * shape.rows * 4,
++            output.length(),
++        ),
++    ] {
++        if offset.checked_add(bytes).is_none_or(|end| end > length) {
++            return Err(Error::Invalid("few-row MMA buffer span admission"));
++        }
++    }
++    if offsets.iter().any(|&offset| offset > u32::MAX as usize) {
++        return Err(Error::Invalid("few-row MMA parameter offset admission"));
++    }
++    Ok(())
++}
++
++#[expect(clippy::too_many_arguments, reason = "explicit component buffers and checked view offsets")]
++fn encode_mma(
++    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
++    shape: Shape,
++    pipeline: &PipelineState,
++    geometry: MmaGeometry,
++    codes: &ProtocolObject<dyn MTLBuffer>,
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    failure: &ProtocolObject<dyn MTLBuffer>,
++    offsets: [usize; 3],
++) -> Result<()> {
++    validate_views(shape, codes, input, output, offsets)?;
++    if failure.length() < 4
++        || geometry.rt != shape.tokens.div_ceil(8)
++        || ![1, 2, 4].contains(&geometry.nt)
++        || geometry.nsg == 0
++        || geometry.nsg * 32 > pipeline.max_total_threads_per_threadgroup()
++    {
++        return Err(Error::Invalid("few-row MMA dispatch admission"));
++    }
++    encoder.set_compute_pipeline_state(pipeline);
++    for (index, value) in [codes, input, output].into_iter().enumerate() {
++        encoder.set_buffer(Some(value), 0, index);
++    }
++    let p = [
++        shape.rows as u32,
++        shape.columns as u32,
++        shape.tokens as u32,
++        offsets[0] as u32,
++        offsets[1] as u32,
++        offsets[2] as u32,
++    ];
++    encoder.set_bytes(NonNull::from(&p).cast(), std::mem::size_of_val(&p), 3);
++    encoder.set_buffer(Some(failure), 0, 4);
++    encoder.set_threadgroup_memory_length(geometry.shared_bytes, 0);
++    encoder.dispatch_threadgroups(
++        MTLSize {
++            width: shape.rows.div_ceil(8 * geometry.nt),
++            height: shape.tokens.div_ceil(8 * geometry.rt),
++            depth: 1,
++        },
++        MTLSize {
++            width: 32 * geometry.nsg,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
++#[expect(clippy::too_many_arguments, reason = "same buffers as the few-row component with one source token")]
++fn encode_serial(
++    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
++    shape: Shape,
++    pipeline: &PipelineState,
++    codes: &ProtocolObject<dyn MTLBuffer>,
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    offsets: [usize; 3],
++    token: usize,
++) -> Result<()> {
++    validate_views(shape, codes, input, output, offsets)?;
++    if token >= shape.tokens {
++        return Err(Error::Invalid("few-row source token admission"));
++    }
++    encoder.set_compute_pipeline_state(pipeline);
++    encoder.set_buffer(Some(codes), 0, 0);
++    encoder.set_buffer(Some(input), (offsets[1] + token * shape.columns) * 4, 1);
++    encoder.set_buffer(Some(output), (offsets[2] + token * shape.rows) * 4, 2);
++    let p = [
++        shape.rows as u32,
++        shape.columns as u32,
++        shape.kind,
++        256,
++        weights::block_layout(shape.kind)?.1 as u32,
++        0,
++        0,
++        0,
++    ];
++    let packed_offsets = [offsets[0] as u32, 0, 0, 0];
++    encoder.set_bytes(NonNull::from(&p).cast(), std::mem::size_of_val(&p), 3);
++    encoder.set_bytes(NonNull::from(&packed_offsets).cast(), std::mem::size_of_val(&packed_offsets), 6);
++    encoder.dispatch_threadgroups(
++        MTLSize {
++            width: shape.rows.div_ceil(if shape.kind == 13 {
++                2
++            } else {
++                4
++            }),
++            height: 1,
++            depth: 1,
++        },
++        MTLSize {
++            width: 64,
++            height: 1,
++            depth: 1,
++        },
++    );
++    Ok(())
++}
++
++fn finite_codes(
++    kind: u32,
++    rows: usize,
++    columns: usize,
++    seed: usize,
++) -> Vec<u8> {
++    let bytes = weights::block_layout(kind).unwrap().1;
++    let mut state = 0x9135_acedu32 ^ seed as u32;
++    let mut codes = vec![0u8; rows * columns / 256 * bytes];
++    for byte in &mut codes {
++        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
++        *byte = (state >> 24) as u8;
++    }
++    for (index, block) in codes.chunks_exact_mut(bytes).enumerate() {
++        let d = half::f16::from_f32(0.001 + ((index * 17 + seed) % 257) as f32 * 0.00003125).to_bits().to_le_bytes();
++        if kind == 14 {
++            block[208..210].copy_from_slice(&d);
++        } else {
++            block[..2].copy_from_slice(&d);
++            block[2..4].copy_from_slice(
++                &half::f16::from_f32(0.0004 + ((index * 29 + seed) % 131) as f32 * 0.000015625).to_bits().to_le_bytes(),
++            );
++        }
++    }
++    codes
++}
++
++fn mathematical_weight(
++    kind: u32,
++    block: &[u8],
++    index: usize,
++) -> f64 {
++    let half_at = |at: usize| f64::from(half::f16::from_bits(u16::from_le_bytes([block[at], block[at + 1]])).to_f32());
++    if kind == 14 {
++        let n = index / 128;
++        let part = index % 128 / 32;
++        let lane = index % 32;
++        let low = (block[n * 64 + (part % 2) * 32 + lane]
++            >> if part >= 2 {
++                4
++            } else {
++                0
++            })
++            & 15;
++        let high = (block[128 + n * 32 + lane] >> (part * 2)) & 3;
++        let q = i32::from(low | (high << 4)) - 32;
++        let scale = block[192 + n * 8 + lane / 16 + part * 2] as i8;
++        return half_at(208) * f64::from(scale) * f64::from(q);
++    }
++    let part = index / 64;
++    let high_nibble = index % 64 / 32;
++    let lane = index % 32;
++    let group = part * 2 + high_nibble;
++    let scales = &block[4..16];
++    let (scale, minimum) = if group < 4 {
++        (scales[group] & 63, scales[group + 4] & 63)
++    } else {
++        (
++            (scales[group + 4] & 15) | ((scales[group - 4] >> 6) << 4),
++            (scales[group + 4] >> 4) | ((scales[group] >> 6) << 4),
++        )
++    };
++    let low = (block[48 + part * 32 + lane] >> (high_nibble * 4)) & 15;
++    let q = low | (((block[16 + lane] >> group) & 1) << 4);
++    half_at(0) * f64::from(scale) * f64::from(q) - half_at(2) * f64::from(minimum)
++}
++
++fn numerical_errors(
++    shape: Shape,
++    codes: &[u8],
++    input: &[f32],
++    actual: &[f32],
++    source: &[f32],
++    sample_rows: usize,
++) -> (f64, f64, f64) {
++    assert!(actual.len() == source.len() && actual.len() == shape.rows * shape.tokens, "MMA result shape");
++    let scale = source.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>();
++    let squared = actual.iter().zip(source).map(|(&a, &b)| (f64::from(a) - f64::from(b)).powi(2)).sum::<f64>();
++    let max_absolute =
++        actual.iter().zip(source).map(|(&a, &b)| (f64::from(a) - f64::from(b)).abs()).fold(0.0, f64::max);
++    let row_bytes = shape.columns / 256 * weights::block_layout(shape.kind).unwrap().1;
++    let samples = sample_rows.min(shape.rows).max(1);
++    let mut normalized = 0.0f64;
++    for token in 0..shape.tokens {
++        for sample in 0..samples {
++            let row = if samples == 1 {
++                0
++            } else {
++                sample * (shape.rows - 1) / (samples - 1)
++            };
++            let mut expected = 0.0f64;
++            let mut absolute = 0.0f64;
++            let mut mathematical = 0.0f64;
++            let mut mathematical_absolute = 0.0f64;
++            for (encoded, values) in codes[row * row_bytes..(row + 1) * row_bytes]
++                .chunks_exact(weights::block_layout(shape.kind).unwrap().1)
++                .zip(input[token * shape.columns..(token + 1) * shape.columns].chunks_exact(256))
++            {
++                let mut decoded = [0.0f32; 256];
++                weights::decode_block(shape.kind, encoded, &mut decoded).unwrap();
++                for (index, (weight, value)) in decoded.into_iter().zip(values).enumerate() {
++                    let product = f64::from(weight) * f64::from(*value);
++                    expected += product;
++                    absolute += product.abs();
++                    let product = mathematical_weight(shape.kind, encoded, index) * f64::from(*value);
++                    mathematical += product;
++                    mathematical_absolute += product.abs();
++                }
++            }
++            normalized =
++                normalized.max((f64::from(actual[token * shape.rows + row]) - expected).abs() / absolute.max(1.0));
++            normalized = normalized.max(
++                (f64::from(actual[token * shape.rows + row]) - mathematical).abs() / mathematical_absolute.max(1.0),
++            );
++        }
++    }
++    ((squared / scale.max(f64::MIN_POSITIVE)).sqrt(), normalized, max_absolute)
++}
++
++fn run(
++    shape: Shape,
++    codes: &[u8],
++    input: &[f32],
++    mma: bool,
++) -> Result<Vec<f32>> {
++    shape.sizes()?;
++    if codes.len() != shape.sizes()?.1 || input.len() != shape.tokens * shape.columns {
++        return Err(Error::Invalid("few-row test payload shape"));
++    }
++    objc2::rc::autoreleasepool(|_| {
++        let executor = executor()?;
++        let mut storage = vec![0xa7u8; 19];
++        storage.extend_from_slice(codes);
++        storage.extend_from_slice(&[0x4d; 19]);
++        let codes = buffer(executor, &storage)?;
++        let mut values = vec![f32::NAN; 3];
++        values.extend_from_slice(input);
++        values.extend_from_slice(&[f32::NAN; 3]);
++        let input = buffer(executor, bytemuck::cast_slice(&values))?;
++        let count = shape.rows * shape.tokens;
++        let output = buffer(executor, bytemuck::cast_slice(&vec![7.25f32; count + 6]))?;
++        let failure = buffer(executor, bytemuck::cast_slice(&[0u32]))?;
++        let command = executor.queue.command_buffer().ok_or(Error::Invalid("MMA test command"))?;
++        let encoder = command.compute_command_encoder().ok_or(Error::Invalid("MMA test encoder"))?;
++        if mma {
++            let (pipeline, geometry) = mma_pipeline(shape)?;
++            encode_mma(&encoder, shape, &pipeline, geometry, &codes, &input, &output, &failure, [19, 3, 3])?;
++        } else {
++            let pipeline = serial_pipeline(shape.kind)?;
++            for token in 0..shape.tokens {
++                encode_serial(&encoder, shape, &pipeline, &codes, &input, &output, [19, 3, 3], token)?;
++            }
++        }
++        encoder.end_encoding();
++        command.commit();
++        command.wait_until_completed();
++        if command.status() != MTLCommandBufferStatus::Completed {
++            return Err(Error::Invalid("MMA test execution"));
++        }
++        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), count + 6) };
++        assert!(values[..3].iter().chain(&values[count + 3..]).all(|&v| v == 7.25), "MMA output tail sentinel changed");
++        if unsafe { failure.contents().as_ptr().cast::<u32>().read() } != 0
++            || values[3..count + 3].iter().any(|x| !x.is_finite())
++        {
++            return Err(Error::Invalid("nonfinite few-row MMA result"));
++        }
++        Ok(values[3..count + 3].to_vec())
++    })
++}
++
++#[stark_test]
++fn q5_special_reference_geometry_matches_pinned_admission_without_runtime_changes() {
++    for tokens in [2, 4, 8, 14] {
++        let small = initial_geometry(Shape {
++            kind: 14,
++            rows: 4096,
++            columns: 4096,
++            tokens,
++        })
++        .unwrap();
++        assert_eq!(
++            (small.nsg, small.nt, small.rt, small.shared_bytes),
++            if tokens <= 8 {
++                (16, 4, 1, 16384)
++            } else {
++                (16, 2, 2, 16384)
++            }
++        );
++        let large = initial_geometry(Shape {
++            kind: 13,
++            rows: 8192,
++            columns: 4096,
++            tokens,
++        })
++        .unwrap();
++        assert_eq!((large.nsg, large.nt, large.rt), (8, 4, tokens.div_ceil(8)));
++    }
++    for shape in [
++        Shape {
++            kind: 12,
++            rows: 13,
++            columns: 256,
++            tokens: 2,
++        },
++        Shape {
++            kind: 14,
++            rows: 0,
++            columns: 256,
++            tokens: 2,
++        },
++        Shape {
++            kind: 14,
++            rows: 13,
++            columns: 255,
++            tokens: 2,
++        },
++        Shape {
++            kind: 13,
++            rows: 13,
++            columns: 256,
++            tokens: 17,
++        },
++    ] {
++        assert!(initial_geometry(shape).is_err());
++    }
++}
++
++#[stark_test]
++fn q5_special_reference_basis_offsets_tails_and_f64_source_oracles() {
++    for kind in [14u32, 13] {
++        for tokens in [2usize, 4, 8, 14] {
++            let shape = Shape {
++                kind,
++                rows: 13,
++                columns: 768,
++                tokens,
++            };
++            let codes = finite_codes(kind, shape.rows, shape.columns, 7);
++            for basis in [true, false] {
++                let indices = [0, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 512, 767];
++                let mut input = (0..shape.columns * tokens)
++                    .map(|i| {
++                        if basis {
++                            0.0
++                        } else {
++                            (i as f32 * 0.017).sin()
++                        }
++                    })
++                    .collect::<Vec<_>>();
++                if basis {
++                    for token in 0..tokens {
++                        input[token * shape.columns + indices[token % indices.len()]] = 1.0;
++                    }
++                }
++                let source = run(shape, &codes, &input, false).unwrap();
++                let actual = run(shape, &codes, &input, true).unwrap();
++                let (rms, f64_error, _) = numerical_errors(shape, &codes, &input, &actual, &source, shape.rows);
++                assert!(rms <= 2e-5, "few-row MMA source RMS changed");
++                assert!(f64_error <= 2e-6, "few-row MMA F64 product error");
++            }
++        }
++        // Exercise clamped weight rows and masked stores with every NT, not
++        // only the NT1 geometry selected by the small 13-row basis fixture.
++        for rows in [2051usize, 4099] {
++            let shape = Shape {
++                kind,
++                rows,
++                columns: 256,
++                tokens: 14,
++            };
++            let codes = finite_codes(kind, rows, shape.columns, 31);
++            let input = (0..shape.columns * shape.tokens).map(|i| (i as f32 * 0.013).cos()).collect::<Vec<_>>();
++            let source = run(shape, &codes, &input, false).unwrap();
++            let actual = run(shape, &codes, &input, true).unwrap();
++            let (rms, f64_error, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
++            assert!(rms <= 2e-5 && f64_error <= 2e-6, "few-row MMA NT2/NT4 row-tail error");
++        }
++    }
++}
++
++#[stark_test]
++fn q5_special_reference_preserves_f32_activation_detail_and_extreme_fallback() {
++    for kind in [14u32, 13] {
++        let shape = Shape {
++            kind,
++            rows: 13,
++            columns: 256,
++            tokens: 14,
++        };
++        let codes = finite_codes(kind, shape.rows, shape.columns, 11);
++        let input = (0..shape.columns * shape.tokens)
++            .map(|i| 1.0 + ((i % 5 + 1) as f32) * 2.0f32.powi(-14))
++            .collect::<Vec<_>>();
++        let source = run(shape, &codes, &input, false).unwrap();
++        let actual = run(shape, &codes, &input, true).unwrap();
++        assert!(
++            numerical_errors(shape, &codes, &input, &actual, &source, shape.rows).0 <= 2e-5,
++            "MMA lost F32 activation detail"
++        );
++        let half_input = input.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect::<Vec<_>>();
++        let downcast = run(shape, &codes, &half_input, true).unwrap();
++        assert!(
++            actual.iter().zip(downcast).any(|(a, b)| a.to_bits() != b.to_bits()),
++            "MMA activation precision probe is insensitive"
++        );
++        for extreme in [1e30, -1e30, f32::MAX] {
++            let input = (0..shape.tokens * shape.columns)
++                .map(|i| {
++                    if i % 2 == 0 {
++                        extreme
++                    } else {
++                        -extreme
++                    }
++                })
++                .collect::<Vec<_>>();
++            let source = run(shape, &codes, &input, false);
++            let actual = run(shape, &codes, &input, true);
++            assert!(source.is_err() == actual.is_err(), "MMA extreme failure contract changed");
++            if let (Ok(source), Ok(actual)) = (source, actual) {
++                assert!(
++                    actual.iter().zip(source).all(|(a, b)| a.to_bits() == b.to_bits()),
++                    "MMA fallback row chronology changed"
++                );
++            }
++        }
++        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++            let mut input = vec![0.0; shape.tokens * shape.columns];
++            input[13 * shape.columns + 255] = poison;
++            assert!(run(shape, &codes, &input, true).is_err(), "MMA concealed nonfinite activation");
++        }
++        let bytes = weights::block_layout(kind).unwrap().1;
++        let mut zero = vec![0u8; bytes];
++        if kind == 14 {
++            zero[128..192].fill(0xaa);
++            zero[192..208].fill(1);
++            zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
++        } else {
++            zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
++            zero[4..16].fill(1);
++        }
++        let values = run(shape, &zero.repeat(shape.rows), &vec![f32::MAX; shape.tokens * shape.columns], true).unwrap();
++        assert!(values.iter().all(|&x| x == 0.0), "MMA zero times MAX fallback changed");
++    }
++}
++
++#[derive(Clone, Copy, Debug)]
++enum Q5Path {
++    Generic,
++    Guarded,
++    RawDiagnostic,
++}
++
++fn special_pipeline(
++    shape: Shape,
++    guarded: bool,
++) -> Result<(PipelineState, MmaGeometry)> {
++    if shape.kind != 13 {
++        return Err(Error::Invalid("specialized MMA requires Q5_K"));
++    }
++    let executor = executor()?;
++    let mut geometry = initial_geometry(shape)?;
++    loop {
++        let constants = MTLFunctionConstantValues::new();
++        for (index, value) in [(0, 13u32), (4, 256), (5, 176), (80, geometry.nsg as u32), (81, u32::from(guarded))] {
++            constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
++        }
++        let name = format!("hybrid_q5_special_nt{}_rt{}", geometry.nt, geometry.rt);
++        let function = executor
++            .library
++            .new_function_with_name_constant_values(&name, &constants)
++            .map_err(|_| Error::Unsupported("Q5 specialized function unavailable"))?;
++        let pipeline = executor
++            .device
++            .new_compute_pipeline_state_with_function(&function)
++            .map_err(|_| Error::Unsupported("Q5 specialized pipeline unavailable"))?;
++        if pipeline.thread_execution_width() != 32 {
++            return Err(Error::Unsupported("Q5 specialized lane mapping"));
++        }
++        if pipeline.max_total_threads_per_threadgroup() < geometry.nsg * 32 {
++            if geometry.nsg == 1 {
++                return Err(Error::Unsupported("Q5 specialized thread limit"));
++            }
++            geometry.nsg /= 2;
++            geometry.shared_bytes = geometry.nsg * geometry.nt * geometry.rt * 256;
++            continue;
++        }
++        if geometry.shared_bytes + pipeline.static_threadgroup_memory_length()
++            > executor.device.max_threadgroup_memory_length()
++        {
++            return Err(Error::Unsupported("Q5 specialized shared memory limit"));
++        }
++        return Ok((pipeline, geometry));
++    }
++}
++
++#[expect(clippy::too_many_arguments, reason = "explicit checked experimental buffers and counters")]
++fn encode_special(
++    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
++    shape: Shape,
++    pipeline: &PipelineState,
++    geometry: MmaGeometry,
++    codes: &ProtocolObject<dyn MTLBuffer>,
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    failure: &ProtocolObject<dyn MTLBuffer>,
++    counters: &ProtocolObject<dyn MTLBuffer>,
++    offsets: [usize; 3],
++) -> Result<()> {
++    if shape.kind != 13 || counters.length() < 5 * 4 {
++        return Err(Error::Invalid("Q5 specialized counter/format span"));
++    }
++    encoder.set_buffer(Some(counters), 0, 5);
++    encode_mma(encoder, shape, pipeline, geometry, codes, input, output, failure, offsets)
++}
++
++fn representative_q5_codes(
++    rows: usize,
++    columns: usize,
++    seed: usize,
++) -> Vec<u8> {
++    let mut result = finite_codes(13, rows, columns, seed);
++    // Synthetic metadata guided by bounded actual-main/output aggregate samples.
++    // Stored dmin stays nonzero; subgroup min codes and quants are randomized.
++    // The resulting a*31 and b ranges are within the sampled ordinary envelope.
++    for (index, block) in result.chunks_exact_mut(176).enumerate() {
++        let d = half::f16::from_f32(0.000015 + ((index * 17 + seed) % 257) as f32 * 0.00000025);
++        let dm = half::f16::from_f32(0.0004 + ((index * 29 + seed) % 131) as f32 * 0.0000075);
++        block[..2].copy_from_slice(&d.to_bits().to_le_bytes());
++        block[2..4].copy_from_slice(&dm.to_bits().to_le_bytes());
++    }
++    result
++}
++
++fn special_run(
++    shape: Shape,
++    codes: &[u8],
++    input: &[f32],
++    path: Q5Path,
++) -> Result<(Vec<f32>, [u32; 5])> {
++    if shape.kind != 13 || codes.len() != shape.sizes()?.1 || input.len() != shape.tokens * shape.columns {
++        return Err(Error::Invalid("Q5 special test payload"));
++    }
++    objc2::rc::autoreleasepool(|_| {
++        let executor = executor()?;
++        let mut storage = vec![0xa7u8; 19];
++        storage.extend_from_slice(codes);
++        storage.extend_from_slice(&[0x4d; 19]);
++        let codes = buffer(executor, &storage)?;
++        let mut values = vec![f32::NAN; 3];
++        values.extend_from_slice(input);
++        values.extend_from_slice(&[f32::NAN; 3]);
++        let input = buffer(executor, bytemuck::cast_slice(&values))?;
++        let count = shape.rows * shape.tokens;
++        let output = buffer(executor, bytemuck::cast_slice(&vec![7.25f32; count + 6]))?;
++        let failure = buffer(executor, bytemuck::cast_slice(&[0u32]))?;
++        let counters = buffer(executor, bytemuck::cast_slice(&[0u32; 5]))?;
++        let command = executor.queue.command_buffer().ok_or(Error::Invalid("Q5 special test command"))?;
++        let encoder = command.compute_command_encoder().ok_or(Error::Invalid("Q5 special test encoder"))?;
++        match path {
++            Q5Path::Generic => {
++                let (pipeline, geometry) = mma_pipeline(shape)?;
++                encode_mma(&encoder, shape, &pipeline, geometry, &codes, &input, &output, &failure, [19, 3, 3])?;
++            },
++            Q5Path::Guarded | Q5Path::RawDiagnostic => {
++                let (pipeline, geometry) = special_pipeline(shape, matches!(path, Q5Path::Guarded))?;
++                encode_special(
++                    &encoder,
++                    shape,
++                    &pipeline,
++                    geometry,
++                    &codes,
++                    &input,
++                    &output,
++                    &failure,
++                    &counters,
++                    [19, 3, 3],
++                )?;
++            },
++        }
++        encoder.end_encoding();
++        command.commit();
++        command.wait_until_completed();
++        if command.status() != MTLCommandBufferStatus::Completed {
++            return Err(Error::Invalid("Q5 special test execution"));
++        }
++        let values = unsafe { std::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), count + 6) };
++        assert!(values[..3].iter().chain(&values[count + 3..]).all(|&v| v == 7.25), "Q5 special tail sentinel");
++        if unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0
++            || values[3..count + 3].iter().any(|x| !x.is_finite())
++        {
++            return Err(Error::Invalid("Q5 special nonfinite result"));
++        }
++        let counts = unsafe { *counters.contents().as_ptr().cast::<[u32; 5]>() };
++        Ok((values[3..count + 3].to_vec(), counts))
++    })
++}
++
++fn constant_q5_block(
++    d: f32,
++    dm: f32,
++    quant: u8,
++    scale: u8,
++    minimum: u8,
++) -> Vec<u8> {
++    assert!(quant < 32 && scale < 64 && minimum < 64);
++    let mut b = vec![0u8; 176];
++    b[..2].copy_from_slice(&half::f16::from_f32(d).to_bits().to_le_bytes());
++    b[2..4].copy_from_slice(&half::f16::from_f32(dm).to_bits().to_le_bytes());
++    for i in 0..4 {
++        b[4 + i] = (scale & 63) | ((scale >> 4) << 6);
++        b[8 + i] = (minimum & 63) | ((minimum >> 4) << 6);
++        b[12 + i] = (scale & 15) | ((minimum & 15) << 4);
++    }
++    b[16..48].fill(if quant & 16 != 0 {
++        255
++    } else {
++        0
++    });
++    b[48..176].fill((quant & 15) * 17);
++    b
++}
++
++#[stark_test]
++fn q5_special_bounded_nonzero_affine_basis_tails_and_f32_precision() {
++    for (rows, columns, tokens) in [(13, 768, 4), (2051, 256, 14), (4099, 256, 14)] {
++        let shape = Shape {
++            kind: 13,
++            rows,
++            columns,
++            tokens,
++        };
++        let codes = representative_q5_codes(rows, columns, 7);
++        for basis in [false, true] {
++            let mut input = (0..tokens * columns)
++                .map(|i| {
++                    if basis {
++                        0.0
++                    } else {
++                        (i as f32 * 0.017).sin()
++                    }
++                })
++                .collect::<Vec<_>>();
++            if basis {
++                for token in 0..tokens {
++                    input[token * columns
++                        + [0, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 512, 767][token % 14] % columns] = 1.0;
++                }
++            }
++            let source = run(shape, &codes, &input, false).unwrap();
++            let (actual, counts) = special_run(shape, &codes, &input, Q5Path::Guarded).unwrap();
++            let (rms, f64_error, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
++            assert!(rms <= 2e-5 && f64_error <= 2e-6, "Q5 special unchanged numerical gates");
++            assert_eq!(counts[1], 0, "representative metadata rejected as large-scale");
++            assert_eq!(counts[2], 0, "ordinary input rejected as extreme");
++            if !basis {
++                assert!(counts[0] > 0, "ordinary Q5 never entered specialized path");
++            }
++        }
++    }
++    let shape = Shape {
++        kind: 13,
++        rows: 13,
++        columns: 256,
++        tokens: 4,
++    };
++    let codes = representative_q5_codes(13, 256, 17);
++    let input = (0..1024).map(|i| 1.0 + ((i % 5 + 1) as f32) * 2.0f32.powi(-14)).collect::<Vec<_>>();
++    let (full, _) = special_run(shape, &codes, &input, Q5Path::Guarded).unwrap();
++    let half = input.iter().map(|&x| half::f16::from_f32(x).to_f32()).collect::<Vec<_>>();
++    let (downcast, _) = special_run(shape, &codes, &half, Q5Path::Guarded).unwrap();
++    assert!(full.iter().zip(downcast).any(|(a, b)| a.to_bits() != b.to_bits()), "Q5 F32 activation probe insensitive");
++}
++
++#[stark_test]
++fn q5_special_cancellation_raw_rejected_guarded_uniform_fallback() {
++    let shape = Shape {
++        kind: 13,
++        rows: 13,
++        columns: 256,
++        tokens: 4,
++    };
++    let mut raw_rejections = 0;
++    let mut legacy_error_cases = 0;
++    let mut legacy_failed_cases = 0;
++    let mut coefficient_checks = 0usize;
++    for (scale_index, d) in [65504.0, 1.0, 2.0f32.powi(-14), 2.0f32.powi(-24)].into_iter().enumerate() {
++        let block = constant_q5_block(d, d, 17, 1, 17);
++        let codes = block.repeat(shape.rows);
++        for (magnitude_index, magnitude) in
++            [1.0f32, -1.0, 1e10, -1e10, 1e-20, -1e-20, f32::MIN_POSITIVE, f32::from_bits(1)].into_iter().enumerate()
++        {
++            let case_id = scale_index * 8 + magnitude_index;
++            let scale_bits = half::f16::from_f32(d).to_bits();
++            let magnitude_bits = magnitude.to_bits();
++            // This is the coefficient proof. The old grouped GPU baseline
++            // already factors affine terms and is not an exact-zero oracle.
++            // Decode every coefficient independently under both policies for
++            // every synthetic case, including all scale/magnitude variants.
++            let mut nonzero_f32 = 0usize;
++            let mut nonzero_f64 = 0usize;
++            for encoded in codes.chunks_exact(176) {
++                let mut decoded = [0.0f32; 256];
++                weights::decode_block(13, encoded, &mut decoded).unwrap();
++                nonzero_f32 += decoded.iter().filter(|&&v| v != 0.0).count();
++                nonzero_f64 += (0..256).filter(|&index| mathematical_weight(13, encoded, index) != 0.0).count();
++                coefficient_checks += 256;
++            }
++            assert_eq!(
++                nonzero_f32, 0,
++                "CPU F32 coefficients case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            assert_eq!(
++                nonzero_f64, 0,
++                "CPU F64 coefficients case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            let mut input = vec![0.0; shape.tokens * shape.columns];
++            for token in 0..shape.tokens {
++                let at = token * shape.columns
++                    + if token % 2 == 0 {
++                        0
++                    } else {
++                        32
++                    };
++                input[at] = magnitude;
++                input[at + 1] = magnitude * 2.0f32.powi(-24);
++            }
++            // Retain the actual legacy outcome as a separately labelled
++            // baseline-error diagnostic, without treating it as mathematics.
++            let legacy = run(shape, &codes, &input, false);
++            let (legacy_nonzero_count, legacy_maximum_absolute_error, legacy_execution_failed) = match legacy {
++                Ok(values) => {
++                    let nonzero = values.iter().filter(|&&v| v != 0.0).count();
++                    legacy_error_cases += usize::from(nonzero != 0);
++                    (nonzero, values.iter().map(|v| f64::from(*v).abs()).fold(0.0, f64::max), false)
++                },
++                Err(_) => {
++                    legacy_failed_cases += 1;
++                    (0, 0.0, true)
++                },
++            };
++            let (generic, _) = special_run(shape, &codes, &input, Q5Path::Generic)
++                .unwrap_or_else(|_|panic!("generic oracle execution case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"));
++            let generic_nonzero = generic.iter().filter(|&&v| v != 0.0).count();
++            assert_eq!(
++                generic_nonzero, 0,
++                "generic per-weight F32 zero oracle case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            println!(
++                "{}",
++                serde_json::json!({"component":"q5_zero_affine_case","case_id":case_id,"scale_f16_bits":scale_bits,
++                "activation_magnitude_f32_bits":magnitude_bits,"CPU_F32_nonzero_coefficients":nonzero_f32,"CPU_F64_nonzero_coefficients":nonzero_f64,
++                "generic_nonzero_outputs":generic_nonzero,"legacy_grouped_nonzero_outputs":legacy_nonzero_count,
++                "legacy_grouped_maximum_absolute_error_vs_zero":legacy_maximum_absolute_error,"legacy_grouped_execution_failed":legacy_execution_failed})
++            );
++            let (guarded, counts) = special_run(shape, &codes, &input, Q5Path::Guarded).unwrap_or_else(|_| {
++                panic!(
++                    "guarded execution case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++                )
++            });
++            println!(
++                "{}",
++                serde_json::json!({"component":"q5_zero_affine_guarded_case","case_id":case_id,
++                "scale_f16_bits":scale_bits,"activation_magnitude_f32_bits":magnitude_bits,
++                "guarded_nonzero_outputs":guarded.iter().filter(|&&v|v!=0.0).count(),
++                "guarded_maximum_absolute_error_vs_zero":guarded.iter().map(|v|f64::from(*v).abs()).fold(0.0,f64::max),
++                "specialized_threadgroups":counts[0],"metadata_generic_fallback":counts[1],"source_input_fallback":counts[2],
++                "cancellation_generic_fallback":counts[3],"total_fallback":counts[4]})
++            );
++            assert!(
++                guarded.iter().zip(&generic).all(|(a, b)| a.to_bits() == b.to_bits()),
++                "Q5 cancellation fallback changed generic bits case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            assert!(
++                guarded.iter().all(|&v| v == 0.0),
++                "Q5 guarded affine cancellation escaped case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            let (guarded_rms, guarded_f64_error, _) =
++                numerical_errors(shape, &codes, &input, &guarded, &generic, shape.rows);
++            assert!(
++                guarded_rms <= 2e-5 && guarded_f64_error <= 2e-6,
++                "Q5 guarded zero/F64 gates case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"
++            );
++            // At very tiny magnitudes the affine L1 bound can underflow to zero;
++            // exact zero results are still required. Ordinary/subnormal scales
++            // with magnitude >=1 exercise metadata or cancellation admission.
++            if magnitude.abs() >= 1.0 {
++                assert!(counts[4] > 0, "Q5 cancellation did not select uniform fallback case={case_id}");
++                if d <= 2.0f32.powi(-14) {
++                    assert_eq!(counts[1], 0, "moderate cancellation fixture exceeded coefficient guard case={case_id}");
++                    assert!(counts[3] > 0, "moderate cancellation did not select post-MMA fallback case={case_id}");
++                }
++            }
++            let (raw, raw_counts) = special_run(shape, &codes, &input, Q5Path::RawDiagnostic)
++                .unwrap_or_else(|_|panic!("raw diagnostic execution case={case_id} scale_bits={scale_bits:04x} magnitude_bits={magnitude_bits:08x}"));
++            let (rms, f64_error, _) = numerical_errors(shape, &codes, &input, &raw, &generic, shape.rows);
++            // Only an actually executed raw specialized tile demonstrates the
++            // integer-MMA affine cancellation failure; source fallbacks do not.
++            raw_rejections += usize::from(raw_counts[0] > 0 && (rms > 2e-5 || f64_error > 2e-6));
++        }
++    }
++    assert!(raw_rejections > 0, "raw Q5 cancellation counterexample did not reject numerical policy");
++    println!(
++        "{}",
++        serde_json::json!({"component":"q5_zero_affine_probe_v2","cases":32,"CPU_coefficient_checks_per_policy":coefficient_checks,
++            "CPU_F32_nonzero_coefficients":0,"CPU_F64_nonzero_coefficients":0,"raw_specialized_numerical_rejections":raw_rejections,
++            "legacy_grouped_nonzero_cases":legacy_error_cases,"legacy_grouped_execution_failed_cases":legacy_failed_cases,"guarded_all_cases_passed":true})
++    );
++}
++
++#[stark_test]
++fn q5_special_extremes_subnormals_nonfinite_and_failure_recovery() {
++    let shape = Shape {
++        kind: 13,
++        rows: 13,
++        columns: 256,
++        tokens: 4,
++    };
++    let ordinary = representative_q5_codes(13, 256, 31);
++    for value in [1e30, -1e30, f32::MAX, f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++        let input = vec![value; 1024];
++        let source = run(shape, &ordinary, &input, false);
++        let generic = special_run(shape, &ordinary, &input, Q5Path::Generic);
++        let guarded = special_run(shape, &ordinary, &input, Q5Path::Guarded);
++        assert_eq!(source.is_err(), guarded.is_err(), "Q5 extreme source failure parity");
++        assert_eq!(generic.is_err(), guarded.is_err(), "Q5 extreme generic failure parity");
++        if let (Ok((a, counts)), Ok((b, _))) = (guarded, generic) {
++            assert!(a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits()), "Q5 extreme fallback bits");
++            assert!(counts[2] > 0 && counts[4] > 0, "Q5 extreme fallback unobserved");
++        }
++    }
++    for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
++        for at in [0usize, 2] {
++            let mut codes = ordinary.clone();
++            for b in codes.chunks_exact_mut(176) {
++                b[at..at + 2].copy_from_slice(&half::f16::from_f32(poison).to_bits().to_le_bytes());
++            }
++            assert!(
++                special_run(shape, &codes, &vec![1.0; 1024], Q5Path::Guarded).is_err(),
++                "Q5 nonfinite metadata escaped"
++            );
++        }
++    }
++    let zero = constant_q5_block(65504.0, 65504.0, 17, 1, 17).repeat(13);
++    let (zero, counters) = special_run(shape, &zero, &vec![f32::MAX; 1024], Q5Path::Guarded).unwrap();
++    assert!(zero.iter().all(|&v| v == 0.0) && counters[2] > 0, "Q5 zero times MAX contract");
++    for d in [2.0f32.powi(-24), 2.0f32.powi(-14)] {
++        let codes = constant_q5_block(d, 0.0, 17, 1, 0).repeat(13);
++        for magnitude in [1.0, f32::MIN_POSITIVE, f32::from_bits(1)] {
++            let input = vec![magnitude; 1024];
++            let source = run(shape, &codes, &input, false).unwrap();
++            let (actual, _) = special_run(shape, &codes, &input, Q5Path::Guarded).unwrap();
++            let (rms, f64_error, _) = numerical_errors(shape, &codes, &input, &actual, &source, 13);
++            assert!(rms <= 2e-5 && f64_error <= 2e-6, "Q5 subnormal scale/input numerical gates");
++        }
++    }
++    assert!(special_run(shape, &ordinary, &vec![1.0; 1024], Q5Path::Guarded).is_ok(), "Q5 failed recovery");
++}
++
++#[path = "weight_metal_q5_special_mma_components.rs"]
++mod specialized_components;
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_components.rs b/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_components.rs
+new file mode 100644
+index 00000000..d3f95aaa
+--- /dev/null
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal_q5_special_mma_components.rs
+@@ -0,0 +1,288 @@
++// SPDX-License-Identifier: Apache-2.0
++//! Test-only paired Q5 components. Synthetic payload metadata is guided by
++//! bounded actual-model aggregate samples; this is not model qualification.
++use stark_engine_macros::stark_test;
++
++use super::*;
++
++const BANKS: usize = 8;
++#[derive(Clone, Copy)]
++enum Schedule {
++    ProjectionMajor,
++    Generic,
++    Guarded,
++}
++impl Schedule {
++    fn label(self) -> &'static str {
++        match self {
++            Self::ProjectionMajor => "legacy_projection_major",
++            Self::Generic => "generic_f32_mma",
++            Self::Guarded => "guarded_integer_mma",
++        }
++    }
++}
++#[derive(Clone, Copy)]
++struct Timing {
++    gpu: f64,
++    encode: f64,
++    roundtrip: f64,
++}
++
++#[expect(clippy::too_many_arguments, reason = "explicit independent reference and experimental component buffers")]
++fn dispatch(
++    shape: Shape,
++    schedule: Schedule,
++    legacy: &PipelineState,
++    generic: &PipelineState,
++    generic_geometry: MmaGeometry,
++    special: &PipelineState,
++    special_geometry: MmaGeometry,
++    codes: &[Retained<ProtocolObject<dyn MTLBuffer>>],
++    input: &ProtocolObject<dyn MTLBuffer>,
++    output: &ProtocolObject<dyn MTLBuffer>,
++    failure: &ProtocolObject<dyn MTLBuffer>,
++    counters: &ProtocolObject<dyn MTLBuffer>,
++    rotation: usize,
++    capture: bool,
++) -> Result<(Timing, Option<Vec<f32>>, [u32; 5])> {
++    objc2::rc::autoreleasepool(|_| {
++        if codes.len() != BANKS || failure.length() < 4 || counters.length() < 20 {
++            return Err(Error::Invalid("Q5 component counter/bank geometry"));
++        }
++        unsafe {
++            failure.contents().as_ptr().cast::<u32>().write(0);
++            counters.contents().as_ptr().cast::<[u32; 5]>().write([0; 5]);
++        }
++        let start = std::time::Instant::now();
++        let command = executor()?.queue.command_buffer().ok_or(Error::Invalid("Q5 component command"))?;
++        let encoder = command.compute_command_encoder().ok_or(Error::Invalid("Q5 component encoder"))?;
++        for step in 0..BANKS {
++            let bank = (step + rotation) % BANKS;
++            let offsets = [0, 0, bank * shape.tokens * shape.rows];
++            match schedule {
++                Schedule::ProjectionMajor => {
++                    for token in 0..shape.tokens {
++                        encode_serial(&encoder, shape, legacy, &codes[bank], input, output, offsets, token)?;
++                    }
++                },
++                Schedule::Generic => encode_mma(
++                    &encoder,
++                    shape,
++                    generic,
++                    generic_geometry,
++                    &codes[bank],
++                    input,
++                    output,
++                    failure,
++                    offsets,
++                )?,
++                Schedule::Guarded => encode_special(
++                    &encoder,
++                    shape,
++                    special,
++                    special_geometry,
++                    &codes[bank],
++                    input,
++                    output,
++                    failure,
++                    counters,
++                    offsets,
++                )?,
++            }
++        }
++        encoder.end_encoding();
++        let encode = start.elapsed().as_secs_f64();
++        command.commit();
++        command.wait_until_completed();
++        let roundtrip = start.elapsed().as_secs_f64();
++        if command.status() != MTLCommandBufferStatus::Completed
++            || unsafe { *failure.contents().as_ptr().cast::<u32>() } != 0
++        {
++            return Err(Error::Invalid("Q5 component GPU/status failure"));
++        }
++        let gpu = command.gpu_end_time() - command.gpu_start_time();
++        let counts = unsafe { *counters.contents().as_ptr().cast::<[u32; 5]>() };
++        let values = if capture {
++            Some(
++                unsafe {
++                    std::slice::from_raw_parts(
++                        output.contents().as_ptr().cast::<f32>(),
++                        BANKS * shape.tokens * shape.rows,
++                    )
++                }
++                .to_vec(),
++            )
++        } else {
++            None
++        };
++        Ok((
++            Timing {
++                gpu,
++                encode,
++                roundtrip,
++            },
++            values,
++            counts,
++        ))
++    })
++}
++fn median(values: &[f64]) -> f64 {
++    let mut v = values.to_vec();
++    v.sort_by(f64::total_cmp);
++    (v[(v.len() - 1) / 2] + v[v.len() / 2]) * 0.5
++}
++fn hash(values: &[f32]) -> String {
++    use sha2::{Digest, Sha256};
++    let mut digest = Sha256::new();
++    for value in values {
++        digest.update(value.to_bits().to_le_bytes());
++    }
++    digest.finalize().iter().map(|b| format!("{b:02x}")).collect()
++}
++
++#[stark_test]
++#[ignore]
++fn q5_special_t4_main_output_rotated_abba_components() {
++    let _activity = crate::engine::hybrid::activity::InferenceActivity::begin().unwrap();
++    for (rows, columns, label) in [(8192, 4096, "q5_main"), (4096, 8192, "q5_output")] {
++        let shape = Shape {
++            kind: 13,
++            rows,
++            columns,
++            tokens: 4,
++        };
++        let (generic, generic_geometry) = mma_pipeline(shape).unwrap();
++        let (special, special_geometry) = special_pipeline(shape, true).unwrap();
++        let legacy = serial_pipeline(13).unwrap();
++        let payloads = (0..BANKS).map(|i| representative_q5_codes(rows, columns, i + 1)).collect::<Vec<_>>();
++        let matrix_bytes = shape.sizes().unwrap().1;
++        assert!(matrix_bytes * BANKS > 160 * 1024 * 1024, "Q5 component population fits excluded cache");
++        let input_values = (0..4 * columns)
++            .map(|i| ((i % columns) as f32 * 0.017 + (i / columns) as f32 * 0.113).sin())
++            .collect::<Vec<_>>();
++        let executor = executor().unwrap();
++        let codes = payloads.iter().map(|p| buffer(executor, p).unwrap()).collect::<Vec<_>>();
++        let input = buffer(executor, bytemuck::cast_slice(&input_values)).unwrap();
++        let output = buffer(executor, bytemuck::cast_slice(&vec![0.0f32; BANKS * 4 * rows])).unwrap();
++        let failure = buffer(executor, bytemuck::cast_slice(&[0u32])).unwrap();
++        let counters = buffer(executor, bytemuck::cast_slice(&[0u32; 5])).unwrap();
++        let (_, source, _) = dispatch(
++            shape,
++            Schedule::ProjectionMajor,
++            &legacy,
++            &generic,
++            generic_geometry,
++            &special,
++            special_geometry,
++            &codes,
++            &input,
++            &output,
++            &failure,
++            &counters,
++            0,
++            true,
++        )
++        .unwrap();
++        let source = source.unwrap();
++        assert!(source.iter().all(|v| v.is_finite()));
++        let mut samples = vec![Vec::<Timing>::new(); 4];
++        let mut outputs: Vec<Option<Vec<f32>>> = vec![None; 4];
++        let mut counts = [[0u64; 5]; 4];
++        let mut rotation = 1;
++        for (pair_index, (left, right)) in
++            [(Schedule::ProjectionMajor, Schedule::Guarded), (Schedule::Generic, Schedule::Guarded)]
++                .into_iter()
++                .enumerate()
++        {
++            let pair = [left, right, right, left];
++            for warmup in 0..11 {
++                for schedule in pair {
++                    let (timing, values, observed) = dispatch(
++                        shape,
++                        schedule,
++                        &legacy,
++                        &generic,
++                        generic_geometry,
++                        &special,
++                        special_geometry,
++                        &codes,
++                        &input,
++                        &output,
++                        &failure,
++                        &counters,
++                        rotation,
++                        warmup >= 3,
++                    )
++                    .unwrap();
++                    rotation = (rotation + 1) % BANKS;
++                    if warmup >= 3 {
++                        let at = pair_index * 2 + usize::from(matches!(schedule, Schedule::Guarded));
++                        samples[at].push(timing);
++                        outputs[at] = values;
++                        for i in 0..5 {
++                            counts[at][i] += u64::from(observed[i]);
++                        }
++                    }
++                }
++            }
++        }
++        for (at, schedule) in
++            [Schedule::ProjectionMajor, Schedule::Guarded, Schedule::Generic, Schedule::Guarded].into_iter().enumerate()
++        {
++            let actual = outputs[at].as_ref().unwrap();
++            assert!(actual.iter().all(|v| v.is_finite()));
++            let mut rms = 0.0f64;
++            let mut f64_error = 0.0f64;
++            let mut absolute = 0.0f64;
++            for bank in 0..BANKS {
++                let range = bank * 4 * rows..(bank + 1) * 4 * rows;
++                let (r, f, a) =
++                    numerical_errors(shape, &payloads[bank], &input_values, &actual[range.clone()], &source[range], 16);
++                rms = rms.max(r);
++                f64_error = f64_error.max(f);
++                absolute = absolute.max(a);
++            }
++            assert!(rms <= 2e-5 && f64_error <= 2e-6, "Q5 component unchanged RRMS/F64 gates");
++            let identical = actual.iter().zip(&source).all(|(a, b)| a.to_bits() == b.to_bits());
++            if matches!(schedule, Schedule::ProjectionMajor) {
++                assert!(identical, "legacy projection-major output changed");
++            }
++            if matches!(schedule, Schedule::Guarded) {
++                assert!(counts[at][0] > 0, "guarded Q5 rejected all ordinary tiles");
++            }
++            let gpu = samples[at].iter().map(|s| s.gpu / BANKS as f64).collect::<Vec<_>>();
++            let encode = samples[at].iter().map(|s| s.encode / BANKS as f64).collect::<Vec<_>>();
++            let roundtrip = samples[at].iter().map(|s| s.roundtrip / BANKS as f64).collect::<Vec<_>>();
++            let total = counts[at][0] + counts[at][4];
++            let geometry = if matches!(schedule, Schedule::Guarded) {
++                special_geometry
++            } else {
++                generic_geometry
++            };
++            println!(
++                "{}",
++                serde_json::json!({
++                    "component":label,"schedule":schedule.label(),"comparison":if at<2 {"legacy_projection_major_vs_guarded"} else {"generic_f32_mma_vs_guarded"},
++                    "rows":rows,"columns":columns,"tokens":4,"banks":BANKS,"weight_population_bytes":matrix_bytes*BANKS,
++                    "metadata_fixture":"synthetic_nonzero_affine_guided_by_bounded_actual_Q5_aggregate_sample",
++                    "coefficient_guard_max_integer_term":1.0,"coefficient_guard_max_minimum_term":1.0,"cancellation_guard_relative_to_affine_L1":2e-6,
++                    "input_nonzero_magnitude_envelope":[1e-30,1e20],"zero_input_admitted":true,
++                    "specialized_threadgroups":counts[at][0],"metadata_generic_fallback_threadgroups":counts[at][1],
++                    "input_source_fallback_threadgroups":counts[at][2],"cancellation_generic_fallback_threadgroups":counts[at][3],
++                    "total_fallback_threadgroups":counts[at][4],"fallback_fraction":if total==0 {0.0} else {counts[at][4]as f64/total as f64},
++                    "nsg":if matches!(schedule,Schedule::ProjectionMajor) {2} else {geometry.nsg},
++                    "nt":if matches!(schedule,Schedule::ProjectionMajor) {None} else {Some(geometry.nt)},
++                    "rt":if matches!(schedule,Schedule::ProjectionMajor) {None} else {Some(geometry.rt)},
++                    "shared_memory_bytes":if matches!(schedule,Schedule::ProjectionMajor) {0} else {geometry.shared_bytes},
++                    "measurement_dispatches":samples[at].len(),"median_gpu_microseconds_per_matrix":median(&gpu)*1e6,
++                    "median_gpu_microseconds_per_token":median(&gpu)*1e6/4.0,"median_cpu_encode_microseconds_per_matrix":median(&encode)*1e6,
++                    "median_cpu_roundtrip_microseconds_per_matrix":median(&roundtrip)*1e6,
++                    "maximum_relative_rms_vs_legacy":rms,"maximum_f64_error_over_absolute_sum":f64_error,
++                    "maximum_absolute_error_vs_legacy":absolute,"bitwise_equal_to_legacy":identical,"output_sha256":hash(actual),
++                    "precision":"exact_integer_F16_A_F32_activation_accumulator_affine_reconstruction_safe_math",
++                    "status":"component_only_not_model_qualified","timer_scope":"serial_rotated_banks_ABBA_upload_excluded"
++                })
++            );
++        }
++    }
++}
