@@ -622,129 +622,142 @@ mod components;
 
 #[stark_test]
 fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
-    for (rows, columns) in [(8192, 4096), (4096, 8192)] {
-        let shape = Shape {
-            kind: 14,
-            rows,
-            columns,
-            tokens: 4,
-        };
-        let codes = finite_codes(14, rows, columns, rows + columns);
-        let input = (0..4 * columns).map(|i| ((i * 31 % 149) as f32 - 74.0) * 0.0078125).collect::<Vec<_>>();
-        let source = run(shape, &codes, &input, false).unwrap();
-        let mut encoded = vec![0xa7; 19];
-        encoded.extend_from_slice(&codes);
-        encoded.extend_from_slice(&[0xa7; 19]);
-        let matrix = MappedMatrix {
-            codes: MappedSlice {
-                buffer: buffer(executor().unwrap(), &encoded).unwrap(),
-                offset: 19,
-                length: codes.len(),
-                registered_length: encoded.len(),
-            },
-            planes: None,
-        };
-        let operation = MappedOperation {
-            matrices: vec![matrix],
-            inputs: &[],
-            rows,
-            columns,
-            rows_per_batch: 0,
-            format: MatrixFormat::Packed(14),
-        };
-        let was_enabled = profile::enabled();
-        profile::enable(true);
-        let before = profile::snapshot().get("native.glm.prefill.q6_mma").map_or(0, |c| c.calls);
-        let mut graph = DecodeGraph::new().unwrap();
-        let mut padded = vec![f32::NAN; 3];
-        padded.extend_from_slice(&input);
-        padded.extend_from_slice(&[f32::NAN; 3]);
-        let values = DeviceVector {
-            buffer: buffer(executor().unwrap(), bytemuck::cast_slice(&padded)).unwrap(),
-            offset: 12,
-            len: input.len(),
-        };
-        let output = graph.mapped_same_weight(&operation, &values, 4, true).unwrap();
-        let actual = graph.finish(&[output]).unwrap().remove(0);
-        let after = profile::snapshot().get("native.glm.prefill.q6_mma").map_or(0, |c| c.calls);
-        profile::enable(was_enabled);
-        let qualified = executor().unwrap().device.name().to_string() == "Apple M5 Max";
-        assert_eq!(after - before, u64::from(qualified), "actual route device admission mismatch");
-        let (rrms, normalized, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
-        assert!(rrms <= 2e-5 && normalized <= 2e-6, "runtime MMA source/F64 tolerance failed");
-
-        for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
-            let mut bad = input.clone();
-            bad[3 * columns + 255] = poison;
-            let mut graph = DecodeGraph::new().unwrap();
-            let values = DeviceVector {
-                buffer: buffer(executor().unwrap(), bytemuck::cast_slice(&bad)).unwrap(),
-                offset: 0,
-                len: bad.len(),
+    for (kind, tokens) in [(14, 4), (13, 8), (14, 8)] {
+        for (rows, columns) in [(8192, 4096), (4096, 8192)] {
+            let shape = Shape {
+                kind,
+                rows,
+                columns,
+                tokens,
             };
-            let output = graph.mapped_same_weight(&operation, &values, 4, true).unwrap();
-            assert!(graph.finish(&[output]).is_err(), "runtime MMA concealed nonfinite input");
-        }
-        let large = vec![1.0e21f32; 4 * columns];
-        let expected = run(shape, &codes, &large, false).unwrap();
-        let mut graph = DecodeGraph::new().unwrap();
-        let values = graph.upload_into(&large).unwrap();
-        let output = graph.mapped_same_weight(&operation, &values, 4, true).unwrap();
-        let actual = graph.finish(&[output]).unwrap().remove(0);
-        assert!(
-            actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()),
-            "runtime MMA extreme fallback changed original chronology"
-        );
-
-        let mut zero = vec![0u8; 210];
-        zero[128..192].fill(0xaa);
-        zero[192..208].fill(1);
-        zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
-        let zero = zero.repeat(rows * columns / 256);
-        let zero_matrix = MappedMatrix {
-            codes: MappedSlice {
-                buffer: buffer(executor().unwrap(), &zero).unwrap(),
-                offset: 0,
-                length: zero.len(),
-                registered_length: zero.len(),
-            },
-            planes: None,
-        };
-        let mut graph = DecodeGraph::new().unwrap();
-        let extreme = graph.upload_into(&vec![f32::MAX; 4 * columns]).unwrap();
-        let output = graph
-            .mapped_same_weight(
-                &MappedOperation {
-                    matrices: vec![zero_matrix],
-                    inputs: &[],
-                    rows,
-                    columns,
-                    rows_per_batch: 0,
-                    format: MatrixFormat::Packed(14),
+            let codes = finite_codes(kind, rows, columns, rows + columns);
+            let input = (0..tokens * columns).map(|i| ((i * 31 % 149) as f32 - 74.0) * 0.0078125).collect::<Vec<_>>();
+            let source = run(shape, &codes, &input, false).unwrap();
+            let mut encoded = vec![0xa7; 19];
+            encoded.extend_from_slice(&codes);
+            encoded.extend_from_slice(&[0xa7; 19]);
+            let matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &encoded).unwrap(),
+                    offset: 19,
+                    length: codes.len(),
+                    registered_length: encoded.len(),
                 },
-                &extreme,
-                4,
-                true,
-            )
-            .unwrap();
-        let actual = graph.finish(&[output]).unwrap().remove(0);
-        assert!(actual.iter().all(|&value| value == 0.0), "runtime MMA zero times MAX fallback failed");
+                planes: None,
+            };
+            let operation = MappedOperation {
+                matrices: vec![matrix],
+                inputs: &[],
+                rows,
+                columns,
+                rows_per_batch: 0,
+                format: MatrixFormat::Packed(kind),
+            };
+            let counter = if kind == 13 {
+                "native.glm.prefill.q5_mma"
+            } else {
+                "native.glm.prefill.q6_mma"
+            };
+            let was_enabled = profile::enabled();
+            profile::enable(true);
+            let before = profile::snapshot().get(counter).map_or(0, |c| c.calls);
+            let mut graph = DecodeGraph::new().unwrap();
+            let mut padded = vec![f32::NAN; 3];
+            padded.extend_from_slice(&input);
+            padded.extend_from_slice(&[f32::NAN; 3]);
+            let values = DeviceVector {
+                buffer: buffer(executor().unwrap(), bytemuck::cast_slice(&padded)).unwrap(),
+                offset: 12,
+                len: input.len(),
+            };
+            let output = graph.mapped_same_weight(&operation, &values, tokens, true).unwrap();
+            let actual = graph.finish(&[output]).unwrap().remove(0);
+            let after = profile::snapshot().get(counter).map_or(0, |c| c.calls);
+            profile::enable(was_enabled);
+            let qualified = executor().unwrap().device.name() == "Apple M5 Max";
+            assert_eq!(after - before, u64::from(qualified), "actual route device admission mismatch");
+            let (rrms, normalized, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
+            assert!(rrms <= 2e-5 && normalized <= 2e-6, "runtime MMA source/F64 tolerance failed");
 
-        for tokens in [1usize, 2, 3] {
-            let input = DecodeGraph::upload(&input[..tokens * columns]).unwrap();
-            let mut control = DecodeGraph::new().unwrap();
-            let expected = control.mapped_same_weight(&operation, &input, tokens, false).unwrap();
-            let expected = control.finish(&[expected]).unwrap().remove(0);
-            let mut fallback = DecodeGraph::new().unwrap();
-            let actual = fallback.mapped_same_weight(&operation, &input, tokens, true).unwrap();
-            let actual = fallback.finish(&[actual]).unwrap().remove(0);
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut bad = input.clone();
+                bad[(tokens - 1) * columns + 255] = poison;
+                let mut graph = DecodeGraph::new().unwrap();
+                let values = DeviceVector {
+                    buffer: buffer(executor().unwrap(), bytemuck::cast_slice(&bad)).unwrap(),
+                    offset: 0,
+                    len: bad.len(),
+                };
+                let output = graph.mapped_same_weight(&operation, &values, tokens, true).unwrap();
+                assert!(graph.finish(&[output]).is_err(), "runtime MMA concealed nonfinite input");
+            }
+            let large = vec![1.0e21f32; tokens * columns];
+            let expected = run(shape, &codes, &large, false).unwrap();
+            let mut graph = DecodeGraph::new().unwrap();
+            let values = graph.upload_into(&large).unwrap();
+            let output = graph.mapped_same_weight(&operation, &values, tokens, true).unwrap();
+            let actual = graph.finish(&[output]).unwrap().remove(0);
             assert!(
                 actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()),
-                "tail route changed legacy bits"
+                "runtime MMA extreme fallback changed original chronology"
             );
+
+            let mut zero = vec![0u8; weights::block_layout(kind).unwrap().1];
+            if kind == 14 {
+                zero[128..192].fill(0xaa);
+                zero[192..208].fill(1);
+                zero[208..210].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+            } else {
+                zero[..2].copy_from_slice(&half::f16::from_f32(2.0).to_bits().to_le_bytes());
+                zero[4..16].fill(1);
+            }
+            let zero = zero.repeat(rows * columns / 256);
+            let zero_matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &zero).unwrap(),
+                    offset: 0,
+                    length: zero.len(),
+                    registered_length: zero.len(),
+                },
+                planes: None,
+            };
+            let mut graph = DecodeGraph::new().unwrap();
+            let extreme = graph.upload_into(&vec![f32::MAX; tokens * columns]).unwrap();
+            let output = graph
+                .mapped_same_weight(
+                    &MappedOperation {
+                        matrices: vec![zero_matrix],
+                        inputs: &[],
+                        rows,
+                        columns,
+                        rows_per_batch: 0,
+                        format: MatrixFormat::Packed(kind),
+                    },
+                    &extreme,
+                    tokens,
+                    true,
+                )
+                .unwrap();
+            let actual = graph.finish(&[output]).unwrap().remove(0);
+            assert!(actual.iter().all(|&value| value == 0.0), "runtime MMA zero times MAX fallback failed");
+
+            for tail in (1..tokens).filter(|&tail| !(kind == 14 && tail == 4)) {
+                let input = DecodeGraph::upload(&input[..tail * columns]).unwrap();
+                let mut control = DecodeGraph::new().unwrap();
+                let expected = control.mapped_same_weight(&operation, &input, tail, false).unwrap();
+                let expected = control.finish(&[expected]).unwrap().remove(0);
+                let mut fallback = DecodeGraph::new().unwrap();
+                let actual = fallback.mapped_same_weight(&operation, &input, tail, true).unwrap();
+                let actual = fallback.finish(&[actual]).unwrap().remove(0);
+                assert!(
+                    actual.iter().zip(expected).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "tail route changed legacy bits"
+                );
+            }
+            let mut graph = DecodeGraph::new().unwrap();
+            assert!(graph.mapped_same_weight(&operation, &extreme, 0, true).is_err());
+            assert!(graph.mapped_same_weight(&operation, &extreme, 9, true).is_err());
+            assert!(graph.mapped_same_weight(&operation, &extreme, 3, true).is_err());
         }
-        let mut graph = DecodeGraph::new().unwrap();
-        assert!(graph.mapped_same_weight(&operation, &extreme, 0, true).is_err());
-        assert!(graph.mapped_same_weight(&operation, &extreme, 3, true).is_err());
     }
 }

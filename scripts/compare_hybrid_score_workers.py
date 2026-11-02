@@ -141,7 +141,8 @@ def requested_probe_path() -> Path | None:
     return path
 
 
-def read_mma_probe(path: Path) -> dict:
+def read_mma_probe(path: Path, expected_rows: int = len(PROMPTS)) -> dict:
+    require(type(expected_rows) is int and expected_rows > 0, "mma_probe_expected_row_count_invalid")
     try:
         info = path.lstat()
         require(path.is_file() and not path.is_symlink(), "mma_probe_file_invalid")
@@ -156,7 +157,7 @@ def read_mma_probe(path: Path) -> dict:
     require(raw.endswith(b"\n"), "mma_probe_jsonl_boundary_invalid")
     try:
         lines = raw.splitlines()
-        require(len(lines) == len(PROMPTS), "mma_probe_row_count_invalid")
+        require(len(lines) == expected_rows, "mma_probe_row_count_invalid")
         rows = [json.loads(line) for line in lines]
     except CheckFailed:
         raise
@@ -164,23 +165,50 @@ def read_mma_probe(path: Path) -> dict:
         raise CheckFailed("mma_probe_json_invalid") from None
     calls = 0
     weight_bytes = 0
+    q5_calls = 0
+    q5_weight_bytes = 0
+    legacy_keys = {"success", "encoded_dispatch_calls", "encoded_weight_bytes"}
+    current_keys = legacy_keys | {"encoded_q5_dispatch_calls", "encoded_q5_weight_bytes"}
+    schema = None
+    mma_enabled = os.environ.get("STARK_GLM53_PREFILL_MMA") == "1"
+    require_q5 = mma_enabled and os.environ.get("STARK_GLM53_PREFILL_CHUNK") == "8"
     for row in rows:
-        require(isinstance(row, dict) and set(row) == {
-            "success", "encoded_dispatch_calls", "encoded_weight_bytes",
-        }, "mma_probe_schema_invalid")
+        require(isinstance(row, dict) and set(row) in (legacy_keys, current_keys), "mma_probe_schema_invalid")
+        keys = set(row)
+        if schema is None:
+            schema = keys
+        require(keys == schema, "mma_probe_schema_changed")
+        require(not require_q5 or keys == current_keys, "mma_probe_q5_schema_required")
         require(row["success"] is True, "mma_probe_request_failed")
-        for key in ("encoded_dispatch_calls", "encoded_weight_bytes"):
+        for key in keys - {"success"}:
             value = row[key]
             require(type(value) is int and 0 <= value <= U64_MAX, "mma_probe_counter_invalid")
-        if os.environ.get("STARK_GLM53_PREFILL_MMA") == "1":
+        # Archived V47 three-key records counted Q6 only. Current totals are
+        # Q5 + Q6; the explicit Q5 subset lets us derive Q6 without ambiguity.
+        row_q5_calls = row.get("encoded_q5_dispatch_calls", 0)
+        row_q5_bytes = row.get("encoded_q5_weight_bytes", 0)
+        require(row_q5_calls <= row["encoded_dispatch_calls"]
+                and row_q5_bytes <= row["encoded_weight_bytes"], "mma_probe_subset_invalid")
+        row_q6_calls = row["encoded_dispatch_calls"] - row_q5_calls
+        row_q6_bytes = row["encoded_weight_bytes"] - row_q5_bytes
+        if mma_enabled:
             require(row["encoded_dispatch_calls"] > 0, "mma_probe_dispatch_missing")
+        if require_q5:
+            require(row_q5_calls > 0 and row_q5_bytes > 0, "mma_probe_q5_dispatch_missing")
+            require(row_q6_calls > 0 and row_q6_bytes > 0, "mma_probe_q6_dispatch_missing")
         calls += row["encoded_dispatch_calls"]
         weight_bytes += row["encoded_weight_bytes"]
+        q5_calls += row_q5_calls
+        q5_weight_bytes += row_q5_bytes
     require(calls <= U64_MAX and weight_bytes <= U64_MAX, "mma_probe_total_overflow")
     return {
         "request_count": len(rows),
         "encoded_dispatch_calls": calls,
         "encoded_weight_bytes": weight_bytes,
+        "encoded_q5_dispatch_calls": q5_calls,
+        "encoded_q5_weight_bytes": q5_weight_bytes,
+        "encoded_q6_dispatch_calls": calls - q5_calls,
+        "encoded_q6_weight_bytes": weight_bytes - q5_weight_bytes,
         "probe_sha256": hashlib.sha256(raw).hexdigest(),
         "qualification": "Software encoded-dispatch counters; successful records follow the request GPU completion fence and reset. Counts do not measure hardware utilization.",
     }
@@ -220,7 +248,48 @@ def collect_inputs(model: Path) -> tuple[list[list[int]], list[int], str]:
     return inputs, candidate_ids, template_hash
 
 
+def validate_prefix_lengths(lengths: list[int]) -> None:
+    require(isinstance(lengths, list) and bool(lengths)
+            and all(type(length) is int and 1 <= length <= CONTEXT for length in lengths)
+            and len(set(lengths)) == len(lengths), "prefix_lengths_invalid")
+
+
+def parse_prefix_lengths(value: str) -> list[int]:
+    fields = value.split(",")
+    if not all(field.strip().isascii() and field.strip().isdecimal() for field in fields):
+        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 512")
+    try:
+        lengths = [int(field) for field in fields]
+        validate_prefix_lengths(lengths)
+    except (ValueError, CheckFailed):
+        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 512") from None
+    return lengths
+
+
+def collect_corpus_prefixes(tokenizer: Tokenizer, corpus: Path,
+                           lengths: list[int]) -> tuple[list[list[int]], str]:
+    validate_prefix_lengths(lengths)
+    require(corpus.is_file(), "corpus_path_invalid")
+    raw = corpus.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise CheckFailed("corpus_encoding_invalid") from None
+    ids = tokenizer.encode(text, add_special_tokens=False).ids
+    require(len(ids) >= max(lengths), "corpus_tokens_insufficient")
+    vocab_size = len(tokenizer.get_vocab())
+    prefixes = [ids[:length] for length in lengths]
+    require(all(type(token) is int and 0 <= token < vocab_size
+                for prefix in prefixes for token in prefix), "token_id_out_of_range")
+    return prefixes, hashlib.sha256(raw).hexdigest()
+
+
 async def run(args) -> dict:
+    prefix_lengths = getattr(args, "prefix_lengths", None)
+    corpus = getattr(args, "corpus", None)
+    require((corpus is None) == (prefix_lengths is None), "corpus_prefix_options_required_together")
+    if prefix_lengths is not None:
+        validate_prefix_lengths(prefix_lengths)
     model = args.model.resolve(strict=True)
     reference = args.reference_worker.resolve(strict=True)
     candidate = args.candidate_worker.resolve(strict=True)
@@ -231,12 +300,21 @@ async def run(args) -> dict:
     reference_sha = sha(reference)
     candidate_sha = sha(candidate)
     inputs, candidates, template_hash = collect_inputs(model)
+    rendered_context_count = len(inputs)
+    corpus_sha = None
+    if corpus is not None:
+        prefixes, corpus_sha = collect_corpus_prefixes(
+            Tokenizer.from_file(str(model / "tokenizer.json")), corpus, prefix_lengths,
+        )
+        inputs.extend(prefixes)
+    input_lengths = [len(ids) for ids in inputs]
+    require(all(1 <= length <= CONTEXT for length in input_lengths), "input_length_out_of_range")
     input_hash = token_hash(inputs)
     candidate_hash = token_hash([candidates])
     probe_path = requested_probe_path()
     reference_rows = await run_worker(reference, model, inputs, candidates, False)
     candidate_rows = await run_worker(candidate, model, inputs, candidates, True, probe_path)
-    mma_probe = read_mma_probe(probe_path) if probe_path is not None else None
+    mma_probe = read_mma_probe(probe_path, expected_rows=len(inputs)) if probe_path is not None else None
     deltas = [b - a for ref, cand in zip(reference_rows, candidate_rows, strict=True)
               for a, b in zip(ref, cand, strict=True)]
     maximum = max(abs(x) for x in deltas)
@@ -266,6 +344,7 @@ async def run(args) -> dict:
         "STARK_GLM53_PREFILL_OVERLAP", "STARK_GLM53_KDA_PARALLEL_NORM",
         "STARK_GLM53_PREFILL_QUEUED",
         "STARK_GLM53_PREFILL_MMA",
+        "STARK_GLM53_PREFILL_CHUNK",
         "STARK_GLM53_IQ_FUSED_GATE_UP",
         "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
         "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS",
@@ -277,10 +356,21 @@ async def run(args) -> dict:
         "schema_version": 1,
         "diagnostic_profile_output_requested": "STARK_QWEN38_PROFILE_OUTPUT" in os.environ,
         "native_profile_output_requested": "STARK_NATIVE_PROFILE_OUTPUT" in os.environ,
-        "scope": "8 public rendered contexts x up to 16 candidate tokens; next-token normalized logprob agreement only",
+        "scope": (
+            "8 public rendered contexts x up to 16 candidate tokens; next-token normalized logprob agreement only"
+            if corpus is None else
+            f"{rendered_context_count} public rendered contexts + {len(prefix_lengths)} exact corpus token prefixes x up to 16 candidate tokens; next-token normalized logprob agreement only"
+        ),
         "passed": maximum <= args.max_logprob_error,
         "threshold_max_absolute_logprob_error": args.max_logprob_error,
         "context_count": len(inputs), "candidate_count": len(candidates), "score_point_count": len(deltas),
+        "min_input_tokens": min(input_lengths), "max_input_tokens": max(input_lengths),
+        "total_input_tokens": sum(input_lengths),
+        **({
+            "corpus_sha256": corpus_sha,
+            "requested_prefix_lengths": prefix_lengths,
+            "corpus_prefix_tokenization": "Direct tokenizer encoding with add_special_tokens=False; exact leading prefixes of one corpus tokenization.",
+        } if corpus is not None else {}),
         "max_absolute_logprob_delta": maximum, "mean_signed_logprob_delta": mean_delta,
         "rms_logprob_delta": rms_delta,
         "reference_mean_candidate_nll": statistics.fmean(-x for row in reference_rows for x in row),
@@ -313,10 +403,15 @@ def main() -> int:
     parser.add_argument("--candidate-worker", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--verified-weights", type=Path)
+    parser.add_argument("--corpus", type=Path, help="Public UTF-8 document for additional exact token prefixes")
+    parser.add_argument("--prefix-lengths", type=parse_prefix_lengths,
+                        help="Distinct comma-separated token lengths, each at most the 512-token context")
     parser.add_argument("--max-logprob-error", type=float, default=0.001)
     args = parser.parse_args()
     if not math.isfinite(args.max_logprob_error) or args.max_logprob_error <= 0:
         parser.error("max-logprob-error must be finite and positive")
+    if (args.corpus is None) != (args.prefix_lengths is None):
+        parser.error("corpus and prefix-lengths must be supplied together")
     try:
         result = asyncio.run(run(args))
         print(json.dumps({"passed": result["passed"], "report_written": True}, sort_keys=True))

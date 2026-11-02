@@ -242,6 +242,10 @@ impl DecodeGraph {
                 scratch.contents().as_ptr().cast::<u32>().write(0);
             }
             profile::record("native.metal.graph.scratch", 0.0, 1024 * 1024);
+            // Snapshot totals, not incremental traffic. Counter.max_bytes is
+            // the largest budget-accounted backing allocation across graphs;
+            // summing Counter.bytes for this category has no memory meaning.
+            profile::record("native.metal.graph.scratch_high_water", 0.0, 1024 * 1024);
             Ok(Self {
                 command,
                 encoding,
@@ -410,6 +414,7 @@ impl DecodeGraph {
             self.scratch.push((buffer, 0));
             self.scratch_bytes = total;
             profile::record("native.metal.graph.scratch", 0.0, size);
+            profile::record("native.metal.graph.scratch_high_water", 0.0, total);
         }
         let (buffer, used) = self.scratch.last_mut().ok_or(Error::Invalid("decode scratch unavailable"))?;
         let output = DeviceVector {

@@ -114,6 +114,48 @@ def sampling_options(args: argparse.Namespace) -> dict:
     return options
 
 
+def screen_monitor_diagnostics(monitor, *, now: float | None = None) -> dict:
+    """Summarize existing observations without exporting host identities or rows."""
+    observed = getattr(monitor, "rows", None)
+    available = isinstance(observed, (list, tuple))
+    rows = list(observed) if available else []
+
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    def values(key):
+        return [row[key] for row in rows if isinstance(row, dict) and finite(row.get(key))]
+
+    intervals = values("interval_seconds")
+    started = getattr(monitor, "started", None)
+    latest_end = rows[-1].get("end_seconds") if rows and isinstance(rows[-1], dict) else None
+    latest_age = None
+    if finite(started) and finite(latest_end):
+        latest_age = max(0.0, (time.monotonic() if now is None else now) - started - latest_end)
+    result = {
+        "data_available": available,
+        "sample_count": len(rows) if available else None,
+        "latest_sample_age_seconds": latest_age,
+        "max_sample_interval_seconds": max(intervals, default=None),
+        "thermal_state_max": max(values("thermal_state"), default=None),
+        "compiler_active": any(
+            isinstance(item, dict) and type(item.get("name")) is str
+            and item["name"] in {"cargo", "rustc", "(rustc)", "clang", "clang++", "ld"}
+            for row in rows if isinstance(row, dict)
+            for item in (row.get("active_processes") or [])
+        ) if available else None,
+    }
+    for label, field in (
+        ("external_cpu_percent", "external_cpu_percent"),
+        ("external_model_cpu_percent", "max_model_cpu_percent"),
+        ("gpu_device_utilization_percent", "gpu_device_utilization_percent"),
+    ):
+        samples = values(field)
+        result[f"{label}_min"] = min(samples, default=None)
+        result[f"{label}_max"] = max(samples, default=None)
+    return result
+
+
 def run(
     args: argparse.Namespace,
     worker_factory=Worker,
@@ -333,6 +375,13 @@ def run(
         if active_item is not None:
             report["failed_attempt"] = active_item
     finally:
+        # Snapshot before stopping observers: a final drain sample must not
+        # hide stale observations at the point admission succeeded or failed.
+        if monitor is not None:
+            report["screening_monitor"] = {
+                "diagnostic_snapshot_stage": "before_observer_cleanup",
+                **screen_monitor_diagnostics(monitor),
+            }
         # Drain observers while the worker still exists. Every cleanup runs
         # even when admission, generation or another observer has failed.
         cleanup = []
@@ -361,7 +410,7 @@ def run(
                     failure = {"error": "native_context_benchmark_failed", "failed_stage": "host_metrics_result",
                                "error_type": type(error).__name__}
         if monitor is not None:
-            report["screening_monitor"] = {"sampling_failures": monitor.failures}
+            report["screening_monitor"]["sampling_failures"] = monitor.failures
             if monitor.failures and failure is None:
                 failure = {"error": "native_context_benchmark_failed", "failed_stage": "screen_monitor_stop",
                            "error_type": "MonitorFailure"}

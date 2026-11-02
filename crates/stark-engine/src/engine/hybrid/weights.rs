@@ -670,7 +670,7 @@ impl BoundedBankGroup<'_> {
         }
         let tensor = self.weights.tensor(name)?;
         if tensor.shape.len() != 2
-            || !(1..=4).contains(&tokens)
+            || !(1..=8).contains(&tokens)
             || tensor.shape[1].checked_mul(tokens) != Some(input.len)
             || tensor.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR)
         {

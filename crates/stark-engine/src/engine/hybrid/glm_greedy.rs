@@ -53,7 +53,14 @@ impl GlmModel {
     ) -> Result<()> {
         // Capture once per bulk request; scalar ingest remains synchronous.
         if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
-            return self.ingest_prefix_chunked(tokens, before_token, true);
+            let limit = match prefill_batch::chunk_limit(std::env::var_os("STARK_GLM53_PREFILL_CHUNK").as_deref()) {
+                Ok(limit) => limit,
+                Err(error) => {
+                    self.reset();
+                    return Err(error);
+                },
+            };
+            return self.ingest_prefix_chunked(tokens, before_token, true, limit);
         }
         let overlap = std::env::var_os("STARK_GLM53_PREFILL_OVERLAP").is_some_and(|value| value == "1");
         let queued = std::env::var_os("STARK_GLM53_PREFILL_QUEUED").is_some_and(|value| value == "1");

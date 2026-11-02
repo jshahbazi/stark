@@ -143,9 +143,11 @@ all resources remain resident. The separately opt-in scratch heap reserves
 weight allocations.
 
 The exact v39 experiment flags are captured in
-`runtime/glm53-optimization-20261101/final-screened-v39.json` and the wrapper
-[`with_glm53_optimized.sh`](../../scripts/with_glm53_optimized.sh). Contexts
-above 4096 are unsupported by this experimental encoder path.
+`runtime/glm53-optimization-20261101/final-screened-v39.json`. The current
+[`with_glm53_optimized.sh`](../../scripts/with_glm53_optimized.sh) additionally
+selects the separately qualified [November 2 T8 prefill path](GLM53_BATCHED_PREFILL_2026_11_02.md);
+the archived v39 receipt remains unchanged. Contexts above 4096 are unsupported
+by this experimental encoder path.
 
 The [IQ factored path](../archive/experiments/glm53-iq-factored-2026-11-01/README.md),
 [fused control path](../archive/experiments/glm53-control-fused-2026-11-01/README.md)

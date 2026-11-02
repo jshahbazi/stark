@@ -1,5 +1,6 @@
 #!/bin/sh
-# Opt-in experimental GLM 5.3 native GGUF recipe. Keep context <=4096; on a
+# Opt-in experimental GLM 5.3 native GGUF recipe, measured on Apple M5 Max.
+# See docs/benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md. Keep context <=4096; on a
 # 128 GB host this can reserve about 109 GB. Native admission remains fail-closed.
 # Usage: scripts/with_glm53_optimized.sh <command> [arguments...]
 
@@ -44,6 +45,8 @@ export STARK_GLM53_RMS_PREFETCH=1
 export STARK_GLM53_GREEDY_OVERLAP=1
 export STARK_GLM53_PREFILL_OVERLAP=1
 export STARK_GLM53_PREFILL_QUEUED=0
+export STARK_GLM53_PREFILL_MMA=1
+export STARK_GLM53_PREFILL_CHUNK=8
 export STARK_GLM53_FINITE_SELECTIVE=1
 export STARK_GLM53_PACKED_FAST_MATH=0
 export STARK_GLM53_PARALLEL_PROJECTIONS=0

@@ -507,3 +507,56 @@ def test_observer_cleanup_failure_still_closes_worker_and_preserves_metrics(cont
     assert len(report["replays"]) == 5
     assert workers[0].closed and monitor.closed and host.closed
     assert "PRIVATE_" not in text
+
+
+def test_screen_monitor_diagnostics_whitelist_aggregates_and_age_before_cleanup():
+    class Monitor:
+        started = 100.0
+        rows = [
+            {"end_seconds": 5.0, "interval_seconds": 0.6, "external_cpu_percent": 10.0,
+             "max_model_cpu_percent": 2.0, "gpu_device_utilization_percent": 3,
+             "thermal_state": 0, "active_processes": [{"pid": 123, "name": "PRIVATE_PROCESS", "args": "PRIVATE_ARGS"}],
+             "unknown_field": "PRIVATE_HOST_DATA"},
+            {"end_seconds": 6.0, "interval_seconds": 0.8, "external_cpu_percent": 30.0,
+             "max_model_cpu_percent": 7.0, "gpu_device_utilization_percent": 9,
+             "thermal_state": 1, "active_processes": [{"pid": 456, "name": "clang"}]},
+        ]
+
+    result = context_benchmark.screen_monitor_diagnostics(Monitor(), now=108.0)
+    assert result == {
+        "data_available": True, "sample_count": 2, "latest_sample_age_seconds": 2.0,
+        "max_sample_interval_seconds": 0.8, "thermal_state_max": 1, "compiler_active": True,
+        "external_cpu_percent_min": 10.0, "external_cpu_percent_max": 30.0,
+        "external_model_cpu_percent_min": 2.0, "external_model_cpu_percent_max": 7.0,
+        "gpu_device_utilization_percent_min": 3, "gpu_device_utilization_percent_max": 9,
+    }
+    serialized = json.dumps(result)
+    assert all(private not in serialized for private in ("PRIVATE_", "pid", "name", "args", "rows", "clang"))
+
+
+def test_screen_monitor_diagnostics_supports_fake_monitor_without_observations():
+    result = context_benchmark.screen_monitor_diagnostics(object(), now=108.0)
+    assert result["data_available"] is False
+    assert all(value is None for key, value in result.items() if key != "data_available")
+    assert context_benchmark.screen_monitor_diagnostics(FakeScreenMonitor())["sample_count"] == 0
+
+
+@pytest.mark.parametrize("fail_admission", [None, 1])
+def test_screen_monitor_diagnostics_persist_on_success_and_partial_receipts(context_args, monkeypatch, fail_admission):
+    kwargs, _, monitor, _, _ = screened_fakes(monkeypatch, fail_admission=fail_admission)
+    if fail_admission is None:
+        run(context_args, **kwargs)
+    else:
+        with pytest.raises(context_benchmark.BenchmarkFailure):
+            run(context_args, **kwargs)
+    report = json.loads(context_args.output.read_text())
+    diagnostics = report["screening_monitor"]
+    assert diagnostics["diagnostic_snapshot_stage"] == "before_observer_cleanup"
+    assert diagnostics["data_available"] is True
+    assert diagnostics["sample_count"] == (5 if fail_admission is None else 1)
+    assert diagnostics["external_cpu_percent_min"] == 0
+    assert diagnostics["external_cpu_percent_max"] == 0
+    assert diagnostics["max_sample_interval_seconds"] == 0.5
+    assert diagnostics["sampling_failures"] == 0
+    assert diagnostics["latest_sample_age_seconds"] is None
+    assert monitor.closed

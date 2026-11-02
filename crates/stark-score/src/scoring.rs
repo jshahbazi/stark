@@ -81,8 +81,11 @@ struct MmaScoreProbe<W: Write> {
 #[derive(Serialize)]
 struct MmaScoreProbeRow {
     success: bool,
+    // Totals retain their existing names; current records include Q5 + Q6.
     encoded_dispatch_calls: u64,
     encoded_weight_bytes: u64,
+    encoded_q5_dispatch_calls: u64,
+    encoded_q5_weight_bytes: u64,
 }
 
 impl MmaScoreProbe<File> {
@@ -127,11 +130,24 @@ impl<W: Write> MmaScoreProbe<W> {
         let previous = self.previous_profile.take().ok_or("mma_score_probe_failed")?;
         let counters = profile::snapshot();
         profile::enable(previous);
-        let counter = counters.get("native.glm.prefill.q6_mma");
+        let q6 = counters.get("native.glm.prefill.q6_mma");
+        let q5 = counters.get("native.glm.prefill.q5_mma");
+        let q5_calls = q5.map_or(0, |counter| counter.calls);
+        let q5_bytes = q5.map_or(0, |counter| counter.bytes);
+        let Some((calls, bytes)) = q6
+            .map_or(0, |counter| counter.calls)
+            .checked_add(q5_calls)
+            .zip(q6.map_or(0, |counter| counter.bytes).checked_add(q5_bytes))
+        else {
+            self.failed = true;
+            return Err("mma_score_probe_failed");
+        };
         self.record(MmaScoreProbeRow {
             success,
-            encoded_dispatch_calls: counter.map_or(0, |counter| counter.calls),
-            encoded_weight_bytes: counter.map_or(0, |counter| counter.bytes),
+            encoded_dispatch_calls: calls,
+            encoded_weight_bytes: bytes,
+            encoded_q5_dispatch_calls: q5_calls,
+            encoded_q5_weight_bytes: q5_bytes,
         })
     }
 
@@ -928,6 +944,12 @@ mod tests {
         let request = serde_json::to_vec(&request(&[2, 1], &[2, 3], 8192, 1.22)).unwrap();
         assert_eq!(worker.process_line(&request, &mut Vec::new()), Err("native_operation_failed"));
         assert!(worker.cache.take_matching(&[1, 2], 8192).is_none());
+        // An earlier successful distribution cannot bypass the sticky probe
+        // error after the failed request cleared the consecutive cache.
+        assert_eq!(
+            worker.process_line(&serde_json::to_vec(&standard()).unwrap(), &mut Vec::new()),
+            Err("native_operation_failed")
+        );
     }
 
     #[test]
@@ -948,6 +970,8 @@ mod tests {
                 success: true,
                 encoded_dispatch_calls: 2,
                 encoded_weight_bytes: 4096,
+                encoded_q5_dispatch_calls: 1,
+                encoded_q5_weight_bytes: 1024,
             })
             .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -955,7 +979,11 @@ mod tests {
         assert!(MmaScoreProbe::open(&path).is_err(), "probe replaced existing evidence");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let row: Value = serde_json::from_slice(&before).unwrap();
-        assert_eq!(row, json!({"success":true,"encoded_dispatch_calls":2,"encoded_weight_bytes":4096}));
+        assert_eq!(
+            row,
+            json!({"success":true,"encoded_dispatch_calls":2,"encoded_weight_bytes":4096,
+            "encoded_q5_dispatch_calls":1,"encoded_q5_weight_bytes":1024})
+        );
         drop(probe);
         std::fs::remove_file(path).unwrap();
     }
@@ -974,6 +1002,8 @@ mod tests {
                 success: true,
                 encoded_dispatch_calls: 2,
                 encoded_weight_bytes: 4096,
+                encoded_q5_dispatch_calls: 1,
+                encoded_q5_weight_bytes: 1024,
             };
             assert_eq!(probe.record(row()), Err("mma_score_probe_failed"));
             assert!(probe.failed);
@@ -993,6 +1023,8 @@ mod tests {
         };
         probe.begin().unwrap();
         profile::record("native.glm.prefill.q6_mma", 123.0, 4096);
+        profile::record("native.glm.prefill.q5_mma", 234.0, 2048);
+        profile::record("native.glm.prefill.q5_mma", 345.0, 1024);
         profile::record("synthetic.unrelated", 321.0, 999);
         probe.complete(true).unwrap();
         assert_eq!(profile::enabled(), previous);
@@ -1007,8 +1039,10 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                json!({"success":true,"encoded_dispatch_calls":1,"encoded_weight_bytes":4096}),
-                json!({"success":false,"encoded_dispatch_calls":0,"encoded_weight_bytes":0})
+                json!({"success":true,"encoded_dispatch_calls":3,"encoded_weight_bytes":7168,
+                    "encoded_q5_dispatch_calls":2,"encoded_q5_weight_bytes":3072}),
+                json!({"success":false,"encoded_dispatch_calls":0,"encoded_weight_bytes":0,
+                    "encoded_q5_dispatch_calls":0,"encoded_q5_weight_bytes":0})
             ]
         );
     }

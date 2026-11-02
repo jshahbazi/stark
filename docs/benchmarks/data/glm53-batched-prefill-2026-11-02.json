@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
-  "status": "qualification_pending_longer_context",
-  "performance_qualified": false,
+  "status": "bounded_experimental_recipe_qualified",
+  "performance_qualified": true,
+  "qualification_scope": "screened native GLM-5.3 T4/T8 prefill results at the recorded 512-context short-input and 96-input-token workloads, plus next-token scorer parity checks; not a whole-engine or universal-default claim",
   "date": "2026-11-02",
   "workload": {
     "scope": "serialized_native_text_greedy",
@@ -84,6 +85,62 @@
       "gain_claimed": false
     }
   },
+  "current_external_comparison": {
+    "status": "screened_comparison_complete",
+    "mlx_serve": {
+      "version": "26.10.3",
+      "engine": "llama",
+      "receipt": "runtime/glm53-resume-20261102/mlx-screened-refresh-v47b.json",
+      "manifest": "runtime/glm53-optimization-20261101/mlx-fresh-weights-manifest.json",
+      "manifest_sha256": "f8b0afb2d832a79506fa49ad9e32f8e6d5af523911e8e05d4ac552f47e6030ba",
+      "executable_sha256": "908e87168f7fbced9a0a40fdd0469e18b510594ca8f76b72c32c69392be918c8",
+      "harness_sha256": "0839dd3e6d0546361cc4cee5d376bb0f240e210cf8bd98c6480e86df8fc44acc",
+      "context_tokens": 512,
+      "input_tokens": 14,
+      "requested_output_tokens": 32,
+      "sampling": "greedy",
+      "input_token_sha256_matches_native_input_sha256": true,
+      "input_token_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+      "prompt_text_sha256": "85d476f0c24fc0fcdac8c88956c61431328128c308d69bc831cbdf51ae69ceae",
+      "output_text_sha256_matches_native": true,
+      "output_text_sha256": "386d79a13ffaa7e65b514edc6a58fbf2cccf934202c5c08e95022d0799e75f36",
+      "output_token_id_hash_compared": false,
+      "effective_settings": {"engine": "llama", "kv_quant": "off", "kv_attn_mode": "auto", "decode_attn_quant": false, "prefill_chunk": 0, "drafter": "none", "max_concurrent": 1, "prefix_cache_ram_enabled": false, "prefix_cache_disk_bytes": 0},
+      "weights_payload_match": true,
+      "weights_manifest_format": "simple filename-to-bytes-and-SHA256 map; differs from native verification receipt wrapper",
+      "accepted_attempts": 4,
+      "excluded_attempts": 1,
+      "median_prefill_tokens_per_second": 88.5233665928333,
+      "median_useful_decode_tokens_per_second": 34.06174228950408,
+      "median_all_sampled_tokens_per_decode_second": 35.16050816981067,
+      "median_prefill_seconds": 0.158150958,
+      "median_decode_seconds": 0.9101505400000003,
+      "median_request_wall_seconds": 1.069414562487509,
+      "repeat_exact": true
+    },
+    "native_candidate": {
+      "build": "v47",
+      "receipt": "runtime/glm53-resume-20261102/mma-screened-v47.json",
+      "worker_sha256": "078a0cdd934722d904e372c0a64564a280639164d1daf2ef2a156f8f5f279ae4",
+      "configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "context_tokens": 512,
+      "input_tokens": 14,
+      "requested_output_tokens": 32,
+      "sampling": "greedy_no_speculation",
+      "input_sha256": "3509a541495b39640d71f426f454b6cb2a1647f22b37535bd9705764e0e3c96d",
+      "output_text_sha256": "386d79a13ffaa7e65b514edc6a58fbf2cccf934202c5c08e95022d0799e75f36",
+      "accepted_attempts": 4,
+      "excluded_attempts": 3,
+      "median_prefill_tokens_per_second": 35.33199671256037,
+      "median_useful_decode_tokens_per_second": 34.99258272949564,
+      "median_all_sampled_tokens_per_decode_second": 36.12137572076969,
+      "median_prefill_seconds": 0.3962421665,
+      "median_decode_seconds": 0.8859020625,
+      "median_request_wall_seconds": 1.2955429580033524
+    },
+    "failed_prior_attempt": {"receipt": "runtime/glm53-resume-20261102/mlx-screened-refresh-v47.json", "result": "preflight failed; wrong manifest; no GPU sample; excluded"},
+    "interpretation": "Same prompt token hash, decoded response text hash, checkpoint payload hashes, and workload settings. Native prefill remains much slower and native request wall time longer in this short-input comparison. No generated token-ID parity claim."
+  },
   "numerical_validation": {
     "scope": "8 public rendered contexts x up to 16 candidate tokens; next-token normalized logprob agreement only",
     "score_points": 128,
@@ -92,6 +149,185 @@
     "passed": true,
     "receipt": "runtime/glm53-resume-20261102/score-parity-mma-v47.json",
     "dispatch_probe": {"encoded_dispatch_calls": 3400, "successful_requests": 8, "hardware_utilization_measurement": false, "receipt": "runtime/glm53-resume-20261102/score-mma-dispatch-v47.jsonl"}
+  },
+  "chunk_8_v48": {
+    "status": "bounded_recipe_selected_for_opt_in_wrapper",
+    "default_enabled": false,
+    "precision_policy": "F32 activations and accumulation; reduction reassociation",
+    "source_binding": {
+      "head": "379e5c79d1cfae249e947740732b783b1a6fec82",
+      "tracked_diff_sha256": "3e8a7f2ed4c63c159657209f732398bcce9706180c0b5736a09f5e6633c15c0c",
+      "hybrid_source_bundle_sha256": "0ba85f6a4aa181a39651c2fb83491bdef4d1f2c399a2cf818f1e7df5313eccb2",
+      "source_unchanged_during_build": true,
+      "patch": "runtime/glm53-resume-20261102/candidate-v48.patch",
+      "build_receipt": "runtime/glm53-resume-20261102/build-receipt-v48.json",
+      "build_receipt_sha256": "c212547ee416f131b558b78127c544308f648f09a8705f53524bcd6f47477379",
+      "generator_sha256": "41fd421767f14cf9fa5a6dd441eec73b5a2c0e4ec1eeba10e11951b6cc11cedf",
+      "scorer_sha256": "49045d592af366a9af405cc3eddead7eb8596a107136954bcc1e5a55148e61fd"
+    },
+    "screened_512_context": {
+      "receipt": "runtime/glm53-resume-20261102/chunk8-screened-v48.json",
+      "receipt_sha256": "f89896dc38f42b5e2d3f729cf7c7f1c47b7fd4b53a45e1a2fb4f90939a975f4d",
+      "input_tokens": 14,
+      "requested_output_tokens": 32,
+      "warmup_replays": 4,
+      "accepted_replays": 4,
+      "excluded_attempts": 1,
+      "repeat_exact": true,
+      "median_prefill_tokens_per_second": 35.33859228386958,
+      "median_useful_decode_tokens_per_second": 34.96930173080932,
+      "worker_sha256": "41fd421767f14cf9fa5a6dd441eec73b5a2c0e4ec1eeba10e11951b6cc11cedf",
+      "harness_sha256": "c7727f9d07180f7b37e05644852982dc0ad70818aea853537fae256257d7ecb4"
+    },
+    "native_diagnostic_probe": {
+      "receipt": "runtime/glm53-resume-20261102/native-chunk8-probe-v48.json",
+      "receipt_sha256": "6d20db3c9fdee1fd999ab3d9a1621982f2694601383b139fb5102efbc2bd9a6e",
+      "phase_receipt": "runtime/glm53-resume-20261102/native-chunk8-phases-v48.jsonl",
+      "median_warm_prefill_tokens_per_second": 39.999384749996075,
+      "median_warm_decode_tokens_per_second": 34.87714517661236,
+      "interpretation": "unscreened diagnostic only; excluded from screened performance comparison",
+      "scratch_high_water_bytes": 337641472,
+      "scratch_high_water_mib": 322,
+      "prefill_phase_max_bytes_request_wide": 337641472,
+      "decode_phase_request_max_bytes_at_end": 337641472
+    },
+    "score_parity": {
+      "eight_context_receipt": "runtime/glm53-resume-20261102/score-parity-chunk8-v48.json",
+      "eight_context_receipt_sha256": "29264e11b1e9c6c5c586cfcf9a997e139e4f22f5face611b614e09067fe9d53a",
+      "corpus_receipt": "runtime/glm53-resume-20261102/score-parity-chunk8-corpus-v48.json",
+      "corpus_receipt_sha256": "41c362a12e19b9681847cd3647b21a61870336e68f22e248e57711f32273dcfc",
+      "contexts": 12,
+      "score_points": 192,
+      "input_token_range": [22, 512],
+      "max_absolute_logprob_delta": 0.000013879155950746735,
+      "rms_logprob_delta": 0.000004188137035436993,
+      "passed": true,
+      "scope": "next-token normalized log-probability agreement only"
+    },
+    "screened_context96": {
+      "workload": {"input_tokens": 96, "requested_output_tokens": 8},
+      "control_v46c": {
+        "receipt": "runtime/glm53-resume-20261102/context96-screened-control-v46c.json",
+        "receipt_sha256": "ae9e64c96160d6858a55c1047d1358c3bc592eb5c8a156b5609336bbfcf84766",
+        "median_prefill_tokens_per_second": 34.89522385665914,
+        "median_useful_decode_tokens_per_second": 34.410269977563786,
+        "median_request_wall_seconds": 2.967536395502975,
+        "accepted_attempts": 5,
+        "excluded_attempts": 3,
+        "repeat_exact": true,
+        "input_sha256": "da577625b599110274643266397b057f833510568c471efca58f36eb100734cd",
+        "output_sha256": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+        "worker_sha256": "2254405fd2653b69519e974d72b2e21778a71a61522389b6ecb56aa2e953805a"
+      },
+      "candidate_v48": {
+        "receipt": "runtime/glm53-resume-20261102/context96-screened-chunk8-v48.json",
+        "receipt_sha256": "91829d96d49d8711c0efe7dbe56b63bdfd9254142c2ebbe87a6678cfda2c8895",
+        "median_prefill_tokens_per_second": 40.692474751090266,
+        "median_useful_decode_tokens_per_second": 34.49699107415185,
+        "median_request_wall_seconds": 2.5766073129925644,
+        "accepted_attempts": 5,
+        "excluded_attempts": 4,
+        "repeat_exact": true,
+        "input_sha256": "da577625b599110274643266397b057f833510568c471efca58f36eb100734cd",
+        "output_sha256": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+        "worker_sha256": "41fd421767f14cf9fa5a6dd441eec73b5a2c0e4ec1eeba10e11951b6cc11cedf"
+      },
+      "candidate_v47_t4": {
+        "receipt": "runtime/glm53-resume-20261102/context96-screened-mma-v47.json",
+        "receipt_sha256": "f93d90dd7a0301f7a80b26985531729b413a3c79fe5388be2d26ed2b898baf0c",
+        "median_prefill_tokens_per_second": 38.88098211799415,
+        "median_useful_decode_tokens_per_second": 34.452800029860015,
+        "median_request_wall_seconds": 2.684457958486746,
+        "warmup_replays": 1,
+        "accepted_attempts": 4,
+        "excluded_attempts": 2,
+        "attempt_count": 7,
+        "all_attempts_repeat_exact": true,
+        "input_sha256": "da577625b599110274643266397b057f833510568c471efca58f36eb100734cd",
+        "output_sha256": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+        "worker_sha256": "078a0cdd934722d904e372c0a64564a280639164d1daf2ef2a156f8f5f279ae4",
+        "harness_sha256": "3fcec271958afc895cde8ef22548261d1989ab6b5b6398e8137023c3ac221878",
+        "configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+        "source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+        "harness_checkout": {
+          "head": "379e5c79d1cfae249e947740732b783b1a6fec82",
+          "tracked_diff_sha256": "f34d5c9e851f2de5ecf938b217d3c789bcadc0c342d6cb364af3d42335aceea7",
+          "hybrid_source_bundle_sha256": "0ba85f6a4aa181a39651c2fb83491bdef4d1f2c399a2cf818f1e7df5313eccb2"
+        }
+      },
+      "prefill_throughput_change_percent": 16.614,
+      "request_wall_time_change_percent": -13.176,
+      "v47_t4_vs_control_prefill_change_percent": 11.422,
+      "v47_t4_vs_control_request_wall_change_percent": -9.539,
+      "v48_t8_vs_v47_t4_prefill_change_percent": 4.659,
+      "v48_t8_vs_v47_t4_request_wall_change_percent": -4.018,
+      "all_three_output_hashes_match": true,
+      "screening_receipt_source_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d"
+    },
+    "selected_opt_in_recipe": {
+      "script": "scripts/with_glm53_optimized.sh",
+      "STARK_GLM53_PREFILL_MMA": "1",
+      "STARK_GLM53_PREFILL_CHUNK": "8",
+      "engine_global_defaults_remain_off": true
+    },
+    "q5_route": "Q5 participates with Q6 in this opt-in v48 recipe; engine global defaults remain off",
+    "validation": {
+      "hybrid_suite": {"passed": 197, "ignored": 74, "receipt": "runtime/glm53-resume-20261102/hybrid-suite-chunk8-v48.log"},
+      "scorer_suite": {"passed": 25, "receipt": "runtime/glm53-resume-20261102/score-units-chunk8-v48.log"},
+      "worker_clippy": {
+        "generate_passed": true,
+        "generate_receipt": "runtime/glm53-resume-20261102/clippy-generate-chunk8-v48.log",
+        "score_passed": true,
+        "score_receipt": "runtime/glm53-resume-20261102/clippy-score-chunk8-v48.log"
+      },
+      "pure_tool_tests": {
+        "passed": 102,
+        "receipt": "runtime/glm53-resume-20261102/final-benchmark-tool-tests-v48.log",
+        "receipt_sha256": "f82c12a3477fb79b973e65489c7ee428712e61d2639fbae5cd70f29a2e615e51",
+        "duration_seconds": 0.16,
+        "format_passed": true,
+        "format_receipt": "runtime/glm53-resume-20261102/final-fmt-v48.log",
+        "format_receipt_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "policy_passed": true,
+        "policy_receipt": "runtime/glm53-resume-20261102/final-policy-v48.log",
+        "policy_receipt_sha256": "f2f1fdca841fef93c82c39c10c2ab30321f9aac9e10e700f66352d18ba2ca7ff",
+        "wrapper_shell_passed": true,
+        "test_scope": "benchmark, compare, context, and host-metrics tooling"
+      },
+      "focused_chunk8_receipts": {
+        "receipt_root": "/Users/johnshahbazian/.codex/worktrees/glm53-prefill-mma/stark",
+        "provenance": "Earlier base commit 5687538dd9daf9d95d0e4f3c77dedb2b1ac8ec37; relevant test/source files have identical SHA-256 values in that worktree and the v48 worktree.",
+        "kernel_source_f64_failure_scratch_gates": {
+          "passed": 5,
+          "ignored": 1,
+          "receipt": "runtime/prefill-mma-chunk8-v1-oracles.log",
+          "sha256": "315d358a026551f689da524e8317c7f1e6769ea22f0932a17adaa35b5fa690e9"
+        },
+        "policy_gate": {
+          "passed": 1,
+          "receipt": "runtime/prefill-mma-chunk8-v1-policy.log",
+          "sha256": "ca248c1a1d84e3a83a4d7e99f7742b4489ec358ec00527c298b3442ae867f376"
+        },
+        "fixture_invocations": {
+          "configurations": 3,
+          "tests_per_configuration": 4,
+          "passed": 12,
+          "receipts": [
+            {"path": "runtime/prefill-mma-chunk8-v1-fixture-base.log", "sha256": "dcc077b0dc651f30e0b600f209a7ff75bc2e77f892700d1f5e40752153f9c8de"},
+            {"path": "runtime/prefill-mma-chunk8-v1-fixture-hc4-float.log", "sha256": "0bde15f3b0efd03723eeb30857ad5a1becb660771bdf27f5d6cb122dd988b60c"},
+            {"path": "runtime/prefill-mma-chunk8-v1-fixture-pool4.log", "sha256": "74c4a3eaadbe39f884997a21f722fb5d5edd1adfa64c779933a29701cb5562a8"}
+          ]
+        },
+        "matching_source_sha256": {
+          "glm_prefill_batch.rs": "b48701fb2a7bd09e4a97d7f1ccc751bba3948cb0ae7a9a15e6a45b2e27f85f2e",
+          "glm_prefill_batch_tests.rs": "1f1b99c682de8f0efab56e87f4af498317c25681fcb03fdf588d6d316577c438",
+          "weight_metal_kquant_mma_tests.rs": "2703cab745436c2a2ae509b801684422f929eab2351dbe5a7887f9d09f1f8ad6",
+          "weight_metal_kquant_mma_components.rs": "2a0be192bf5ac83a8b9ac7cbb0b5c33cbecf39793b45ea8b56271d7fc0e3fcf3"
+        },
+        "whole_v48_source_bundle_match": false
+      },
+      "whole_engine_suite_claimed": false
+    }
   },
   "validation": {
     "precision_policy": "F32 activations and accumulation; reduction reassociation",
@@ -103,8 +339,7 @@
     "clippy": {"generate_passed": true, "score_passed": true},
     "whole_engine_suite_claimed": false
   },
-  "pending": {
-    "longer_context_96_runs": {
+  "historical_unfiltered_context96_observation": {
       "performance_qualified": false,
       "input_tokens": 96,
       "output_tokens": 8,
@@ -133,14 +368,15 @@
       "exact_replay_output_hashes_match": true,
       "attribution": null,
       "interpretation": "Unfiltered, uncontrolled observation. Large host-load difference prevents attributing timing differences to the candidate or qualifying performance.",
-      "prospective_quiet_host_screening": "being added to the 96-token harness; screened longer-context runs pending"
+      "prospective_quiet_host_screening": "superseded by the separately recorded screened context96 v46c control, v47 T4 candidate, and v48 T8 candidate results"
     },
-    "optional_chunk_8_source_experiment": null,
-    "final_wrapper_promoted": false,
+  "post_qualification_status": {
+    "optional_chunk_8_source_experiment": "completed as separate v48 evidence recorded under chunk_8_v48",
+    "opt_in_wrapper_recipe_selected": "v48 T8 via scripts/with_glm53_optimized.sh; engine global defaults remain off",
     "default_promoted": false,
-    "mlx_serve_control_refresh": null,
-    "q5_mma": {"study": "docs/archive/experiments/glm53-q5-mma-20261102/README.md", "status": "rejected prototype; no Q5 runtime route admitted"},
-    "chunk_8_experiment": "separate ongoing work; not included in v47 source or results"
+    "mlx_serve_control_refresh": "complete; embedded llama.cpp backend comparison recorded under current_external_comparison",
+    "q5_mma": {"study": "docs/archive/experiments/glm53-q5-mma-20261102/README.md", "status": "that prototype was rejected; v48 separately measures a default-off Q5+Q6 route"},
+    "chunk_8_experiment": "completed separately as v48; not included in v47 source or results"
   },
   "public_data_policy": "Aggregate metrics and hashes only; no prompts, responses, token IDs, logits, probability arrays, exception dumps, or raw logs."
 }

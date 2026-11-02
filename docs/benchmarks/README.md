@@ -4,7 +4,7 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
-**GLM-5.3-Flash batched prefill (2026-11-02), qualification pending longer context.** The opt-in v47 MMA candidate improves screened 512-context prefill by 14.2% over the merged v46 control; decode movement is noise. Longer-context qualification and wrapper/default promotion remain pending. See the [experiment report](GLM53_BATCHED_PREFILL_2026_11_02.md) and [aggregate JSON](data/glm53-batched-prefill-2026-11-02.json).
+**GLM-5.3-Flash batched prefill (2026-11-02).** The experimental wrapper selects the v48 T8 F32 Q5/Q6 MMA path. Screened 96-input-token prefill improves 16.6% and request time falls 13.2% against the merged v46 control; short-input decode movement is noise. Scorer checks cover 12 contexts through 512 input tokens. Engine defaults remain unchanged. See the [experiment report](GLM53_BATCHED_PREFILL_2026_11_02.md) and [aggregate JSON](data/glm53-batched-prefill-2026-11-02.json).
 
 **Qwen3.8, identical checkpoint, maximum sampled throughput (2026-10-30).**
 Stark peaks at **66.81 tok/s** versus **61.17** for stock MLX-Serve 26.10.3,

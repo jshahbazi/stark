@@ -10,8 +10,8 @@
 // and accumulator remain F32. MMA/K-slice reduction changes sum association.
 // The Apple lane mapping is implementation-defined: basis/tail tests on the
 // admitted 32-lane device/compiler are required before any runtime admission.
-// Runtime admission is restricted to the component-qualified Q6/T4 shapes
-// on Apple M5 Max; other uses remain test-only.
+// Runtime admission is restricted to the component-qualified Q6/T4 and
+// Q5/Q6/T8 shapes on Apple M5 Max; other uses remain test-only.
 
 constant uint hybrid_kquant_mma_nsg [[function_constant(80)]];
 

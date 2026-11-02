@@ -6,32 +6,61 @@
 
 use super::*;
 
-type MmaCache = Mutex<HashMap<usize, PipelineState>>;
+type MmaCache = Mutex<HashMap<(u32, usize), PipelineState>>;
 static MMA_PIPELINES: OnceLock<MmaCache> = OnceLock::new();
 
 fn admitted(
     operation: &MappedOperation<'_>,
     tokens: usize,
 ) -> Result<bool> {
-    Ok(tokens == 4
-        && operation.format == MatrixFormat::Packed(14)
+    Ok((tokens == 4 && operation.format == MatrixFormat::Packed(14)
+        || tokens == 8 && matches!(operation.format, MatrixFormat::Packed(13 | 14)))
         && matches!((operation.rows, operation.columns), (8192, 4096) | (4096, 8192))
         // thread_elements layout is implementation-defined in MSL. This is
         // the exact device on which basis/tail/source/F64 gates were run.
         && executor()?.device.name() == "Apple M5 Max")
 }
 
-fn pipeline(nsg: usize) -> Result<PipelineState> {
+#[cfg(test)]
+mod tests {
+    use stark_engine_macros::stark_test;
+
+    use super::*;
+
+    #[stark_test]
+    fn kquant_mma_scratch_high_water_reports_total_graph_backing() {
+        let previous = profile::enabled();
+        profile::reset();
+        profile::enable(true);
+        let mut graph = DecodeGraph::new().unwrap();
+        graph.scratch(300_000).unwrap();
+        graph.scratch(400_000).unwrap();
+        let total = graph.scratch_bytes;
+        let largest_slab = graph.scratch.iter().map(|(buffer, _)| buffer.length()).max().unwrap();
+        let counter = profile::snapshot().remove("native.metal.graph.scratch_high_water").unwrap();
+        profile::enable(previous);
+        assert_eq!(counter.max_bytes, total as u64);
+        assert!(total > largest_slab && total <= 512 * 1024 * 1024);
+        // Counter.bytes sums successive snapshots; it is not an allocated
+        // peak and must never be used as the resident/scratch memory bound.
+        assert!(counter.bytes > counter.max_bytes);
+    }
+}
+
+fn pipeline(
+    kind: u32,
+    nsg: usize,
+) -> Result<PipelineState> {
     let mut cache = MMA_PIPELINES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| Error::Invalid("prefill MMA cache failed"))?;
-    if let Some(pipeline) = cache.get(&nsg) {
+    if let Some(pipeline) = cache.get(&(kind, nsg)) {
         return Ok(pipeline.clone());
     }
     let executor = executor()?;
     let constants = MTLFunctionConstantValues::new();
-    for (index, value) in [(0, 14u32), (4, 256), (5, 210), (80, nsg as u32)] {
+    for (index, value) in [(0, kind), (4, 256), (5, weights::block_layout(kind)?.1 as u32), (80, nsg as u32)] {
         constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
     }
     let function = executor
@@ -48,7 +77,7 @@ fn pipeline(nsg: usize) -> Result<PipelineState> {
     {
         return Err(Error::Unsupported("prefill MMA qualified geometry unavailable"));
     }
-    cache.insert(nsg, result.clone());
+    cache.insert((kind, nsg), result.clone());
     Ok(result)
 }
 
@@ -61,7 +90,7 @@ impl DecodeGraph {
         use_mma: bool,
     ) -> Result<DeviceVector> {
         input.validate()?;
-        if !(1..=4).contains(&tokens)
+        if !(1..=8).contains(&tokens)
             || operation.matrices.len() != 1
             || operation.rows_per_batch != 0
             || operation.columns.checked_mul(tokens) != Some(input.len)
@@ -86,7 +115,10 @@ impl DecodeGraph {
             return Err(Error::Unsupported("prefill MMA requires serial encoding"));
         }
         let matrix = &operation.matrices[0];
-        let bytes = operation.rows * (operation.columns / 256) * 210;
+        let MatrixFormat::Packed(kind) = operation.format else {
+            return Err(Error::Invalid("prefill MMA packed format"));
+        };
+        let bytes = operation.rows * (operation.columns / 256) * weights::block_layout(kind)?.1;
         if matrix.planes.is_some()
             || matrix.codes.length < bytes
             || matrix.codes.offset.checked_add(bytes).is_none_or(|end| end > matrix.codes.buffer.length())
@@ -101,7 +133,7 @@ impl DecodeGraph {
         } else {
             16
         };
-        let pipeline = pipeline(nsg)?;
+        let pipeline = pipeline(kind, nsg)?;
         self.check_finite(input)?;
         self.order_dispatch();
         self.encoding.set_compute_pipeline_state(&pipeline);
@@ -133,7 +165,15 @@ impl DecodeGraph {
         );
         self.resources.extend([matrix.codes.buffer.clone(), input.buffer.clone()]);
         self.check_finite(&output)?;
-        profile::record("native.glm.prefill.q6_mma", 0.0, bytes);
+        profile::record(
+            if kind == 13 {
+                "native.glm.prefill.q5_mma"
+            } else {
+                "native.glm.prefill.q6_mma"
+            },
+            0.0,
+            bytes,
+        );
         Ok(output)
     }
 }

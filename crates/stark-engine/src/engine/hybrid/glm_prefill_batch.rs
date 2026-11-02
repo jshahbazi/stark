@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Experimental layer-major chunks of four known prompt tokens. Only dense
+//! Experimental layer-major chunks of four or eight known prompt tokens. Only dense
 //! projection scheduling changes: recurrent and MLA cache writers retain token
 //! order, and each chunk is fenced before another graph is constructed.
 
@@ -11,17 +11,39 @@ use super::{
     *,
 };
 
+pub(super) fn chunk_limit(value: Option<&std::ffi::OsStr>) -> Result<usize> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None if value.is_none() => Ok(4),
+        Some("4") => Ok(4),
+        Some("8") => Ok(8),
+        _ => Err(Error::Invalid("GLM prefill chunk limit must be four or eight")),
+    }
+}
+
+fn eight_token_prefix(
+    tokens: usize,
+    maximum: usize,
+) -> Result<usize> {
+    match maximum {
+        4 => Ok(0),
+        8 => Ok(tokens / 8 * 8),
+        _ => Err(Error::Invalid("GLM prefill chunk limit must be four or eight")),
+    }
+}
+
 impl GlmModel {
     pub(super) fn ingest_prefix_chunked(
         &mut self,
         tokens: &[u32],
         before_token: &mut dyn FnMut() -> Result<()>,
         use_mma: bool,
+        maximum_chunk: usize,
     ) -> Result<()> {
         let result = (|| {
             if self.cleanup_failed {
                 return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
             }
+            let eight_prefix = eight_token_prefix(tokens.len(), maximum_chunk)?;
             if tokens.is_empty() {
                 return Ok(());
             }
@@ -52,7 +74,9 @@ impl GlmModel {
             if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
                 return Err(Error::Unsupported("GLM chunk prefill requires one admitted serial encoder group"));
             }
-            for chunk in tokens.chunks(4) {
+            // Prefer complete eights; retain the qualified Q6/T4 tail before
+            // the final one-to-three legacy tokens (13 => 8 + 4 + 1).
+            for chunk in tokens[..eight_prefix].chunks(8).chain(tokens[eight_prefix..].chunks(4)) {
                 objc2::rc::autoreleasepool(|_| -> Result<()> {
                     let _encode = super::super::profile::Scope::new("native.glm.prefill.chunk_encode_cpu");
                     let c = &self.config;
