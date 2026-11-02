@@ -316,7 +316,7 @@ def test_text_output_and_required_or_named_choice():
         output(tool_choice="none")
 
 
-def test_parser_admission_requires_exact_template():
+def test_parser_admission_requires_a_reviewed_template_program():
     assert tool_parser_for(None) is None
     assert tool_parser_for({"prompt_template": "<tool_call>tool_calls tools"}) is None
     fixture = Path(__file__).parent / "fixtures" / "qwen3_4b_chat_template.jinja"
@@ -895,7 +895,7 @@ def test_xml_stream_content_matches_terminal_without_exposing_wire_at_any_split(
         assert reason == "tool_calls" and "".join(delivered) == "Leading text"
 
 
-def test_xml_template_hash_admission_is_exact_and_flavor_specific(monkeypatch):
+def test_xml_source_hash_fast_path_is_exact_and_flavor_specific(monkeypatch):
     import stark_convert.api_tools as api_tools
 
     assert QWEN38_XML_TEMPLATE_SHA256 == "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"

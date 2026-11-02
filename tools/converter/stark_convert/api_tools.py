@@ -1,4 +1,4 @@
-"""Bounded Chat Completions tools and the pinned Qwen3 tool wire format.
+"""Bounded Chat Completions tools and reviewed Qwen tool wire formats.
 
 Tools are requests for client execution. JSON schemas are supplied to the model
 as hints; this module does not promise schema-constrained generation. The client
@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from .local_api import APIError
+from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
 
 MAX_TOOLS = 64
 MAX_CALLS = 16
@@ -31,7 +32,7 @@ _QWEN35_XML_PARSER = "qwen35-xml-v1"
 _XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
-# binds the exact template program, not a model name.
+# binds the reviewed template program, not a model name.
 QWEN3_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
 # Official mlx-community/Qwen3-4B-4bit tokenizer_config.json chat_template at
 # revision 4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25, independently reviewed
@@ -49,6 +50,14 @@ QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa
 # synthetic history. Its top-level boolean/null values use the exact
 # literals True/False/None; nested object/array values still use JSON.
 QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+# Version-1 Jinja AST fingerprints of the four hash-verified sources above.
+# They admit only syntax-equivalent programs, independently of model metadata.
+_SUPPORTED_TEMPLATE_PROGRAMS = {
+    "2537497c84cb9ae2a885de78e7531cd44c62f38dadfcfa7565793ce9e38481ac": _PARSER,
+    "813d6e292f35cf32a98357c5382ec57ae39ddb658e5b16559c957b119a2859b5": _PARSER,
+    "ece3bd43a4194cae4a2d3b6079214373b84f9083ff6258940d0b03634e93f08e": _XML_PARSER,
+    "a0feb6a6a23bced6ef842bcb46dad27dc43738bf9acd5751606f24aa343610d8": _QWEN35_XML_PARSER,
+}
 _XML_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "object", "array"})
 _XML_UNKNOWN = object()
 _XML_ANNOTATIONS = frozenset(
@@ -283,15 +292,22 @@ def template_messages(messages: list[dict]) -> list[dict]:
 
 def tool_parser_for(codec: dict | None) -> str | None:
     source = (codec or {}).get("prompt_template")
-    if isinstance(source, str):
-        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
-        if digest in _SUPPORTED_TEMPLATE_HASHES:
-            return _PARSER
-        if digest == QWEN38_XML_TEMPLATE_SHA256:
-            return _XML_PARSER
-        if digest == QWEN35_XML_TEMPLATE_SHA256:
-            return _QWEN35_XML_PARSER
-    return None
+    if not isinstance(source, str) or not source or len(source) > MAX_TEMPLATE_BYTES:
+        return None
+    try:
+        encoded = source.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > MAX_TEMPLATE_BYTES:
+        return None
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest in _SUPPORTED_TEMPLATE_HASHES:
+        return _PARSER
+    if digest == QWEN38_XML_TEMPLATE_SHA256:
+        return _XML_PARSER
+    if digest == QWEN35_XML_TEMPLATE_SHA256:
+        return _QWEN35_XML_PARSER
+    return _SUPPORTED_TEMPLATE_PROGRAMS.get(template_program_sha256(source))
 
 
 def _xml_schema_error(reason="parameter_type"):

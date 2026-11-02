@@ -14,12 +14,12 @@ import time
 from pathlib import Path
 
 from jinja2.exceptions import TemplateError
-from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
+from .template_compat import chat_template_environment
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     family_image_input_contract,
@@ -180,9 +180,7 @@ def load_template(model, *, expected_hashes=None):
                 )
             ):
                 raise ValueError
-        environment = ImmutableSandboxedEnvironment(
-            extensions=["jinja2.ext.loopcontrols"], trim_blocks=True, lstrip_blocks=True
-        )
+        environment = chat_template_environment()
 
         def raise_exception(_message):
             raise ChatError("The model's chat template rejected this conversation.")
