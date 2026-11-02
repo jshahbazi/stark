@@ -22,7 +22,7 @@ Stark is an experimental, open-source Rust/Metal engine for running language mod
 
 | Generate | Score | Prepare |
 | --- | --- | --- |
-| Terminal chat and native text generation with fresh state per request. | Candidate logits, full-vocabulary log probabilities and temperature-scaled candidate probabilities. | Streaming conversion of supported dense and existing MLX 4/8-bit checkpoints. |
+| Terminal chat and native text generation, with exact reuse of the prompt prefix shared by consecutive requests. | Candidate logits, full-vocabulary log probabilities and temperature-scaled candidate probabilities. | Streaming conversion of supported dense and existing MLX 4/8-bit checkpoints. |
 | [Generation protocol](docs/GENERATION.md) | [Scoring protocol](docs/SCORING.md) | [Converter guide](tools/converter/README.md) |
 
 ## Quickstart

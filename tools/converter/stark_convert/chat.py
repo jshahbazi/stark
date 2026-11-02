@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import secrets
 import select
 import signal
 import stat
@@ -220,6 +221,7 @@ class Worker:
         except (OSError, ValueError, TypeError, ConversionError):
             self._launch_worker_sha256 = None
         self.media = None
+        self.prefix_cache = False
         command = [str(executable), "--model-path", str(model)]
         try:
             config = read_model_config(Path(model))
@@ -234,6 +236,9 @@ class Worker:
                 raise ChatError(str(error)) from None
             self.media = PrivateMediaStore()
             command.extend(["--vision-staging-root", str(self.media.root)])
+        else:
+            # The worker enables reuse only for models whose state can rewind.
+            command.append("--prefix-cache")
         read_fd, self.cancel_fd = os.pipe()
         os.set_blocking(self.cancel_fd, False)
         telemetry_fd = None
@@ -394,6 +399,7 @@ class Worker:
                     raise ChatError("Unexpected worker readiness reply; restart the model.")
                 self._ready_seen = True
                 self.mtp = mtp_capabilities(reply)
+                self.prefix_cache = prefix_cache_enabled(reply)
                 self.cancellation = reply.get("cancellation") == "pipe-v1"
                 self.image_input = image_input_contract(reply.get("image_input"))
                 launch_hash = getattr(self, "_launch_worker_sha256", None)
@@ -766,6 +772,18 @@ def _read_image_file(path: Path) -> ImageData:
     return ImageData(data, media_type)
 
 
+def prefix_cache_enabled(ready):
+    """Accept consecutive prefix reuse only from a complete readiness contract."""
+    settings = ready.get("prefix_cache")
+    return (
+        ready.get("state_policy") == "consecutive-prefix-v1"
+        and isinstance(settings, dict)
+        and settings.get("enabled") is True
+        and settings.get("chunk_tokens") == 1024
+        and "reset_cache" in (ready.get("operations") or [])
+    )
+
+
 def run_chat(args, worker):
     ready = worker.read()
     if ready.get("ready") is not True or ready.get("mode") != "text-generation-v1":
@@ -797,6 +815,7 @@ def run_chat(args, worker):
     initial = [{"role": "system", "content": system}] if system else []
     messages = list(initial)
     image_attached = False
+    cache_scope = secrets.token_hex(16)
     print("Stark chat. /reset clears history; /exit quits. Ctrl-D or Ctrl-C exits.")
     while True:
         try:
@@ -811,6 +830,7 @@ def run_chat(args, worker):
         if text.strip() == "/reset":
             messages = list(initial)
             image_attached = False
+            cache_scope = secrets.token_hex(16)
             print("Conversation cleared.")
             continue
         if text.strip() == "/help":
@@ -856,6 +876,8 @@ def run_chat(args, worker):
                 }
                 if capabilities["supported"]:
                     request["mtp_drafts"] = drafts
+                if getattr(worker, "prefix_cache", False) is True:
+                    request["cache_scope"] = cache_scope
                 reply = worker.request(request)
             if not isinstance(reply.get("text"), str) or "error" in reply:
                 raise ChatError("Generation failed; chat closed.")

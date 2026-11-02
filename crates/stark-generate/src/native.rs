@@ -5,7 +5,11 @@ use stark_engine::{
     backends::metal::Metal,
     engine::{
         Engine,
-        language_model::{LanguageModel, stream::SamplingMethod},
+        language_model::{
+            LanguageModel,
+            state::LanguageModelState,
+            stream::{PREFILL_CHUNK_TOKENS, SamplingMethod},
+        },
         vision::{NativeVisionErrorKind, PreparedVisionImage, VisionLanguageModel},
     },
 };
@@ -16,8 +20,14 @@ use crate::{
         GeneratedTokens, GenerationBackend, GenerationOptions, ImageArtifactIdentity, PreparedImageMetadata,
         ProgressCallback, Sampling, TextCallback, collect_tokens_controlled, native_result_after_cleanup,
     },
+    prefix_cache::{self, PrefixEntry},
     text_stop::StopFilter,
 };
+
+// Reuse must follow the engine's prefill chunk grid exactly.
+const _: () = assert!(prefix_cache::PREFILL_CHUNK_TOKENS == PREFILL_CHUNK_TOKENS);
+
+type RetainedState = PrefixEntry<LanguageModelState<Metal>>;
 
 pub(crate) struct NativeBackend {
     model: NativeModel,
@@ -25,6 +35,10 @@ pub(crate) struct NativeBackend {
     eos_token_ids: Vec<u32>,
     cancellation: Option<CancelSignal>,
     runtime_identity: stark_engine::engine::MetalDeviceIdentity,
+    /// Reusable state of the previous generation whose reply was delivered.
+    prefix_cache: Option<RetainedState>,
+    /// State of the last generation, published once its reply is flushed.
+    pending_prefix: Option<RetainedState>,
 }
 
 enum NativeModel {
@@ -123,6 +137,8 @@ impl NativeBackend {
             eos_token_ids,
             cancellation,
             runtime_identity,
+            prefix_cache: None,
+            pending_prefix: None,
         })
     }
 }
@@ -291,6 +307,35 @@ impl GenerationBackend for NativeBackend {
     ) -> Result<GeneratedTokens, &'static str> {
         self.generate_inner(&[], Some(image), options, on_text, on_progress)
     }
+
+    fn prefix_cache_supported(&self) -> bool {
+        matches!(&self.model, NativeModel::Text(model) if model.prefix_reuse_supported())
+    }
+
+    fn prefix_cache_plan(
+        &self,
+        input: &[u32],
+        options: &GenerationOptions,
+    ) -> usize {
+        self.prefix_cache
+            .as_ref()
+            .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
+    }
+
+    fn publish_prefix_cache(&mut self) {
+        if let Some(entry) = self.pending_prefix.take() {
+            self.prefix_cache = Some(entry);
+        }
+    }
+
+    fn clear_prefix_cache(&mut self) {
+        self.prefix_cache = None;
+        self.pending_prefix = None;
+    }
+
+    fn prefix_cache_retained(&self) -> bool {
+        self.prefix_cache.is_some() || self.pending_prefix.is_some()
+    }
 }
 
 impl NativeBackend {
@@ -318,14 +363,36 @@ impl NativeBackend {
             NativeModel::Text(model) => model.tokenizer().clone(),
             NativeModel::Vision(model) => model.tokenizer().clone(),
         };
-        let mut state = match &mut self.model {
-            NativeModel::Text(model) => model
-                .create_empty_state(Some(options.context_tokens), options.seed)
-                .map_err(|_| "native_generation_failed")?,
-            NativeModel::Vision(model) => model
-                .create_empty_state(Some(options.context_tokens), options.seed)
-                .map_err(|_| "native_generation_failed")?,
+        // Take the retained entry. A request that cannot reuse it drops it
+        // before allocating, so two request states never coexist.
+        let reused = match (&self.prefix_cache, &image) {
+            (Some(entry), None) => entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()),
+            _ => 0,
         };
+        let retained = self.prefix_cache.take();
+        self.pending_prefix = None;
+        let mut state = match (&mut self.model, retained) {
+            (NativeModel::Text(model), Some(entry)) if reused > 0 => {
+                let mut state = entry.state;
+                model
+                    .rewind_state(&mut state, reused, Some(options.context_tokens), options.seed)
+                    .map_err(|_| "native_generation_failed")?;
+                state
+            },
+            (NativeModel::Text(model), retained) => {
+                drop(retained);
+                model
+                    .create_empty_state(Some(options.context_tokens), options.seed)
+                    .map_err(|_| "native_generation_failed")?
+            },
+            (NativeModel::Vision(model), retained) => {
+                drop(retained);
+                model
+                    .create_empty_state(Some(options.context_tokens), options.seed)
+                    .map_err(|_| "native_generation_failed")?
+            },
+        };
+        let prompt_ids = input;
         let input: Vec<u64> = input.iter().map(|id| u64::from(*id)).collect();
         let input_tokens = image.as_ref().map_or(input.len(), |image| image.tokens.len());
         let mut stream_options = match &self.model {
@@ -350,7 +417,7 @@ impl NativeBackend {
         };
         let stream = match (&mut self.model, image) {
             (NativeModel::Text(model), None) => {
-                model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
+                model.stream(&input[reused..], &mut state, stream_options).map_err(|_| "native_generation_failed")?
             },
             (NativeModel::Vision(model), None) => {
                 model.stream(&input, &mut state, stream_options).map_err(|_| "native_generation_failed")?
@@ -411,9 +478,9 @@ impl NativeBackend {
             &mut cancelled,
         );
         // collect_tokens has dropped and drained the stream, including its lookahead.
-        drop(state);
         let fenced = matches!(&self.model, NativeModel::Vision(model) if model.is_fenced());
         let mut result = native_result_after_cleanup(result, fenced)?;
+        result.reused_input_tokens = reused;
         if needs_text {
             let full = tokenizer.decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
             let suffix = full.strip_prefix(&raw).ok_or("decoding_failed")?;
@@ -426,6 +493,10 @@ impl NativeBackend {
                 callback(&tail)?;
             }
             result.text = Some(filter.text().to_owned());
+        }
+        // Retain only a completed text generation that has a host scope.
+        if let (NativeModel::Text(_), Some(scope)) = (&self.model, options.cache_scope) {
+            self.pending_prefix = Some(PrefixEntry::new(state, scope, options.context_tokens, prompt_ids));
         }
         Ok(result)
     }

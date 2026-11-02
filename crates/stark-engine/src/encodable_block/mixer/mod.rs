@@ -37,6 +37,24 @@ pub trait MixerState<B: Backend>: Any + Send {
         accepted_indices: &[u32],
         command_buffer: &mut <B::CommandBuffer as CommandBuffer>::Encoding,
     ) -> Result<(), B::Error>;
+
+    /// Whether `rewind(context_length)` would succeed. Recurrent and ring
+    /// states cannot drop their newest rows and never rewind.
+    fn can_rewind(
+        &self,
+        _context_length: u32,
+    ) -> bool {
+        false
+    }
+
+    /// Keep only the first `context_length` retained rows. Returns false and
+    /// leaves the state unchanged when `can_rewind` is false.
+    fn rewind(
+        &mut self,
+        _context_length: u32,
+    ) -> bool {
+        false
+    }
 }
 
 impl<'a, B: Backend> MaybeMut<'a, dyn MixerState<B>> {
@@ -52,6 +70,12 @@ pub trait Mixer<B: Backend>: Any + Send + Sync {
     fn speculation_supported(&self) -> bool;
 
     fn max_context_length(&self) -> Option<u32>;
+
+    /// Whether every state this mixer creates can be rewound to a shorter
+    /// prefix. Only full, non-ring attention caches qualify.
+    fn prefix_reuse_supported(&self) -> bool {
+        false
+    }
 
     fn create_empty_state(
         &self,

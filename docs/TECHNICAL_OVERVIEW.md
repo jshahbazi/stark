@@ -41,7 +41,7 @@ Everything a user runs is one of: `Stark.app`, the `stark` shell launcher (`scri
 | `build/` | The build script: scans GPU type definitions, generates Rust bindings for each kernel, and compiles `.metal` sources with Xcode's Metal toolchain into `.metallib` files embedded in the binary (`build/metal/`), or compiles CPU kernels (`build/cpu/`) |
 | `unit/` | The engine unit and benchmark suite; see [Contributing](../CONTRIBUTING.md#engine-tests) |
 
-A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No state outlives a request in either worker.
+A generation request creates a `LanguageModelState` sized to the requested context, runs prefill in batches of up to 1,024 tokens, then decodes one token per command buffer with the sampler on the GPU. A scoring request runs the same prefill batching with a flat topology, reads the logits at the final prompt position as BF16 and drops the state. No native state outlives a request in the scorer. The generator drops its state too unless started with `--prefix-cache`. In that case it keeps one in-memory state of the previous text request and rewinds its full-attention KV cache to a 1,024-token chunk boundary of the shared prompt prefix ([prefix reuse](GENERATION.md#prefix-reuse)).
 
 Mixed-precision inference is permitted by [repository policy](../AGENTS.md).
 Activation, accumulation, recurrent-state, cache and weight precision are chosen

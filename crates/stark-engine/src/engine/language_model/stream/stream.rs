@@ -356,7 +356,8 @@ impl<'a, B: Backend> LanguageModelStream<'a, B> {
                 model_state.last_output_token.take();
 
                 // NOTE: this is required for attention correctness (hardcoded suffix 1024). This is really bad design, attention should be rewritten to allow on-demand suffix length
-                let max_batch_size = 1024;
+                // Prefix reuse depends on this fixed grid starting at position zero.
+                let max_batch_size = super::PREFILL_CHUNK_TOKENS;
                 let number_of_batches = input.len().div_ceil(max_batch_size);
 
                 model_state
