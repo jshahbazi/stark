@@ -39,3 +39,5 @@ The separate test-only timing follow-up is documented in [MTP head profile v4](p
 The wait-policy comparison is documented separately in [MTP head FFN wait policy v5](wait-v5.md) and [its aggregate JSON](wait-v5.json); the v3 and v4 result records remain unchanged.
 
 The same-view FFN reuse diagnostic is documented separately in [MTP same-view reuse v6](reuse-v6.md) and [its aggregate JSON](reuse-v6.json); the v3 through v5 result records remain unchanged.
+
+The bounded fixed-prefix cache assessment is documented separately in [MTP fixed-prefix cache v7c](cache-v7c.md) and [its aggregate JSON](cache-v7c.json), with a canonical source patch in [cache-v7c.patch](cache-v7c.patch). It preserves the earlier v3 through v6 records and does not qualify generation throughput or production admission.
