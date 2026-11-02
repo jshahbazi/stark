@@ -842,6 +842,83 @@ def test_xml_malformed_unknown_quoted_or_ambiguous_wire_is_not_repaired(text):
     assert error.value.status == 502 and error.value.code == "invalid_tool_call"
 
 
+REJECTED = "The model produced an incomplete, invalid or unavailable tool call: "
+LIMIT = "generation stopped at the output or context limit."
+UNFINISHED = "generation did not end normally."
+DISABLED = "this request does not allow tool calls."
+MARKUP = "tool-call markup appeared outside a complete call."
+PREFIX = "text before the call contains a code block, quotation or unclosed reasoning."
+FORMAT = "the call does not follow the model's tool-call format."
+TRAILING = "text follows the call."
+UNOFFERED = "the call names a tool that this request does not offer or allow."
+ARGUMENT = "the call uses an argument that the tool does not define, or repeats one."
+VALUE = "an argument value does not match the tool's schema."
+LIMITS = "the call's arguments exceed the size or nesting limits."
+COUNT = "the reply has more tool calls than this request allows."
+
+
+def rejection(parse, text, **extra):
+    with pytest.raises(APIError) as error:
+        parse(text, **extra)
+    assert error.value.status == 502 and error.value.code == "invalid_tool_call"
+    assert error.value.message.startswith(REJECTED)
+    return error.value.message[len(REJECTED) :]
+
+
+@pytest.mark.parametrize(
+    ("text", "extra", "reason"),
+    [
+        (OUTPUT, {"finish_reason": "length"}, LIMIT),
+        (OUTPUT, {"finish_reason": "context"}, LIMIT),
+        (OUTPUT, {"finish_reason": "cancelled"}, UNFINISHED),
+        (OUTPUT, {"tool_choice": "none"}, DISABLED),
+        ("</tool_call>" + OUTPUT, {}, MARKUP),
+        ("```json\n" + OUTPUT + "\n```", {}, PREFIX),
+        ("> Quoted\n" + OUTPUT, {}, PREFIX),
+        (OUTPUT.replace("<tool_call>", "<tool_call name='lookup'>"), {}, FORMAT),
+        (OUTPUT.replace("</tool_call>", ""), {}, FORMAT),
+        (OUTPUT.replace('{"key":"a"}', '{"key":NaN}'), {}, FORMAT),
+        (OUTPUT + " trailing text", {}, TRAILING),
+        (OUTPUT.replace('"lookup"', '"invented_tool"'), {}, UNOFFERED),
+        (OUTPUT, {"tool_choice": {"type": "function", "function": {"name": "other"}}}, UNOFFERED),
+        (OUTPUT.replace('"a"', "[" * 40 + "]" * 40), {}, LIMITS),
+        (OUTPUT.replace('"a"', '"' + "a" * (MAX_ARGUMENT_BYTES + 2048) + '"'), {}, LIMITS),
+        (OUTPUT + "\n" + OUTPUT, {"parallel_tool_calls": False}, COUNT),
+        ("\n".join([OUTPUT] * 17), {}, COUNT),
+    ],
+)
+def test_hermes_rejections_report_a_fixed_reason(text, extra, reason):
+    assert rejection(output, text, **extra) == reason
+
+
+@pytest.mark.parametrize(
+    ("text", "tool", "reason"),
+    [
+        ("<function=lookup>\n</function>", TOOL, MARKUP),
+        ("<think>unfinished reasoning\n" + xml_call(), TOOL, PREFIX),
+        ('An open quotation "' + xml_call(), TOOL, PREFIX),
+        (xml_call().replace("</function>", ""), TOOL, FORMAT),
+        (xml_call().replace("</parameter>", ""), TOOL, FORMAT),
+        (xml_call({"key": "x<tool_call>y"}), TOOL, FORMAT),
+        (xml_call() + " trailing", TOOL, TRAILING),
+        (xml_call(name="invented_tool"), TOOL, UNOFFERED),
+        (xml_call({"invented_argument": "a"}), TOOL, ARGUMENT),
+        (xml_call().replace("</function>", "<parameter=key>\nb\n</parameter>\n</function>"), TOOL, ARGUMENT),
+        (xml_call({"key": "not json"}), xml_property_tool({"type": "integer"}), VALUE),
+        (xml_call({"key": "a" * (MAX_ARGUMENT_BYTES + 1)}), TOOL, LIMITS),
+        ("\n".join([xml_call()] * 17), TOOL, COUNT),
+    ],
+)
+def test_xml_rejections_report_a_fixed_reason(text, tool, reason):
+    assert rejection(xml_output, text, tools=[tool]) == reason
+
+
+def test_xml_rejection_reasons_follow_finish_and_parallel_rules():
+    assert rejection(xml_output, xml_call(), finish_reason="length") == LIMIT
+    assert rejection(xml_output, xml_call(), finish_reason="stop_sequence") == UNFINISHED
+    assert rejection(xml_output, xml_call() + "\n" + xml_call(), parallel_tool_calls=False) == COUNT
+
+
 def test_xml_natural_preamble_and_inline_string_values_remain_lossless():
     text = 'I\'ll look up "weather".\n' + xml_call().replace("<parameter=key>\na\n", "<parameter=key>a")
     message, reason = xml_output(text)

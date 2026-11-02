@@ -159,6 +159,20 @@ The 4B template is preserved as an upstream fixture with source and license prov
 
 Buffered completions return `message.tool_calls`, optional text (null when absent), and `finish_reason: "tool_calls"`. Tool-enabled streaming delivers ordinary text as it is generated. Possible tool markers and their arguments stay private through the terminal worker frame and strict parsing, then indexed `delta.tool_calls` are emitted exactly once, followed by the terminal reason, optional usage and `[DONE]`. Trailing whitespace is held until it can be distinguished from the separator before a call. Invalid or truncated calls produce a stream error after any provisional text; they never produce executable tool deltas. Usage includes all generated framing/argument tokens and tokens completing a stop sequence. Cancellation/deadline checks remain active throughout generation.
 
+An `invalid_tool_call` message ends with one fixed reason naming the rule that rejected the reply, for example "the call names a tool that this request does not offer or allow" or "text before the call contains a code block, quotation or unclosed reasoning". The reasons cover:
+
+- generation stopping at the output or context limit, or ending abnormally
+- tool calls not allowed for the request
+- call markup outside a complete call
+- a code block, quotation or unclosed reasoning before the call
+- a call that breaks the model's format, or text after it
+- a tool the request does not offer or allow
+- an undefined or repeated argument, or a value that does not match its schema
+- arguments over the size or nesting limits
+- more calls than the request allows
+
+Reasons never include generated text, tool or argument names, or values. Clients should act on `code` rather than the message text.
+
 An agent client can still take longer to produce its first token than a short Playground chat. Its system instructions, tool schemas and conversation history are part of the model input and must be processed before decoding begins. Live text streaming removes the additional wait for the entire answer; it does not shorten the client's instructions. [Prefix reuse](#prefix-reuse) removes most of the repeated work on later steps of the same conversation, but the first request of a conversation is still processed in full. The [OpenWork first-text latency record](archive/runs/2026-10-31-openwork-first-text-latency.md) separates native first-token work from the rest of a measured client request.
 
 Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-tool result-use task locally. Looser variants failed through an unwanted parallel call or premature stopping; this checkpoint is not a general-purpose agent recommendation. Protocol fixtures and task-competence evidence are recorded separately.
