@@ -71,3 +71,5 @@ timing for agent follow-ups and a long-prompt prefill profile.
 The [Qwen3.8 prefix reuse run](archive/runs/2026-11-02-hybrid-prefix-reuse.md)
 records the same checks for recurrent-state snapshots on the native Lily-format
 Qwen3.8 backend.
+The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
+records reuse and first-text timing for one real agent session.
