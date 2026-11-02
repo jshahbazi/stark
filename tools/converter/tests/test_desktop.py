@@ -313,11 +313,22 @@ def test_xml_schema_rejection_precedes_queue_and_worker_dispatch(tool_desktop):
     desktop, payload, seen, _ = tool_desktop
     if desktop.settings_summary()["tool_parser"] == "qwen3-hermes-v1":
         pytest.skip("Hermes arguments carry their JSON types directly")
-    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = {}
+    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = {"type": None}
     with pytest.raises(APIError) as error:
         desktop.api_complete(payload)
     assert error.value.code == "tool_schema_unsupported"
     assert not seen and desktop.job is None and desktop.api_queue == []
+
+
+def test_unused_untyped_hint_preserves_normal_tool_requests(tool_desktop):
+    desktop, payload, seen, _ = tool_desktop
+    payload["tools"][0]["function"]["parameters"]["properties"]["unused"] = {
+        "description": "Synthetic unconstrained optional value"
+    }
+    result = desktop.api_complete(payload)
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    assert desktop.job is None and desktop.api_queue == []
 
 
 def test_unused_schemas_do_not_block_none_or_named_tool_choice(tool_desktop):

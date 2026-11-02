@@ -555,10 +555,10 @@ def test_xml_mixed_literal_constraints_preserve_ambiguous_value_rejection(schema
 
 
 def test_xml_unsupported_schema_error_identifies_only_a_fixed_form_category():
-    tool = xml_property_tool({"description": "Synthetic schema text must stay private"})
+    tool = xml_property_tool({"format": "Synthetic schema text must stay private"})
     with pytest.raises(APIError) as error:
         validate_parser_tools([tool], "qwen38-xml-v1")
-    assert "untyped_or_composed_parameter" in error.value.message
+    assert "untyped_constraint_or_unknown_keyword" in error.value.message
     assert "Synthetic schema text" not in error.value.message and "lookup" not in error.value.message
     tool["function"]["parameters"]["additionalProperties"] = True
     with pytest.raises(APIError) as error:
@@ -614,17 +614,22 @@ def test_xml_bounded_local_schema_references_and_nested_json():
 @pytest.mark.parametrize(
     "schema",
     [
-        {},
+        {"type": None},
         {"type": []},
         {"type": "arbitrary"},
         {"type": True},
         {"enum": []},
         {"enum": "not-a-literal-list"},
+        {"type": "string", "enum": None},
         {"$ref": "https://example.invalid/type"},
         {"$ref": "#/$defs/missing"},
         {"anyOf": []},
-        {"anyOf": [{"type": "string"}, {}]},
         {"allOf": [{"type": "string"}]},
+        {"description": None},
+        {"title": 1},
+        {"examples": "invalid"},
+        {"deprecated": "invalid"},
+        {"format": "unknown-without-type"},
     ],
 )
 def test_xml_unsupported_parameter_schemas_rejected_before_generation(schema):
@@ -633,6 +638,58 @@ def test_xml_unsupported_parameter_schemas_rejected_before_generation(schema):
     assert error.value.status == 400 and error.value.code == "tool_schema_unsupported"
     # The existing JSON wire path does not need these XML representation rules.
     validate_parser_tools([xml_property_tool(schema)], "qwen3-hermes-v1")
+
+
+@pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1"])
+@pytest.mark.parametrize(
+    "unknown_schema",
+    [
+        {},
+        {"description": "Optional annotation-only input", "default": None},
+        {"title": "Input", "$comment": "Metadata", "examples": [None], "deprecated": False},
+        {"readOnly": True, "writeOnly": False},
+        {"anyOf": [{"type": "string"}, {}]},
+        {"oneOf": [{"description": "No representation"}, {"type": "integer"}]},
+        {"$ref": "#/$defs/untyped"},
+    ],
+)
+def test_xml_unused_unknown_parameters_preserve_chat_and_typed_tool_calls(parser, unknown_schema):
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["parameters"]["properties"]["hint"] = unknown_schema
+    tool["function"]["parameters"]["$defs"] = {"untyped": {}}
+    original = copy.deepcopy(tool)
+    validate_parser_tools([tool], parser)
+    assert tool == original  # Definitions are forwarded without inferred types.
+    assert xml_output("Ordinary chat", tools=[tool], parser=parser) == (
+        {"role": "assistant", "content": "Ordinary chat"},
+        "stop",
+    )
+    message, reason = xml_output(xml_call(), tools=[tool], parser=parser)
+    assert reason == "tool_calls"
+    assert json.loads(message["tool_calls"][0]["function"]["arguments"]) == {"key": "a"}
+    # A completed typed call preceding an untyped one is still withheld: the
+    # completion is atomic and no generated text is used to guess a type.
+    wire = "Preamble\n" + xml_call() + xml_call({"key": "b", "hint": "5"})
+    delivered = []
+    stream = ToolTextStream(delivered.append)
+    for character in wire:
+        stream.feed(character)
+    with pytest.raises(APIError) as error:
+        xml_output(wire, tools=[tool], parser=parser)
+    assert error.value.status == 502 and error.value.code == "tool_argument_type_unsupported"
+    assert "".join(delivered) == "Preamble"
+    # An unknown union branch cannot be bypassed by a value that fits its known
+    # branch. This second request must fail for the same fixed reason.
+    with pytest.raises(APIError) as error:
+        xml_output(xml_call({"hint": "plain text"}), tools=[tool], parser=parser)
+    assert error.value.code == "tool_argument_type_unsupported"
+
+
+def test_xml_unknown_alternative_still_validates_all_remaining_branches():
+    tool = xml_property_tool({"anyOf": [{}, {"type": None}]})
+    with pytest.raises(APIError) as error:
+        validate_parser_tools([tool], "qwen38-xml-v1")
+    assert error.value.code == "tool_schema_unsupported" and "declared_type" in error.value.message
 
 
 @pytest.mark.parametrize("parser", ["qwen38-xml-v1", "qwen35-xml-v1"])

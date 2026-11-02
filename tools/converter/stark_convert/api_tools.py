@@ -50,6 +50,10 @@ QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa
 # literals True/False/None; nested object/array values still use JSON.
 QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
 _XML_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "object", "array"})
+_XML_UNKNOWN = object()
+_XML_ANNOTATIONS = frozenset(
+    {"title", "description", "$comment", "default", "examples", "deprecated", "readOnly", "writeOnly"}
+)
 _XML_RESERVED = (
     "<tool_call",
     "</tool_call",
@@ -293,7 +297,7 @@ def tool_parser_for(codec: dict | None) -> str | None:
 def _xml_schema_error(reason="parameter_type"):
     return _bad(
         "This XML tool parser requires direct named parameters with declared or literal-constrained types or bounded "
-        "local schema references. Dynamic parameters, root composition, and untyped or unresolved schemas "
+        "local schema references. Dynamic parameters, root composition, and unresolved or unsupported schemas "
         "are unsupported. "
         f"Unsupported schema form: {reason}.",
         "tool_schema_unsupported",
@@ -304,8 +308,10 @@ def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
     work[0] -= 1
     if work[0] < 0 or not isinstance(schema, dict) or depth > MAX_JSON_DEPTH:
         raise _xml_schema_error("resolution_limit_or_invalid_schema")
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
+        raise _xml_schema_error("literal_constraint")
     declared = schema.get("type")
-    if declared is not None:
+    if "type" in schema:
         values = [declared] if isinstance(declared, str) else declared
         if (
             not isinstance(values, list)
@@ -356,13 +362,27 @@ def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
             else "object"
             for value in literals
         )
+    if set(schema) <= _XML_ANNOTATIONS:
+        if (
+            any(key in schema and not isinstance(schema[key], str) for key in ("title", "description", "$comment"))
+            or any(key in schema and type(schema[key]) is not bool for key in ("deprecated", "readOnly", "writeOnly"))
+            or ("examples" in schema and not isinstance(schema["examples"], list))
+        ):
+            raise _xml_schema_error("invalid_annotation")
+        return _XML_UNKNOWN
     alternatives = [schema[key] for key in ("anyOf", "oneOf") if key in schema]
     if len(alternatives) != 1 or not isinstance(alternatives[0], list) or not alternatives[0]:
-        raise _xml_schema_error("untyped_or_composed_parameter")
+        reason = "untyped_all_of" if "allOf" in schema else "untyped_constraint_or_unknown_keyword"
+        raise _xml_schema_error(reason)
     result = frozenset()
+    unknown = False
     for candidate in alternatives[0]:
-        result |= _xml_types(candidate, root, work, memo, depth + 1, references)
-    return result
+        resolved = _xml_types(candidate, root, work, memo, depth + 1, references)
+        if resolved is _XML_UNKNOWN:
+            unknown = True
+        else:
+            result |= resolved
+    return _XML_UNKNOWN if unknown else result
 
 
 def _xml_tool_schemas(tools):
@@ -417,6 +437,8 @@ def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
     This determines parameter representations, not full JSON Schema validity.
     Mixed string/non-string unions are accepted here; an ambiguous generated
     value is rejected later rather than guessed into an executable argument.
+    Empty or annotation-only parameters can remain unused in a definition;
+    generating one is rejected because its wire value has no conclusive type.
     """
     if parser in _XML_PARSERS:
         _xml_tool_schemas(tools)
@@ -554,6 +576,13 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
             argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
             if argument_bytes > MAX_ARGUMENT_BYTES:
                 raise invalid()
+            if schemas[name][parameter] is _XML_UNKNOWN:
+                raise APIError(
+                    502,
+                    "The model selected a tool argument whose schema does not determine its XML value type. "
+                    "No tool calls from this completion were released.",
+                    "tool_argument_type_unsupported",
+                )
             try:
                 arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, parser)
             except APIError:
