@@ -1,0 +1,35 @@
+# GLM-5.3 MTP Feasibility Probe
+
+Date: 2026-11-02. Status: **measured feasibility only**. A bounded one-step teacher-forced probe measured agreement, component cost, selected-weight access, and memory gauges. It did not execute speculative decoding, T2 verification, or target rollback. No throughput gain or production admission is established.
+
+The companion [aggregate results](results.json) records public-safe counts, timings, memory gauges, receipt hashes, source identities, and precision policy. Runtime request and response payloads, token IDs, logits, probability arrays, and raw process logs are not published. The source patch includes the authored public test cases.
+
+## Probe result
+
+Across three cases, 23 of 24 draft comparisons agreed with the target continuation (8/8, 7/8, and 8/8). These short early continuations do not establish acceptance during longer generation. The aggregate covers 59 prompt rows and reports zero EOS cases. Cache alignment accounted for eight target rows and eight cache rows across three chunk groups. The alignment result does not validate target rollback: the probe made zero rollback calls.
+
+Dividing the measured aggregate component times by 24 continuation comparisons gives 18.4853 ms wall / 2.5611 ms GPU for the MTP head and 31.4839 ms wall / 28.3589 ms GPU for the serial target with hidden tap. The head wall value includes audits and mapping and will be profiled in the pending v4 follow-up. The cold full-head wall measurement was 88.9515 ms including lazy pipeline compilation. These are component timings, not end-to-end speculative throughput.
+
+The v2 parser attempt produced no recoverable result: `libtest-mimic` emitted the test result after its same-line test-name prefix, while the v2 driver accepted only a standalone JSON sentinel. V3 accepted the exact known prefix or a standalone sentinel and retained strict rejection of malformed or unexpected output. Its model-free parser suite covered 15 cases: five accepted forms and ten rejected forms. V3 reused the v2 engine test binary; this repair changed the private driver/parser path, not production engine code.
+
+## Memory observations and limits
+
+The probe recorded 33 selected calls and 33 release-owner checks, with zero selected live bytes at return. Peak selected registration was 73,269,248 bytes over at most 24 views. The static cache held 609 entries. Sampled Metal allocation peak was 106,012,295,168 bytes against the recorded 109,676,289,225-byte cap.
+
+The guard report's prospective production-overlap projection leaves 371,913,609 bytes. Subtracting the 152,633,344-byte target KDA snapshot would leave 219,280,265 bytes before other extras. This is arithmetic on a prospective reservation, not admission evidence. It does not show that the snapshot, production scratch, speculative state, or rollback fits. The production overlap projection cannot be promoted into a runtime claim.
+
+At the measured 23/24 agreement rate, a necessary break-even condition is `V2 + H < 43.1707195 ms`, calculated as `(1 + 23/24) * D - G`, where `D` is the 31.4839046 ms serial target wall time and `G` is the 18.4852603 ms head wall time. `V2` (the two-row verifier) and `H` (capture, catch-up, coordination, and state handling) have not been measured. This uses the audited serial target with hidden tap, not the production worker's faster decode measurement. The bound is specific to this small sample and is not a production speedup threshold.
+
+At this v3 checkpoint, the v4 profile and T2 cost probes are follow-up work; no results from either are included here. Until those paths are measured and validated, do not claim speculative runtime support, rollback correctness, production memory admission, or throughput improvement.
+
+## Precision and source provenance
+
+The recorded precision policy is `existing_safe_f32_graph_quant_weights_cpu_f32_router`: existing safe F32 graph, quantized weights, and CPU F32 router. The probe did not change the production precision policy. Its cold-row convention is pinned to the llama.cpp behavior of zero prior hidden state and the normal position-zero embedding.
+
+The local GGUF repository was pinned to `unsloth/GLM-5.3-Flash-GGUF` revision `a38483c8cd5df544f53d70fb281afe97369d5ab6`; official model metadata was pinned to `zai-org/GLM-5.3-Flash` revision `04c4e9e95c5da8862dced7e5056455116f83a7e0`. The primary architecture references are [llama.cpp GLM-5.3 graph](https://github.com/ggml-org/llama.cpp/blob/1b6935b227b9f9aa89deea8016c0e208f547446f/src/models/glm5-next.cpp) and [vLLM GLM-5.3 MTP layer](https://github.com/vllm-project/vllm/blob/3b6eeb060621eba88deb74a146039291a1afbc42/vllm/models/glm5next/common/mtp.py), pinned respectively to `1b6935b227b9f9aa89deea8016c0e208f547446f` and `3b6eeb060621eba88deb74a146039291a1afbc42`.
+
+The inspected Stark base was `379e5c79d1cfae249e947740732b783b1a6fec82`. The private v3 source-freeze receipt SHA-256 is `a4564fe2e585de17f934d48fc04db2b0ebc9fc423d4c494fc7d294e1c2327ec5`; it records six inspected files and their hashes in `results.json`. The v2 no-run engine build receipt SHA-256 is `3f2bb6aece6b03270725402686705704d4b86b5a26ebb5c72a2c6a036c6f8bdf`; it records a successful `--no-run` build on `nightly-2026-10-01`, unchanged source during build, and engine test binary SHA-256 `4091f277775eee10b12bd0571bafa314e1da624729b314ad74cad7589ef3ff58`. V3 ran the probe with that binary and recorded before/after source and weight identity guards.
+
+The full v3 probe result and guard receipts remain private. Their SHA-256 values are included in [results.json](results.json) so the aggregate can be checked against the retained records. The guard reports unchanged weight identities and no persisted raw process output. The sealed 30-member evidence archive is retained privately; its hash and provenance are recorded in [results.json](results.json). Its embedded patch has SHA-256 `0dd7360733306c378990f885a22b779ce92f90e69a9cf083b54198fa30e517c6`, but is superseded: repository configuration used `diff.external=difft`, so the three added source files were represented as formatted text rather than machine-applicable new-file hunks. The archive manifest's reverse-check PASS covered the recognized tracked hunks and was insufficient to establish a complete six-file round trip.
+
+The public [canonical `prototype.patch`](prototype.patch) was regenerated from the six exact files in the sealed source snapshot with external diff and text conversion disabled, full object IDs, and binary patch output. It has SHA-256 `e0dd229a33fe5f5de0ebc6f48d2832d4cf4bee1748ae009eda08fe190650bf4b`, declares all six source paths including three `new file mode 100644` sections, applies forward from clean base `379e5c79d1cfae249e947740732b783b1a6fec82` to all six freeze-recorded hashes, then reverses cleanly across all six paths. The patch contains only `cfg(test)` probe wiring and source, with no model payload or run output. The test executable, full source snapshot, wrapper, licenses, and private receipts were not extracted into this public experiment directory.

@@ -1,0 +1,175 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-02",
+  "status": "measured_feasibility_only",
+  "scope": "one-step teacher-forced GLM-5.3-Flash MTP agreement and bounded selected-weight/memory feasibility probe; no speculative runtime admission",
+  "agreement": {
+    "cases": 3,
+    "comparisons": 24,
+    "draft_agreements": 23,
+    "agreement_rate_percent": 95.83333333333333,
+    "case_rows": [
+      {"case": 0, "agreements": 8, "comparisons": 8},
+      {"case": 1, "agreements": 7, "comparisons": 8},
+      {"case": 2, "agreements": 8, "comparisons": 8}
+    ],
+    "prompt_rows": 59,
+    "eos_cases": 0,
+    "target_rollback_calls": 0,
+    "corpus_sha256": "82c1bb1e02a5315c24317475a305f5a8798523cab5c45ceda5764baf8c19ffc4",
+    "target_continuation_sha256": "d8cd412f3a6ba2233f609a873fa434f558f6646344eb651003138b8bba35c3b2"
+  },
+  "cache_alignment": {
+    "target_rows": 8,
+    "cache_rows": 8,
+    "chunk_groups": 3,
+    "scope": "alignment accounting only; not a speculative target rollback test"
+  },
+  "timing": {
+    "aggregation_basis": "aggregate measured component times divided by 24 continuation comparisons",
+    "mtp_head_wall_ms_per_comparison": 18.485260291667,
+    "mtp_head_gpu_ms_per_comparison": 2.561111115938,
+    "serial_target_with_hidden_tap_wall_ms_per_comparison": 31.483904583333,
+    "serial_target_with_hidden_tap_gpu_ms_per_comparison": 28.358934027589,
+    "head_wall_includes": ["audits", "mapping"],
+    "cold_full_head_wall_including_lazy_pipeline_compile_ms": 88.951542,
+    "first_measured_prefill_cache_row_wall_ms": 1.00475,
+    "profile_v4_followup": "pending; current head wall includes audits and mapping"
+  },
+  "memory": {
+    "selected_calls": 33,
+    "released_owner_checks": 33,
+    "selected_live_bytes_at_return": 0,
+    "selected_view_count_peak": 24,
+    "selected_registered_peak_bytes": 73269248,
+    "static_cache_entries_peak": 609,
+    "static_cache_peak_bytes": 6573162496,
+    "resident_bank_peak_bytes": 99035873280,
+    "resident_static_peak_bytes": 6573162496,
+    "residency_allocated_peak_bytes": 105609035776,
+    "sampled_metal_allocated_peak_bytes": 106012295168,
+    "admitted_cap_bytes": 109676289225,
+    "target_registered_trunk_prospective_bytes": 99035873280,
+    "target_static_reserve_bytes": 8589934592,
+    "target_dynamic_allowance_bytes": 1066257728,
+    "observed_target_required_peak_bytes": 108692065600,
+    "extra_reserved_bytes": 75439104,
+    "projected_production_overlap_extra_bytes": 536870912,
+    "projected_production_reserved_bytes": 109304375616,
+    "projected_production_cap_margin_bytes": 371913609,
+    "target_kda_snapshot_bytes": 152633344,
+    "projected_margin_after_snapshot_before_other_extras_bytes": 219280265,
+    "projection_interpretation": "Prospective production-overlap arithmetic only. It is not production admission, does not establish snapshot admission, and does not qualify runtime rollback or speculative execution."
+  },
+  "break_even": {
+    "acceptance_fraction": 0.9583333333333334,
+    "serial_target_wall_ms_per_token": 31.483904583333,
+    "mtp_head_wall_ms_per_draft": 18.485260291667,
+    "necessary_verifier_plus_overhead_wall_ms_upper_bound": 43.170719517361,
+    "formula": "V2 + H < (1 + acceptance_fraction) * D - G",
+    "interpretation": "Necessary condition for this small sample only, using measured component wall times. V2 and H are not measured; this is not a throughput-gain claim."
+  },
+  "precision_policy": {
+    "receipt_value": "existing_safe_f32_graph_quant_weights_cpu_f32_router",
+    "description": "Existing safe F32 graph, quantized weights, and CPU F32 router; no precision policy was changed by the probe.",
+    "source_convention": "llama.cpp 1b6935b227b9f9aa89deea8016c0e208f547446f: zero prior hidden and normal position-zero embedding"
+  },
+  "parser_repair": {
+    "v2_rejected_attempt": "Driver required a standalone JSON sentinel, but libtest-mimic emitted the result on a same-line test-name prefix; the single v2 model attempt yielded no recoverable result.",
+    "v3_driver_sha256": "e06b0e21a8a3a38438560d2f3c41835289f4f66cd92eaeabdb8ce5586f80648a",
+    "model_free_parser_cases": 15,
+    "accepted_forms": 5,
+    "rejected_forms": 10,
+    "parser_receipt": "private mtp-probe-parser-v3-receipt.json",
+    "parser_receipt_sha256": "c3f8349878d670dbe94e39aae6c84435a34b84c4d1f0148e3eeccce4aeed8cdb",
+    "v3_repair": "Accepts either a standalone sentinel or the exact known libtest-mimic test-name prefix; malformed, duplicate, wrong-prefix, and trailing-junk forms remain rejected."
+  },
+  "source_and_guard": {
+    "inspected_stark_base": "379e5c79d1cfae249e947740732b783b1a6fec82",
+    "source_freeze_sha256": "a4564fe2e585de17f934d48fc04db2b0ebc9fc423d4c494fc7d294e1c2327ec5",
+    "build_receipt_sha256": "3f2bb6aece6b03270725402686705704d4b86b5a26ebb5c72a2c6a036c6f8bdf",
+    "build_version": "v2",
+    "build_toolchain": "nightly-2026-10-01",
+    "build_command": "cargo +nightly-2026-10-01 test --release --locked -p stark-engine --features cpu,metal --no-run",
+    "build_exit_code": 0,
+    "source_unchanged_during_build": true,
+    "source_before_receipt_sha256": "97a511af42647ac3e3bb4bc5c812eafbdcc9158fcc571da454007b90b43f207b",
+    "engine_test_binary_sha256": "4091f277775eee10b12bd0571bafa314e1da624729b314ad74cad7589ef3ff58",
+    "v3_reused_v2_engine_binary_without_rebuild": true,
+    "v3_source_freeze_changed_files": {
+      "crates/stark-engine/src/engine/hybrid/glm.rs": "a8e01ba5ebf2ea0dc3be7f52b83848ce8c5415e3f264913fb9ab19f803dc0121",
+      "crates/stark-engine/src/engine/hybrid/glm_metal.rs": "0455437e4f89c519592b5a404ac3be1b63cf975a4027eeca92c45268506228ee",
+      "crates/stark-engine/src/engine/hybrid/weights.rs": "d15bb4ebd1623a6e6fb2a802780baed883cff24536ab57409d5d5bc1b431239f",
+      "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs": "9401aa50fc9f57db70192f185bc4f88062c35fbb8b1990554301d832eb656f16",
+      "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs": "f8b5eaa8ca176294301dcefc082cfaf6a444c7d8011fa22a01a816803d9ea1d7",
+      "scripts/probe_glm53_mtp.py": "e06b0e21a8a3a38438560d2f3c41835289f4f66cd92eaeabdb8ce5586f80648a"
+    },
+    "guard": {
+      "probe_result_sha256": "4171650971b4dab3820471ac007d13a00dc268220821910f6da0b9b95f53214a",
+      "guard_receipt_sha256": "e29c6eeef3488da54c4f4ac69c94c1396ffe215a1187c933a2f602a9254ab99b",
+      "source_before_and_after_passed": true,
+      "weight_identities_unchanged": true,
+      "weight_receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb",
+      "raw_process_output_persisted": false,
+      "wrapper_sha256": "556cb0f7d96bf0286f2da26ee4f6cbddbfd5831fbd66fb01701a29c63a6af6f4"
+    },
+    "production_engine_changed_by_this_probe": false,
+    "canonical_public_patch": {
+      "public_path": "prototype.patch",
+      "sha256": "e0dd229a33fe5f5de0ebc6f48d2832d4cf4bee1748ae009eda08fe190650bf4b",
+      "bytes": 56100,
+      "diff_files": [
+        "crates/stark-engine/src/engine/hybrid/glm.rs",
+        "crates/stark-engine/src/engine/hybrid/glm_metal.rs",
+        "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs",
+        "crates/stark-engine/src/engine/hybrid/weights.rs",
+        "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs",
+        "scripts/probe_glm53_mtp.py"
+      ],
+      "base": "379e5c79d1cfae249e947740732b783b1a6fec82",
+      "diff_external_disabled": true,
+      "textconv_disabled": true,
+      "full_object_ids": true,
+      "binary_diff_enabled": true,
+      "new_file_modes": 3,
+      "all_six_freeze_file_hashes_matched_after_forward_apply": true,
+      "reverse_check_all_six_paths_passed": true,
+      "scope": "test-only probe wiring and source; cfg(test); no runtime route"
+    },
+    "superseded_embedded_patch": {
+      "sealed_archive_member": "mtp-probe-v3-private-archive/prototype.patch",
+      "sha256": "0dd7360733306c378990f885a22b779ce92f90e69a9cf083b54198fa30e517c6",
+      "bytes": 58726,
+      "disposition": "not published as canonical; diff.external=difft formatted three new-file sections as text, so the embedded patch was not a complete machine-applicable six-file patch"
+    },
+    "sealed_evidence_archive": {
+      "private_worktree": "glm53-mtp-probe/stark",
+      "path": "runtime/mtp-probe-v3-evidence.tgz",
+      "sha256": "6f25f1a0c96425241b4987e9fa912f8fdb618c6beb2ed01d048a7c8211889933",
+      "bytes": 32074358,
+      "members": 30,
+      "manifest_path": "mtp-probe-v3-private-archive/manifest.json",
+      "manifest_recorded_patch_reverse_check": "PASS; insufficient because external diff formatting caused the three new-file sections to be ignored by the reverse check",
+      "canonical_patch_forward_and_reverse_checks_passed": true,
+      "manifest_models_or_raw_process_output_included": false,
+      "original_patch_inspected": "mtp-probe-v3-private-archive/prototype.patch",
+      "exact_source_files_used_for_canonical_generation": 6,
+      "temporary_source_worktrees_removed": true,
+      "binary_and_runtime_receipts_published": false
+    }
+  },
+  "pinned_primary_sources": {
+    "local_gguf_repository": {"name": "unsloth/GLM-5.3-Flash-GGUF", "revision": "a38483c8cd5df544f53d70fb281afe97369d5ab6"},
+    "official_model_metadata": {"name": "zai-org/GLM-5.3-Flash", "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0"},
+    "llama_cpp": {"revision": "1b6935b227b9f9aa89deea8016c0e208f547446f", "url": "https://github.com/ggml-org/llama.cpp"},
+    "vllm": {"revision": "3b6eeb060621eba88deb74a146039291a1afbc42", "url": "https://github.com/vllm-project/vllm"}
+  },
+  "limitations": [
+    "The measured work is one-step teacher-forced draft agreement and component cost, not speculative decoding.",
+    "No T2 verifier or target rollback was executed; target_rollback_calls is zero.",
+    "The prospective memory projection is not a production admission result.",
+    "No end-to-end throughput gain, production runtime, or rollback claim is made.",
+    "The published patch contains the six test-probe source files and wiring, including authored public test cases. It establishes no runtime admission."
+  ],
+  "follow_up": "Profile v4 and T2 verification follow-up remain pending; the current head wall includes audits and mapping."
+}
