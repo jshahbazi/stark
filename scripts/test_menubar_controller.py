@@ -198,6 +198,26 @@ extension EngineController {
             guard engine.generationProgress == nil else { return false }
             engine.apply(["event": "reply", "text": "synthetic answer"])
             return !engine.hasPlaygroundGeneration
+        case "playground-request-error":
+            engine.mode = .chat; engine.loadedMode = .chat; engine.draft = "synthetic prompt"
+            engine.generate()
+            let id = command()["request_id"] as! String
+            engine.apply(["event": "error", "request_id": UUID().uuidString.lowercased(), "message": "Stale failure"])
+            guard engine.pendingMessageID != nil, engine.errorMessage == nil, engine.messages.count == 1 else { return false }
+            engine.apply(["event": "error", "request_id": id, "message": "Conversation is full."])
+            guard engine.pendingMessageID == nil, engine.messages.isEmpty, engine.draft == "synthetic prompt",
+                  engine.errorMessage == "Conversation is full.", engine.state == "generating" else { return false }
+            engine.apply(["event": "status", "state": "ready", "message": "Ready"])
+            guard engine.modelReady else { return false }
+            // A send rejected behind a connected application leaves that request's progress visible.
+            engine.draft = "synthetic retry"
+            engine.generate()
+            let retry = command()["request_id"] as! String
+            engine.apply(["event": "status", "state": "generating", "message": "Generating for connected application…"])
+            engine.apply(["event": "error", "request_id": retry, "message": "Wait for the current operation or choose Stop."])
+            guard !engine.hasPlaygroundGeneration, engine.hasAPIGeneration, engine.draft == "synthetic retry" else { return false }
+            engine.apply(apiProgress(apiFirst))
+            return engine.generationProgress != nil
         case "generation-progress-api-requests":
             engine.mode = .decision; engine.loadedMode = .chat
             engine.apply(["event": "status", "state": "generating", "message": "Generating for connected application…"])
@@ -1854,6 +1874,9 @@ class ControllerLifecycleTests(unittest.TestCase):
 
     def test_api_progress_is_fenced_per_request_and_reports_prefix_reuse(self):
         self.exercise("generation-progress-api-requests")
+
+    def test_playground_request_error_restores_draft_and_ignores_stale_ids(self):
+        self.exercise("playground-request-error")
 
     def test_generation_progress_matches_active_request_and_retains_actual_first_token(self):
         self.exercise("generation-progress-request-and-lifecycle")

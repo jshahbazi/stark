@@ -1488,6 +1488,13 @@ final class EngineController: ObservableObject {
                 if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
                 return
             }
+            if let requestID = requestID, let pending = pendingMessageID, UUID(uuidString: requestID) == pending {
+                // The backend settles the worker state with a following status event
+                // or, for a rejected send, with the running operation's own status.
+                errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+                discardPendingMessage()
+                return
+            }
             if let requestID = requestID, requestID != activeInstallRequestID { return }
             let matchingInstallError = requestID != nil && requestID == activeInstallRequestID
             let installOwned = requestID != nil || state == "installing" || (activeInstallRequestID != nil && catalogInstallation == nil)
