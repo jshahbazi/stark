@@ -1668,8 +1668,15 @@ code {
 .qwen38-precision { max-width:960px; border-left:2px solid var(--gold); padding-left:18px; margin-top:22px; color:#bec7b5; font-size:12px; line-height:1.8 }
 .qwen38-precision strong { color:var(--gold); font-weight:500 }
 .qwen38-method { border-top:0; padding-top:0; margin-top:26px }
+.mtp-table { min-width:600px }
+.mtp-table th:first-child { width:38% }
+.mtp-table th:nth-child(2),.mtp-table th:nth-child(3) { width:22% }
+.mtp-table th:last-child { width:18% }
+.mtp-table small { line-height:1.7 }
+.mtp-table td { white-space:nowrap }
+.qwen38-mtp-study .measurement-notes code { overflow-wrap:anywhere }
 @media (max-width:600px) {
-  .benchmark-tabs { gap:4px; margin-top:28px }
+  .benchmark-tabs { gap:4px; margin-top:28px; flex-wrap:wrap }
   .benchmark-tabs button { padding:12px 10px; font-size:12px }
   .benchmark-tabs button small { font-size:8px }
   .benchmark-panel { padding-top:26px }
@@ -1680,6 +1687,15 @@ code {
   .qwen38-table tbody th { font-size:12px }
   .qwen38-table small { font-size:8px }
   .qwen38-table td { font-size:12px }
+  .mtp-table { min-width:330px }
+  .mtp-table th:first-child { width:34% }
+  .mtp-table th:nth-child(2),.mtp-table th:nth-child(3) { width:23% }
+  .mtp-table th:last-child { width:20% }
+  .mtp-table th,.mtp-table td { padding-right:8px }
+  .mtp-table thead th { font-size:9px; line-height:1.6 }
+  .mtp-table thead span,.mtp-table small { font-size:8px }
+  .mtp-table small { overflow-wrap:anywhere }
+  .mtp-table tbody th,.mtp-table td,.mtp-table .gain { font-size:11px }
   .qwen38-conditions,.qwen38-precision { font-size:11px }
 }
 

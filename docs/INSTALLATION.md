@@ -128,7 +128,12 @@ Two lock directories guard installations. An interrupted CLI install can leave `
 On a configured build Mac, commit the intended source and run:
 
 ```sh
-uv run --no-project --python 3.13.13 python scripts/build_distribution.py --version VERSION
+uv run --no-project --python 3.13.13 python scripts/build_distribution.py --version 0.0.0-dev.BUILD
 ```
 
 Output goes to the ignored `artifacts/distributions/` directory: the archive, its `.sha256` and `install.sh`. The builder compiles the scorer with `--features optimized` and the generator without it in separate Cargo invocations, checks arm64 architecture, system-only dynamic libraries, model-free worker replies, relocated Python imports and converter entry points, and writes a manifest of source identity, lockfiles, configuration and file hashes. `--allow-dirty` builds an explicitly marked development bundle; `--cli-only` omits the app. Independent builds are not byte-identical, so every build needs its own version. Signing, notarization and publication are described in [releasing](RELEASING.md).
+
+Replace `BUILD` with a unique build identifier. Local archives require a
+development/prerelease suffix; bare release versions are reserved for the release
+workflows. The app displays **Development build NUMBER**, records its numeric
+build separately and always offers the latest compatible stable update.

@@ -160,7 +160,8 @@ def verify_release(app: Path, version: str) -> str:
     digest = installer.validate(app)
     info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
     installer.require(
-        info.get("CFBundleShortVersionString") == version,
+        info.get("CFBundleShortVersionString") == version
+        and info.get("StarkBuildChannel") in (None, "stable"),
         "update version does not match release",
     )
     requirement = (

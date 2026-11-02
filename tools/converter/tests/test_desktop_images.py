@@ -9,6 +9,7 @@ from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 from stark_convert.chat import ChatCancelled, ChatImageError, Worker
 from stark_convert.desktop import Desktop
+from stark_convert.generation_eta import GenerationEstimates
 from stark_convert.local_api import APIError
 from stark_convert.media import PrivateMediaStore
 from stark_convert.vision_contract import REPO, REVISION
@@ -108,6 +109,7 @@ def make_desktop(worker):
     desktop.epoch = 1
     desktop.job = None
     desktop.worker = worker
+    desktop.generation_estimates = GenerationEstimates()
     desktop.active_model = "private-model-id"
     desktop.active_mode = "chat"
     desktop.codec = {"bos_token": "", "eos_token": "", "default_system_prompt": None}
@@ -394,7 +396,7 @@ def test_buffered_stream_delta_is_fenced_after_dispatch(kind, change, buffered_w
     try:
         with pytest.raises(APIError) as error:
             desktop.api_complete(stream_payload(kind), on_delta=deltas.append)
-        assert error.value.code == "request_cancelled"
+        assert error.value.status == 503 and error.value.code == "model_changed"
         assert deltas == []
         assert worker.cancelled_requests
         assert worker.generation_terminals == 1
@@ -428,7 +430,7 @@ def test_old_stream_fatal_cleanup_preserves_replacement_worker(buffered_worker):
     try:
         with pytest.raises(APIError) as error:
             desktop.api_complete(payload(stream=True), on_delta=lambda _text: pytest.fail("stale delta"))
-        assert error.value.code == "generation_failed"
+        assert error.value.status == 503 and error.value.code == "model_changed"
         assert worker.generation_terminals == 1 and worker.closed
         assert desktop.worker is replacement and not replacement.closed
         assert desktop.api_complete(payload())["usage"]["prompt_tokens"] == 17
@@ -477,7 +479,7 @@ def test_stream_delivery_holds_epoch_lock_until_callback_returns(buffered_worker
         stopper.join(2)
         assert not request.is_alive() and not stopper.is_alive()
         assert stopped.is_set() and desktop.epoch == 2
-        assert errors in ([], ["request_stopped"])
+        assert errors in ([], ["model_changed"])
     finally:
         release.set()
         request.join(2)

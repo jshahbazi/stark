@@ -1,0 +1,14 @@
+{
+  "files_sha256": {
+    "LICENSE": "9bccbc28796f30661b7ac0d4f67d936f2ab276a6cb4d5d635f8f29b4c7919a8a",
+    "connector.js": "debd8389fdc8e71a10c0f7f73469bae779c11bb068b457d449063e15f32b1d34",
+    "index.js": "190a30e2c50b421af597f91420d7115d9d61e967ee6ae71465070536069f40da",
+    "package.json": "408387a6b59c5d182d76faeb3dcd6ce602f7debf6b83f7dc459479f71843f9d4",
+    "protocol.js": "7c47f64d98df1e96bca4600836a67c2e0ed9dd7a8e30dac3c75a4be536f0dbf1",
+    "server.js": "536198c335ba229d4230f082d27f1eb866326af152c495344dc11102e2d09d08"
+  },
+  "protocol_version": 1,
+  "repository": "https://github.com/jshahbazi/stark-openwork",
+  "revision": "a5534db0526e08c9b9b4df12825c9da7117cae86",
+  "schema_version": 1
+}

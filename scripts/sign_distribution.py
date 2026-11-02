@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 import build_distribution as distribution
@@ -30,6 +31,11 @@ APPLICATION = "app/Stark.app"
 APPLICATION_ID = "com.starkengine.menubar"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 REVISION = re.compile(r"[0-9a-f]{40}\Z")
+STABLE_VERSION = re.compile(r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}\Z")
+DEVELOPMENT_VERSION = re.compile(
+    r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}(?:[.-][A-Za-z0-9]+)+\Z"
+)
+BUILD_NUMBER = re.compile(r"[1-9][0-9]{0,19}\Z")
 MACHO_MAGIC = {
     b"\xcf\xfa\xed\xfe",
     b"\xfe\xed\xfa\xcf",
@@ -342,14 +348,37 @@ def application(bundle: Path) -> Path | None:
     return app
 
 
-def prepare_application_version(bundle: Path, version: str) -> None:
+def prepare_application_version(
+    bundle: Path, version: str, *, development: bool
+) -> None:
     app = application(bundle)
     if app is None:
         return
     plist = app / "Contents/Info.plist"
     metadata = plistlib.loads(plist.read_bytes())
-    metadata["CFBundleShortVersionString"] = version
-    metadata["CFBundleVersion"] = ".".join(version.split(".")[:3]).split("-")[0]
+    if development:
+        require(
+            DEVELOPMENT_VERSION.fullmatch(version) is not None,
+            "development_version_required",
+        )
+        build_number = metadata.get("CFBundleVersion")
+        if (
+            metadata.get("StarkBuildChannel") != "development"
+            or metadata.get("CFBundleShortVersionString") != "0.0.0"
+            or not isinstance(build_number, str)
+            or BUILD_NUMBER.fullmatch(build_number) is None
+        ):
+            build_number = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+        metadata["CFBundleShortVersionString"] = "0.0.0"
+        metadata["CFBundleVersion"] = build_number
+        metadata["StarkBuildChannel"] = "development"
+    else:
+        require(
+            STABLE_VERSION.fullmatch(version) is not None, "stable_version_required"
+        )
+        metadata["CFBundleShortVersionString"] = version
+        metadata["CFBundleVersion"] = version
+        metadata["StarkBuildChannel"] = "stable"
     plist.write_bytes(plistlib.dumps(metadata, sort_keys=True))
     (app / "Contents/Resources/runtime/share/stark/VERSION").write_text(version + "\n")
 
@@ -383,6 +412,12 @@ def refresh_application_manifest(bundle: Path, identity: dict[str, str]) -> None
         "manifest_sha256": distribution.sha256(runtime_manifest_path),
         "certificate_sha1": identity["sha1"],
         "team_id": identity["team_id"],
+    }
+    metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    manifest["signed_application"] = {
+        "application_version": metadata["CFBundleShortVersionString"],
+        "build_number": metadata["CFBundleVersion"],
+        "build_channel": metadata["StarkBuildChannel"],
     }
     manifest["signed_overlays_sha256"] = {
         name: distribution.sha256(runtime / relative_path(name))
@@ -535,6 +570,15 @@ def publish(outputs: list[tuple[Path, Path]]) -> None:
 
 def sign(options: argparse.Namespace) -> dict:
     require(
+        (DEVELOPMENT_VERSION if options.sign_only else STABLE_VERSION).fullmatch(
+            options.version
+        )
+        is not None,
+        "development_version_required"
+        if options.sign_only
+        else "stable_version_required",
+    )
+    require(
         platform.system() == "Darwin" and platform.machine() == "arm64",
         "signing_requires_apple_silicon_macos",
     )
@@ -573,7 +617,9 @@ def sign(options: argparse.Namespace) -> dict:
         )
         identity = resolve_identity(options.sign_identity, options.keychain, env)
         (bundle / "share/stark/VERSION").write_text(options.version + "\n")
-        prepare_application_version(bundle, options.version)
+        prepare_application_version(
+            bundle, options.version, development=options.sign_only
+        )
         signed_paths = sign_bundle(bundle, identity, options.keychain, env)
         try:
             distribution.verify_relocation(bundle, env)

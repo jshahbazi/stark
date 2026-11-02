@@ -42,7 +42,7 @@ jobs:
           case "$STARK_RELEASE_VERSION" in
             ''|*[!0-9A-Za-z.-]*) echo 'Invalid release version.' >&2; exit 1 ;;
           esac
-          printf '%s\n' "$STARK_RELEASE_VERSION" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9]+)*$'
+          printf '%s\n' "$STARK_RELEASE_VERSION" | LC_ALL=C grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
           test "$GITHUB_REF" = "refs/tags/v$STARK_RELEASE_VERSION"
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$(git rev-parse "refs/tags/v$STARK_RELEASE_VERSION^{commit}")" = "$GITHUB_SHA"
@@ -67,7 +67,7 @@ jobs:
         run: |
           set -euo pipefail
           uv run --no-project --python 3.13.13 python scripts/build_distribution.py \
-            --version "$STARK_RELEASE_VERSION"
+            --version "$STARK_RELEASE_VERSION" --release-input
       - name: Verify standalone installation without a model
         run: |
           set -euo pipefail

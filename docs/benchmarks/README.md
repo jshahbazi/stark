@@ -16,6 +16,16 @@ records the 389-check aggregate audit, timing conventions and machine-readable
 results. The earlier [58.13/60.95 baseline](QWEN38_SAME_CHECKPOINT_STARK_MLX_SERVE_2026_10_30.md)
 is retained unchanged.
 
+**Qwen3.8 exact MTP, two checkpoint packs (2026-10-31).** At 4K input and
+256 sampled outputs with top-k 20, two drafts, and exact sampling, the optimized
+Lily path measured **82.85 tok/s on vs 72.97 off** (+13.54%, 16/16 paired wins).
+The official mixed-4/8-bit checkpoint measured **65.02 vs 56.69 tok/s**
+(+14.69%, 16/16 wins). These are within-checkpoint Stark MTP on/off results,
+not a new MLX comparison; the two weight packs remain separate. Lily nucleus
+sampling gained 1.70%. MTP remains off by default, and these bounded runs do
+not establish a general throughput floor. See the [Lily report](QWEN38_MTP_COMBINATION_2026_10_31.md)
+and [official-checkpoint report](QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md).
+
 **Earlier Qwen3.8 comparison, different quantization profiles (2026-10-30).**
 The Lily-format Stark checkpoint peaked at 79.52 tok/s against 61.00 for the
 official MLX pack. Its [source-bound report](QWEN38_STARK_MLX_SERVE_2026_10_30.md)
@@ -111,8 +121,8 @@ rejected, inconclusive and deferred outcomes with source and evidence links.
 
 | Study | Outcome |
 | --- | --- |
-| [Qwen3.8 mixed-4-8bit exact batched MTP](QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md) | Same MLX-Serve checkpoint: 65.02 tok/s on versus 56.69 off (+14.69%, 16/16 paired wins); separate original non-MTP worker ABBA +10.88%; quantization and exact sampling preserved; absolute rates drift and 77–80 tok/s remains unmet |
-| [Qwen3.8 MTP with the optimized Metal branch](QWEN38_MTP_COMBINATION_2026_10_31.md) | Current Lily long run: 82.85 tok/s on versus 72.97 off across 16 pairs, all MTP requests at least 78.61; nucleus gains 1.70%; earlier official serial MTP is slower; original 78.33 implementation preserved |
+| [Qwen3.8 mixed-4/8-bit exact batched MTP](QWEN38_OFFICIAL_BATCHED_MTP_2026_10_31.md) | Same MLX-Serve checkpoint: 65.02 tok/s on versus 56.69 off (+14.69%, 16/16 paired wins); separate original non-MTP worker ABBA +10.88%; quantization and exact sampling preserved; absolute rates drift and 77–80 tok/s remains unmet |
+| [Qwen3.8 MTP with the optimized Metal branch](QWEN38_MTP_COMBINATION_2026_10_31.md) | Lily: 82.85 tok/s on versus 72.97 off (+13.54%, 16/16 wins); nucleus +1.70%; results are Stark on/off within each distinct checkpoint, not an MLX comparison; MTP remains off by default |
 | [Qwen3.8 matched-checkpoint Metal optimization](QWEN38_MATCHED_OPTIMIZATION_2026_10_30.md) | Same-checkpoint maximum 66.81 vs 61.17 tok/s (+9.21%), no speculation; exact stock component controls and retained Lily parity; 77–80 tok/s and whole-model quality equivalence remain unestablished |
 | [Qwen3.8 converted-format speed](QWEN38_UZU_SPEED_2026_10_30.md) | NEON affine restoration reduces median process-to-ready time from 20.54 to 18.09 seconds; exact nucleus-prefix work and sampled controls retain quantization; consistent 77–80 tok/s remains unqualified |
 | [Qwen3.8 Uzu conversion and generation](QWEN38_UZU_FORMAT_2026_10_29.md) | Full quantization-preserving conversion, self-contained load and exact readout/sample parity; paired timing series has substantial throughput drift |

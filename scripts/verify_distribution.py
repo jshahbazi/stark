@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import plistlib
+import re
 import subprocess
 import sys
 import tarfile
@@ -44,6 +45,52 @@ def run(
     )
     require(result.returncode == expected, "command_failed")
     return result
+
+
+def verify_application_version(
+    metadata: dict,
+    version: str,
+    *,
+    require_notarized: bool,
+    release_input: bool = False,
+) -> None:
+    """Check the delivered app channel without treating archive labels as releases."""
+    channel = metadata.get("StarkBuildChannel")
+    short_version = metadata.get("CFBundleShortVersionString")
+    if channel == "development":
+        build_number = metadata.get("CFBundleVersion")
+        valid = (
+            not require_notarized
+            and (
+                re.fullmatch(
+                    r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}(?:[.-][A-Za-z0-9]+)+",
+                    version,
+                )
+                is not None
+                or (
+                    release_input
+                    and re.fullmatch(
+                        r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}",
+                        version,
+                    )
+                    is not None
+                )
+            )
+            and short_version == "0.0.0"
+            and isinstance(build_number, str)
+            and re.fullmatch(r"[1-9][0-9]{0,19}", build_number) is not None
+        )
+    else:
+        # Previously published releases predate the explicit channel marker.
+        valid = (
+            channel in (None, "stable")
+            and re.fullmatch(
+                r"(?:0|[1-9][0-9]{0,8})(?:\.(?:0|[1-9][0-9]{0,8})){2}", version
+            )
+            is not None
+            and short_version == version
+        )
+    require(valid, "application_version")
 
 
 def verify(
@@ -130,9 +177,14 @@ def verify(
             metadata = plistlib.loads((app / "Contents/Info.plist").read_bytes())
             require(
                 metadata.get("CFBundleIdentifier") == "com.starkengine.menubar"
-                and metadata.get("CFBundleExecutable") == "Stark"
-                and metadata.get("CFBundleShortVersionString") == version.split("-")[0],
+                and metadata.get("CFBundleExecutable") == "Stark",
                 "application_identity",
+            )
+            verify_application_version(
+                metadata,
+                version,
+                require_notarized=require_notarized,
+                release_input=manifest.get("build", {}).get("release_input") is True,
             )
             from build_distribution import file_manifest
 

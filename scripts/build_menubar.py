@@ -19,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+import urllib.error
+import urllib.request
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,6 +31,18 @@ MIN_MACOS = "26.4"
 RUNTIME_MANIFEST = Path("share/stark/manifest.json")
 PYTHON = Path("libexec/python/bin/python3.13")
 CONVERTER = Path("libexec/python/lib/python3.13/site-packages/stark_convert")
+OPENWORK_CONNECTOR_LOCK = ROOT / "apps/menu-bar/Resources/OpenWorkConnector.lock.json"
+OPENWORK_CONNECTOR_REPOSITORY = "https://github.com/jshahbazi/stark-openwork"
+OPENWORK_CONNECTOR_FILES = (
+    "package.json",
+    "index.js",
+    "server.js",
+    "connector.js",
+    "protocol.js",
+    "LICENSE",
+)
+MAX_CONNECTOR_FILE_BYTES = 256 * 1024
+MAX_CONNECTOR_TOTAL_BYTES = 1024 * 1024
 
 
 class BuildError(Exception):
@@ -41,6 +55,298 @@ def sha256(path: Path) -> str:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def read_openwork_connector_lock(path: Path | None = None) -> dict:
+    """Accept only a fixed first-party source and a complete immutable pin."""
+    path = path or OPENWORK_CONNECTOR_LOCK
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+        info = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or info.st_size > 16 * 1024
+        ):
+            raise ValueError
+        data = bytearray()
+        while True:
+            block = os.read(descriptor, 16 * 1024 + 1 - len(data))
+            if not block:
+                break
+            data.extend(block)
+            if len(data) > 16 * 1024:
+                raise ValueError
+        after = os.fstat(descriptor)
+        if (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or len(data) != info.st_size:
+            raise ValueError
+        lock = json.loads(data, object_pairs_hook=unique_object)
+        if not isinstance(lock, dict) or set(lock) != {
+            "schema_version",
+            "protocol_version",
+            "repository",
+            "revision",
+            "files_sha256",
+        }:
+            raise ValueError
+        if (
+            type(lock["schema_version"]) is not int
+            or lock["schema_version"] != 1
+            or type(lock["protocol_version"]) is not int
+            or lock["protocol_version"] != 1
+            or lock["repository"] != OPENWORK_CONNECTOR_REPOSITORY
+            or not isinstance(lock["files_sha256"], dict)
+        ):
+            raise ValueError
+        files = lock["files_sha256"]
+        if not set(files).issubset(OPENWORK_CONNECTOR_FILES) or any(
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+            for value in files.values()
+        ):
+            raise ValueError
+        revision = lock["revision"]
+        if revision is not None and (
+            not isinstance(revision, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", revision)
+            or set(files) != set(OPENWORK_CONNECTOR_FILES)
+        ):
+            raise ValueError
+        return {**lock, "lock_sha256": hashlib.sha256(data).hexdigest()}
+    except (OSError, ValueError, TypeError, UnicodeError):
+        raise BuildError("openwork_connector_lock_invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _read_openwork_connector_file(directory: int, name: str) -> bytes:
+    if name not in OPENWORK_CONNECTOR_FILES:
+        raise BuildError("openwork_connector_source_invalid")
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_mode & 0o133
+            or before.st_size < 1
+            or before.st_size > MAX_CONNECTOR_FILE_BYTES
+        ):
+            raise ValueError
+        data = bytearray()
+        while True:
+            block = os.read(
+                descriptor, min(8192, MAX_CONNECTOR_FILE_BYTES + 1 - len(data))
+            )
+            if not block:
+                break
+            data.extend(block)
+            if len(data) > MAX_CONNECTOR_FILE_BYTES:
+                raise ValueError
+        after = os.fstat(descriptor)
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ) or len(data) != before.st_size:
+            raise ValueError
+        return bytes(data)
+    except (OSError, ValueError):
+        raise BuildError("openwork_connector_source_invalid") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _download_openwork_connector_file(revision: str, name: str) -> bytes:
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    if (
+        not re.fullmatch(r"[0-9a-f]{40}", revision)
+        or name not in OPENWORK_CONNECTOR_FILES
+    ):
+        raise BuildError("openwork_connector_download_failed")
+    url = (
+        f"https://raw.githubusercontent.com/jshahbazi/stark-openwork/{revision}/{name}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Stark-application-builder",
+            "Accept": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.build_opener(NoRedirect()).open(
+            request, timeout=30
+        ) as response:
+            if response.status != 200 or response.geturl() != url:
+                raise ValueError
+            size = response.headers.get("Content-Length")
+            if size is not None and not 1 <= int(size) <= MAX_CONNECTOR_FILE_BYTES:
+                raise ValueError
+            data = response.read(MAX_CONNECTOR_FILE_BYTES + 1)
+            if not 1 <= len(data) <= MAX_CONNECTOR_FILE_BYTES:
+                raise ValueError
+            return data
+    except (OSError, ValueError, urllib.error.URLError):
+        raise BuildError("openwork_connector_download_failed") from None
+
+
+def install_openwork_connector(
+    resources: Path,
+    *,
+    source: Path | None = None,
+    allow_development: bool = False,
+    lockfile: Path | None = None,
+) -> dict:
+    """Bundle only public, reviewed connector files; never execute package scripts."""
+    lock_path = lockfile or OPENWORK_CONNECTOR_LOCK
+    lock = read_openwork_connector_lock(lock_path)
+    pinned = lock["revision"] is not None
+    if allow_development and source is None:
+        raise BuildError("openwork_connector_development_source_required")
+    if not pinned and not (source is not None and allow_development):
+        raise BuildError("openwork_connector_lock_unpinned")
+    payload: dict[str, bytes] = {}
+    if source is not None:
+        directory = -1
+        try:
+            source = source.expanduser().absolute()
+            if ".." in source.parts or source.is_symlink():
+                raise ValueError
+            directory = os.open(
+                source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+            )
+            info = os.fstat(directory)
+            if info.st_mode & 0o022:
+                raise ValueError
+            payload = {
+                name: _read_openwork_connector_file(directory, name)
+                for name in OPENWORK_CONNECTOR_FILES
+            }
+        except (OSError, ValueError):
+            raise BuildError("openwork_connector_source_invalid") from None
+        finally:
+            if directory >= 0:
+                os.close(directory)
+    else:
+        payload = {
+            name: _download_openwork_connector_file(lock["revision"], name)
+            for name in OPENWORK_CONNECTOR_FILES
+        }
+    if sum(map(len, payload.values())) > MAX_CONNECTOR_TOTAL_BYTES:
+        raise BuildError("openwork_connector_source_invalid")
+    hashes = {name: hashlib.sha256(data).hexdigest() for name, data in payload.items()}
+    if pinned and hashes != lock["files_sha256"]:
+        raise BuildError("openwork_connector_hash_mismatch")
+    try:
+        for data in payload.values():
+            if b"\0" in data:
+                raise ValueError
+            data.decode("utf-8")
+        package = json.loads(payload["package.json"])
+        if (
+            not isinstance(package, dict)
+            or package.get("name") != "@stark/openwork-provider"
+            or package.get("type") != "module"
+            or package.get("main") != "./server.js"
+            or package.get("exports") != {".": "./index.js", "./server": "./server.js"}
+            or any(
+                package.get(name)
+                for name in ("dependencies", "optionalDependencies", "peerDependencies")
+            )
+        ):
+            raise ValueError
+    except (ValueError, TypeError, UnicodeError):
+        raise BuildError("openwork_connector_package_invalid") from None
+    target = resources / "OpenWorkConnector"
+    if (
+        resources.is_symlink()
+        or not resources.is_dir()
+        or target.exists()
+        or target.is_symlink()
+    ):
+        raise BuildError("openwork_connector_destination_invalid")
+    target_descriptor = -1
+    target_identity = None
+    try:
+        target.mkdir(mode=0o755)
+        target_descriptor = os.open(
+            target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        target_identity = os.fstat(target_descriptor)
+        for name, data in payload.items():
+            destination = target / name
+            destination.write_bytes(data)
+            destination.chmod(0o644)
+    except OSError:
+        try:
+            current = target.lstat()
+            if (
+                target_identity is not None
+                and stat.S_ISDIR(current.st_mode)
+                and (current.st_dev, current.st_ino)
+                == (target_identity.st_dev, target_identity.st_ino)
+            ):
+                shutil.rmtree(target)
+        except OSError:
+            pass
+        raise BuildError("openwork_connector_copy_failed") from None
+    finally:
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+    return {
+        "repository": OPENWORK_CONNECTOR_REPOSITORY,
+        "revision": lock["revision"],
+        "protocol_version": lock["protocol_version"],
+        "development_override": not pinned,
+        "source_mode": "local" if source is not None else "download",
+        "lock_sha256": lock["lock_sha256"],
+        "files_sha256": hashes,
+        "resources_sha256": {
+            f"OpenWorkConnector/{name}": digest for name, digest in hashes.items()
+        },
+    }
 
 
 def run(command: list[str], stage: str) -> str:
@@ -71,16 +377,23 @@ def read_plist(path: Path) -> dict:
         raise BuildError("app_metadata_invalid") from None
 
 
-def set_application_version(info: dict, version: str | None) -> None:
-    """Use a release's numeric version in Apple bundle metadata when supplied."""
-    if version is None:
-        info["CFBundleVersion"] = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
-        return
-    match = re.fullmatch(r"([0-9]+\.[0-9]+\.[0-9]+)(?:[.-][A-Za-z0-9]+)*", version)
-    if match is None:
+def set_application_version(
+    info: dict, version: str | None, build_number: str | None = None
+) -> None:
+    """Keep local build identity separate from versions reserved for releases."""
+    if (
+        version is not None
+        and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[.-][A-Za-z0-9]+)*", version)
+        is None
+    ):
         raise BuildError("application_version_invalid")
-    info["CFBundleShortVersionString"] = match.group(1)
-    info["CFBundleVersion"] = match.group(1)
+    if build_number is None:
+        build_number = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    if re.fullmatch(r"[1-9][0-9]{0,19}", build_number) is None:
+        raise BuildError("application_build_number_invalid")
+    info["CFBundleShortVersionString"] = "0.0.0"
+    info["CFBundleVersion"] = build_number
+    info["StarkBuildChannel"] = "development"
 
 
 def verify_runtime(runtime: Path) -> dict:
@@ -712,6 +1025,11 @@ def build(options: argparse.Namespace) -> Path:
         executable.parent.mkdir(parents=True)
         resources = contents / "Resources"
         resources.mkdir()
+        openwork_connector = install_openwork_connector(
+            resources,
+            source=getattr(options, "openwork_connector", None),
+            allow_development=getattr(options, "allow_development_connector", False),
+        )
         for helper in ("update_app.py", "install_app.py"):
             shutil.copy2(ROOT / "scripts" / helper, resources / helper)
         embedded = resources / "runtime"
@@ -733,7 +1051,11 @@ def build(options: argparse.Namespace) -> Path:
             )
         make_icon(artwork, resources, temporary)
         info = read_plist(source_directory / "Info.plist")
-        set_application_version(info, getattr(options, "version", None))
+        set_application_version(
+            info,
+            getattr(options, "version", None),
+            getattr(options, "build_number", None),
+        )
         with (contents / "Info.plist").open("wb") as stream:
             plistlib.dump(info, stream)
         run(
@@ -800,6 +1122,9 @@ def build(options: argparse.Namespace) -> Path:
             "application_id": APP_ID,
             "minimum_macos": MIN_MACOS,
             "distribution_version": getattr(options, "version", None),
+            "application_version": info["CFBundleShortVersionString"],
+            "build_number": info["CFBundleVersion"],
+            "build_channel": info["StarkBuildChannel"],
             "source": source_identity(),
             "base_runtime": {
                 "manifest_sha256": sha256(runtime / RUNTIME_MANIFEST),
@@ -832,15 +1157,23 @@ def build(options: argparse.Namespace) -> Path:
                 "requirements_sha256": desktop_dependencies["requirements_sha256"],
                 "requirement_file": "menu-bar-python-requirements.txt",
             },
+            "openwork_connector": {
+                key: value
+                for key, value in openwork_connector.items()
+                if key != "resources_sha256"
+            },
             "resources_sha256": {
-                name: sha256(resources / name)
-                for name in (
-                    "Stark.jpg",
-                    "MenuBarTemplate.png",
-                    "Stark.icns",
-                    "update_app.py",
-                    "install_app.py",
-                )
+                **{
+                    name: sha256(resources / name)
+                    for name in (
+                        "Stark.jpg",
+                        "MenuBarTemplate.png",
+                        "Stark.icns",
+                        "update_app.py",
+                        "install_app.py",
+                    )
+                },
+                **openwork_connector["resources_sha256"],
             },
             "executable_before_signing_sha256": sha256(executable),
             "validation": {
@@ -853,6 +1186,10 @@ def build(options: argparse.Namespace) -> Path:
                 "converter_toolchain_provenance": "passed",
                 "desktop_entrypoint": "passed",
                 "image_attachment_imports_and_entrypoint": "passed",
+                "openwork_connector_resources": "passed",
+                "openwork_connector_lock": "development_override"
+                if openwork_connector["development_override"]
+                else "passed",
                 "model_loaded": False,
             },
             "signature": "local ad-hoc; no Developer ID signature or notarization",
@@ -932,9 +1269,24 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         help="Optional source-bound build record for a development scoring worker",
     )
+    parser.add_argument(
+        "--openwork-connector",
+        type=Path,
+        help="Local first-party connector source; pinned hashes are verified",
+    )
+    parser.add_argument(
+        "--allow-development-connector",
+        action="store_true",
+        help="Allow local connector source while its lock is explicitly unpinned; records a development override",
+    )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/menu-bar")
     parser.add_argument(
-        "--version", help="distribution version to record in the application bundle"
+        "--version",
+        help="archive identifier recorded in build provenance; app stays a development build",
+    )
+    parser.add_argument(
+        "--build-number",
+        help="positive numeric local build identifier (default: UTC timestamp with microseconds)",
     )
     parser.add_argument(
         "--install",

@@ -14,6 +14,30 @@ gh workflow run signed-release.yml --ref main -f bump=patch
 
 The workflow selects the highest stable `vMAJOR.MINOR.PATCH` Git tag or Cargo workspace version, then applies the selected bump. For example, a baseline of `0.1.2` produces `1.0.0`, `0.2.0` or `0.1.3`. Prerelease tags are excluded. All stable tags count, including tags belonging to drafts, so reserved versions are never reused. The selected version appears in the action log.
 
+Reserve release version increments for this publication process. Local apps and
+unsigned release inputs carry a separate numeric `CFBundleVersion`, use
+`CFBundleShortVersionString=0.0.0` and `StarkBuildChannel=development`, and display
+**Development build NUMBER**. The optional menu-bar builder `--version` is an
+archive provenance identifier; it cannot turn a local app into a release.
+Use `0.0.0-dev.COMMIT.BUILD` identifiers for local distribution archives.
+`--build-number NUMBER` can override the menu-bar builder's default UTC timestamp
+with microseconds. Never consume patch versions for local validation or upgrade
+test packages.
+
+The distribution builder and `--sign-only` signer reject bare stable output
+versions for local archives. The prebuilt release workflow passes
+`--release-input` to build an existing immutable stable tag; that explicit mode
+requires a clean checkout at the matching tag. Normal signed releases continue
+to build the selected `VERSION-unsigned` input and promote it during release
+signing.
+
+The normal signing and notarization path assigns the selected numeric release
+version and `StarkBuildChannel=stable` to the release candidate. Local
+`--sign-only` packages retain development identity. Signing records the delivered
+application metadata separately from its original build provenance. Development
+builds always offer the latest compatible stable release; their build numbers and
+archive identifiers cannot suppress stable updates.
+
 The workflow builds `stark-VERSION-unsigned-aarch64-apple-darwin.tar.gz` from the exact dispatched `main` commit, including the CLI and `Stark.app`; it verifies that combined archive before importing credentials. After signing and verification succeed, the separate publishing job creates `vVERSION` at that same commit, uploads the verified assets and publishes the release with `--latest`. No manual tag or publication step is required. An existing tag or release causes publication to fail; tags and assets are never overwritten. A failure after tag creation leaves that version reserved; a fresh dispatch selects the next version. Never move a published tag or replace published archive bytes.
 
 The `macos-release` environment is restricted to protected branches. It contains these six secrets:

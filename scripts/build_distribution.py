@@ -78,6 +78,39 @@ def validate_version(value: str) -> str:
     return value
 
 
+def validate_build_version(
+    version: str,
+    *,
+    release_input: bool,
+    source: dict[str, object],
+    environment: dict[str, str],
+) -> None:
+    """Reserve bare release identifiers for clean, explicitly tagged inputs."""
+    stable = re.fullmatch(r"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}", version)
+    if not release_input:
+        if (
+            VERSION.fullmatch(version) is None
+            or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version) is not None
+        ):
+            raise BuildError(
+                "development_version_suffix_required: use an identifier such as 0.0.0-dev.COMMIT.BUILD"
+            )
+        return
+    if stable is None or source.get("dirty") is not False:
+        raise BuildError("release_input_requires_stable_version_and_clean_source")
+    tagged_revision = (
+        run(
+            ["git", "rev-parse", "--verify", f"refs/tags/v{version}^{{commit}}"],
+            "release_input_tag",
+            environment,
+        )
+        .stdout.decode()
+        .strip()
+    )
+    if tagged_revision != source["revision"]:
+        raise BuildError("release_input_tag_does_not_match_source")
+
+
 def clean_environment() -> dict[str, str]:
     environment = os.environ.copy()
     # Do not let a developer environment supply Python modules, native flags or
@@ -957,6 +990,12 @@ def build(options: argparse.Namespace) -> Path:
     if uv_version[:2] != ["uv", UV_VERSION]:
         raise BuildError("build_requires_uv_0_12_24")
     source = source_provenance(environment, options.allow_dirty)
+    validate_build_version(
+        options.version,
+        release_input=getattr(options, "release_input", False),
+        source=source,
+        environment=environment,
+    )
     output_directory = options.output_dir.resolve()
     # Keep generated artifacts in an ignored repository tree by default. An
     # explicit path is useful to maintainers preparing a local release handoff.
@@ -998,6 +1037,7 @@ def build(options: argparse.Namespace) -> Path:
             "minimum_macos": MIN_MACOS,
             "source": source,
             "build": {
+                "release_input": getattr(options, "release_input", False),
                 "rust": RUST_VERSION,
                 "uv": UV_VERSION,
                 "python": PYTHON_VERSION,
@@ -1057,7 +1097,12 @@ def main() -> int:
         "--version",
         required=True,
         type=validate_version,
-        help="immutable bundle version, e.g. 0.1.0-preview.1",
+        help="immutable development identifier, e.g. 0.0.0-dev.COMMIT.BUILD",
+    )
+    parser.add_argument(
+        "--release-input",
+        action="store_true",
+        help="allow a bare stable version only for clean source at its existing vVERSION tag",
     )
     parser.add_argument(
         "--output-dir", type=Path, default=ROOT / "artifacts" / "distributions"
