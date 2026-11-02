@@ -1,0 +1,449 @@
+diff --git a/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs b/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs
+index d5fc152863a75241f08d9c4f3a671c95306307a3..92aa6a4ef0e51cd1b8656cea0139c9f50df1e90d 100644
+--- a/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs
++++ b/crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs
+@@ -393,7 +393,11 @@ fn probe() -> Result<Value> {
+         Ok("0") | Err(std::env::VarError::NotPresent) => false,
+         _ => return Err(Error::Invalid("MTP FFN wait policy")),
+     };
++    if ffn_poll || !matches!(std::env::var("STARK_GLM53_MTP_TEST_FFN_REPEAT_SAME_VIEWS").as_deref(), Ok("1")) {
++        return Err(Error::Invalid("MTP same-view FFN diagnostic requires blocking repeat policy"));
++    }
+     hp::configure_ffn_poll(ffn_poll);
++    hp::configure_same_view_repeat(true);
+     let path =
+         PathBuf::from(std::env::var_os("STARK_GLM53_MTP_PROBE_MODEL_PATH").ok_or(Error::Invalid("MTP model path"))?);
+     let config: Value = serde_json::from_slice(&std::fs::read(path.join("config.json"))?)
+@@ -592,6 +596,10 @@ fn probe() -> Result<Value> {
+     if comparisons == 0
+         || memory.selected_live_bytes_at_return != 0
+         || memory.selected_calls != memory.released_owner_checks
++        || memory.reuse.full_pairs != memory.selected_calls
++        || memory.reuse.bitwise_equal_pairs != memory.reuse.full_pairs
++        || memory.reuse.bitwise_compared_elements != memory.reuse.full_pairs * 4096
++        || memory.reuse.mismatched_elements != 0
+         || memory.sampled_metal_allocated_peak_bytes > memory.admitted_cap_bytes
+     {
+         return Err(Error::Invalid("MTP final memory gate"));
+@@ -600,9 +608,10 @@ fn probe() -> Result<Value> {
+     Ok(serde_json::json!({"glm_mtp_probe_result": true, "aggregate": {
+         "status": "component_probe_complete_no_speculative_runtime", "precision": "existing_safe_f32_graph_quant_weights_cpu_f32_router",
+         "source_convention": SOURCE, "memory_gauges": memory,
+-        "head_profile_schema": hp::SCHEMA, "head_profile_v5_wall_ms": head_profile_wall,
+-        "head_profile_v5_gpu_ms": head_profile_gpu, "head_profile_v5_calls": head_profile_calls,
++        "head_profile_schema": hp::SCHEMA, "head_profile_v6_wall_ms": head_profile_wall,
++        "head_profile_v6_gpu_ms": head_profile_gpu, "head_profile_v6_calls": head_profile_calls,
+         "ffn_wait_policy": hp::ffn_policy_name(),
++        "ffn_reuse_policy": hp::REUSE_POLICY, "ffn_reuse_diagnostic": memory.reuse,
+         "counts": {"cases": request.cases.len(), "prompt_rows": prompt_rows, "comparisons": comparisons, "agreements": agreement, "eos_cases": eos_cases,
+             "alignment_target_rows": 8, "alignment_cache_rows": 8, "alignment_chunk_groups": 3, "target_rollback_calls": 0},
+         "timing_ms": {"cold_full_head_wall_including_lazy_pipeline_compile": cold_full_head_ms,
+diff --git a/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs b/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs
+index c16ed40849ffdc41783acfaa5aa17d463b7bb129..996716856bee5f17f126a9511effc95c0ade8a2a 100644
+--- a/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs
++++ b/crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs
+@@ -7,8 +7,9 @@ use std::{
+     time::Instant,
+ };
+ 
+-pub(in crate::engine::hybrid) const SCHEMA: &str = "v5_warm_decode_ffn_wait_policy";
+-pub(in crate::engine::hybrid) const KEYS: [&str; 17] = [
++pub(in crate::engine::hybrid) const SCHEMA: &str = "v6_warm_decode_same_view_ffn_repeat";
++pub(in crate::engine::hybrid) const REUSE_POLICY: &str = "same_views_twice_blocking_return_first";
++pub(in crate::engine::hybrid) const KEYS: [&str; 25] = [
+     "head_total_inclusive",
+     "prepare",
+     "norm_mla_encode",
+@@ -26,6 +27,14 @@ pub(in crate::engine::hybrid) const KEYS: [&str; 17] = [
+     "ffn_submit_return_inclusive",
+     "ffn_commit_call_inclusive",
+     "ffn_wait_return_inclusive",
++    "ffn_first_compute_wait",
++    "ffn_repeat_compute_wait",
++    "ffn_first_submit_return_inclusive",
++    "ffn_repeat_submit_return_inclusive",
++    "ffn_first_commit_call_inclusive",
++    "ffn_repeat_commit_call_inclusive",
++    "ffn_first_wait_return_inclusive",
++    "ffn_repeat_wait_return_inclusive",
+ ];
+ 
+ #[repr(usize)]
+@@ -48,19 +57,27 @@ pub(in crate::engine::hybrid) enum Phase {
+     FfnFence,
+     FfnCommit,
+     FfnWait,
++    FfnFirst,
++    FfnRepeat,
++    FfnFirstFence,
++    FfnRepeatFence,
++    FfnFirstCommit,
++    FfnRepeatCommit,
++    FfnFirstWait,
++    FfnRepeatWait,
+ }
+ 
+ struct Stats {
+-    wall: [f64; 17],
+-    gpu: [f64; 17],
+-    calls: [usize; 17],
++    wall: [f64; 25],
++    gpu: [f64; 25],
++    calls: [usize; 25],
+ }
+ impl Default for Stats {
+     fn default() -> Self {
+         Self {
+-            wall: [0.0; 17],
+-            gpu: [0.0; 17],
+-            calls: [0; 17],
++            wall: [0.0; 25],
++            gpu: [0.0; 25],
++            calls: [0; 25],
+         }
+     }
+ }
+@@ -70,6 +87,48 @@ thread_local! {
+     static STATS: RefCell<Stats> = RefCell::new(Stats::default());
+     static IN_HEAD: Cell<bool> = const { Cell::new(false) };
+     static FFN_POLL: Cell<bool> = const { Cell::new(false) };
++    static FFN_REPEAT: Cell<bool> = const { Cell::new(false) };
++    static FFN_PASS: Cell<Option<FfnPass>> = const { Cell::new(None) };
++}
++
++#[derive(Clone, Copy)]
++pub(in crate::engine::hybrid) enum FfnPass {
++    First,
++    Repeat,
++}
++
++pub(in crate::engine::hybrid) fn configure_same_view_repeat(enabled: bool) {
++    FFN_REPEAT.with(|value| value.set(enabled));
++}
++
++pub(in crate::engine::hybrid) fn same_view_repeat_enabled() -> bool {
++    IN_HEAD.with(Cell::get) && FFN_REPEAT.with(Cell::get) && !FFN_POLL.with(Cell::get)
++}
++
++pub(in crate::engine::hybrid) struct FfnPassScope(Option<FfnPass>);
++
++pub(in crate::engine::hybrid) fn enter_ffn_pass(pass: FfnPass) -> FfnPassScope {
++    FfnPassScope(FFN_PASS.with(|value| value.replace(Some(pass))))
++}
++
++impl Drop for FfnPassScope {
++    fn drop(&mut self) {
++        FFN_PASS.with(|value| value.set(self.0));
++    }
++}
++
++pub(in crate::engine::hybrid) fn ffn_phase(
++    first: Phase,
++    repeat: Phase,
++) -> Span {
++    if !ACTIVE.with(Cell::get) {
++        return Span(None);
++    }
++    match FFN_PASS.with(Cell::get) {
++        Some(FfnPass::First) => phase(first),
++        Some(FfnPass::Repeat) => phase(repeat),
++        None => Span(None),
++    }
+ }
+ 
+ pub(in crate::engine::hybrid) fn configure_ffn_poll(enabled: bool) {
+@@ -173,3 +232,28 @@ fn mtp_ffn_poll_policy_is_head_scoped_and_restored_on_error() {
+     let _head = enter_head();
+     assert!(!poll_head_ffn(), "blocking test policy unexpectedly polls");
+ }
++
++#[stark_engine_macros::stark_test]
++fn mtp_same_view_repeat_and_pass_scopes_restore_on_error() {
++    configure_ffn_poll(false);
++    configure_same_view_repeat(true);
++    assert!(!same_view_repeat_enabled(), "repeat escaped head scope");
++    {
++        let _head = enter_head();
++        assert!(same_view_repeat_enabled(), "repeat missing in head");
++        configure_ffn_poll(true);
++        assert!(!same_view_repeat_enabled(), "repeat allowed polling");
++        configure_ffn_poll(false);
++        let _first = enter_ffn_pass(FfnPass::First);
++        let fail = || -> Result<(), ()> {
++            let _repeat = enter_ffn_pass(FfnPass::Repeat);
++            assert!(FFN_PASS.with(|value| matches!(value.get(), Some(FfnPass::Repeat))));
++            Err(())
++        };
++        assert!(fail().is_err());
++        assert!(FFN_PASS.with(|value| matches!(value.get(), Some(FfnPass::First))));
++    }
++    assert!(FFN_PASS.with(|value| value.get().is_none()), "pass leaked after error");
++    assert!(!same_view_repeat_enabled(), "repeat leaked after head");
++    configure_same_view_repeat(false);
++}
+diff --git a/crates/stark-engine/src/engine/hybrid/weight_metal.rs b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+index e1072db1e27baa428a31b89fc970a5f2a9e92026..2283ac151dc3718ef58c3d697ed76ccf419cefa8 100644
+--- a/crates/stark-engine/src/engine/hybrid/weight_metal.rs
++++ b/crates/stark-engine/src/engine/hybrid/weight_metal.rs
+@@ -1454,12 +1454,24 @@ impl Executor {
+         #[cfg(test)]
+         let mtp_fence_profile =
+             super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnFence);
++        #[cfg(test)]
++        let mtp_pass_fence_profile = super::weights::mtp_probe::head_profile::ffn_phase(
++            super::weights::mtp_probe::head_profile::Phase::FfnFirstFence,
++            super::weights::mtp_probe::head_profile::Phase::FfnRepeatFence,
++        );
+         let submit = profile::Scope::new("native.metal.submit");
+         #[cfg(test)]
+         let mtp_commit_profile =
+             super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnCommit);
++        #[cfg(test)]
++        let mtp_pass_commit_profile = super::weights::mtp_probe::head_profile::ffn_phase(
++            super::weights::mtp_probe::head_profile::Phase::FfnFirstCommit,
++            super::weights::mtp_probe::head_profile::Phase::FfnRepeatCommit,
++        );
+         command.commit();
+         #[cfg(test)]
++        drop(mtp_pass_commit_profile);
++        #[cfg(test)]
+         drop(mtp_commit_profile);
+         drop(submit);
+         let wait = profile::Scope::new("native.metal.wait");
+@@ -1467,6 +1479,11 @@ impl Executor {
+         let mtp_wait_profile =
+             super::weights::mtp_probe::head_profile::phase(super::weights::mtp_probe::head_profile::Phase::FfnWait);
+         #[cfg(test)]
++        let mtp_pass_wait_profile = super::weights::mtp_probe::head_profile::ffn_phase(
++            super::weights::mtp_probe::head_profile::Phase::FfnFirstWait,
++            super::weights::mtp_probe::head_profile::Phase::FfnRepeatWait,
++        );
++        #[cfg(test)]
+         if super::weights::mtp_probe::head_profile::poll_head_ffn() {
+             while !matches!(command.status(), MTLCommandBufferStatus::Completed | MTLCommandBufferStatus::Error) {
+                 std::thread::sleep(std::time::Duration::from_micros(20));
+@@ -1481,9 +1498,13 @@ impl Executor {
+         drop(execute);
+         profile::record("native.metal.gpu", command.gpu_end_time() - command.gpu_start_time(), 0);
+         #[cfg(test)]
++        drop(mtp_pass_wait_profile);
++        #[cfg(test)]
+         drop(mtp_wait_profile);
+         #[cfg(test)]
+         drop(mtp_fence_profile);
++        #[cfg(test)]
++        drop(mtp_pass_fence_profile);
+         let _readback = profile::Scope::bytes("native.metal.readback", dim * 4);
+         // SAFETY: the checked dim-sized shared output has completed its sole
+         // writer. All intermediate and mapped buffers remain owned above.
+diff --git a/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs b/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs
+index f1e16520b968921abfd9994be9870c4ba368407a..f5e238d2c89c1c3d48f576eb8edee80223c9b545 100644
+--- a/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs
++++ b/crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs
+@@ -9,8 +9,18 @@ use crate::engine::hybrid::weight_metal::{MappedOperation, allocated_bytes, mapp
+ pub(in crate::engine::hybrid) mod head_profile;
+ use head_profile::{Phase, phase};
+ 
++#[derive(Default, serde::Serialize)]
++pub(in crate::engine::hybrid) struct ReuseReceipt {
++    pub full_pairs: usize,
++    pub bitwise_equal_pairs: usize,
++    pub bitwise_compared_elements: usize,
++    pub mismatched_elements: usize,
++}
++
+ #[derive(Default, serde::Serialize)]
+ pub(in crate::engine::hybrid) struct Receipt {
++    #[serde(skip)]
++    pub reuse: ReuseReceipt,
+     pub selected_calls: usize,
+     pub selected_view_count_peak: usize,
+     pub selected_registered_peak_bytes: usize,
+@@ -35,6 +45,19 @@ pub(in crate::engine::hybrid) struct Receipt {
+     pub projected_production_cap_deficit_bytes: usize,
+ }
+ 
++fn require_equal_ffn_rows(
++    first: &[f32],
++    repeat: &[f32],
++) -> Result<()> {
++    if first.len() != 4096
++        || repeat.len() != 4096
++        || first.iter().zip(repeat).any(|(a, b)| !a.is_finite() || !b.is_finite() || a.to_bits() != b.to_bits())
++    {
++        return Err(Error::Invalid("MTP same-view FFN output mismatch"));
++    }
++    Ok(())
++}
++
+ impl Weights {
+     /// Fail before a selected view can enter bank_view's promotion branch.
+     fn mtp_probe_selected_mode(&self) -> Result<()> {
+@@ -217,7 +240,30 @@ impl Weights {
+         drop(mapping_profile);
+         self.mtp_probe_observe(extra, receipt)?;
+         let ffn_profile = phase(Phase::Ffn);
+-        let result = mapped_ffn(&operations, probabilities, 1.0, shared_gate, shared_up, Some((limit, limit)));
++        // Both stateless calls borrow the same operations and exact selected
++        // MappedSlice objects. Keep them owned until both final fences and the
++        // full F32 bitwise comparison have completed. Return only the first
++        // output so this diagnostic cannot alter the head's mathematical row.
++        let result = (|| {
++            if !head_profile::same_view_repeat_enabled() {
++                return Err(Error::Invalid("MTP same-view FFN diagnostic policy"));
++            }
++            let first = {
++                let _pass = head_profile::enter_ffn_pass(head_profile::FfnPass::First);
++                let _profile = phase(Phase::FfnFirst);
++                mapped_ffn(&operations, probabilities, 1.0, shared_gate, shared_up, Some((limit, limit)))?
++            };
++            let repeat = {
++                let _pass = head_profile::enter_ffn_pass(head_profile::FfnPass::Repeat);
++                let _profile = phase(Phase::FfnRepeat);
++                mapped_ffn(&operations, probabilities, 1.0, shared_gate, shared_up, Some((limit, limit)))?
++            };
++            receipt.reuse.full_pairs += 1;
++            require_equal_ffn_rows(&first, &repeat)?;
++            receipt.reuse.bitwise_equal_pairs += 1;
++            receipt.reuse.bitwise_compared_elements += 4096;
++            Ok(first)
++        })();
+         drop(ffn_profile);
+         let release_profile = phase(Phase::Release);
+         drop(operations);
+@@ -231,3 +277,17 @@ impl Weights {
+         result
+     }
+ }
++
++#[stark_engine_macros::stark_test]
++fn mtp_same_view_ffn_comparison_checks_all_f32_bits() {
++    let first = vec![0.0; 4096];
++    assert!(require_equal_ffn_rows(&first, &first).is_ok());
++    let mut changed = first.clone();
++    changed[4095] = -0.0;
++    assert!(require_equal_ffn_rows(&first, &changed).is_err());
++    changed[4095] = f32::from_bits(1);
++    assert!(require_equal_ffn_rows(&first, &changed).is_err());
++    changed[4095] = f32::NAN;
++    assert!(require_equal_ffn_rows(&changed, &changed).is_err());
++    assert!(require_equal_ffn_rows(&first[..4095], &first).is_err());
++}
+diff --git a/scripts/probe_glm53_mtp.py b/scripts/probe_glm53_mtp.py
+index 106a0d1223958c23b933c56547b1634d2be5eb4b..37531b863a7e355dbc38d17d06eaa764586b0495 100644
+--- a/scripts/probe_glm53_mtp.py
++++ b/scripts/probe_glm53_mtp.py
+@@ -24,6 +24,8 @@ from pathlib import Path
+ SCOPE = "glm53_mtp_one_step_probe"
+ MODEL_PATH_ENV = "STARK_GLM53_MTP_PROBE_MODEL_PATH"
+ FFN_POLL_ENV = "STARK_GLM53_MTP_TEST_FFN_POLL_WAIT"
++FFN_REPEAT_ENV = "STARK_GLM53_MTP_TEST_FFN_REPEAT_SAME_VIEWS"
++FFN_REUSE_POLICY = "same_views_twice_blocking_return_first"
+ TEST_NAME = b"stark_engine::engine::hybrid::glm::mtp_probe::glm_mtp_one_step_probe"
+ CONTINUATION_TOKENS = 8
+ CONTEXT_TOKENS = 256
+@@ -39,17 +41,22 @@ PROMPTS = (
+ AGGREGATE_KEYS = {
+     "status", "precision", "source_convention", "memory_gauges", "rows",
+     "timing_ms", "counts", "hashes",
+-    "head_profile_schema", "head_profile_v5_wall_ms", "head_profile_v5_gpu_ms", "head_profile_v5_calls",
+-    "ffn_wait_policy",
++    "head_profile_schema", "head_profile_v6_wall_ms", "head_profile_v6_gpu_ms", "head_profile_v6_calls",
++    "ffn_wait_policy", "ffn_reuse_policy", "ffn_reuse_diagnostic",
+ }
+-PROFILE_V5_SCHEMA = "v5_warm_decode_ffn_wait_policy"
+-PROFILE_V5_PHASES = {
++PROFILE_V6_SCHEMA = "v6_warm_decode_same_view_ffn_repeat"
++PROFILE_V6_PHASES = {
+     "head_total_inclusive", "prepare", "norm_mla_encode", "norm_mla_wait_readback",
+     "projection_blocking", "cpu_router", "selected_mapping_admission", "mapped_ffn_compute_wait",
+     "final_readout_encode", "final_readout_wait_readback", "validation_observe", "selected_owner_release",
+     "autorelease_drain", "projection_submit_return_inclusive", "ffn_submit_return_inclusive",
+     "ffn_commit_call_inclusive", "ffn_wait_return_inclusive",
++    "ffn_first_compute_wait", "ffn_repeat_compute_wait",
++    "ffn_first_submit_return_inclusive", "ffn_repeat_submit_return_inclusive",
++    "ffn_first_commit_call_inclusive", "ffn_repeat_commit_call_inclusive",
++    "ffn_first_wait_return_inclusive", "ffn_repeat_wait_return_inclusive",
+ }
++REUSE_KEYS = {"full_pairs", "bitwise_equal_pairs", "bitwise_compared_elements", "mismatched_elements"}
+ MEMORY_KEYS = {
+     "selected_calls", "selected_view_count_peak", "selected_registered_peak_bytes",
+     "selected_live_bytes_at_return", "released_owner_checks", "resident_bank_peak_bytes",
+@@ -79,6 +86,7 @@ FAILURE_GUARDS = {
+ }
+ BOOLEAN_EXECUTION_SELECTORS = (
+     FFN_POLL_ENV,
++    FFN_REPEAT_ENV,
+     "STARK_GLM53_ENCODER_BANKS",
+     "STARK_GLM53_RESIDENT_BANKS",
+     "STARK_GLM53_WIDE_ENCODER",
+@@ -165,9 +173,9 @@ def execution_selector_sha256() -> str:
+ 
+ def requested_ffn_wait_policy() -> str:
+     flag = os.environ.get(FFN_POLL_ENV, "0")
+-    if flag not in {"0", "1"}:
++    if flag != "0" or os.environ.get(FFN_REPEAT_ENV) != "1":
+         raise ProbeError("arguments")
+-    return "status_poll_then_final_wait" if flag == "1" else "blocking_final_wait"
++    return "blocking_final_wait"
+ 
+ 
+ def validate_aggregate(value: object) -> dict:
+@@ -205,20 +213,28 @@ def validate_aggregate(value: object) -> dict:
+                     or any(type(cell) is not int or cell < 0 for cell in row.values())
+                 ):
+                     raise ProbeError("test_result")
+-        elif key in {"head_profile_v5_wall_ms", "head_profile_v5_gpu_ms", "head_profile_v5_calls"}:
+-            if not isinstance(item, dict) or set(item) != PROFILE_V5_PHASES:
++        elif key in {"head_profile_v6_wall_ms", "head_profile_v6_gpu_ms", "head_profile_v6_calls"}:
++            if not isinstance(item, dict) or set(item) != PROFILE_V6_PHASES:
+                 raise ProbeError("test_result")
+-            if key == "head_profile_v5_calls":
++            if key == "head_profile_v6_calls":
+                 if any(type(cell) is not int or cell < 0 for cell in item.values()):
+                     raise ProbeError("test_result")
+             elif any(type(cell) not in (int, float) or not math.isfinite(cell) or cell < 0 for cell in item.values()):
+                 raise ProbeError("test_result")
+         elif key == "head_profile_schema":
+-            if item != PROFILE_V5_SCHEMA:
++            if item != PROFILE_V6_SCHEMA:
+                 raise ProbeError("test_result")
+         elif key == "ffn_wait_policy":
+             if item != requested_ffn_wait_policy():
+                 raise ProbeError("test_result")
++        elif key == "ffn_reuse_policy":
++            if item != FFN_REUSE_POLICY:
++                raise ProbeError("test_result")
++        elif key == "ffn_reuse_diagnostic":
++            if not isinstance(item, dict) or set(item) != REUSE_KEYS:
++                raise ProbeError("test_result")
++            if any(type(cell) is not int or cell < 0 for cell in item.values()):
++                raise ProbeError("test_result")
+         elif key in {"memory_gauges", "timing_ms", "counts", "hashes"}:
+             expected_map_keys = {
+                 "memory_gauges": MEMORY_KEYS,
+@@ -244,6 +260,24 @@ def validate_aggregate(value: object) -> dict:
+                 raise ProbeError("test_result")
+         elif not isinstance(item, SCALAR):
+             raise ProbeError("test_result")
++    if not rejected:
++        reuse = aggregate["ffn_reuse_diagnostic"]
++        memory = aggregate["memory_gauges"]
++        calls = aggregate["head_profile_v6_calls"]
++        comparisons = aggregate["counts"]["comparisons"]
++        pairs = reuse["full_pairs"]
++        if (
++            type(comparisons) is not int or comparisons <= 0
++            or pairs < comparisons or pairs != memory["selected_calls"]
++            or pairs != memory["released_owner_checks"]
++            or reuse["bitwise_equal_pairs"] != pairs
++            or reuse["bitwise_compared_elements"] != 4096 * pairs
++            or reuse["mismatched_elements"] != 0
++            or any(calls[key] != comparisons for key in PROFILE_V6_PHASES if key.startswith(("ffn_first_", "ffn_repeat_")))
++            or any(calls[key] != 2 * comparisons for key in ("ffn_submit_return_inclusive", "ffn_commit_call_inclusive", "ffn_wait_return_inclusive"))
++            or calls["mapped_ffn_compute_wait"] != comparisons
++        ):
++            raise ProbeError("test_result")
+     return aggregate
+ 
+ 

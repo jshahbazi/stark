@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "experiment": "glm53_mtp_same_view_ffn_repeat_v6",
+  "status": "bounded_test_only_diagnostic_complete",
+  "conclusion": "same_view_ffn_repeat_bitwise_equal; reuse_mechanism_and_net_gain_unresolved",
+  "claim_limits": {
+    "cache_admitted": false,
+    "object_reuse_effect_isolated": false,
+    "net_gain_claimed": false,
+    "production_memory_admission": false,
+    "runtime_speedup_claimed": false,
+    "speculative_decoding_executed": false
+  },
+  "protocol": {
+    "ffn_reuse_policy": "same_views_twice_blocking_return_first",
+    "ffn_wait_policy": "blocking_final_wait",
+    "precision_policy": "existing_safe_f32_graph_quant_weights_cpu_f32_router",
+    "source_convention": "llama_1b6935b227b9f9aa89deea8016c0e208f547446f_zero_prior_hidden_normal_pos0_embedding",
+    "context_tokens": 256,
+    "continuation_tokens": 8,
+    "full_head_timing_includes": [
+      "first_ffn_compute_and_wait",
+      "repeat_ffn_compute_and_wait",
+      "full_output_f32_bitwise_comparison"
+    ]
+  },
+  "quality_gates": {
+    "status": "passed",
+    "cases": 3,
+    "prompt_rows": 59,
+    "continuation_comparisons": 24,
+    "agreements": 23,
+    "case_agreements": [8, 7, 8],
+    "eos_cases": 0,
+    "alignment_target_rows": 8,
+    "alignment_cache_rows": 8,
+    "alignment_chunk_groups": 3,
+    "target_rollback_calls": 0,
+    "same_view_pairs": 33,
+    "bitwise_compared_f32_elements": 135168,
+    "bitwise_equal_pairs": 33,
+    "mismatched_elements": 0
+  },
+  "timing_per_warm_head_ms": {
+    "warm_heads": 24,
+    "first_ffn_compute_wait": {
+      "wall": 17.967178958333335,
+      "gpu": 1.434076388250105
+    },
+    "first_ffn_submit_return_inclusive": {
+      "wall": 17.837319458333337,
+      "gpu": 1.434076388250105
+    },
+    "first_ffn_wait_return_inclusive": {
+      "wall": 17.833116416666666,
+      "gpu": 1.434076388250105
+    },
+    "first_ffn_commit_call_inclusive": {
+      "wall": 0.003284750000000001,
+      "gpu": 0.0
+    },
+    "repeat_ffn_compute_wait": {
+      "wall": 1.6688992916666663,
+      "gpu": 1.2815798642501857
+    },
+    "repeat_ffn_submit_return_inclusive": {
+      "wall": 1.5208264999999999,
+      "gpu": 1.2815798642501857
+    },
+    "repeat_ffn_wait_return_inclusive": {
+      "wall": 1.5136440833333336,
+      "gpu": 1.2815798642501857
+    },
+    "repeat_ffn_commit_call_inclusive": {
+      "wall": 0.006453000000000001,
+      "gpu": 0.0
+    },
+    "head_total_inclusive_double_work_and_compare": {
+      "wall": 22.389178791666662,
+      "gpu": 3.9367743071731334
+    },
+    "mapped_ffn_compute_wait_both_calls": {
+      "wall": 19.643086666666665,
+      "gpu": 2.7156562525002905
+    },
+    "decode_head_inclusive_diagnostic": {
+      "wall": 537.350626,
+      "gpu": 94.4825833721552
+    },
+    "prefill_cache_only_head": {
+      "wall": 63.102585
+    },
+    "serial_target_with_hidden_tap": {
+      "wall": 750.844834,
+      "gpu": 675.4376667377073
+    }
+  },
+  "timing_interpretation": {
+    "first_repeat_difference_isolated_to_view_object_reuse": false,
+    "phase_values_may_be_subtracted_as_net_gain": false,
+    "whole_head_value_is_normal_optimized_head": false,
+    "reason": "the repeat phase also benefits from warm command, pipeline, scratch, or other state; the inclusive head performs two FFN computations and the comparison"
+  },
+  "memory_gauges": {
+    "selected_calls": 33,
+    "released_owner_checks": 33,
+    "selected_live_bytes_at_return": 0,
+    "selected_registered_peak_bytes": 73269248,
+    "selected_view_count_peak": 24,
+    "static_cache_entries_peak": 609,
+    "sampled_metal_allocated_peak_bytes": 106012295168,
+    "admitted_cap_bytes": 109676289225,
+    "target_static_reserve_bytes": 8589934592,
+    "observed_target_required_peak_bytes": 108692065600,
+    "projected_production_reserved_bytes": 109304375616,
+    "projected_production_cap_margin_bytes": 371913609,
+    "production_projection_is_admission": false,
+    "identical_to_v5_memory_gauges": true
+  },
+  "identities": {
+    "corpus_sha256": "82c1bb1e02a5315c24317475a305f5a8798523cab5c45ceda5764baf8c19ffc4",
+    "target_continuation_sha256": "d8cd412f3a6ba2233f609a873fa434f558f6646344eb651003138b8bba35c3b2",
+    "execution_selector_sha256": "f94bca05a81e99f016f80a28a0abbcc5ec3c308a4afb14f5ba748b5122a03a75",
+    "source_before_passed": true,
+    "source_after_passed": true,
+    "metadata_identities_unchanged": true,
+    "weight_identities_unchanged": true,
+    "raw_process_output_persisted": false,
+    "model_artifacts": {
+      "chat_template.jinja": "34d5ee66b12fa6446cdae131c352b8f68cd85369e0e6fda115583805fada3891",
+      "config.json": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "generation_config.json": "230c30609ecbbb9e6583bedde8e7bdda0c6eb8fe5fad0eaeb3d1b293d751cb4f",
+      "native-source.json": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+      "tokenizer.json": "19e773648cb4e65de8660ea6365e10acca112d42a854923df93db4a6f333a82d",
+      "tokenizer_config.json": "98b1271574f41abf89427ae2dda030d94dc9478f0edc5a8bd240db213c6fd5fc"
+    },
+    "gguf_identity_guard_receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb"
+  },
+  "source": {
+    "base_revision": "379e5c79d1cfae249e947740732b783b1a6fec82",
+    "source_freeze_sha256": "f66ba80e2610419091614b3afd4bf119f76ea58856f0690f1da35d8423652096",
+    "llama_cpp_commit": "1b6935b227b9f9aa89deea8016c0e208f547446f",
+    "vllm_comparison_commit": "3b6eeb060621eba88deb74a146039291a1afbc42",
+    "files": {
+      "crates/stark-engine/src/engine/hybrid/glm.rs": "a8e01ba5ebf2ea0dc3be7f52b83848ce8c5415e3f264913fb9ab19f803dc0121",
+      "crates/stark-engine/src/engine/hybrid/glm_metal.rs": "0455437e4f89c519592b5a404ac3be1b63cf975a4027eeca92c45268506228ee",
+      "crates/stark-engine/src/engine/hybrid/weights.rs": "d15bb4ebd1623a6e6fb2a802780baed883cff24536ab57409d5d5bc1b431239f",
+      "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs": "4a44738358171af9839100442a35cab75f08cb5d3f4fce583f9ca7759de2cd10",
+      "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs": "a488e3c92e1bbe7007da6fab53bd34d52bef63d51e20717b5ba8983ea65ebbd1",
+      "scripts/probe_glm53_mtp.py": "4579ea4984b793b08866198eef8174ae18e14b946f7d532b0dee313d8716154d",
+      "crates/stark-engine/src/engine/hybrid/profile.rs": "31a6845a88feec3815bb73170d05d48740527e33c6e29039ae97e6dc877d8e6e",
+      "crates/stark-engine/src/engine/hybrid/weight_metal.rs": "3e8e79b1ad10064e14d315213276a141371b8b8872c63686e26d2a64d9eb693c",
+      "crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs": "b7700250acc8cbc1109457c051b4a0637f1d75f18189c2a5ceb284dce1e9a066"
+    }
+  },
+  "validation_receipts": {
+    "engine_binary_sha256": "caed04ebe1316a63bb545ad722621656bc1c50e32a0c1f74ab66512164dac970",
+    "driver_sha256": "4579ea4984b793b08866198eef8174ae18e14b946f7d532b0dee313d8716154d",
+    "probe_result_sha256": "bf866b6f3ed1dc2b77537fe736189780db3ee0da8fb085d1d38c8cc3576e8bb1",
+    "guard_receipt_sha256": "2bfaad89b17859a15e82fd439f32ce2ff2e1ead7b6f65b4ade0e8815be6497e3",
+    "release_no_run_build_receipt_sha256": "a1dca32599e52ed1a57d3638b19d9fb735741fe251b5db226fec7b99e33699b6",
+    "model_free_parser_receipt": {
+      "cases": 33,
+      "passed": true,
+      "receipt_sha256": "3fc92e0586f54ab960c29d446549c2a0e106587633401cdb3230bf08de9669d3"
+    },
+    "model_free_native_units": {
+      "passed": 2,
+      "failed": 0,
+      "receipt_sha256": "0522036ff3a0803cfbb5f0c52383e3181dda22a3de1cdd3913e083d15eaf6576"
+    },
+    "archive_receipt_sha256": "2798ba6d58da6e801d492151e51e4e1dc649050d726058e8a930b94e86291d9e"
+  },
+  "patch_provenance": {
+    "public_path": "reuse-v6.patch",
+    "public_patch_sha256": "427df440f927096fb429fd2eb65fa0fc6ee9696d9730d31a915a089934e53ceb",
+    "private_incremental_patch_sha256": "1dd78c3798e92877614e92f874d53d8307a1f24edc1f8b492652055573e338de",
+    "changed_source_paths": [
+      "crates/stark-engine/src/engine/hybrid/glm_mtp_probe.rs",
+      "crates/stark-engine/src/engine/hybrid/mtp_head_profile.rs",
+      "crates/stark-engine/src/engine/hybrid/weight_metal.rs",
+      "crates/stark-engine/src/engine/hybrid/weights_mtp_probe.rs",
+      "scripts/probe_glm53_mtp.py"
+    ],
+    "baseline_source_freeze_sha256": "8b17a190cc950278d62bc0a224132777652086d56fd95391e0f8e75600c876c9",
+    "forward_reconstructed_v6_hashes": 9,
+    "reverse_restored_v5_hashes": 9,
+    "application_mode_from_v5_freeze": "git apply with normal context",
+    "diff_flags": ["--no-ext-diff", "--no-textconv", "--full-index", "--binary"],
+    "public_v5_patch_sha256": "d5a355a884f5c291baf721bb432b66826966abf9c46b81ca09e209ca17be4511",
+    "public_v5_patch_application_mode_from_base": "git apply --unidiff-zero",
+    "public_v5_patch_reproduced_v5_freeze_hashes": 9,
+    "public_v5_patch_expected_freeze_hashes": 9,
+    "public_v5_patch_reverse_restored_clean_base": true,
+    "public_v5_patch_default_application_misplaces_zero_context_hunks": true,
+    "public_v5_patch_bytes_unchanged": true
+  },
+  "follow_up": {
+    "v7_fixed_192_expert_prefix_576_views": "source_only_approved_within_existing_8_gib_reserve_not_run",
+    "speedup_result": false
+  },
+  "privacy": {
+    "prompts_published": false,
+    "responses_published": false,
+    "token_ids_published": false,
+    "logits_or_probability_arrays_published": false,
+    "raw_process_output_published": false,
+    "authored_source_test_fixtures_included": true
+  }
+}

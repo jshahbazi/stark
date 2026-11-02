@@ -37,3 +37,5 @@ The public [canonical `prototype.patch`](prototype.patch) was regenerated from t
 The separate test-only timing follow-up is documented in [MTP head profile v4](profile-v4.md) and [its aggregate JSON](profile-v4.json); the v3 results above remain unchanged.
 
 The wait-policy comparison is documented separately in [MTP head FFN wait policy v5](wait-v5.md) and [its aggregate JSON](wait-v5.json); the v3 and v4 result records remain unchanged.
+
+The same-view FFN reuse diagnostic is documented separately in [MTP same-view reuse v6](reuse-v6.md) and [its aggregate JSON](reuse-v6.json); the v3 through v5 result records remain unchanged.

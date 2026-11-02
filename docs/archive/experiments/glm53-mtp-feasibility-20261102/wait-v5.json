@@ -815,12 +815,16 @@
     "new_file_sections": 4,
     "forward_reconstructed_source_hashes": 9,
     "reverse_check_passed": true,
+    "application_mode": "git apply --unidiff-zero from clean base revision",
+    "forward_reconstruction_verified_with_application_mode": true,
+    "reverse_check_verified_with_application_mode": true,
     "only_canonical_source_patch_extracted": true,
     "private_archive_contains_models_or_raw_process_output": false,
     "diff_command_flags": [
       "--no-ext-diff",
       "--no-textconv"
     ],
+    "application_command_flags": ["--unidiff-zero"],
     "proof_source": "sealed archive manifest"
   },
   "receipt_hashes": {
