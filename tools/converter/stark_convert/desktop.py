@@ -2007,7 +2007,7 @@ class Desktop:
             system = (self.codec or {}).get("default_system_prompt")
             if system and not any(m["role"] == "system" for m in candidate):
                 candidate.insert(0, {"role": "system", "content": system})
-            self.status("generating", "Generating for connected application…", epoch)
+            self.status("generating", "Generating for an app…", epoch)
         # A random per-request identifier lets the app fence progress without
         # receiving client identities, credentials or request content.
         progress_id = uuid.uuid4().hex
