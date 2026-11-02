@@ -23,7 +23,7 @@ cargo build --release --locked -p stark-generate
 ./scripts/stark chat --model-path /absolute/path/to/converted-model --image /absolute/path/to/image.png
 ```
 
-The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
+The client renders the converted model's chat template in a Jinja sandbox, keeps the conversation in memory, and sends the complete conversation to one worker for each turn. For eligible text models the worker reuses the prompt prefix shared with the previous turn ([prefix reuse](#prefix-reuse)); `/reset` starts a new reuse scope. Replies appear when generation completes; the client does not stream. Type one message per line. `/help` lists commands, `/reset` clears the history, and `/exit`, `/quit`, Ctrl-D or Ctrl-C quit. Conversation history stays in memory.
 
 When a backend has no declared finite context maximum, the CLI treats its unsigned 32-bit ceiling as a protocol range. It allocates native text context only for the rendered input plus requested output, while enforcing an explicit `--context-tokens` budget. Image chat requires a declared finite model context.
 
@@ -53,7 +53,7 @@ The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift
 
 ## Private JSON-lines protocol
 
-Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport. Models that contain a `speculator` directory are refused.
+Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
 
 ### Readiness
 
@@ -68,7 +68,8 @@ context limit, EOS IDs and MTP support vary by loaded model:
 | --- | --- |
 | `mode` | Protocol tag for this contract |
 | `operations` | Accepted `operation` values |
-| `state_policy` | `fresh-per-request`: no state survives between requests |
+| `state_policy` | `fresh-per-request`: no state survives between requests. `consecutive-prefix-v1` when [prefix reuse](#prefix-reuse) is enabled |
+| `prefix_cache` | Present only when the worker was started with `--prefix-cache`: `supported`, `enabled`, `chunk_tokens` (the reuse grid, a multiple of 1,024: 1,024 for converted models, 4,096 for the native Qwen3.8 backend), `idle_seconds` (600) and the reuse `key`. When enabled, `operations` also lists `reset_cache` |
 | `vocab_size` | Upper bound for every token ID |
 | `max_context_tokens` | Loaded model's configured maximum context; no global 16,384-token cap. A backend with no finite maximum reports the protocol's unsigned 32-bit maximum. |
 | `max_new_tokens` | Fixed cap of 4,096 output tokens per request |
@@ -124,6 +125,7 @@ Reply: `{"text":"...","token_count":N}`. An empty vector is valid. The whole vec
 | `stop` | Optional, at most four non-empty strings of at most 1,024 characters each. See [Stop sequences](#stop-sequences). |
 | `stream` | Optional boolean, default `false`. See [Streaming](#streaming). |
 | `request_id` | Optional unsigned 64-bit integer, default 0. See [Cancellation](#cancellation). |
+| `cache_scope` | Optional, only when prefix reuse is enabled: 32 lowercase hexadecimal characters chosen by the host. See [Prefix reuse](#prefix-reuse). Otherwise the field is rejected with `invalid_generation_request`. |
 
 The worker honors the union of `generation_config.stop_token_ids` and the tokenizer ID for a nonempty `token_codec_config.eos_token`. The chat EOS must resolve to a single vocabulary token; an unresolved declaration fails model loading with `invalid_model_config`. This covers checkpoints whose end-of-text and end-of-turn declarations differ, including existing converted models. The ColGrep checkpoint declares both EOS IDs, `1` and `130073`; both are honored automatically. Caller stops supplement model stops. A terminal stop is excluded from `generated_token_ids` and `text`.
 
@@ -141,7 +143,8 @@ The terminal reply:
 | `generation_seconds` | Wall-clock time for state setup, generation, cleanup and decoding |
 | `prefill_seconds` | Time from state setup until the first sampled token |
 | `decode_seconds` | Time between the first and last sampled tokens; `null` when fewer than two tokens were sampled |
-| `input_tokens_per_second` | `input_tokens / prefill_seconds`, or `null` when unmeasurable |
+| `input_tokens_per_second` | `(input_tokens - reused_input_tokens) / prefill_seconds`, the prompt tokens actually processed, or `null` when unmeasurable |
+| `reused_input_tokens` | Present only when prefix reuse is enabled: prompt tokens taken from the retained prefix instead of prefill, a multiple of `prefix_cache.chunk_tokens` below `input_tokens` |
 | `output_tokens_per_second` | `(sampled_tokens - 1) / decode_seconds`, or `null` when unmeasurable |
 | `timing_method` | `first-token-wall-clock-v1` |
 | `mtp` | Present for an MTP-capable model: selected `enabled`/`drafts`, `sampling: "exact-rejection-v1"`, the admitted `verification` route, and aggregate round, proposal, acceptance, verified-row and phase-time counters when available. |
@@ -204,7 +207,7 @@ Responses retain the same route label. The generation worker loads
 the head with the checkpoint's existing quantization, including its memory
 cost when drafting is disabled. Set `mtp_drafts` to 1,
 2 or 3 on a text request; omit it or use 0 for ordinary autoregressive decode.
-Requests on one worker remain serialized and start with fresh state.
+Requests on one worker remain serialized. With `--prefix-cache`, a request resumes a [prefix snapshot](#prefix-reuse) only when it enables or disables MTP the same way as the request that captured it.
 
 The desktop backend remembers an opt-in preference per registered model;
 its API can inherit or override that preference. See
@@ -255,11 +258,11 @@ With `stream: true`, the worker writes progress and delta lines while generating
 {"generated_token_ids":[...],"text":"Hello", ...}
 ```
 
-Consume every progress event, delta and the terminal reply before sending another request. Progress events contain counts and timings only. `output_token_budget` is the smaller of the requested output limit and the remaining context capacity. `sampled_tokens` includes sampled EOS and stop tokens, even when they produce no text delta. `prefill_seconds` becomes available at the first sampled token; `elapsed_seconds` starts before native generation setup, after prompt preparation. Progress is provisional until the terminal reply succeeds. Nonstreaming replies are unchanged.
+Consume every progress event, delta and the terminal reply before sending another request. Progress events contain counts and timings only. With prefix reuse enabled, every progress event also carries the request's `reused_input_tokens`. `output_token_budget` is the smaller of the requested output limit and the remaining context capacity. `sampled_tokens` includes sampled EOS and stop tokens, even when they produce no text delta. `prefill_seconds` becomes available at the first sampled token; `elapsed_seconds` starts before native generation setup, after prompt preparation. Progress is provisional until the terminal reply succeeds. Nonstreaming replies are unchanged.
 
 The concatenated deltas equal the terminal `text`. Incremental decoding buffers incomplete multi-byte characters, so a delta never splits a character; a final delta may be emitted after native cleanup to flush such a buffer. Streaming timings include decoding and output back-pressure.
 
-The desktop playground uses progress events to update a time-to-first-token estimate and a remaining-completion range. Calibration uses bounded, in-memory timing and count history from successful comparable requests; it stores no conversation content. With no matching history, the first-token estimate is unavailable and live decode measurements can establish a completion range after generation starts. The range estimates an unknown response length within the output budget and can change as generation continues. It is not a deadline or a statistical coverage guarantee. Loading, queueing, prompt tokenization and CPU image decoding/preprocessing are outside the generation timing; vision-tower and decoder inference are included. Failed, cancelled and stale requests do not train the estimator.
+The desktop app uses progress events, for Playground chats and [local API](LOCAL_API.md#progress-in-stark) requests, to update a time-to-first-token estimate and a remaining-completion range. Calibration uses bounded, in-memory timing and count history from successful comparable requests; it stores no conversation content. With no matching history, the first-token estimate is unavailable and live decode measurements can establish a completion range after generation starts. The range estimates an unknown response length within the output budget and can change as generation continues. It is not a deadline or a statistical coverage guarantee. Loading, queueing, prompt tokenization and CPU image decoding/preprocessing are outside the generation timing; vision-tower and decoder inference are included. Failed, cancelled and stale requests do not train the estimator.
 
 Calibration profiles distinguish the effective MTP draft count. Turning MTP on
 or off, or overriding it for an API request, uses the matching profile without
@@ -272,6 +275,53 @@ mixing measurements from the other mode.
 ### Cancellation
 
 If the environment variable `STARK_CANCEL_FD` names an inherited pipe descriptor (3 or higher, a FIFO), the worker reads it for cancellation frames: eight little-endian bytes holding the `request_id` to cancel. The worker checks the pipe before allocating state and around every token. Image requests also check before and after CPU preparation and after vision work has drained, before decoder work starts. A frame matching the running request stops generation after native cleanup and returns the recoverable error `generation_cancelled`; the model stays loaded. Frames for other IDs are discarded. End of file on the pipe cancels the running request and every later one. The worker removes `STARK_CANCEL_FD` from its environment before loading the model. Without the variable, the only way to interrupt a request is to terminate the process.
+
+### Prefix reuse
+
+Agent clients resend the same instructions, tool definitions and history on every step. With `--prefix-cache`, the worker can keep the state of the previous text generation and reuse the part that covers the prompt prefix it shares with the next request, so only the new part of the prompt is prefilled. Without the flag, behaviour is unchanged.
+
+Eligibility and key:
+
+- Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
+- The native mixed-precision Qwen3.8 backend (Lily-format, official mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
+- Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native GLM, Flint and F32 Qwen graphs.
+- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On the Qwen3.8 backend, whether MTP is enabled must also match (`key` reports this).
+
+Exactness, converted models:
+
+- Prompts are prefilled in 1,024-token chunks from position zero. The worker retains only rows produced by full, non-final prefill chunks of the previous prompt. It reuses the longest common token prefix rounded down to a chunk boundary and kept below the new prompt's own final chunk.
+- The rest of the prompt is then prefilled with the same chunk boundaries, kernels and arithmetic as on a fresh state. Rows from the previous final chunk and from decoding are never reused, and the sampler is reseeded from the request.
+
+Exactness, Qwen3.8:
+
+- Prefill runs in 4,096-token passes counted from the position it starts at. A scoped request splits its prefill at the start of its final pass and copies the recurrent state there: GDN states and convolution windows, the n-gram history and window, and the draft head's last hidden. Both parts run the same passes as one prefill.
+- A snapshot cannot be rewound. The next request reuses it only when its prompt begins with the whole snapshotted prefix and leaves at least two tokens to prefill; otherwise it reuses nothing. The remaining prompt then runs the same 4,096-token passes, final-token route and draw as on a fresh state.
+
+Greedy and seeded outputs are therefore identical to a fresh-state run. The [validation record](archive/runs/2026-11-01-generation-prefix-reuse.md) checks this on the pinned Qwen3-4B artifact, and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) on the native Lily-format Qwen3.8 checkpoint.
+
+Lifetime:
+
+- There is one entry. It is published only after the terminal reply has been written and flushed.
+- A request that cannot reuse it drops it before allocating new state, so two request states never coexist.
+- The entry is dropped on:
+  - any error reply, including invalid requests, `context_overflow`, cancellation and oversized lines
+  - a different scope or context size, or a `generate` without `cache_scope`
+  - any image operation or `reset_cache`
+  - 600 seconds without a request
+  - process exit
+- `tokenize` and `decode` keep it.
+
+Memory: on converted models the entry holds the KV cache of the previous request. On Qwen3-4B that is 144 KiB per token, about 2.7 GiB after an 18,500-token step, bounded by the state's capacity of `context_tokens` plus 1,024 rows. A request of that size already maps this memory while it runs; reuse keeps it resident until the next request or idle expiry. The Qwen3.8 backend already keeps its caches allocated between requests; its entry adds the snapshot, about 110 MiB (36 GDN layers of 48 × 128 × 128 F32 state plus convolution windows).
+
+Privacy: the retained state and its prefix token IDs exist only in worker memory. They are never written to disk, logged, or included in replies; replies carry counts only. A faster first token reveals that the previous request shared a prefix, so hosts give each principal its own random scope. The desktop backend uses one scope per Playground conversation, per API session and master key, and per managed client grant. It rotates scopes on reset, revocation and key change, and sends `reset_cache` on revocation and API restart.
+
+### Reset cache
+
+```json
+{"operation":"reset_cache"}
+```
+
+Drops the retained prefix. The reply is `{"cache_reset":true}`. Available only when prefix reuse is enabled; otherwise the reply is `{"error":"invalid_request"}`.
 
 ### Error codes
 
@@ -287,7 +337,9 @@ A write failure on the reply pipe also ends the process with exit status 1.
 
 ## State and privacy
 
-Every generate request creates a fresh native state sized to `context_tokens`, runs the prompt through prefill, generates, and drops the state before the terminal reply is written. No KV cache or prompt prefix survives between requests, so each turn of a conversation re-processes the whole conversation. This is the `fresh-per-request` policy advertised in readiness.
+By default every generate request creates a fresh native state sized to `context_tokens`, runs the prompt through prefill, generates, and drops the state before the terminal reply is written. No KV cache or prompt prefix survives between requests, so each turn of a conversation re-processes the whole conversation. This is the `fresh-per-request` policy advertised in readiness.
+
+With `--prefix-cache` on an eligible model, the policy is `consecutive-prefix-v1`: the state of the previous successful text generation (on Qwen3.8, its recurrent-state snapshot) is kept in memory for the next request under the key, lifetime and privacy rules in [Prefix reuse](#prefix-reuse). Nothing is ever persisted.
 
 The worker suppresses native diagnostics and capture variables as described in [worker protocols](WORKER_PROTOCOLS.md#privacy-and-diagnostics). It opens no network listener and executes no tools.
 
@@ -299,6 +351,18 @@ Model-free tests cover request parsing and bounds, stop handling, UTF-8 decoding
 cargo test --locked -p stark-generate --no-default-features
 cargo test --release --locked -p stark-generate -- --test-threads=1
 uv run --no-project --python 3.12.13 python scripts/test_generation_process.py --binary target/release/stark-generate
+```
+
+The model-free tests also cover prefix-reuse alignment, backend reuse grids, whole-prefix snapshot matching, key matching, publication after the reply is flushed and every invalidation path. A model-bound script compares a `--prefix-cache` worker with fresh-state workers on synthetic agent sessions rendered by the model's chat template. It compares generated token IDs, text and parsed tool calls (when the template has a qualified tool parser), checks every reuse count against the documented rule, checks each invalidation path and measures first-token time. Workers run one at a time, so models that fill most of unified memory can be checked. It writes aggregates and hashes only. Add `--reuse boundary` for the Qwen3.8 backend:
+
+```sh
+uv run --project tools/converter --locked --python 3.13.13 python scripts/validate_generation_prefix_cache.py --model MODEL_DIR --baseline BASELINE_WORKER --candidate CANDIDATE_WORKER --output runtime/prefix-cache-validation.json
+```
+
+An ignored engine test checks at the model level that capturing a snapshot leaves the prefill unchanged and that a resumed prefix matches a fresh prefill bit for bit:
+
+```sh
+STARK_LILY_TEST_MODEL_PATH=/absolute/path/to/qwen38 cargo +nightly-2026-10-01 test --locked -p stark-engine --features cpu,metal -- --ignored private_checkpoint_prefix_capture_and_restore_match_fresh_prefill
 ```
 
 The model-bound acceptance record for the `lightonai/colgrep-agent-2B` checkpoint, including how to reproduce it, is in [ColGrep generation validation](validation/GENERATION_COLGREP.md).

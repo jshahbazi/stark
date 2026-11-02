@@ -41,6 +41,14 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Recurrent state at a prompt prefix boundary (see [`Model::restore_prefix`]).
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub use lily::PrefixSnapshot;
+
+/// Only the macOS mixed-precision backend captures prefix snapshots.
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+pub enum PrefixSnapshot {}
+
 /// Loaded-model MTP policy. Recommendations select the depth when a caller
 /// enables MTP without choosing an explicit draft count; MTP remains opt-in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -313,8 +321,9 @@ impl Model {
         &self.eos
     }
 
-    /// Each worker request starts with fresh state. No prompt or recurrent state
-    /// is persisted, and failures invalidate the entire current sequence.
+    /// Each worker request starts from reset state, optionally resumed at a
+    /// prefix snapshot. No prompt or recurrent state is persisted, and
+    /// failures invalidate the entire current sequence.
     pub fn reset(&mut self) {
         match &mut self.forward {
             Forward::Flint(model) => model.reset(),
@@ -555,6 +564,60 @@ impl Model {
                 let _ = (first, remaining);
                 Err(Error::Unsupported("native greedy stream unavailable"))
             },
+        }
+    }
+
+    /// The prefill chunk length when this backend can snapshot and resume a
+    /// prompt prefix, which then happens only at multiples of it.
+    pub fn prefix_chunk_tokens(&self) -> Option<usize> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &self.forward {
+            return Some(model.prefill_chunk_tokens());
+        }
+        None
+    }
+
+    /// Capture the recurrent state when the next prefill reaches `position`.
+    /// Call after `reset` (and any `restore_prefix`), before the prompt.
+    pub fn capture_prefix_at(
+        &mut self,
+        position: usize,
+    ) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.capture_prefix_at(position),
+            _ => {
+                let _ = position;
+                Err(Error::Unsupported("prefix snapshots unavailable"))
+            },
+        }
+    }
+
+    /// The snapshot captured by this request's prefill. Take it before the
+    /// next `reset`.
+    pub fn take_prefix_snapshot(&mut self) -> Option<PrefixSnapshot> {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if let Forward::Lily(model) = &mut self.forward {
+            return model.take_prefix_snapshot();
+        }
+        None
+    }
+
+    /// Resume a reset request at `snapshot`'s position. Only the prompt
+    /// prefix the snapshot was captured from may follow, and every request
+    /// since the capture must have kept that prefix. On failure the model is
+    /// reset.
+    pub fn restore_prefix(
+        &mut self,
+        snapshot: &PrefixSnapshot,
+    ) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            Forward::Lily(model) => model.restore_prefix(snapshot),
+            #[cfg(not(all(feature = "metal", target_os = "macos")))]
+            _ => match *snapshot {},
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            _ => Err(Error::Unsupported("prefix snapshots unavailable")),
         }
     }
 

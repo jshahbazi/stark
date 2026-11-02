@@ -8,7 +8,10 @@ use std::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id};
+use crate::{
+    media::{ImageLease, ImageReference, MediaStore, opaque_id, valid_id},
+    prefix_cache::{self, CacheScope, RequestInput},
+};
 
 pub(crate) const MAX_NEW_TOKENS: u32 = 4_096;
 const MAX_REQUEST_BYTES: usize = 1_048_576;
@@ -115,7 +118,10 @@ enum Request {
         stop: Vec<String>,
         #[serde(default)]
         request_id: u64,
+        #[serde(default, deserialize_with = "present_value")]
+        cache_scope: Option<String>,
     },
+    ResetCache {},
     PrepareImage {
         rendered_prompt: String,
         image: ImageReference,
@@ -215,6 +221,8 @@ pub(crate) struct GenerationOptions {
     pub extra_stop_token_ids: Vec<u32>,
     pub stop: Vec<String>,
     pub request_id: u64,
+    /// Present only when prefix reuse is enabled and the host supplied a scope.
+    pub cache_scope: Option<CacheScope>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -236,6 +244,8 @@ pub(crate) struct GeneratedTokens {
     pub prefill_seconds: Option<f64>,
     pub decode_seconds: Option<f64>,
     pub text: Option<String>,
+    /// Prompt tokens served from the retained prefix instead of prefill.
+    pub reused_input_tokens: usize,
 }
 
 /// Content-free wall-clock observations of native token sampling. The first
@@ -337,6 +347,7 @@ fn collect_tokens_with_clock_and_callback(
         prefill_seconds: None,
         decode_seconds: None,
         text: None,
+        reused_input_tokens: 0,
     };
     let mut first_sample = None;
     let mut last_sample = None;
@@ -456,6 +467,36 @@ pub(crate) trait GenerationBackend {
     ) -> Result<GeneratedTokens, &'static str> {
         Err("images_not_supported")
     }
+    /// Whether the loaded model's text states can be rewound for reuse.
+    fn prefix_cache_supported(&self) -> bool {
+        false
+    }
+    /// Reused prompt tokens are a multiple of this prefill chunk length, itself
+    /// a multiple of `PREFILL_CHUNK_TOKENS`.
+    fn prefix_cache_chunk_tokens(&self) -> usize {
+        prefix_cache::PREFILL_CHUNK_TOKENS
+    }
+    /// What a retained state must match, as reported in readiness.
+    fn prefix_cache_key(&self) -> &'static str {
+        prefix_cache::KEY
+    }
+    /// Prompt tokens the next text `generate` will reuse for `input`. A text
+    /// generation with a scope retains its state; any other drops the entry.
+    fn prefix_cache_plan(
+        &self,
+        _input: &[u32],
+        _options: &GenerationOptions,
+    ) -> usize {
+        0
+    }
+    /// Make the state retained by the last successful generation reusable.
+    /// Called only after its terminal reply has been written and flushed.
+    fn publish_prefix_cache(&mut self) {}
+    /// Drop retained and published state.
+    fn clear_prefix_cache(&mut self) {}
+    fn prefix_cache_retained(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) type TextCallback<'a> = dyn FnMut(&str) -> Result<(), &'static str> + 'a;
@@ -466,6 +507,8 @@ pub(crate) struct GenerationWorker<B: GenerationBackend> {
     mtp: Option<MtpCapabilities>,
     media: Option<MediaStore>,
     prepared: Option<PreparedRequest<B::PreparedImage>>,
+    /// `Some(enabled)` when the host requested prefix reuse at startup.
+    prefix_cache: Option<bool>,
 }
 
 fn valid_ids(
@@ -487,12 +530,13 @@ fn write_reply(
 impl<B: GenerationBackend> GenerationWorker<B> {
     #[cfg(test)]
     pub(crate) fn new(backend: B) -> Result<Self, &'static str> {
-        Self::new_with_media(backend, None)
+        Self::new_with_options(backend, None, false)
     }
 
-    pub(crate) fn new_with_media(
+    pub(crate) fn new_with_options(
         backend: B,
         media: Option<MediaStore>,
+        prefix_cache: bool,
     ) -> Result<Self, &'static str> {
         let mtp = backend.mtp_capabilities();
         if backend.vocab_size() == 0
@@ -514,12 +558,23 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         {
             return Err("invalid_model_config");
         }
+        let prefix_cache = prefix_cache.then(|| {
+            let chunk = backend.prefix_cache_chunk_tokens();
+            backend.prefix_cache_supported()
+                && chunk >= prefix_cache::PREFILL_CHUNK_TOKENS
+                && chunk.is_multiple_of(prefix_cache::PREFILL_CHUNK_TOKENS)
+        });
         Ok(Self {
             backend,
             mtp,
             media,
             prepared: None,
+            prefix_cache,
         })
+    }
+
+    fn prefix_cache_enabled(&self) -> bool {
+        self.prefix_cache == Some(true)
     }
 
     fn resolve_mtp(
@@ -581,12 +636,25 @@ impl<B: GenerationBackend> GenerationWorker<B> {
     ) -> Result<Value, &'static str> {
         let started = Instant::now();
         let output_token_budget = (options.context_tokens as usize - input_tokens).min(options.max_new_tokens as usize);
+        let reused = match image {
+            None => self.backend.prefix_cache_plan(input, options),
+            Some(_) => 0,
+        };
+        if reused >= input_tokens || !reused.is_multiple_of(self.backend.prefix_cache_chunk_tokens()) {
+            return Err("invalid_generation_output");
+        }
+        let report_reuse = self.prefix_cache_enabled();
+        let progress = |sampled_tokens: usize, elapsed_seconds: f64, prefill_seconds: Option<f64>| {
+            let mut frame = json!({"event":"progress","input_tokens":input_tokens,"sampled_tokens":sampled_tokens,
+                "output_token_budget":output_token_budget,"elapsed_seconds":elapsed_seconds,
+                "prefill_seconds":prefill_seconds});
+            if report_reuse {
+                frame["reused_input_tokens"] = json!(reused);
+            }
+            frame
+        };
         if stream {
-            write_reply(
-                output,
-                &json!({"event":"progress","input_tokens":input_tokens,"sampled_tokens":0,
-                    "output_token_budget":output_token_budget,"elapsed_seconds":0.0,"prefill_seconds":null}),
-            )?;
+            write_reply(output, &progress(0, 0.0, None))?;
         }
         let mut emitted = String::new();
         let generated = {
@@ -600,12 +668,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 }
                 Ok(())
             };
-            let mut on_progress = |progress: GenerationProgress| {
+            let mut on_progress = |value: GenerationProgress| {
                 write_reply(
                     &mut **output.borrow_mut(),
-                    &json!({"event":"progress","input_tokens":input_tokens,
-                        "sampled_tokens":progress.sampled_tokens,"output_token_budget":output_token_budget,
-                        "elapsed_seconds":progress.elapsed_seconds,"prefill_seconds":progress.prefill_seconds}),
+                    &progress(value.sampled_tokens, value.elapsed_seconds, value.prefill_seconds),
                 )
             };
             let on_text = if stream {
@@ -628,6 +694,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             || input_tokens + generated.sampled_tokens > options.context_tokens as usize
             || generated.sampled_tokens
                 != generated.generated_token_ids.len() + usize::from(generated.stop_token_id.is_some())
+            || generated.reused_input_tokens != reused
         {
             return Err("invalid_generation_output");
         }
@@ -646,9 +713,12 @@ impl<B: GenerationBackend> GenerationWorker<B> {
             "sampled_tokens":generated.sampled_tokens,"finish_reason":generated.finish_reason,
             "stop_token_id":generated.stop_token_id,"generation_seconds":started.elapsed().as_secs_f64(),
             "prefill_seconds":generated.prefill_seconds,"decode_seconds":generated.decode_seconds,
-            "input_tokens_per_second":tokens_per_second(input_tokens, generated.prefill_seconds),
+            "input_tokens_per_second":tokens_per_second(input_tokens - reused, generated.prefill_seconds),
             "output_tokens_per_second":tokens_per_second(generated.sampled_tokens.saturating_sub(1), generated.decode_seconds),
             "timing_method":"first-token-wall-clock-v1"});
+        if report_reuse {
+            reply["reused_input_tokens"] = json!(reused);
+        }
         if self.backend.mtp_capabilities() != self.mtp {
             return Err("invalid_generation_output");
         }
@@ -723,7 +793,15 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 stream,
                 stop,
                 request_id,
+                cache_scope,
             } => {
+                let cache_scope = match cache_scope {
+                    None => None,
+                    Some(scope) if self.prefix_cache_enabled() => {
+                        Some(prefix_cache::parse_scope(&scope).ok_or("invalid_generation_request")?)
+                    },
+                    Some(_) => return Err("invalid_generation_request"),
+                };
                 let options = GenerationOptions {
                     context_tokens,
                     max_new_tokens,
@@ -734,6 +812,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     extra_stop_token_ids: stop_token_ids,
                     stop,
                     request_id,
+                    cache_scope,
                 };
                 self.validate_options(&options)?;
                 let input = match (rendered_prompt, input_token_ids) {
@@ -769,6 +848,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
                     request_id,
+                    cache_scope: None,
                 };
                 self.validate_options(&options)?;
                 if self.backend.cancelled(request_id)? {
@@ -845,6 +925,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     extra_stop_token_ids: stop_token_ids,
                     stop,
                     request_id,
+                    cache_scope: None,
                 };
                 self.validate_options(&options)?;
                 if self.backend.cancelled(request_id)? {
@@ -858,6 +939,13 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                     stream,
                     output,
                 )
+            },
+            Request::ResetCache {} => {
+                if !self.prefix_cache_enabled() {
+                    return Err("invalid_request");
+                }
+                self.backend.clear_prefix_cache();
+                Ok(json!({"cache_reset":true}))
             },
             Request::DiscardImage {
                 prepared_id,
@@ -883,15 +971,25 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         if !matches!(&request, Ok(Request::GenerateImage { .. } | Request::DiscardImage { .. })) {
             self.prepared = None;
         }
+        // Image transactions never use or populate the retained text prefix.
+        if !matches!(&request, Ok(Request::Tokenize { .. } | Request::Decode { .. } | Request::Generate { .. })) {
+            self.backend.clear_prefix_cache();
+        }
+        let generate = matches!(&request, Ok(Request::Generate { .. }));
         let result = request.and_then(|request| self.handle(request, output));
         if result.is_err() {
             self.prepared = None;
+            self.backend.clear_prefix_cache();
         }
         match result {
             Ok(value) => {
                 let result = write_reply(output, &value);
                 if result.is_err() {
                     self.prepared = None;
+                    self.backend.clear_prefix_cache();
+                } else if generate {
+                    // Publish only state whose terminal reply reached the host.
+                    self.backend.publish_prefix_cache();
                 }
                 result
             },
@@ -920,7 +1018,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
 
 pub(crate) fn run_lines<B: GenerationBackend>(
     worker: &mut GenerationWorker<B>,
-    input: &mut impl BufRead,
+    input: &mut impl RequestInput,
     output: &mut impl Write,
 ) -> Result<(), &'static str> {
     let mut readiness = json!({"ready":true,"engine":"stark","version":env!("CARGO_PKG_VERSION"),
@@ -931,6 +1029,15 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         "sampling_modes":["greedy","stochastic"],"streaming":"text-delta-v1",
         "generation_progress":"token-counts-v1",
         "stop_sequences":true,"cancellation":"pipe-v1"});
+    if let Some(enabled) = worker.prefix_cache {
+        readiness["prefix_cache"] = json!({"supported":enabled,"enabled":enabled,
+            "chunk_tokens":worker.backend.prefix_cache_chunk_tokens(),"idle_seconds":prefix_cache::IDLE_SECONDS,
+            "key":worker.backend.prefix_cache_key()});
+        if enabled {
+            readiness["state_policy"] = json!(prefix_cache::POLICY);
+            readiness["operations"] = json!(["tokenize", "decode", "generate", "reset_cache"]);
+        }
+    }
     readiness["mtp"] = match worker.mtp {
         Some(capabilities) => json!({"supported":true,"max_drafts":capabilities.max_drafts,
             "recommended_drafts":capabilities.recommended_drafts,"default_drafts":0,
@@ -972,6 +1079,18 @@ pub(crate) fn run_lines<B: GenerationBackend>(
     }
     write_reply(output, &readiness)?;
     loop {
+        // Release retained state when the host stays idle.
+        if worker.backend.prefix_cache_retained() {
+            match input.wait_readable(Duration::from_secs(prefix_cache::IDLE_SECONDS)) {
+                Ok(true) => {},
+                Ok(false) => worker.backend.clear_prefix_cache(),
+                Err(_) => {
+                    worker.backend.clear_prefix_cache();
+                    worker.prepared = None;
+                    return Err("protocol_read_failed");
+                },
+            }
+        }
         let mut bytes = Vec::new();
         let count = match Read::by_ref(input).take(MAX_REQUEST_BYTES as u64 + 1).read_until(b'\n', &mut bytes) {
             Ok(count) => count,
@@ -986,6 +1105,7 @@ pub(crate) fn run_lines<B: GenerationBackend>(
         }
         if bytes.len() > MAX_REQUEST_BYTES {
             worker.prepared = None;
+            worker.backend.clear_prefix_cache();
             // Drain the rest of this frame so the next request remains independent.
             if bytes.last() != Some(&b'\n') {
                 loop {
@@ -1062,6 +1182,12 @@ mod tests {
         cancel_image: bool,
         cancel_after_prepare: bool,
         fail_image_prepare: bool,
+        prefix_supported: bool,
+        prefix_entry: Option<prefix_cache::PrefixEntry<usize>>,
+        prefix_pending: Option<prefix_cache::PrefixEntry<usize>>,
+        state_allocations: usize,
+        prefix_chunk: usize,
+        prefix_reuse_override: Option<usize>,
     }
 
     struct FakePreparedImage {
@@ -1145,6 +1271,18 @@ mod tests {
             self.sampling.push(options.sampling.clone());
             self.mtp_requests.push(options.mtp_drafts);
             self.drained.store(false, Ordering::SeqCst);
+            // Mirror the native backend: take the entry, reuse or drop it, and
+            // retain a completed scoped state as pending until publication.
+            let reused = self.prefix_cache_plan(input, options);
+            let retained = self.prefix_entry.take();
+            self.prefix_pending = None;
+            let state = match retained {
+                Some(entry) if reused > 0 => entry.state,
+                _ => {
+                    self.state_allocations += 1;
+                    self.state_allocations
+                },
+            };
             let mut on_token = |token| {
                 if let Some(callback) = on_text.as_deref_mut() {
                     callback(match token {
@@ -1156,7 +1294,7 @@ mod tests {
                 }
                 Ok(true)
             };
-            collect_tokens_controlled(
+            let mut result = collect_tokens_controlled(
                 TestStream {
                     tokens: self.tokens.clone().into(),
                     drained: self.drained.clone(),
@@ -1168,7 +1306,48 @@ mod tests {
                 &mut on_token,
                 on_progress,
                 &mut || Ok(false),
-            )
+            )?;
+            result.reused_input_tokens = reused;
+            if let Some(scope) = options.cache_scope {
+                self.prefix_pending = Some(prefix_cache::PrefixEntry::new(state, scope, options.context_tokens, input));
+            }
+            Ok(result)
+        }
+
+        fn prefix_cache_supported(&self) -> bool {
+            self.prefix_supported
+        }
+
+        fn prefix_cache_chunk_tokens(&self) -> usize {
+            self.prefix_chunk
+        }
+
+        fn prefix_cache_plan(
+            &self,
+            input: &[u32],
+            options: &GenerationOptions,
+        ) -> usize {
+            if let Some(reused) = self.prefix_reuse_override {
+                return reused;
+            }
+            self.prefix_entry
+                .as_ref()
+                .map_or(0, |entry| entry.reusable(input, options.context_tokens, options.cache_scope.as_ref()))
+        }
+
+        fn publish_prefix_cache(&mut self) {
+            if let Some(entry) = self.prefix_pending.take() {
+                self.prefix_entry = Some(entry);
+            }
+        }
+
+        fn clear_prefix_cache(&mut self) {
+            self.prefix_entry = None;
+            self.prefix_pending = None;
+        }
+
+        fn prefix_cache_retained(&self) -> bool {
+            self.prefix_entry.is_some() || self.prefix_pending.is_some()
         }
 
         fn supports_images(&self) -> bool {
@@ -1279,6 +1458,12 @@ mod tests {
             cancel_image: false,
             cancel_after_prepare: false,
             fail_image_prepare: false,
+            prefix_supported: false,
+            prefix_entry: None,
+            prefix_pending: None,
+            state_allocations: 0,
+            prefix_chunk: prefix_cache::PREFILL_CHUNK_TOKENS,
+            prefix_reuse_override: None,
         })
         .unwrap()
     }
@@ -1811,6 +1996,7 @@ mod tests {
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
             request_id: 0,
+            cache_scope: None,
         };
         let drained = Arc::new(AtomicBool::new(false));
         let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();
@@ -1848,6 +2034,7 @@ mod tests {
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
             request_id: 0,
+            cache_scope: None,
         };
         let mut clock = [Duration::from_secs(2), Duration::from_secs(3), Duration::from_secs(6)].into_iter();
         let mut progress = Vec::new();
@@ -1952,6 +2139,7 @@ mod tests {
             extra_stop_token_ids: Vec::new(),
             stop: Vec::new(),
             request_id: 0,
+            cache_scope: None,
         };
         let mut samples = Vec::new();
         let result = collect_tokens_controlled(
@@ -2005,6 +2193,7 @@ mod tests {
                     extra_stop_token_ids: Vec::new(),
                     stop: Vec::new(),
                     request_id: 1,
+                    cache_scope: None,
                 };
                 let result = collect_tokens_controlled(
                     LookaheadStream {
@@ -2434,5 +2623,321 @@ mod tests {
             );
             assert!(worker.backend.drained.load(Ordering::SeqCst));
         }
+    }
+
+    const SCOPE: &str = "0123456789abcdef0123456789abcdef";
+    const OTHER_SCOPE: &str = "fedcba9876543210fedcba9876543210";
+
+    fn prefix_worker(supported: bool) -> GenerationWorker<FakeBackend> {
+        let mut backend = worker().backend;
+        backend.max_context = Some(16_384);
+        backend.prefix_supported = supported;
+        GenerationWorker::new_with_options(backend, None, true).unwrap()
+    }
+
+    fn cached_request(
+        length: usize,
+        scope: Option<&str>,
+    ) -> Value {
+        let mut request = json!({"operation":"generate","input_token_ids":vec![2; length],
+            "context_tokens":8192,"max_new_tokens":8});
+        if let Some(scope) = scope {
+            request["cache_scope"] = json!(scope);
+        }
+        request
+    }
+
+    fn reused(
+        worker: &mut GenerationWorker<FakeBackend>,
+        length: usize,
+    ) -> Value {
+        post(worker, cached_request(length, Some(SCOPE)))["reused_input_tokens"].clone()
+    }
+
+    fn readiness(worker: &mut GenerationWorker<FakeBackend>) -> Value {
+        let mut output = Vec::new();
+        run_lines(worker, &mut io::Cursor::new(Vec::<u8>::new()), &mut output).unwrap();
+        serde_json::from_slice(&output).unwrap()
+    }
+
+    #[test]
+    fn prefix_cache_readiness_reports_policy_only_when_requested() {
+        let plain = readiness(&mut worker());
+        assert_eq!(plain["state_policy"], "fresh-per-request");
+        assert!(plain.get("prefix_cache").is_none());
+        assert_eq!(plain["operations"], json!(["tokenize", "decode", "generate"]));
+
+        let unsupported = readiness(&mut prefix_worker(false));
+        assert_eq!(unsupported["state_policy"], "fresh-per-request");
+        assert_eq!(unsupported["prefix_cache"]["supported"], false);
+        assert_eq!(unsupported["prefix_cache"]["enabled"], false);
+        assert_eq!(unsupported["operations"], json!(["tokenize", "decode", "generate"]));
+
+        let enabled = readiness(&mut prefix_worker(true));
+        assert_eq!(enabled["state_policy"], "consecutive-prefix-v1");
+        assert_eq!(
+            enabled["prefix_cache"],
+            json!({"supported":true,"enabled":true,"chunk_tokens":1024,"idle_seconds":600,
+                "key":"model-instance+context-tokens+cache-scope"})
+        );
+        assert_eq!(enabled["operations"], json!(["tokenize", "decode", "generate", "reset_cache"]));
+    }
+
+    #[test]
+    fn prefix_cache_reports_the_backend_chunk_and_rejects_misaligned_reuse() {
+        let coarse = || {
+            let mut backend = prefix_worker(true).backend;
+            backend.prefix_chunk = 4096;
+            GenerationWorker::new_with_options(backend, None, true).unwrap()
+        };
+        assert_eq!(readiness(&mut coarse())["prefix_cache"]["chunk_tokens"], 4096);
+        let mut aligned = coarse();
+        aligned.backend.prefix_reuse_override = Some(4096);
+        assert_eq!(reused(&mut aligned, 8_000), 4096);
+        // A backend contradicting its own grid or the input length fences the worker.
+        for reuse in [2048, 8_000] {
+            let mut worker = coarse();
+            worker.backend.prefix_reuse_override = Some(reuse);
+            let mut output = Vec::new();
+            let request = serde_json::to_vec(&cached_request(8_000, Some(SCOPE))).unwrap();
+            assert_eq!(worker.process_line(&request, &mut output), Err("native_operation_failed"), "{reuse}");
+            assert_eq!(serde_json::from_slice::<Value>(&output).unwrap()["error"], "invalid_generation_output");
+            assert_eq!(worker.backend.generation_calls, 0);
+            assert!(!worker.backend.prefix_cache_retained());
+        }
+        for chunk in [0, 512, 1536] {
+            let mut backend = prefix_worker(true).backend;
+            backend.prefix_chunk = chunk;
+            let mut invalid = GenerationWorker::new_with_options(backend, None, true).unwrap();
+            assert_eq!(readiness(&mut invalid)["prefix_cache"]["enabled"], false, "{chunk}");
+        }
+    }
+
+    #[test]
+    fn prefix_cache_fields_are_rejected_unless_enabled() {
+        let mut plain = worker();
+        plain.backend.max_context = Some(16_384);
+        for mut disabled in [plain, prefix_worker(false)] {
+            assert_eq!(post(&mut disabled, cached_request(4, Some(SCOPE)))["error"], "invalid_generation_request");
+            assert_eq!(post(&mut disabled, json!({"operation":"reset_cache"}))["error"], "invalid_request");
+            let reply = post(&mut disabled, cached_request(4, None));
+            assert!(reply.get("error").is_none());
+            assert!(reply.get("reused_input_tokens").is_none());
+            assert_eq!(disabled.backend.generation_calls, 1);
+        }
+        let mut enabled = prefix_worker(true);
+        for invalid in [json!(null), json!(7), json!(""), json!("0123456789ABCDEF0123456789ABCDEF"), json!("00")] {
+            let mut request = cached_request(4, None);
+            request["cache_scope"] = invalid;
+            let error = post(&mut enabled, request)["error"].clone();
+            assert!(error == "invalid_generation_request" || error == "invalid_request", "{error}");
+        }
+        assert_eq!(post(&mut enabled, json!({"operation":"reset_cache","extra":1}))["error"], "invalid_request");
+        assert_eq!(enabled.backend.generation_calls, 0);
+    }
+
+    #[test]
+    fn prefix_cache_reuses_aligned_rows_and_reports_processed_rate() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        assert_eq!(worker.backend.state_allocations, 1);
+        let mut request = cached_request(3_500, Some(SCOPE));
+        request["stream"] = json!(true);
+        let mut output = Vec::new();
+        worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output).unwrap();
+        let frames: Vec<Value> = output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        let reply = frames.last().unwrap();
+        assert_eq!(reply["reused_input_tokens"], 2048);
+        assert_eq!(reply["input_tokens"], 3_500);
+        let prefill = reply["prefill_seconds"].as_f64();
+        assert_eq!(
+            reply["input_tokens_per_second"].as_f64(),
+            tokens_per_second(3_500 - 2_048, prefill),
+            "the input rate counts processed tokens only"
+        );
+        let progress: Vec<&Value> = frames.iter().filter(|frame| frame["event"] == "progress").collect();
+        assert!(!progress.is_empty());
+        assert!(progress.iter().all(|frame| frame["reused_input_tokens"] == 2048));
+        assert_eq!(worker.backend.state_allocations, 1, "a hit reuses the retained state");
+        // Each request keeps at least its own final chunk to prefill.
+        assert_eq!(reused(&mut worker, 3_072), 2048);
+        assert_eq!(reused(&mut worker, 2_048), 1024);
+        assert_eq!(reused(&mut worker, 1_024), 0);
+    }
+
+    #[test]
+    fn prefix_cache_key_mismatches_drop_the_entry_before_allocating() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        let mut other_context = cached_request(3_000, Some(SCOPE));
+        other_context["context_tokens"] = json!(4096);
+        assert_eq!(post(&mut worker, other_context)["reused_input_tokens"], 0);
+        assert_eq!(reused(&mut worker, 3_000), 0, "a context change replaced the entry");
+        assert_eq!(post(&mut worker, cached_request(3_000, Some(OTHER_SCOPE)))["reused_input_tokens"], 0);
+        assert_eq!(reused(&mut worker, 3_000), 0, "a scope change replaced the entry");
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+        let unscoped = post(&mut worker, cached_request(3_000, None));
+        assert_eq!(unscoped["reused_input_tokens"], 0);
+        assert!(!worker.backend.prefix_cache_retained(), "unscoped requests retain nothing");
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        let mut diverged = cached_request(3_000, Some(SCOPE));
+        diverged["input_token_ids"][1500] = json!(3);
+        assert_eq!(post(&mut worker, diverged)["reused_input_tokens"], 1024);
+        // Only the two hits reused a state; every other request allocated.
+        assert_eq!(worker.backend.state_allocations, 7);
+    }
+
+    #[test]
+    fn prefix_cache_is_cleared_by_errors_resets_and_image_operations() {
+        let invalidations: [(&str, Value); 6] = [
+            (
+                "context_overflow",
+                json!({"operation":"generate","input_token_ids":[2,2,2],"context_tokens":2,
+                "max_new_tokens":1,"cache_scope":SCOPE}),
+            ),
+            ("invalid_request", json!({"operation":"generate","unknown":true})),
+            ("invalid_decoding_request", json!({"operation":"decode","token_ids":[99]})),
+            ("cache_reset", json!({"operation":"reset_cache"})),
+            ("discarded", json!({"operation":"discard_image"})),
+            (
+                "images_not_supported",
+                json!({"operation":"prepare_image","rendered_prompt":"x",
+                "image":{"id":"00000000000000000000000000000000","media_type":"image/png","byte_length":1},
+                "context_tokens":64,"max_new_tokens":1}),
+            ),
+        ];
+        for (expected, request) in invalidations {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            assert_eq!(reused(&mut worker, 3_000), 2048);
+            let reply = post(&mut worker, request);
+            assert!(reply["error"] == expected || reply.get(expected).is_some(), "{expected}: {reply}");
+            assert!(!worker.backend.prefix_cache_retained(), "{expected}");
+            assert_eq!(reused(&mut worker, 3_000), 0, "{expected}");
+        }
+    }
+
+    #[test]
+    fn prefix_cache_is_cleared_by_cancellation_and_native_errors() {
+        for error in ["generation_cancelled", "native_generation_failed"] {
+            let mut worker = prefix_worker(true);
+            assert_eq!(reused(&mut worker, 3_000), 0);
+            worker.backend.tokens = vec![Err(error)];
+            let mut output = Vec::new();
+            let _ = worker.process_line(&serde_json::to_vec(&cached_request(3_000, Some(SCOPE))).unwrap(), &mut output);
+            assert!(String::from_utf8_lossy(&output).contains(error));
+            assert!(!worker.backend.prefix_cache_retained(), "{error}");
+            worker.backend.tokens = vec![Ok(3), Ok(1)];
+            assert_eq!(reused(&mut worker, 3_000), 0, "{error}");
+        }
+    }
+
+    #[test]
+    fn prefix_cache_keeps_its_entry_across_tokenize_and_decode() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        assert!(post(&mut worker, json!({"operation":"tokenize","text":"fixture"})).get("error").is_none());
+        assert!(post(&mut worker, json!({"operation":"decode","token_ids":[3]})).get("error").is_none());
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+    }
+
+    struct FailingOutput;
+
+    impl Write for FailingOutput {
+        fn write(
+            &mut self,
+            _: &[u8],
+        ) -> io::Result<usize> {
+            Err(io::Error::other("closed"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("closed"))
+        }
+    }
+
+    #[test]
+    fn prefix_cache_publishes_only_after_the_reply_is_written() {
+        let mut worker = prefix_worker(true);
+        assert_eq!(
+            worker.process_line(&serde_json::to_vec(&cached_request(3_000, Some(SCOPE))).unwrap(), &mut FailingOutput),
+            Err("protocol_write_failed")
+        );
+        assert!(!worker.backend.prefix_cache_retained());
+        assert_eq!(reused(&mut worker, 3_000), 0);
+        assert_eq!(reused(&mut worker, 3_000), 2048);
+    }
+
+    struct IdleInput {
+        input: io::Cursor<Vec<u8>>,
+        waits: Vec<bool>,
+    }
+
+    impl Read for IdleInput {
+        fn read(
+            &mut self,
+            buffer: &mut [u8],
+        ) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl BufRead for IdleInput {
+        fn fill_buf(&mut self) -> io::Result<&[u8]> {
+            self.input.fill_buf()
+        }
+        fn consume(
+            &mut self,
+            amount: usize,
+        ) {
+            self.input.consume(amount);
+        }
+    }
+
+    impl RequestInput for IdleInput {
+        fn wait_readable(
+            &mut self,
+            timeout: Duration,
+        ) -> io::Result<bool> {
+            assert_eq!(timeout, Duration::from_secs(600));
+            Ok(self.waits.remove(0))
+        }
+    }
+
+    fn run_requests(
+        worker: &mut GenerationWorker<FakeBackend>,
+        lines: &[Vec<u8>],
+        waits: Vec<bool>,
+    ) -> Vec<Value> {
+        let mut input = IdleInput {
+            input: io::Cursor::new(lines.iter().flat_map(|line| line.iter().copied().chain(*b"\n")).collect()),
+            waits,
+        };
+        let mut output = Vec::new();
+        run_lines(worker, &mut input, &mut output).unwrap();
+        assert!(input.waits.is_empty(), "waited only while state was retained");
+        output
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .skip(1)
+            .collect()
+    }
+
+    #[test]
+    fn prefix_cache_expires_while_idle_and_on_oversized_lines() {
+        let request = serde_json::to_vec(&cached_request(3_000, Some(SCOPE))).unwrap();
+        let replies = run_requests(&mut prefix_worker(true), &[request.clone(), request.clone()], vec![true, true]);
+        assert_eq!(replies[1]["reused_input_tokens"], 2048);
+        let replies = run_requests(&mut prefix_worker(true), &[request.clone(), request.clone()], vec![false, true]);
+        assert_eq!(replies[1]["reused_input_tokens"], 0, "idle expiry released the entry");
+        let oversized = vec![b' '; MAX_REQUEST_BYTES + 1];
+        let replies =
+            run_requests(&mut prefix_worker(true), &[request.clone(), oversized, request.clone()], vec![true, true]);
+        assert_eq!(replies[1]["error"], "request_too_large");
+        assert_eq!(replies[2]["reused_input_tokens"], 0);
     }
 }

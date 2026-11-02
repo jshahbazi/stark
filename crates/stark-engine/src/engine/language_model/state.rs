@@ -53,6 +53,10 @@ impl<B: Backend> LanguageModelState<B> {
 }
 
 #[derive(Debug, Error)]
+#[error("State cannot be rewound to this prefix")]
+pub struct LanguageModelRewindStateError;
+
+#[derive(Debug, Error)]
 pub enum LanguageModelCreateEmptyStateError<B: Backend> {
     #[error("Invalid model state context")]
     InvalidContext,
@@ -112,6 +116,46 @@ impl<B: Backend> LanguageModel<B> {
             #[cfg(test)]
             vision_prefill_layer_readbacks: None,
         })
+    }
+
+    /// Whether a completed state can be rewound for the next request.
+    pub fn prefix_reuse_supported(&self) -> bool {
+        self.speculator.is_none() && self.decoder.prefix_reuse_supported()
+    }
+
+    /// Prepare a completed request state for a new prompt that shares its
+    /// first `prefix_length` tokens.
+    ///
+    /// `prefix_length` must lie on the prefill chunk grid, so the rest of the
+    /// prompt is prefilled with the same chunk boundaries as on a fresh state.
+    /// The capacity must match the one the state was created with. Clears the
+    /// pending output token and reseeds the sampler as `create_empty_state`
+    /// would. After an error the state must be discarded.
+    pub fn rewind_state(
+        &self,
+        state: &mut LanguageModelState<B>,
+        prefix_length: usize,
+        max_context_length: Option<u32>,
+        sampling_seed: u64,
+    ) -> Result<(), LanguageModelRewindStateError> {
+        if !Arc::ptr_eq(&self.model_identity, &state.model_identity)
+            || !self.prefix_reuse_supported()
+            || state.speculator_state.is_some()
+            || state.multimodal_failed
+            || state.max_context_length != max_context_length
+            || !prefix_length.is_multiple_of(super::stream::PREFILL_CHUNK_TOKENS)
+            || prefix_length > state.tokens.len()
+        {
+            return Err(LanguageModelRewindStateError);
+        }
+        let rows = u32::try_from(prefix_length).map_err(|_| LanguageModelRewindStateError)?;
+        if !state.transformer_state.rewind(rows) {
+            return Err(LanguageModelRewindStateError);
+        }
+        state.tokens.truncate(prefix_length);
+        state.last_output_token = None;
+        state.prng = PRng::new(sampling_seed);
+        Ok(())
     }
 }
 

@@ -157,9 +157,9 @@ def test_revoke_releases_running_and_queued_desktop_requests_and_preserves_model
     entered = threading.Event()
     original = worker.request
 
-    def blocked(payload, on_delta=None, cancelled=None):
+    def blocked(payload, on_delta=None, cancelled=None, on_progress=None):
         if payload["operation"] != "generate":
-            return original(payload, on_delta=on_delta, cancelled=cancelled)
+            return original(payload, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress)
         if on_delta is not None:
             on_delta("synthetic partial")
         entered.set()
@@ -206,9 +206,9 @@ def test_model_stop_and_restart_preserve_client_admission_with_old_request_fence
     entered = threading.Event()
     original = worker.request
 
-    def blocked(payload, on_delta=None, cancelled=None):
+    def blocked(payload, on_delta=None, cancelled=None, on_progress=None):
         if payload["operation"] != "generate":
-            return original(payload, on_delta=on_delta, cancelled=cancelled)
+            return original(payload, on_delta=on_delta, cancelled=cancelled, on_progress=on_progress)
         entered.set()
         wait_for(lambda: worker.process.poll() is not None)
         raise ChatError("Synthetic stopped worker")

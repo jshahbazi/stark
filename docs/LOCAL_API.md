@@ -77,6 +77,8 @@ The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. 
 
 **Streaming.** With `stream: true` the response is Server-Sent Events of `chat.completion.chunk` objects followed by `data: [DONE]`. The first chunk carries the assistant role. `stream_options: {"include_usage": true}` adds a final usage-only chunk. Validation errors keep their HTTP status because they occur before streaming starts; a failure during streaming emits an error object in the stream and closes without `[DONE]`.
 
+**Usage.** `usage` reports `prompt_tokens`, `completion_tokens` and `total_tokens`. When the running worker supports [prefix reuse](#prefix-reuse), it also reports `prompt_tokens_details.cached_tokens`: the prompt tokens served from the retained prefix of the previous request instead of being processed again. `prompt_tokens` always counts the whole prompt.
+
 ## MTP capabilities and per-model preferences
 
 The live worker supplies `capabilities.mtp` in `/v1/capabilities` and each
@@ -157,7 +159,7 @@ The 4B template is preserved as an upstream fixture with source and license prov
 
 Buffered completions return `message.tool_calls`, optional text (null when absent), and `finish_reason: "tool_calls"`. Tool-enabled streaming delivers ordinary text as it is generated. Possible tool markers and their arguments stay private through the terminal worker frame and strict parsing, then indexed `delta.tool_calls` are emitted exactly once, followed by the terminal reason, optional usage and `[DONE]`. Trailing whitespace is held until it can be distinguished from the separator before a call. Invalid or truncated calls produce a stream error after any provisional text; they never produce executable tool deltas. Usage includes all generated framing/argument tokens and tokens completing a stop sequence. Cancellation/deadline checks remain active throughout generation.
 
-An agent client can still take longer to produce its first token than a short Playground chat. Its system instructions, tool schemas and conversation history are part of the model input and must be processed before decoding begins. Live text streaming removes the additional wait for the entire answer; it does not remove model prefill work or shorten the client's instructions. The [OpenWork first-text latency record](archive/runs/2026-10-31-openwork-first-text-latency.md) separates native first-token work from the rest of a measured client request.
+An agent client can still take longer to produce its first token than a short Playground chat. Its system instructions, tool schemas and conversation history are part of the model input and must be processed before decoding begins. Live text streaming removes the additional wait for the entire answer; it does not shorten the client's instructions. [Prefix reuse](#prefix-reuse) removes most of the repeated work on later steps of the same conversation, but the first request of a conversation is still processed in full. The [OpenWork first-text latency record](archive/runs/2026-10-31-openwork-first-text-latency.md) separates native first-token work from the rest of a measured client request.
 
 Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-tool result-use task locally. Looser variants failed through an unwanted parallel call or premature stopping; this checkpoint is not a general-purpose agent recommendation. Protocol fixtures and task-competence evidence are recorded separately.
 
@@ -175,7 +177,37 @@ The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read tas
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
 - Image preparation, generation, streaming reads, frame writes and discard share one worker transaction deadline, with a 300-second default. The timeout does not reset for each operation. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
-Each request is tokenized and prefilled from scratch by the worker; there is no prompt or prefix cache between requests.
+### Prefix reuse
+
+Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
+
+- Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
+- The native Qwen3.8 backend resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. A later step waits for its new messages plus at most about 4,096 tokens, provided nothing before that point changed; an earlier change processes the whole prompt. MTP must be on or off for both requests.
+
+Reuse follows the worker's prefill grid, so outputs are identical to processing the whole prompt. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md) and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) the measurements.
+
+The cache holds one entry, in worker memory only. It is never written to disk, logged or returned. Each principal has its own random, in-memory scope:
+
+- each Playground conversation
+- the master API key within one API session
+- each managed client grant within one API session
+
+A request never reuses another principal's entry, so first-token timing cannot reveal what another principal sent. Clients that share the master key share its scope. The entry is released:
+
+- when the next request uses a different scope or context size
+- on any worker error, cancellation, client disconnect or deadline
+- on any image request
+- on Disconnect/revocation, a key change or an API restart
+- after 600 seconds without requests
+- when the model stops or changes
+
+It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
+
+## Progress in Stark
+
+While a completion runs, the Stark menu and Playground show that a connected application is generating, the time to the first token (counting up, then the measured value), an estimated completion range, the tokens sampled so far against the output budget, and the prompt token count. When the worker reports reused prompt-prefix tokens, the prompt line also shows how many were reused; workers without prefix reuse omit it. Buffered requests are streamed from the worker internally for this purpose; the HTTP response is unchanged. When generation finishes, the menu's last-request readout shows the input and output rates and the first-token time, including for requests whose tool calls then fail strict parsing.
+
+These app events carry counts and timings, a random per-request identifier and the loaded model's library identifier only. They never contain prompts, responses, tool arguments, client identifiers, capability scopes or keys, and they are not written to disk. The worker serves one request at a time, so a request's progress ends before the next request starts, and progress from a stopped or replaced model is discarded. Completion estimates use the same bounded, in-memory calibration as Playground chats, with separate profiles per model load and request settings; see the [generation contract](GENERATION.md#generate).
 
 ## Error codes
 

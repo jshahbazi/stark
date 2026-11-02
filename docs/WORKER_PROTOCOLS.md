@@ -44,6 +44,7 @@ The first line a worker writes is its readiness reply. On success it starts with
 | `stark-generate` | `image_input.version` | `mediaref-v1` (when the loaded model supports the implemented vision layout) |
 | `stark-generate` | `image_input.transport` | `owner-private-file-v1` |
 | `stark-generate` | `timing_method` (in generate replies) | `first-token-wall-clock-v1` |
+| `stark-generate` | `state_policy` | `fresh-per-request`, or `consecutive-prefix-v1` with `--prefix-cache` on an eligible model ([prefix reuse](GENERATION.md#prefix-reuse)) |
 | `stark-score` | `mode` | `exact-token-scoring-cache-v1` or `exact-token-digest-cache-v1` |
 | `stark-score` | `cache_policy` | `consecutive-full-vocabulary-logits-v1` or `fresh-state` |
 
