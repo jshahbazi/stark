@@ -14,7 +14,7 @@ struct ConnectionDetailsView: View {
 
     private enum Section: String, CaseIterable {
         case apps = "Apps"
-        case other = "Other apps"
+        case other = "Connect your own app"
     }
 
     private var canConnect: Bool { !engine.apiBaseURL.isEmpty && !engine.apiKey.isEmpty }
@@ -144,7 +144,7 @@ struct ConnectionDetailsView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("If you added a provider named stark manually, remove it in that app’s settings, then reconnect here.")
                     Text("If Stark is missing in OpenCode, quit OpenCode, run opencode service stop in Terminal, reopen OpenCode, then allow its new engine here.")
-                    Text("For the standalone OpenCode CLI, use the settings under Other apps. A terminal session sharing an approved Desktop engine can also use that engine’s Stark connection.")
+                    Text("For the standalone OpenCode CLI, use the settings under Connect your own app. A terminal session sharing an approved Desktop engine can also use that engine’s Stark connection.")
                 }
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true).padding(.top, 8)
             }.font(.caption)
