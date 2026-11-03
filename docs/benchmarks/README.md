@@ -10,6 +10,8 @@ Measured results, each bound to the source revision, build and host named inside
 
 **Source-qualified OLMo 3 and Gemma 4 Q4 text (2026-10-29).** On Apple M5 Max, repaired Stark has a median paired combined-work rate 1.55% above MLX for OLMo and 2.15% below for Gemma. Relative to the numerically repaired C2 native baseline, paired request latency falls 19.46% and 3.07%. Four loads per engine, three measured requests per load, and matching 128-token hashes accompany the numerical qualification. Rates cover the complete 512-input/128-return request. See the [repaired comparison](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) and [aggregate results](olmo3-gemma4-q4-repaired-2026-10-29.json).
 
+The subsequent [2026-11-02 source fusions](../archive/runs/2026-11-02-olmo3-gemma4-source-fusions.md) pass fresh correctness checks. Their timing is unqualified; the October rates above describe the earlier frozen C3 build.
+
 **Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
 GPU decode graphs measured Qwen at 22.94 tok/s versus 11.21 staged, and GLM at
 9.04 versus 8.13, on Apple M5 Max. Five fresh requests per mode use the same

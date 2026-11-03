@@ -399,3 +399,90 @@ fn mlx_bf16_rms_public_midpoint_distinguishes_reduction_and_legacy_default() {
     source_rms_boundary::<Cpu>();
     for_each_non_cpu_backend!(|B| source_rms_boundary::<B>());
 }
+
+fn source_rms_materialized_residual<B: Backend>() {
+    let context = B::Context::new().unwrap();
+    for width in [1u32, 7, 127, 128, 129, 256, 512, 1536, 4096] {
+        let length = width as usize * 3;
+        let input: Vec<_> = (0..length).map(|i| bf16::from_f32(((i * 37 % 257) as f32 - 128.0) / 64.0)).collect();
+        let residual: Vec<_> = (0..length).map(|i| bf16::from_f32(((i * 17 % 131) as f32 - 65.0) / 128.0)).collect();
+        let combined: Vec<_> = input.iter().zip(&residual).map(|(a, b)| *a + *b).collect();
+        let scales: Vec<_> = (0..width).map(|i| 0.75 + (i % 23) as f32 / 19.0).collect();
+        let input = create_buffer_with_data::<B, bf16>(&context, &input);
+        let combined_input = create_buffer_with_data::<B, bf16>(&context, &combined);
+        let scales = create_buffer_with_data::<B, f32>(&context, &scales);
+        let mut residual = create_buffer_with_data::<B, bf16>(&context, &residual);
+        let mut copied = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::NAN; length]);
+        let mut separate = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::NAN; length]);
+        let mut fused = create_buffer_with_data::<B, bf16>(&context, &vec![bf16::NAN; length]);
+        let make_kernel = |add| {
+            <B::Kernels as Kernels>::NormalizationKernel::new(
+                &context,
+                DataType::BF16,
+                DataType::F32,
+                DataType::BF16,
+                DataType::F32,
+                false,
+                false,
+                false,
+                true,
+                add,
+                false,
+                false,
+                false,
+                false,
+                true,
+                true,
+            )
+            .unwrap()
+        };
+        let separate_kernel = make_kernel(false);
+        let fused_kernel = make_kernel(true);
+        let mut commands = context.create_command_buffer(None, None).unwrap();
+        separate_kernel.encode(
+            Some(&combined_input),
+            Some(&scales),
+            None::<&B::GlobalBuffer>,
+            &mut separate,
+            Some(&mut copied),
+            None::<&B::GlobalBuffer>,
+            3,
+            width,
+            1e-6,
+            0.0,
+            1.0,
+            &mut commands,
+        );
+        fused_kernel.encode(
+            Some(&input),
+            Some(&scales),
+            None::<&B::GlobalBuffer>,
+            &mut fused,
+            Some(&mut residual),
+            None::<&B::GlobalBuffer>,
+            3,
+            width,
+            1e-6,
+            0.0,
+            1.0,
+            &mut commands,
+        );
+        commands.end_encoding().submit().wait_until_completed().unwrap();
+        let bits = |buffer: &B::GlobalBuffer| {
+            buffer_to_vec::<B, bf16>(buffer).into_iter().map(bf16::to_bits).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            bits(&residual),
+            combined.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "source residual storage differs at width={width}"
+        );
+        assert_eq!(bits(&copied), bits(&residual), "source copy differs at width={width}");
+        assert_eq!(bits(&separate), bits(&fused), "source fused RMS differs at width={width}");
+    }
+}
+
+#[stark_test]
+fn source_rms_fuses_bf16_residual_with_exact_storage_and_tail_reductions() {
+    source_rms_materialized_residual::<Cpu>();
+    for_each_non_cpu_backend!(|B| source_rms_materialized_residual::<B>());
+}

@@ -295,10 +295,14 @@ impl<B: Backend> TransformerLayer<B> {
         }
 
         let reference_ple_bf16 = layer_config.ple_config.as_ref().is_some_and(|config| config.reference_bf16);
+        // The explicit source RMS path materializes each residual sum as BF16
+        // before statistics, so it can absorb the Gemma PLE residual addition.
+        let source_ple_residual =
+            reference_ple_bf16 && data_type == DataType::BF16 && layer_config.pre_mlp_norm_config.mlx_bf16_reduction;
         let pre_mlp_norm = Normalization::new(
             model_dim,
             mlp_input_hadamard_factors,
-            if reference_ple_bf16 {
+            if reference_ple_bf16 && !source_ple_residual {
                 ShortcutMode::Copy
             } else {
                 ShortcutMode::Add
@@ -356,7 +360,7 @@ impl<B: Backend> TransformerLayer<B> {
                 .then(|| <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false))
                 .transpose()
                 .map_err(TransformerLayerError::Backend)?,
-            reference_ple_residual_add: reference_ple_bf16
+            reference_ple_residual_add: (reference_ple_bf16 && !source_ple_residual)
                 .then(|| <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, false))
                 .transpose()
                 .map_err(TransformerLayerError::Backend)?,

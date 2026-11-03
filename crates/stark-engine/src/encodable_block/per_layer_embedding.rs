@@ -4,7 +4,10 @@ use thiserror::Error;
 use crate::{
     backends::common::{
         Backend, BufferMut, BufferRef, CommandBuffer, CommandBufferEncoding, InvalidInput,
-        kernel::{GatedActMul, GatedActMulSettings, Kernels, TensorAddBiasKernel, TensorAddScaleKernel},
+        kernel::{
+            GatedActMul, GatedActMulSettings, Kernels, MaterializedBF16AddScaleKernel, TensorAddBiasKernel,
+            TensorAddScaleKernel,
+        },
     },
     config::{
         activation::AnyActivation,
@@ -223,6 +226,7 @@ pub struct PerLayerEmbeddingProjection<B: Backend> {
     gate_act_mul: GatedActMul<B>,
     residual_finalize: <B::Kernels as Kernels>::TensorAddBiasKernel,
     residual_combine: <B::Kernels as Kernels>::TensorAddScaleKernel,
+    source_residual_combine: Option<<B::Kernels as Kernels>::MaterializedBF16AddScaleKernel>,
     model_dim: u32,
     ple_dim: u32,
     num_layers: u32,
@@ -283,6 +287,11 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
             .map_err(PerLayerEmbeddingError::BackendError)?;
         let residual_combine = <B::Kernels as Kernels>::TensorAddScaleKernel::new(context, data_type, true)
             .map_err(PerLayerEmbeddingError::BackendError)?;
+        let source_residual_combine =
+            (data_type == DataType::BF16 && config.reference_bf16 && config.norm_config.mlx_bf16_reduction)
+                .then(|| <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel::new(context, true))
+                .transpose()
+                .map_err(PerLayerEmbeddingError::BackendError)?;
 
         Ok(Self {
             gate,
@@ -291,6 +300,7 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
             gate_act_mul,
             residual_finalize,
             residual_combine,
+            source_residual_combine,
             model_dim,
             ple_dim: config.ple_dim,
             num_layers,
@@ -343,6 +353,20 @@ impl<B: Backend> PerLayerEmbeddingProjection<B> {
 
         let projected = self.projection.encode(activated, batch_dim, command_buffer)?;
         let normed = self.norm.encode(&projected, 0, batch_dim, None::<&mut B::ScratchBuffer>, command_buffer)?;
+
+        if let Some(combine) = &self.source_residual_combine {
+            combine.encode(
+                None::<&B::ScratchBuffer>,
+                &normed,
+                outputs,
+                length,
+                length,
+                self.post_layer_scalar,
+                command_buffer,
+            );
+            command_buffer.pop_debug_group();
+            return Ok(());
+        }
 
         self.residual_combine.encode(
             None::<&B::ScratchBuffer>,

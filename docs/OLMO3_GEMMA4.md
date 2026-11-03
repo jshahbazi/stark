@@ -63,6 +63,12 @@ Contiguous single-token Q/K normalization reuses the existing source RMS kernel.
 
 This routing requires BF16, the explicit source reduction setting, `OnlyNormalization`, learned scales, no bias or mean subtraction, and zero scale offset. Gemma additionally requires eight query heads and at most one KV head. Weightless value normalization, multi-token input, canonical BF16 profiles and other geometries retain their existing routing and validation. The host selects contiguous buffer subranges without changing the artifact format or precision policy.
 
+Source RMS normalization retains each thread's four BF16-rounded values in registers and reuses them for normalization, avoiding another buffer read on both OLMo and Gemma. The source row limit remains 4,096 elements and the reduction order is unchanged.
+
+Gemma's source PLE path also fuses the post-attention residual addition into pre-FFN RMS normalization. Each residual sum rounds to BF16 before statistics. The source PLE final residual addition and layer scaling share one dispatch, with an explicit BF16 sum before the final scaled BF16 store. These fusions require BF16, `reference_bf16` PLE and the explicit source RMS policy. Canonical BF16 and legacy PLE profiles retain their separate operations.
+
+The [source fusion validation](archive/runs/2026-11-02-olmo3-gemma4-source-fusions.md) records fresh numerical, text/image worker and native-suite checks. The earlier C3 benchmark below remains the last qualified speed result; the new fusions do not yet establish a throughput gain or closure of the remaining Gemma/MLX gap.
+
 ## Gemma 4 E2B image artifact and execution
 
 The converter emits a `Gemma4VisionLanguageModelConfig` with artifact-contract schema 4 and the `gemma4-e2b-bf16-v1` family profile. Native admission validates five components before loading tensors: `config.json`, `model.safetensors`, `tokenizer.json`, `preprocessor_config.json`, and `chat_template.jinja`. Their hashes, source identity, schema, geometry, tokenizer IDs and processor recipe must match the contract.

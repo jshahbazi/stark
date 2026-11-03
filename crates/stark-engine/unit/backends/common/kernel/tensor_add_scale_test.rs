@@ -8,8 +8,8 @@ use crate::{
     array::ArrayElement,
     backends::{
         common::{
-            Backend, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
-            kernel::TensorAddScaleKernel,
+            Backend, BufferMut, CommandBufferEncoding, CommandBufferExecutable, CommandBufferPending, Context, Kernels,
+            kernel::{MaterializedBF16AddScaleKernel, TensorAddScaleKernel},
         },
         cpu::Cpu,
     },
@@ -296,5 +296,80 @@ fn materialized_bf16_sum_then_scale_preserves_the_intermediate_cast() {
     check_materialized_bf16_sum_then_scale::<Cpu>();
     for_each_non_cpu_backend!(|B| {
         check_materialized_bf16_sum_then_scale::<B>();
+    });
+}
+
+fn check_materialized_bf16_fusion<B: Backend>(in_place: bool) {
+    let context = B::Context::new().unwrap();
+    let fused = <B::Kernels as Kernels>::MaterializedBF16AddScaleKernel::new(&context, in_place).unwrap();
+    let add = <B::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::BF16, false).unwrap();
+    let multiply = <B::Kernels as Kernels>::TensorAddScaleKernel::new(&context, DataType::BF16, true).unwrap();
+    let sentinel = bf16::from_f32(123.0);
+    // Include a full model row, a broadcast bias, non-SIMD tails and multiple
+    // rows. Distinct scales exercise a learned scalar and both scale signs.
+    for (num_cols, rows) in [(1536usize, 1usize), (41, 3), (7, 1)] {
+        let length = num_cols * rows;
+        let input = (0..length).map(|i| bf16::from_f32((i % 89) as f32 * 0.3 - 5.0)).collect::<Vec<_>>();
+        let bias = (0..num_cols).map(|i| bf16::from_f32((i % 37) as f32 * 0.07 - 1.0)).collect::<Vec<_>>();
+        for scale in [0.70703125f32, 1.1875, -0.8359375] {
+            let expected = input
+                .iter()
+                .enumerate()
+                .map(|(i, a)| {
+                    let sum = bf16::from_f32(a.to_f32() + bias[i % num_cols].to_f32());
+                    bf16::from_f32((sum.to_f32() + 0.0) * scale)
+                })
+                .collect::<Vec<_>>();
+            assert!(input.iter().enumerate().zip(&expected).any(|((i, a), expected)| {
+                bf16::from_f32((a.to_f32() + bias[i % num_cols].to_f32()) * scale).to_bits() != expected.to_bits()
+            }));
+            let input_buffer = create_buffer_with_data::<B, bf16>(&context, &input);
+            let bias_buffer = create_buffer_with_data::<B, bf16>(&context, &bias);
+            let zero = create_buffer_with_data::<B, bf16>(&context, &[bf16::ZERO]);
+            let mut separate = create_buffer::<B, bf16>(&context, length);
+            let mut initial = vec![sentinel; length + 2];
+            if in_place {
+                initial[1..length + 1].copy_from_slice(&input);
+            }
+            let mut fused_output = create_buffer_with_data::<B, bf16>(&context, &initial);
+            let bytes = DataType::BF16.size_in_bytes();
+            let mut command = context.create_command_buffer(None, None).unwrap();
+            add.encode(
+                Some(&input_buffer),
+                &bias_buffer,
+                &mut separate,
+                num_cols as u32,
+                length as u32,
+                1.0,
+                &mut command,
+            );
+            multiply.encode(None::<&B::GlobalBuffer>, &zero, &mut separate, 1, length as u32, scale, &mut command);
+            fused.encode(
+                (!in_place).then_some(&input_buffer),
+                &bias_buffer,
+                (&mut fused_output).subrange_mut(bytes..(length + 1) * bytes),
+                num_cols as u32,
+                length as u32,
+                scale,
+                &mut command,
+            );
+            command.end_encoding().submit().wait_until_completed().unwrap();
+            let separate = buffer_to_vec::<B, bf16>(&separate);
+            let actual = buffer_to_vec::<B, bf16>(&fused_output);
+            assert_eq!(actual[0].to_bits(), sentinel.to_bits());
+            assert_eq!(actual[length + 1].to_bits(), sentinel.to_bits());
+            assert!(actual[1..length + 1].iter().zip(&expected).all(|(a, e)| a.to_bits() == e.to_bits()));
+            assert!(separate.iter().zip(expected).all(|(a, e)| a.to_bits() == e.to_bits()));
+        }
+    }
+}
+
+#[stark_test]
+fn materialized_bf16_fusion_preserves_sum_scale_and_tail_boundaries() {
+    check_materialized_bf16_fusion::<Cpu>(false);
+    check_materialized_bf16_fusion::<Cpu>(true);
+    for_each_non_cpu_backend!(|B| {
+        check_materialized_bf16_fusion::<B>(false);
+        check_materialized_bf16_fusion::<B>(true);
     });
 }

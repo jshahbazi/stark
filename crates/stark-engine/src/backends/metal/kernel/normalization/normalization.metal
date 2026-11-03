@@ -77,6 +77,7 @@ PUBLIC KERNEL(Normalization)(
   // Step 1 - threads read from global and accumulate sum / sum of squares
   AccumT thread_sum = static_cast<AccumT>(0.0f);
   AccumT thread_sum_of_squares = static_cast<AccumT>(0.0f);
+  float source_values[4] = {0.0f, 0.0f, 0.0f, 0.0f};
 
   if (mlx_bf16_reduction) {
     // Four contiguous values form each source lane subtotal. Inactive groups
@@ -95,6 +96,7 @@ PUBLIC KERNEL(Normalization)(
             shortcut[i] = val;
           }
           x[j] = float(val);
+          source_values[j] = x[j];
         }
       }
       thread_sum_of_squares = source_rms_four(thread_sum_of_squares,x[0],x[1],x[2],x[3]);
@@ -148,47 +150,57 @@ PUBLIC KERNEL(Normalization)(
       ? source_inverse_rms(total_sum_of_squares,element_count,epsilon)
       : rsqrt(var + static_cast<AccumT>(epsilon));
 
-  // Step 3 - elementwise normalization
-  for (uint i = thread_in_row; i < element_count; i += BLOCK_SIZE) {
-    AccumT x;
-    // If we fuse TensorAddSwap, read shortcut (that now has input + shortcut)
-    // No need for memory barrier because each thread only reads what it wrote
-    if (residual_add) {
-      x = static_cast<AccumT>(shortcut[i]);
-    } else {
-      x = static_cast<AccumT>(input[i]);
-    }
-
-    // If full_layer, normalize and scale in AccumT, cast to OutputT at the end
-    // If not, cast to OutputT after normalize, scale in OutputT
-    OutputT val;
-    if (has_scales) {
-      AccumT scale = static_cast<AccumT>(scales[i]) + static_cast<AccumT>(scale_offset);
-      if (full_layer) {
-        val = static_cast<OutputT>((x - mean) * rms_inv * scale);
+  // Step 3 - elementwise normalization. Source profiles are validated to
+  // at most 4096 values: each thread owns its four source values throughout.
+  // Reuse those BF16-materialized values rather than reading another thread's
+  // shortcut writes. This preserves rounding and needs no device-memory fence.
+  const uint first = mlx_bf16_reduction ? thread_in_row * 4 : thread_in_row;
+  const uint stride = mlx_bf16_reduction ? BLOCK_SIZE * 4 : BLOCK_SIZE;
+  const uint owned_values = mlx_bf16_reduction ? 4 : 1;
+  for (uint base = first; base < element_count; base += stride) {
+    for (uint j = 0; j < owned_values; ++j) {
+      const uint i = base + j;
+      if (i >= element_count) continue;
+      AccumT x;
+      if (mlx_bf16_reduction) {
+        x = source_values[j];
+      } else if (residual_add) {
+        x = static_cast<AccumT>(shortcut[i]);
       } else {
-        val = static_cast<OutputT>((x - mean) * rms_inv) * static_cast<OutputT>(scale);
+        x = static_cast<AccumT>(input[i]);
       }
-    } else {
-      val = static_cast<OutputT>((x - mean) * rms_inv);
-    }
 
-    if (has_biases) {
-      val = static_cast<OutputT>(static_cast<AccumT>(val) + static_cast<AccumT>(biases[i]));
-    }
+      // If full_layer, normalize and scale in AccumT, cast to OutputT at the end
+      // If not, cast to OutputT after normalize, scale in OutputT
+      OutputT val;
+      if (has_scales) {
+        AccumT scale = static_cast<AccumT>(scales[i]) + static_cast<AccumT>(scale_offset);
+        if (full_layer) {
+          val = static_cast<OutputT>((x - mean) * rms_inv * scale);
+        } else {
+          val = static_cast<OutputT>((x - mean) * rms_inv) * static_cast<OutputT>(scale);
+        }
+      } else {
+        val = static_cast<OutputT>((x - mean) * rms_inv);
+      }
 
-    if (use_hadamard) {
-      val = static_cast<OutputT>(simdgroup_input_random_hadamard_transform(
-          static_cast<ushort>(thread_in_row % METAL_SIMD_SIZE),
-          val,
-          hadamard_factors[i]
-      ));
-    }
+      if (has_biases) {
+        val = static_cast<OutputT>(static_cast<AccumT>(val) + static_cast<AccumT>(biases[i]));
+      }
 
-    if (scale_output) {
-      val = static_cast<OutputT>(static_cast<float>(val) * post_layer_scalar);
-    }
+      if (use_hadamard) {
+        val = static_cast<OutputT>(simdgroup_input_random_hadamard_transform(
+            static_cast<ushort>(thread_in_row % METAL_SIMD_SIZE),
+            val,
+            hadamard_factors[i]
+        ));
+      }
 
-    output[i] = val;
+      if (scale_output) {
+        val = static_cast<OutputT>(static_cast<float>(val) * post_layer_scalar);
+      }
+
+      output[i] = val;
+    }
   }
 }

@@ -84,6 +84,23 @@ eight query heads and at most one KV head. Weightless V, multirow and other
 profiles retain their existing validation and kernels. This host selection
 uses the normalization source pin above and adds no upstream kernel source.
 
+Source RMS normalization extends this existing adaptation by retaining each
+thread's four rounded values in registers through normalization, within the
+validated 4,096-element row limit. This reuse applies to OLMo and Gemma.
+Gemma's source PLE residual fusion additionally materializes the residual sum
+in BF16 before statistics. A separate native
+`tensor_add_scale/materialized_bf16_add_scale` kernel fuses the final PLE
+residual addition and layer scale while retaining both BF16 boundaries.
+These host selections require BF16, reference PLE and the explicit source RMS
+policy; canonical and legacy PLE profiles retain their separate operations.
+
+The scheduling investigation inspected local Qwen optimization revision
+`908ae21f4894d841cf2e1ad44451643439543443`, including the thread-local rounded
+value in `vendor/lily-core/src/kernels/metal/gdn.metal`. The Gemma changes
+independently apply that scheduling pattern. No Lily kernel arithmetic was
+copied. The existing MLX source revisions, attribution and MIT notice above
+remain the arithmetic provenance for the source RMS path.
+
 Source BF16 vector attention uses a separate Safe, contraction-enabled kernel
 in `crates/stark-engine/src/backends/metal/kernel/attention/source_single_pass.metal`,
 selected by `single_pass.rs`. This follows the pinned `sdpa_vector.h` arithmetic
