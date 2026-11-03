@@ -1,6 +1,6 @@
 # Model-family support and installation preflight
 
-Stark uses one family registry for conversion coverage, intended application
+Stark uses one family registry for conversion and native-preparation coverage, intended application
 modes and early installation checks. The converter CLI and **Model Catalog**
 tab in the menu bar app's **Manage Models** window consume that registry. A family
 entry describes implemented paths and constraints; a source preflight checks selected checkpoint
@@ -8,7 +8,10 @@ metadata before weights are downloaded.
 
 The [native hybrid path](NATIVE_HYBRID_MODELS.md) loads prepared
 GLM-5.3-Flash UD-Q2_K_XL, Qwen3.8-Flash-Next mixed MLX and Flint checkpoints.
-Its helper pins native-source downloads for local import. The registry also
+Its helper pins native-source downloads for local import. **Model Catalog →
+GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` checkpoint through that same
+preparation path. GLM is a separate native family in the inventory; arbitrary
+GLM repositories remain outside generic converter preflight. The registry also
 includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
 a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
 MLX storage and unchanged mixed quantization, sharing the existing specialized
@@ -68,8 +71,15 @@ The download catalogue combines registered reference sources with a bounded live
 Hugging Face search. Parsed configuration identifies the family; repository
 names alone do not establish compatibility. At most 45 candidates are inspected
 and 30 choices are returned, preserving representative sizes and formats when
-available. Only supported floating Safetensors and implemented MLX 4-bit/8-bit
-paths are offered. Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
+available. Generic discovery offers supported floating Safetensors and implemented MLX 4-bit/8-bit
+paths. GLM instead has one fixed `UD-Q2_K_XL` GGUF entry, with its source
+revisions, four shards and 108,720,071,552 stored weight bytes owned by the native
+preparation helper. Browsing that entry uses bundled metadata and makes no Hub
+requests. Download uses the pinned weight and tokenizer repositories, preserves
+quantized bytes and validates the completed prepared identity before library
+registration. Download progress remains indeterminate until the stored byte
+total is verified. GLM image input and Decision mode are unavailable.
+Lily Qwen3.8 uses a mixed `4-bit / 8-bit` label, including
 its fixed Q8 control projections. Embedding/reranking tasks, known internal test
 models, quantized vision, unsupported MoE families, adapter-only and unsupported
 packed formats are excluded. The implemented Qwen3.8 text path includes its
@@ -182,9 +192,17 @@ A browser download also pins the catalogue card's immutable primary revision.
 The backend caches the offered repository, revision and artifact modes under
 the catalogue request and opaque entry ID. The app submits that ID and selected
 mode; it cannot supply a replacement source through this command. Installation
-repeats preflight at the cached revision and rejects a changed revision before
+repeats generic preflight at the cached revision and rejects a changed revision before
 weight download. A **Downloaded** marker requires a saved model with the same
 bound repository, revision and artifact mode.
+
+The fixed GLM entry selects only its exact native preparation choice. It bypasses
+generic conversion and uses the helper's pinned weight and metadata revisions;
+its prepared identity must match the catalog before publication. Stop cancels
+the isolated preparation process. Failed or cancelled installations do not
+register a model. Private, source-bound download staging is retained for retry,
+and registry failures return the completed folder to that staging. A per-source
+lock prevents concurrent installers from writing the same download.
 
 A successful metadata check remains provisional. Full conversion validates the
 actual tensor inventory, shapes, dtypes and payloads. Native admission validates

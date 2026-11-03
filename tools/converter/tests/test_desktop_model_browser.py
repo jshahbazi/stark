@@ -5,10 +5,11 @@ import json
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from stark_convert import cli, model_catalog, model_removal
+from stark_convert import cli, hybrid_prepare, model_catalog, model_removal, native_catalog
 from stark_convert import desktop as module
 from stark_convert.desktop import Desktop, DesktopError
 
@@ -159,6 +160,186 @@ def test_catalogue_download_resolves_server_cache_and_pins_mode_and_revision(hos
     payload["catalog_request_id"] = "stale"
     host.dispatch(payload)
     assert len(called) == 1 and events(host)[-1]["request_id"] == "install"
+
+
+def test_glm_catalogue_download_uses_only_the_offered_pinned_native_choice(host, monkeypatch):
+    item = native_catalog.catalog_item()
+    host.catalog_request_id, host.catalog_family_id = "request", native_catalog.FAMILY_ID
+    host.catalog_entries = {item["id"]: item}
+    called = []
+    monkeypatch.setattr(host, "start", lambda *args, **kwargs: called.append((args, kwargs)))
+    payload = {
+        "catalog_request_id": "request",
+        "entry_id": item["id"],
+        "support_request_id": "install",
+        "source": "untrusted/Replacement",
+        "revision": "f" * 40,
+    }
+    host.install_catalog(payload)
+    args, kwargs = called[0]
+    assert args[3:] == ("native", "glm53-q2", "text", "text", "install", item["revision"])
+    assert kwargs == {"request_id": "install"}
+    for change in ({"revision": "f" * 40}, {"repo": "untrusted/Replacement"}, {"artifact_modes": ["vision-language"]}):
+        host.catalog_entries[item["id"]] = {**item, **change}
+        with pytest.raises(DesktopError):
+            host.install_catalog(payload)
+    host.catalog_entries[item["id"]] = item
+    for change in ({"catalog_request_id": "stale"}, {"entry_id": "unknown"}, {"artifact_mode": "vision-language"}):
+        with pytest.raises(DesktopError):
+            host.install_catalog({**payload, **change})
+    assert len(called) == 1
+
+
+@pytest.fixture
+def native_download(host, monkeypatch):
+    from test_hybrid_prepare import metadata
+
+    source = {**hybrid_prepare.SOURCES["glm53-q2"], "weight_bytes": 4}
+    monkeypatch.setitem(hybrid_prepare.SOURCES, "glm53-q2", source)
+
+    def snapshot(repo, **options):
+        root = Path(options["local_dir"])
+        if repo == source["weights_repo"]:
+            assert options["revision"] == source["weights_revision"]
+            shards = root / "UD-Q2_K_XL"
+            shards.mkdir(exist_ok=True)
+            for index in range(4):
+                (shards / f"model-{index}.gguf").write_bytes(b"x")
+        else:
+            assert repo == source["metadata_repo"]
+            assert options["revision"] == source["metadata_revision"]
+            metadata(root)
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", snapshot)
+    monkeypatch.setattr(host, "run_support_check", lambda *_args: pytest.fail("generic preflight used for GLM"))
+
+    def prepare(command, _environment, _epoch):
+        assert command[:6] == [sys.executable, "-I", "-B", "-m", "stark_convert.hybrid_prepare", "glm53-q2"]
+        assert command[6] == "--output" and len(command) == 8
+        hybrid_prepare.prepare("glm53-q2", Path(command[7]))
+        return 0
+
+    monkeypatch.setattr(host, "run_converter", prepare)
+    return source
+
+
+def test_glm_preparation_registers_verified_managed_folder_without_loading(host, native_download):
+    host.worker = Worker()
+    host.begin_install_progress(host.epoch, "native")
+    assert host.install_progress["download"]["state"] == "waiting"
+    host.install(host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    assert len(host.models) == 1 and not host.worker.closed
+    model = host.models[0]
+    assert model["source"] == "huggingface:" + native_download["weights_repo"]
+    assert Path(model["path"]).parent == host.model_dir
+    assert module.model_valid(Path(model["path"]))
+    assert json.loads(host.registry.read_bytes()) == host.models
+    assert list(host.model_dir.iterdir()) == [Path(model["path"])]
+    assert next(event for event in events(host) if event["event"] == "installed")["support_request_id"] == "install"
+    assert host.install_progress["download"]["state"] == "complete"
+
+
+def test_glm_download_retries_reuse_owned_partial_shards(host, native_download, monkeypatch):
+    snapshot = hybrid_prepare.snapshot_download
+    attempts = []
+
+    def interrupted(repo, **options):
+        if repo == native_download["weights_repo"]:
+            root = Path(options["local_dir"])
+            attempts.append(root)
+            if len(attempts) == 1:
+                shards = root / "UD-Q2_K_XL"
+                shards.mkdir()
+                (shards / "model-0.gguf").write_bytes(b"x")
+                raise OSError("synthetic interrupted download")
+            assert (root / "UD-Q2_K_XL" / "model-0.gguf").read_bytes() == b"x"
+        return snapshot(repo, **options)
+
+    monkeypatch.setattr(hybrid_prepare, "snapshot_download", interrupted)
+    args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    with pytest.raises(OSError):
+        host.install(*args)
+    assert host.models == []
+    host.install(*args)
+    assert attempts[0] == attempts[1] and len(host.models) == 1
+
+
+def test_glm_registry_failure_keeps_completed_download_for_retry(host, native_download, monkeypatch):
+    persist = host.persist
+    monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+    args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    with pytest.raises(OSError):
+        host.install(*args)
+    assert host.models == [] and list(host.model_dir.iterdir()) == []
+    cached = list((host.data_dir / "native-downloads").glob("*/model"))
+    assert len(cached) == 1 and module.model_valid(cached[0])
+    monkeypatch.setattr(host, "persist", persist)
+    monkeypatch.setattr(host, "run_converter", lambda *_args: pytest.fail("redownloaded complete pinned model"))
+    host.install(*args)
+    assert len(host.models) == 1 and not cached[0].exists()
+
+
+def test_glm_download_stage_rejects_concurrent_installers_and_symlinks(host, tmp_path, native_download):
+    with module.native_download_stage(host.data_dir):
+        with pytest.raises(DesktopError, match="already being downloaded"):
+            host.install(
+                host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"]
+            )
+    assert host.models == []
+    other = tmp_path / "other-data"
+    other.mkdir()
+    (other / "native-downloads").symlink_to(host.data_dir / "native-downloads")
+    with pytest.raises(DesktopError, match="unavailable"):
+        with module.native_download_stage(other):
+            pytest.fail("followed native download directory symlink")
+
+
+@pytest.mark.parametrize("failure", ["identity", "persist", "cancel", "child"])
+def test_glm_failed_or_cancelled_preparation_never_publishes_a_library_entry(
+    host, native_download, monkeypatch, failure
+):
+    actual = host.run_converter
+
+    def prepare(*args):
+        result = actual(*args)
+        if failure == "cancel":
+            host.epoch += 1
+        return 1 if failure == "child" else result
+
+    monkeypatch.setattr(host, "run_converter", prepare)
+    if failure == "identity":
+        identity = module.prepared_identity
+        monkeypatch.setattr(module, "prepared_identity", lambda path: {**identity(path), "revision": "f" * 40})
+    elif failure == "persist":
+        monkeypatch.setattr(host, "persist", lambda: (_ for _ in ()).throw(OSError("synthetic registry failure")))
+    args = (host.epoch, "native", "glm53-q2", "text", "text", "install", native_download["weights_revision"])
+    if failure == "cancel":
+        host.install(*args)
+    else:
+        with pytest.raises((DesktopError, OSError)):
+            host.install(*args)
+    assert host.models == [] and list(host.model_dir.iterdir()) == []
+    assert not host.registry.exists()
+    assert all(event["event"] != "installed" for event in events(host))
+
+
+@pytest.mark.parametrize(
+    "choice,revision,artifact_mode,support_mode",
+    [
+        ("glm53-q2", None, "text", "text"),
+        ("glm53-q2", "a" * 40, "text", "text"),
+        ("qwen38-mixed", "a" * 40, "text", "text"),
+        ("glm53-q2", None, "vision-language", "vision-language"),
+        ("glm53-q2", None, "text", "decision"),
+    ],
+)
+def test_native_installer_rejects_unpinned_or_unoffered_choices(
+    host, monkeypatch, choice, revision, artifact_mode, support_mode
+):
+    monkeypatch.setattr(host, "run_converter", lambda *_args: pytest.fail("started unoffered native download"))
+    with pytest.raises(DesktopError):
+        host.install(host.epoch, "native", choice, artifact_mode, support_mode, "install", revision)
+    assert list(host.model_dir.iterdir()) == []
 
 
 def test_catalogue_rejects_unoffered_artifact_mode(host, monkeypatch):

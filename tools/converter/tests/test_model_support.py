@@ -17,7 +17,7 @@ FUTURE = "example/future-model"
 def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification():
     matrix = support_matrix()
     assert matrix["schema_version"] == 1 and matrix["modes"] == list(model_support.MODES)
-    assert len(matrix["families"]) == 14
+    assert len(matrix["families"]) == 15
     assert len(json.dumps(matrix).encode()) < 65536
     assert matrix["qualification"] == {
         "status": "not_assessed",
@@ -28,6 +28,18 @@ def test_matrix_is_shared_bounded_mutation_safe_and_separate_from_qualification(
     assert registry.architecture_for_config({"model_type": "qwen3_5_text"}) == "qwen3_5"
     matrix["families"][0]["modes"]["text"]["status"] = "qualified"
     assert support_matrix()["families"][0]["modes"]["text"]["status"] == "conditional"
+
+
+def test_native_glm_is_listed_without_generic_architecture_admission():
+    family = next(item for item in support_matrix()["families"] if item["family_id"] == "glm5_next")
+    assert family["conversion"]["containers"] == [".gguf"]
+    assert family["conversion"]["source_formats"] == ["UD-Q2_K_XL"]
+    assert family["modes"]["text"]["status"] == "conditional"
+    assert family["modes"]["decision"]["status"] == "unsupported"
+    assert family["modes"]["vision-language"]["status"] == "unsupported"
+    assert "glm5_next" not in model_support.CONFIG_ADAPTERS.values()
+    assert model_support.normalize_architecture("glm5_next") is None
+    assert preflight_model({"model_type": "glm5_next"}, mode="text")["reasons"] == ["unsupported_architecture"]
 
 
 @pytest.mark.parametrize("architecture", list(model_support.CONFIG_ADAPTERS.values()))
@@ -239,7 +251,7 @@ def test_resolver_rejects_changed_explicit_immutable_revision_before_metadata(tm
 def test_cli_family_listing_and_local_preflight_need_no_output(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr("sys.argv", ["stark-convert", "--list-families"])
     assert cli.main() == 0
-    assert len(json.loads(capsys.readouterr().out)["families"]) == 14
+    assert len(json.loads(capsys.readouterr().out)["families"]) == 15
     root = files(tmp_path / "source")
     monkeypatch.setattr(
         "sys.argv", ["stark-convert", str(root), "--preflight", "--offline", "--support-mode", "decision"]
