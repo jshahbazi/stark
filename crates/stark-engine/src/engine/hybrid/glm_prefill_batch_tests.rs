@@ -44,14 +44,13 @@ fn glm_prefill_chunk_limits_keep_default_four_and_greedy_eight_tails() {
     assert_eq!(chunk_limit(None).unwrap(), 4);
     assert_eq!(chunk_limit(Some(OsStr::new("4"))).unwrap(), 4);
     assert_eq!(chunk_limit(Some(OsStr::new("8"))).unwrap(), 8);
-    for invalid in ["", "0", "08", "16", "-1"] {
+    for width in [16, 32, 64] {
+        assert_eq!(chunk_limit(Some(OsStr::new(&width.to_string()))).unwrap(), width);
+    }
+    for invalid in ["", "0", "08", "128", "-1"] {
         assert!(chunk_limit(Some(OsStr::new(invalid))).is_err());
     }
-    let sizes = |tokens, maximum| {
-        let first = eight_token_prefix(tokens, maximum).unwrap();
-        let dummy = vec![0u8; tokens];
-        dummy[..first].chunks(8).chain(dummy[first..].chunks(4)).map(<[u8]>::len).collect::<Vec<_>>()
-    };
+    let sizes = |tokens, maximum| chunk_sizes(tokens, maximum).unwrap();
     assert_eq!(sizes(13, 4), vec![4, 4, 4, 1]);
     assert_eq!(sizes(7, 8), vec![4, 3]);
     assert_eq!(sizes(8, 8), vec![8]);
@@ -59,7 +58,11 @@ fn glm_prefill_chunk_limits_keep_default_four_and_greedy_eight_tails() {
     assert_eq!(sizes(13, 8), vec![8, 4, 1]);
     assert_eq!(sizes(17, 8), vec![8, 8, 1]);
     assert_eq!(sizes(65, 8), [vec![8; 8], vec![1]].concat());
-    assert!(eight_token_prefix(13, 16).is_err());
+    assert_eq!(chunk_sizes(13, 8).unwrap(), vec![8, 4, 1]);
+    assert_eq!(chunk_sizes(31, 32).unwrap(), vec![16, 8, 4, 3]);
+    assert_eq!(chunk_sizes(65, 64).unwrap(), vec![64, 1]);
+    assert_eq!(chunk_sizes(127, 64).unwrap(), vec![64, 32, 16, 8, 4, 3]);
+    assert!(chunk_sizes(64, 128).is_err());
 }
 
 #[stark_test]
@@ -72,6 +75,13 @@ fn glm_prefill_chunked_matches_scalar_state_tails_and_growth() {
 #[ignore]
 fn glm_prefill_chunked_eight_matches_scalar_state_tails_and_growth() {
     compare_prefixes(&[7, 8, 9, 13, 17, 65], 8);
+}
+
+#[stark_test]
+#[ignore]
+fn glm_prefill_chunked_wide_matches_scalar_state_tails_and_growth() {
+    compare_prefixes(&[31, 32, 33, 65], 32);
+    compare_prefixes(&[63, 64, 65], 64);
 }
 
 fn compare_prefixes(
@@ -128,7 +138,7 @@ fn glm_prefill_chunked_validates_and_drains_cancelled_reservations() {
     let mut reference = model(&path, &config);
     let expected = reference.step(tokens[0]).expect("reference readout failed");
     for use_mma in [false, true] {
-        for maximum_chunk in [4, 8] {
+        for maximum_chunk in [4, 8, 32, 64] {
             let mut invalid = model(&path, &config);
             let mut calls = 0;
             assert!(
@@ -198,7 +208,7 @@ fn glm_prefill_chunked_discards_failed_encoding_and_keeps_bank_admission() {
     let (path, config, tokens) = fixture();
     let mut reference = model(&path, &config);
     let expected = reference.step(tokens[0]).expect("reference readout failed");
-    for maximum_chunk in [4, 8] {
+    for maximum_chunk in [4, 8, 32, 64] {
         let mut failed = model(&path, &config);
         let limit = failed.config.swiglu_limit;
         // Test-only invalid arithmetic parameter fails after the first attention

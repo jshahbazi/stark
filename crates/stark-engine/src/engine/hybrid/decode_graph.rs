@@ -12,6 +12,13 @@ use metal::MTLHeap;
 #[path = "decode_graph_batch.rs"]
 mod batch;
 
+#[path = "decode_graph_indexed_batch.rs"]
+mod indexed_batch;
+
+#[cfg(test)]
+#[path = "decode_graph_scratch_rewind_tests.rs"]
+mod scratch_rewind_tests;
+
 /// Persistent backing for automatic, non-aliasable Shared scratch buffers.
 /// Apple documents that each subresource strongly retains its heap until the
 /// resource is destroyed. No buffer here is ever made aliasable or placed.
@@ -67,6 +74,17 @@ pub(crate) struct DeviceVector {
     pub len: usize,
 }
 
+/// Scratch arena offsets saved at the start of a serial temporary-allocation
+/// scope. The retained slab identities prevent applying a checkpoint to a
+/// different graph or to storage that has since been replaced.
+pub(crate) struct ScratchCheckpoint {
+    used: Vec<usize>,
+    // Keep each backing allocation alive so allocator address reuse cannot
+    // make a stale checkpoint appear to belong to a later graph.
+    buffers: Vec<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    cursor: usize,
+}
+
 impl DeviceVector {
     pub fn slice(
         &self,
@@ -117,6 +135,8 @@ pub(crate) struct DecodeGraph {
     encode_scope: Option<profile::Scope>,
     scratch: Vec<(Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     scratch_bytes: usize,
+    scratch_cursor: usize,
+    scratch_scoped: bool,
     single_encoder: bool,
     serial_projection_levels: bool,
     byte_loads: bool,
@@ -265,6 +285,8 @@ impl DecodeGraph {
                 encode_scope: Some(profile::Scope::new("native.metal.encode")),
                 scratch: vec![(scratch, 256)],
                 scratch_bytes: 1024 * 1024,
+                scratch_cursor: 0,
+                scratch_scoped: false,
                 single_encoder,
                 serial_projection_levels: std::env::var_os("STARK_QWEN38_SERIAL_LEVELS")
                     .is_some_and(|value| value == "1"),
@@ -303,6 +325,9 @@ impl DecodeGraph {
         &mut self,
         values: &[f32],
     ) -> Result<DeviceVector> {
+        if self.scratch_scoped {
+            return Err(Error::Unsupported("host uploads are not allowed in a rewound scratch scope"));
+        }
         if values.iter().any(|v| !v.is_finite()) {
             return Err(Error::Invalid("invalid decode upload"));
         }
@@ -392,11 +417,13 @@ impl DecodeGraph {
         let bytes = len * 4;
         let aligned =
             bytes.checked_add(255).map(|n| n / 256 * 256).ok_or(Error::Invalid("decode scratch size overflow"))?;
-        if self
-            .scratch
-            .last()
-            .is_none_or(|(buffer, used)| used.checked_add(aligned).is_none_or(|n| n > buffer.length()))
+        let mut index = self.scratch_cursor;
+        while index < self.scratch.len()
+            && self.scratch[index].1.checked_add(aligned).is_none_or(|n| n > self.scratch[index].0.length())
         {
+            index += 1;
+        }
+        if index == self.scratch.len() {
             let size = aligned.max(1024 * 1024);
             let total = self
                 .scratch_bytes
@@ -413,10 +440,12 @@ impl DecodeGraph {
             };
             self.scratch.push((buffer, 0));
             self.scratch_bytes = total;
+            index = self.scratch.len() - 1;
             profile::record("native.metal.graph.scratch", 0.0, size);
             profile::record("native.metal.graph.scratch_high_water", 0.0, total);
         }
-        let (buffer, used) = self.scratch.last_mut().ok_or(Error::Invalid("decode scratch unavailable"))?;
+        self.scratch_cursor = index;
+        let (buffer, used) = self.scratch.get_mut(index).ok_or(Error::Invalid("decode scratch unavailable"))?;
         let output = DeviceVector {
             buffer: buffer.clone(),
             offset: *used,
@@ -424,6 +453,73 @@ impl DecodeGraph {
         };
         *used += aligned;
         Ok(output)
+    }
+
+    /// Save the allocator position before a bounded temporary scope. Rewind
+    /// is deliberately restricted to serial, untimed graphs outside
+    /// projection levels so dependency ordering and profiling semantics stay
+    /// unchanged. Keep any vectors needed after the scope outside it, and use
+    /// separate buffers for host uploads after the checkpoint: host writes
+    /// happen immediately and could overwrite earlier queued GPU reads.
+    pub fn scratch_checkpoint(&mut self) -> Result<ScratchCheckpoint> {
+        if self.encoding_ended
+            || self.encoding_dispatch != MTLDispatchType::SERIAL
+            || self.single_encoder
+            || self.projection_level
+            || self.phase_timing
+            || self.encoder_timing.is_some()
+        {
+            return Err(Error::Unsupported("scratch checkpoints require an active serial untimed graph"));
+        }
+        self.scratch_scoped = true;
+        Ok(ScratchCheckpoint {
+            used: self.scratch.iter().map(|(_, used)| *used).collect(),
+            buffers: self.scratch.iter().map(|(buffer, _)| buffer.clone()).collect(),
+            cursor: self.scratch_cursor,
+        })
+    }
+
+    /// Recycle temporary arenas to a prior checkpoint without releasing their
+    /// backing. Vectors allocated after the checkpoint become invalid for the
+    /// caller and must not be read, submitted, or retained for later use.
+    /// Earlier vectors and the graph failure status remain live. Pending
+    /// finite scans are encoded before any later GPU writes can reuse the
+    /// reclaimed spans. `upload_into` remains disabled for the graph after a
+    /// checkpoint because its CPU writes are not ordered by the Metal encoder.
+    pub fn scratch_rewind(
+        &mut self,
+        checkpoint: &ScratchCheckpoint,
+    ) -> Result<()> {
+        if self.encoding_ended
+            || self.encoding_dispatch != MTLDispatchType::SERIAL
+            || self.single_encoder
+            || self.projection_level
+            || self.phase_timing
+            || self.encoder_timing.is_some()
+        {
+            return Err(Error::Unsupported("scratch rewind requires an active serial untimed graph"));
+        }
+        if checkpoint.used.is_empty()
+            || checkpoint.used.len() != checkpoint.buffers.len()
+            || checkpoint.used.len() > self.scratch.len()
+            || checkpoint.cursor >= checkpoint.used.len()
+            || checkpoint
+                .buffers
+                .iter()
+                .zip(&self.scratch)
+                .zip(&checkpoint.used)
+                .any(|((expected, (buffer, used)), saved)| !std::ptr::eq(&**expected, &**buffer) || *saved > *used)
+        {
+            return Err(Error::Invalid("scratch checkpoint does not belong to this graph"));
+        }
+        // A pending finite check owns reads from these spans. Encode those
+        // checks before a later serial dispatch can overwrite recycled bytes.
+        self.flush_pending_finite()?;
+        for (index, (_, used)) in self.scratch.iter_mut().enumerate() {
+            *used = checkpoint.used.get(index).copied().unwrap_or(0);
+        }
+        self.scratch_cursor = checkpoint.cursor;
+        Ok(())
     }
     pub fn failure(&self) -> &DeviceVector {
         &self.failure

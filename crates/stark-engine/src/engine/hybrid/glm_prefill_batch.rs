@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Experimental layer-major chunks of four or eight known prompt tokens. Only dense
-//! projection scheduling changes: recurrent and MLA cache writers retain token
-//! order, and each chunk is fenced before another graph is constructed.
+//! Experimental layer-major chunks of known prompt tokens. Dense projections
+//! retain their qualified few-row tiles; optional expert batches share decoded
+//! weights across routes. Recurrent and MLA cache writers retain token order,
+//! and each chunk is fenced before another graph is constructed.
 
 use super::{
     super::{
@@ -16,19 +17,31 @@ pub(super) fn chunk_limit(value: Option<&std::ffi::OsStr>) -> Result<usize> {
         None if value.is_none() => Ok(4),
         Some("4") => Ok(4),
         Some("8") => Ok(8),
-        _ => Err(Error::Invalid("GLM prefill chunk limit must be four or eight")),
+        Some("16") => Ok(16),
+        Some("32") => Ok(32),
+        Some("64") => Ok(64),
+        _ => Err(Error::Invalid("GLM prefill chunk limit must be 4, 8, 16, 32 or 64")),
     }
 }
 
-fn eight_token_prefix(
-    tokens: usize,
+fn chunk_sizes(
+    mut tokens: usize,
     maximum: usize,
-) -> Result<usize> {
-    match maximum {
-        4 => Ok(0),
-        8 => Ok(tokens / 8 * 8),
-        _ => Err(Error::Invalid("GLM prefill chunk limit must be four or eight")),
+) -> Result<Vec<usize>> {
+    if ![4, 8, 16, 32, 64].contains(&maximum) {
+        return Err(Error::Invalid("GLM prefill chunk limit must be 4, 8, 16, 32 or 64"));
     }
+    let mut sizes = Vec::new();
+    for width in [64, 32, 16, 8, 4] {
+        if width <= maximum {
+            sizes.extend(std::iter::repeat_n(width, tokens / width));
+            tokens %= width;
+        }
+    }
+    if tokens != 0 {
+        sizes.push(tokens);
+    }
+    Ok(sizes)
 }
 
 impl GlmModel {
@@ -43,7 +56,7 @@ impl GlmModel {
             if self.cleanup_failed {
                 return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
             }
-            let eight_prefix = eight_token_prefix(tokens.len(), maximum_chunk)?;
+            let sizes = chunk_sizes(tokens.len(), maximum_chunk)?;
             if tokens.is_empty() {
                 return Ok(());
             }
@@ -74,9 +87,10 @@ impl GlmModel {
             if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
                 return Err(Error::Unsupported("GLM chunk prefill requires one admitted serial encoder group"));
             }
-            // Prefer complete eights; retain the qualified Q6/T4 tail before
-            // the final one-to-three legacy tokens (13 => 8 + 4 + 1).
-            for chunk in tokens[..eight_prefix].chunks(8).chain(tokens[eight_prefix..].chunks(4)) {
+            let mut remaining = tokens;
+            for size in sizes {
+                let (chunk, tail) = remaining.split_at(size);
+                remaining = tail;
                 objc2::rc::autoreleasepool(|_| -> Result<()> {
                     let _encode = super::super::profile::Scope::new("native.glm.prefill.chunk_encode_cpu");
                     let c = &self.config;
@@ -93,13 +107,26 @@ impl GlmModel {
                     }
                     let mut graph = new_encoder_graph(decode)?;
                     let mut streams = graph.upload_into(&values)?;
+                    // Only these two stream buffers survive a layer. Reuse
+                    // temporary storage after all of that layer's readers and
+                    // finite scans, within the same ordered serial encoder.
+                    let mut next_streams = if maximum_chunk > 8 {
+                        Some(graph.scratch(values.len())?)
+                    } else {
+                        None
+                    };
+                    let checkpoint = if next_streams.is_some() {
+                        Some(graph.scratch_checkpoint()?)
+                    } else {
+                        None
+                    };
                     let group = &plan.groups[0];
                     let banks = self.weights.encoder_indexed_group(&group.names, plan.budget)?;
                     if banks.registered_bytes() > group.bytes {
                         return Err(Error::Invalid("GLM chunk encoder inventory changed"));
                     }
                     for layer in group.start..group.end {
-                        streams = encode_layer(
+                        let next = encode_layer(
                             &self.weights,
                             c,
                             decode,
@@ -111,6 +138,13 @@ impl GlmModel {
                             chunk.len(),
                             use_mma,
                         )?;
+                        if let (Some(target), Some(checkpoint)) = (&mut next_streams, &checkpoint) {
+                            graph.copy_into(&next, target)?;
+                            graph.scratch_rewind(checkpoint)?;
+                            std::mem::swap(&mut streams, target);
+                        } else {
+                            streams = next;
+                        }
                     }
                     graph.check_finite(&streams)?;
                     // A cancelled unsubmitted graph drops before the outer
@@ -151,7 +185,32 @@ fn project(
     tokens: usize,
     use_mma: bool,
 ) -> Result<DeviceVector> {
-    banks.encode_same_weight_batch(graph, &format!("{prefix}.{name}"), input, tokens, use_mma)
+    let name = format!("{prefix}.{name}");
+    if tokens <= 8 {
+        return banks.encode_same_weight_batch(graph, &name, input, tokens, use_mma);
+    }
+    // Retain the qualified few-row F32 MMA tile and scalar tails. The larger
+    // graph batch primarily exposes repeated expert weights across tokens.
+    let columns = input.len / tokens;
+    let mut output = None;
+    let mut start = 0;
+    for width in chunk_sizes(tokens, 8)? {
+        let tile = banks.encode_same_weight_batch(
+            graph,
+            &name,
+            &input.slice(start * columns, width * columns)?,
+            width,
+            use_mma,
+        )?;
+        let rows = tile.len / width;
+        let target = match &output {
+            Some(value) => value,
+            None => output.insert(graph.scratch(rows * tokens)?),
+        };
+        graph.copy_into(&tile, &target.slice(start * rows, width * rows)?)?;
+        start += width;
+    }
+    output.ok_or(Error::Invalid("GLM empty projection batch"))
 }
 
 fn controls_pre(
@@ -240,7 +299,68 @@ fn encode_layer(
         let shared = project(banks, graph, &p, "ffn_down_shexp.weight", &active, tokens, use_mma)?;
         let output = graph.scratch(tokens * c.hidden)?;
         let bias = decode.routing_biases[layer].as_ref().ok_or(Error::Invalid("GLM chunk router bias"))?;
-        let scale = graph.upload_into(&[1.0])?;
+        let scale = DecodeGraph::upload(&[1.0])?;
+        if std::env::var_os("STARK_GLM53_PREFILL_EXPERT_BATCH").is_some_and(|value| value == "1") {
+            let indices = graph.scratch(tokens * c.active_experts)?;
+            let probabilities = graph.scratch(tokens * c.active_experts)?;
+            for token in 0..tokens {
+                let (ids, weights) = super::super::glm_metal::route(
+                    graph,
+                    &logits.slice(token * c.experts, c.experts)?,
+                    bias,
+                    c.active_experts,
+                    c.routed_scale,
+                )?;
+                // Router choices are integer bit patterns, including F32
+                // subnormal encodings. Keep this transfer integer-only.
+                graph.kernel(
+                    "hybrid_graph_route_copy",
+                    &[&ids, &indices.slice(token * c.active_experts, c.active_experts)?],
+                    &[c.active_experts as u32],
+                    c.active_experts,
+                    256,
+                )?;
+                graph.copy_into(&weights, &probabilities.slice(token * c.active_experts, c.active_experts)?)?;
+            }
+            let gate = banks.encode_indexed_batch(
+                graph,
+                &format!("{p}.ffn_gate_exps.weight"),
+                &indices,
+                c.active_experts,
+                &norm,
+                tokens,
+                false,
+            )?;
+            let up = banks.encode_indexed_batch(
+                graph,
+                &format!("{p}.ffn_up_exps.weight"),
+                &indices,
+                c.active_experts,
+                &norm,
+                tokens,
+                false,
+            )?;
+            let active = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+            let down = banks.encode_indexed_batch(
+                graph,
+                &format!("{p}.ffn_down_exps.weight"),
+                &indices,
+                c.active_experts,
+                &active,
+                tokens,
+                true,
+            )?;
+            for token in 0..tokens {
+                let row = graph.weighted_sum_device(
+                    &down.slice(token * c.active_experts * c.hidden, c.active_experts * c.hidden)?,
+                    &probabilities.slice(token * c.active_experts, c.active_experts)?,
+                    &shared.slice(token * c.hidden, c.hidden)?,
+                    &scale,
+                )?;
+                graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            }
+            return controls_post(&decode.controls[layer][1], graph, &residual, &output, &mix, c.hidden, c.hc);
+        }
         for token in 0..tokens {
             let norm = norm.slice(token * c.hidden, c.hidden)?;
             let (indices, probabilities) = super::super::glm_metal::route(

@@ -669,6 +669,7 @@ fn executor() -> Result<&'static Executor> {
             source.push_str(include_str!("packed_vector_matvec.metal"));
             source.push_str(include_str!("packed_iq_rows_matvec.metal"));
             source.push_str(include_str!("packed_iq_multirow_matvec.metal"));
+            source.push_str(include_str!("decode_graph_indexed_batch.metal"));
             source.push_str(include_str!("packed_iq_staged_matvec.metal"));
             source.push_str(include_str!("packed_iq_grouped32_matvec.metal"));
             source.push_str(include_str!("packed_iq4_matvec.metal"));

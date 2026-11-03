@@ -730,6 +730,36 @@ impl BoundedBankGroup<'_> {
         };
         graph.indexed(&matrix, self.weights.matrix_format(tensor)?, shape, indices, selected, input, input_batched)
     }
+
+    /// Reuse an admitted resident expert bank across known prompt tokens.
+    /// The selected count describes each token, not additional bank mappings.
+    #[expect(clippy::too_many_arguments, reason = "explicit token/expert input layout")]
+    pub(super) fn encode_indexed_batch(
+        &self,
+        graph: &mut super::weight_metal::DecodeGraph,
+        name: &str,
+        indices: &super::weight_metal::DeviceVector,
+        selected: usize,
+        input: &super::weight_metal::DeviceVector,
+        tokens: usize,
+        input_batched: bool,
+    ) -> Result<super::weight_metal::DeviceVector> {
+        if !self.encoder_registry || !self.names.contains(name) || self.registered_bytes > self.budget {
+            return Err(Error::Invalid("expert batch requires an admitted resident encoder bank"));
+        }
+        let (tensor, shape) = self.weights.indexed_geometry(name, selected)?;
+        let matrix = self.weights.encoder_bank_matrix(name, tensor)?;
+        graph.indexed_batch(
+            &matrix,
+            self.weights.matrix_format(tensor)?,
+            shape,
+            indices,
+            selected,
+            input,
+            tokens,
+            input_batched,
+        )
+    }
 }
 
 impl Weights {
