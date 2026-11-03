@@ -75,6 +75,51 @@ The client database showed no message rows for the attempt made before
   so loader, inspector and interpreter variables are still rejected and a
   different configuration directory does not match. This was not exercised.
 
+## Follow-up: login-shell environment
+
+A review after the run found that OpenCode Desktop runs the user's login shell
+(`$SHELL -il -c 'env -0'`) and merges its exports into the environment it hands
+the engine. The first build compared the engine's configuration directory with
+the one resolved from the app's own launch environment, which never contains
+those exports. A user whose shell sets `OPENCODE_CONFIG_DIR` or
+`XDG_CONFIG_HOME` would therefore never connect, and a shell export of
+`NODE_OPTIONS` rejected every engine.
+
+Checks on the pinned 2.2.5 engine:
+
+| Variable | Compiled engine | With `BUN_BE_BUN` (already rejected) |
+| --- | --- | --- |
+| `NODE_OPTIONS` with `--require`, `-r` or `--import` | ignored | ignored |
+| `BUN_OPTIONS` with `--preload` | ignored | executed |
+
+The control run with `BUN_BE_BUN` and `--preload` executed, so the probe could
+detect execution.
+
+The rule changed to:
+
+- the engine must be connected to the running, verified Desktop app. The app's
+  main process must hold an established loopback TCP connection that the engine
+  process accepted on one of its listening ports, matched at both ends. The
+  test Desktop held three long-lived connections to its engine and none to the
+  account's other engine;
+- the connector entry goes into the configuration directory resolved from the
+  engine's own environment;
+- `NODE_OPTIONS` is allowed in the engine only. The Desktop app (Electron) and
+  OpenWork still refuse it. `BUN_OPTIONS` stays rejected.
+
+Second desktop run, with test package `0.0.2` (signed app executable
+`07f547b206f9b1d83fa1f740fb1179ed689bbf71b8fc4c568e4dd12b50cc863a`, signed
+generation worker
+`1fe952c65f038b9adfaec303943169e331ac5b475202c9a6c3cdeb4429543ce7`). The test
+profile's home folder had a shell profile exporting a different
+`OPENCODE_CONFIG_DIR` and `NODE_OPTIONS`. The engine started by Desktop carried
+both, with 116 environment variables. Against those live processes, the old
+rule rejected the engine and the new one accepted it. **Connect** installed the
+entry into the shell-selected directory and approved the engine. The engine
+reloaded its configuration and loaded the connector. After JevK5 was started in
+Stark, Stark appeared in OpenCode's model picker. No chat was repeated in this
+run; the chat path is unchanged.
+
 ## Prefix-cache interaction
 
 The prefix-reuse work merged into `main` before this run. A `client_prefix`
@@ -86,7 +131,7 @@ test covers this.
 
 | Check | Result |
 | --- | --- |
-| Menu bar scripts: desktop connections, connector installer, controller, build, API credentials | 160 passed |
+| Menu bar scripts: desktop connections, connector installer, controller, build, API credentials | 160 passed, also after the follow-up (28 native desktop-connection scenarios, including the new `connection-binding` with real loopback sockets and child processes) |
 | Focused backend tests including prefix cache and tool prefix safety | 520 passed, 1 skipped |
 | Full offline converter suite | 5,853 passed, 89 skipped |
 | App type-check, including with `STARK_CONNECTION_VALIDATION` | Passed |

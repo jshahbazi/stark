@@ -222,16 +222,14 @@ final class OpenCodeConnectionController: ObservableObject {
 
     private func install(baseURL: String, operation: UUID, attempt: Int) {
         guard self.operation == operation, !closing, let connectorDirectory, let path = brokerPath() else { return }
-        let profile = DesktopConnectionTesting.profile
-        guard let application = DesktopApplicationIdentity.running(.openCode, configurationRoot: profile),
-              let expected = DesktopClientPeer.openCodeConfigDirectory(application: application) else {
+        guard let application = DesktopApplicationIdentity.running(.openCode, configurationRoot: DesktopConnectionTesting.profile) else {
             busy = false; message = "Open OpenCode, then connect again."
             return
         }
         let storage = storage
         let current = engines
         queue.async { [weak self] in
-            let engine = DesktopClientPeer.openCodeEngines(profile: profile, configDirectory: expected).first
+            let engine = DesktopClientPeer.openCodeEngines(application: application).first
             let directory = engine.flatMap { Self.canonicalDirectory($0.configDirectory) }
             let result: Result<(Bool, OpenCodeEngineApprovals), Error>?
             if let engine, let directory {

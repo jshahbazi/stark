@@ -40,6 +40,7 @@ SCENARIOS = (
     "opencode-engine-path",
     "opencode-config-directory",
     "launch-environment",
+    "connection-binding",
     "coordinator",
 )
 

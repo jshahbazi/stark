@@ -49,6 +49,23 @@ struct DesktopConnectionsTests {
     private static let nextSession = String(repeating: "2", count: 32)
 
     static func main() {
+        if let index = CommandLine.arguments.firstIndex(of: "child-listen"), index + 1 < CommandLine.arguments.count {
+            // Synthetic loopback server: report its port in a file, then hold accepted connections.
+            guard let (server, port) = listener() else { exit(1) }
+            let report = CommandLine.arguments[index + 1]
+            guard FileManager.default.createFile(atPath: report + ".tmp", contents: Data(String(port).utf8)),
+                  rename(report + ".tmp", report) == 0 else { exit(1) }
+            Thread.detachNewThread {
+                var held: [Int32] = []
+                while true {
+                    let connection = accept(server, nil, nil)
+                    if connection < 0 { break }
+                    held.append(connection)
+                }
+            }
+            Thread.sleep(forTimeInterval: 10)
+            exit(0)
+        }
         if CommandLine.arguments.count >= 2, CommandLine.arguments.dropFirst().contains("child-wait") {
             // Synthetic child for launch-environment checks; it never reads its input.
             Thread.sleep(forTimeInterval: 10)
@@ -85,6 +102,7 @@ struct DesktopConnectionsTests {
             case "opencode-engine-path": try openCodeEnginePath()
             case "opencode-config-directory": try openCodeConfigDirectory()
             case "launch-environment": try launchEnvironment()
+            case "connection-binding": try connectionBinding()
             case "coordinator": try coordinator()
             default: throw CheckFailure()
             }
@@ -914,43 +932,121 @@ struct DesktopConnectionsTests {
     }
 
     private static func launchEnvironment() throws {
-        func read(arguments: [String] = [], _ environment: [String], leading: [String] = []) throws -> (DesktopLaunchEnvironment?, DesktopLaunchEnvironment?) {
+        typealias Views = (DesktopLaunchEnvironment?, DesktopLaunchEnvironment?, DesktopLaunchEnvironment?)
+        // OpenWork, the OpenCode Desktop app, and OpenCode's engine.
+        func read(arguments: [String] = [], _ environment: [String], leading: [String] = []) throws -> Views {
             let pid = try child(arguments, environment: environment, leading: leading)
             defer { reap(pid) }
-            return (DesktopClientPeer.launchEnvironment(pid, client: .openWork), DesktopClientPeer.launchEnvironment(pid, client: .openCode))
+            return (DesktopClientPeer.launchEnvironment(pid, client: .openWork), DesktopClientPeer.launchEnvironment(pid, client: .openCode),
+                    DesktopClientPeer.launchEnvironment(pid, client: .openCode, engine: true))
         }
         let paths = ["OPENCODE_CONFIG_DIR=/synthetic/config", "XDG_CONFIG_HOME=/synthetic/xdg", "HOME=/synthetic/home"]
-        let (openWork, openCode) = try read(paths)
+        let (openWork, openCode, engine) = try read(paths)
         try check(openWork == DesktopLaunchEnvironment(configDirectory: "/synthetic/config"))
         try check(openCode == DesktopLaunchEnvironment(configDirectory: "/synthetic/config", xdgConfigHome: "/synthetic/xdg", home: "/synthetic/home"))
-        let (_, unset) = try read(["XDG_CONFIG_HOME=", "OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT=", "DYLD_FRAMEWORK_PATH=", "BUN_INSPECT="])
+        try check(engine == openCode)
+        let (_, unset, _) = try read(["XDG_CONFIG_HOME=", "OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT=", "DYLD_FRAMEWORK_PATH=", "BUN_INSPECT="])
         try check(unset == DesktopLaunchEnvironment())
-        // OpenCode's engine refuses loader and inspector variables; OpenWork's checks are unchanged.
+        // OpenCode refuses loader and inspector variables; OpenWork's checks are unchanged.
         for variable in ["DYLD_FRAMEWORK_PATH=/synthetic/missing", "DYLD_LIBRARY_PATH=/synthetic/missing", "BUN_INSPECT=1", "BUN_BE_BUN=1",
                          "BUN_INSPECT_CONNECT_TO=ws://127.0.0.1:9", "BUN_INSPECT_PRELOAD=/synthetic/preload.js",
                          "OPENCODE_DESKTOP_REMOTE_DEBUGGING_PORT=9222", "XDG_CONFIG_HOME=relative", "HOME=relative"] {
-            let (work, code) = try read([variable])
-            try check(work != nil && code == nil)
+            let (work, code, engine) = try read([variable])
+            try check(work != nil && code == nil && engine == nil)
         }
-        for variable in ["NODE_OPTIONS=--require /synthetic/x.js", "BUN_OPTIONS=--preload /synthetic/x.js", "ELECTRON_RUN_AS_NODE=1",
-                         "OPENCODE_CONFIG_DIR=relative", "OPENCODE_CONFIG_DIR="] {
-            let (work, code) = try read([variable])
-            try check(work == nil && code == nil)
+        for variable in ["BUN_OPTIONS=--preload /synthetic/x.js", "ELECTRON_RUN_AS_NODE=1", "OPENCODE_CONFIG_DIR=relative", "OPENCODE_CONFIG_DIR="] {
+            let (work, code, engine) = try read([variable])
+            try check(work == nil && code == nil && engine == nil)
         }
+        // Desktop copies login-shell variables into its compiled engine, which ignores
+        // NODE_OPTIONS. The Electron app and OpenWork still refuse it.
+        let (work, app, shellEngine) = try read(["NODE_OPTIONS=--max-old-space-size=4096"])
+        try check(work == nil && app == nil && shellEngine == DesktopLaunchEnvironment())
         for argument in ["--inspect", "--inspect-brk=9229", "--preload", "-e", "--eval", "--require=x", "--remote-debugging-port=9222"] {
-            let (work, code) = try read(arguments: [argument], [])
-            try check(work == nil && code == nil)
+            let (work, code, engine) = try read(arguments: [argument], [])
+            try check(work == nil && code == nil && engine == nil)
         }
-        let (work, code) = try read(arguments: ["serve", "--service"], [])
-        try check(work != nil && code == DesktopLaunchEnvironment())
+        let (served, code, _) = try read(arguments: ["serve", "--service"], [])
+        try check(served != nil && code == DesktopLaunchEnvironment())
         // Only `serve --service` as the first two arguments marks Desktop's background engine.
-        let (_, service) = try read(paths, leading: ["serve", "--service"])
+        let (_, service, _) = try read(paths, leading: ["serve", "--service"])
         try check(service == DesktopLaunchEnvironment(configDirectory: "/synthetic/config", xdgConfigHome: "/synthetic/xdg",
                                                       home: "/synthetic/home", service: true))
         for leading in [["serve"], ["--service", "serve"], ["run", "--service"], ["serve", "--stdio"]] {
-            let (_, other) = try read([], leading: leading)
+            let (_, other, _) = try read([], leading: leading)
             try check(other == DesktopLaunchEnvironment())
         }
+    }
+
+    /// A loopback listener on an ephemeral port.
+    private static func listener() -> (Int32, UInt16)? {
+        let server = socket(AF_INET, SOCK_STREAM, 0)
+        guard server >= 0 else { return nil }
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafeMutablePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(server, $0, length) == 0 && listen(server, 8) == 0 && getsockname(server, $0, &length) == 0
+            }
+        }
+        guard bound else { Darwin.close(server); return nil }
+        return (server, UInt16(bigEndian: address.sin_port))
+    }
+
+    private static func connect(port: UInt16) throws -> Int32 {
+        let client = socket(AF_INET, SOCK_STREAM, 0)
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        address.sin_port = port.bigEndian
+        let connected = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(client, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
+            }
+        }
+        guard client >= 0, connected else { throw CheckFailure() }
+        return client
+    }
+
+    /// The engine binding: Desktop must hold a loopback connection that the
+    /// engine process itself accepted.
+    private static func connectionBinding() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("stark-binding-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        var servers: [(pid_t, UInt16)] = []
+        defer { servers.filter { $0.0 > 0 }.forEach { reap($0.0) } }
+        for name in ["first", "second"] {
+            let report = folder.appendingPathComponent(name).path
+            let pid = try spawn([CommandLine.arguments[0], "child-listen", report], environment: ["PATH=/usr/bin:/bin"])
+            servers.append((pid, 0))
+            try wait({ FileManager.default.fileExists(atPath: report) }, timeout: 5)
+            guard let text = try? String(contentsOfFile: report, encoding: .utf8), let port = UInt16(text) else { throw CheckFailure() }
+            servers[servers.count - 1].1 = port
+        }
+        let (first, firstPort) = servers[0]
+        let (second, secondPort) = servers[1]
+        let me = getpid()
+        try check(!DesktopClientPeer.isConnected(me, to: first) && !DesktopClientPeer.isConnected(me, to: second))
+        let toFirst = try connect(port: firstPort)
+        try wait({ DesktopClientPeer.isConnected(me, to: first) }, timeout: 3)
+        // A connection to one listener never binds another process, in either direction.
+        try check(!DesktopClientPeer.isConnected(me, to: second) && !DesktopClientPeer.isConnected(first, to: me))
+        try check(!DesktopClientPeer.isConnected(second, to: first) && !DesktopClientPeer.isConnected(first, to: first))
+        let toSecond = try connect(port: secondPort)
+        try wait({ DesktopClientPeer.isConnected(me, to: second) }, timeout: 3)
+        Darwin.close(toFirst)
+        try check(!DesktopClientPeer.isConnected(me, to: first) && DesktopClientPeer.isConnected(me, to: second))
+        Darwin.close(toSecond)
+        try check(!DesktopClientPeer.isConnected(me, to: second))
+        // An exited server leaves nothing to match.
+        reap(first)
+        servers[0].0 = 0
+        try check(!DesktopClientPeer.isConnected(me, to: first))
     }
 
     private static func coordinator() throws {

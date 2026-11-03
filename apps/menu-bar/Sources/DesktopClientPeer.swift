@@ -162,7 +162,10 @@ enum DesktopClientPeer {
     /// interpreter/debugger injection modes as defense in depth; this does not
     /// claim isolation from code/plugins inside an authorized client runtime.
     /// OpenCode's Bun engine additionally refuses loader and inspector variables.
-    static func launchEnvironment(_ pid: pid_t, client: DesktopClient) -> DesktopLaunchEnvironment? {
+    /// OpenCode Desktop copies the user's login-shell variables into its
+    /// `engine`; that compiled engine ignores `NODE_OPTIONS`, so a shell
+    /// export of it is not rejected there.
+    static func launchEnvironment(_ pid: pid_t, client: DesktopClient, engine: Bool = false) -> DesktopLaunchEnvironment? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var count = 0
         guard sysctl(&mib, UInt32(mib.count), nil, &count, nil, 0) == 0,
@@ -200,7 +203,8 @@ enum DesktopClientPeer {
             guard let equals = entry.firstIndex(of: 61) else { continue }
             let name = String(decoding: entry[..<equals], as: UTF8.self)
             let value = entry[entry.index(after: equals)...]
-            if ["ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "BUN_OPTIONS"].contains(name), !value.isEmpty { return nil }
+            if ["ELECTRON_RUN_AS_NODE", "NODE_OPTIONS", "BUN_OPTIONS"].contains(name), !value.isEmpty,
+               !(client == .openCode && engine && name == "NODE_OPTIONS") { return nil }
             if name == "OPENWORK_ELECTRON_REMOTE_DEBUG_PORT", !value.isEmpty, value != [48][...] { return nil }
             if name == "OPENCODE_CONFIG_DIR" {
                 guard let directory = path(value) else { return nil }
@@ -237,12 +241,11 @@ enum DesktopClientPeer {
               let path = executable(peer.pid) else { return nil }
         if client == .openCode {
             // OpenCode Desktop runs a detached copy of its engine whose parent is
-            // launchd, so a running verified app replaces the ancestry check, and
-            // the engine must read the configuration that app hands its engine.
+            // launchd, so a running verified app that is connected to the engine
+            // replaces the ancestry check.
             guard application.process.isCurrent,
                   verify(pid: application.process.pid, identifier: client.bundleID, client: client),
-                  let expected = openCodeConfigDirectory(application: application),
-                  openCodeEngine(peer, path: path, profile: application.profile, configDirectory: expected) != nil
+                  openCodeEngine(peer, path: path, application: application) != nil
             else { return nil }
             return peer
         }
@@ -332,35 +335,91 @@ enum DesktopClientPeer {
         return home?.appendingPathComponent(".config/opencode", isDirectory: true)
     }
 
-    /// The engine inherits the Desktop app's environment, so the app's own
-    /// selectors name the configuration its background engine reads.
-    static func openCodeConfigDirectory(application: DesktopApplicationIdentity) -> URL? {
-        launchEnvironment(application.process.pid, client: .openCode).flatMap(openCodeConfigDirectory)
-    }
-
     /// A signed `opencode-cli` from Anomaly's team, running from the Desktop
     /// staging folder as `serve --service`, without loader, inspector or
-    /// interpreter injection, and reading the running Desktop app's configuration.
-    private static func openCodeEngine(_ identity: DesktopProcessIdentity, path: String, profile: URL?,
-                                       configDirectory expected: URL) -> OpenCodeEngine? {
+    /// interpreter injection, that the running Desktop app is connected to.
+    /// Desktop merges the user's login-shell variables into its engine, so the
+    /// engine's own environment names the configuration it reads.
+    private static func openCodeEngine(_ identity: DesktopProcessIdentity, path: String,
+                                       application: DesktopApplicationIdentity) -> OpenCodeEngine? {
+        let profile = application.profile
         guard let root = openCodeEngineRoot(profile: profile), isStagedOpenCodeEngine(path, root: root),
-              let environment = launchEnvironment(identity.pid, client: .openCode), environment.service,
+              let environment = launchEnvironment(identity.pid, client: .openCode, engine: true), environment.service,
               let directory = openCodeConfigDirectory(environment),
-              directory.standardizedFileURL.path == expected.standardizedFileURL.path, identity.isCurrent else { return nil }
+              isConnected(application.process.pid, to: identity.pid), identity.isCurrent else { return nil }
         if let profile, !isWithin(directory.path, root: profile) { return nil }
         return OpenCodeEngine(process: identity, configDirectory: directory)
     }
 
-    /// Verified engines for the Desktop app's configuration, newest first.
+    /// Verified engines the Desktop app is connected to, newest first.
     /// Called off the main queue.
-    static func openCodeEngines(profile: URL?, configDirectory: URL) -> [OpenCodeEngine] {
+    static func openCodeEngines(application: DesktopApplicationIdentity) -> [OpenCodeEngine] {
         let client = DesktopClient.openCode
         return processes().compactMap { pid -> OpenCodeEngine? in
             guard let identity = DesktopProcessIdentity.read(pid), let path = executable(pid),
-                  let root = openCodeEngineRoot(profile: profile), isStagedOpenCodeEngine(path, root: root),
+                  let root = openCodeEngineRoot(profile: application.profile), isStagedOpenCodeEngine(path, root: root),
                   verify(pid: pid, identifier: client.engineIdentifier, client: client) else { return nil }
-            return openCodeEngine(identity, path: path, profile: profile, configDirectory: configDirectory)
+            return openCodeEngine(identity, path: path, application: application)
         }.sorted { ($0.process.seconds, $0.process.microseconds) > ($1.process.seconds, $1.process.microseconds) }
+    }
+
+    private struct LoopbackTCP {
+        let listening: Bool
+        let localPort: UInt16
+        let foreignPort: UInt16
+    }
+
+    /// TCP sockets in a process's file table: listening sockets, and established
+    /// connections whose two ends are both loopback addresses.
+    private static func loopbackTCP(_ pid: pid_t) -> [LoopbackTCP] {
+        let stride = MemoryLayout<proc_fdinfo>.stride
+        let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
+        guard bytes > 0, Int(bytes) / stride <= 65_536 else { return [] }
+        var files = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / stride + 32)
+        let filled = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, &files, Int32(files.count * stride))
+        guard filled > 0 else { return [] }
+        var result: [LoopbackTCP] = []
+        for file in files.prefix(Int(filled) / stride) where file.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
+            var info = socket_fdinfo()
+            let size = Int32(MemoryLayout<socket_fdinfo>.size)
+            guard proc_pidfdinfo(pid, file.proc_fd, PROC_PIDFDSOCKETINFO, &info, size) == size,
+                  info.psi.soi_kind == Int32(SOCKINFO_TCP) else { continue }
+            let tcp = info.psi.soi_proto.pri_tcp
+            let endpoints = tcp.tcpsi_ini
+            // Ports are stored in network byte order in the low 16 bits.
+            let local = UInt16(bigEndian: UInt16(truncatingIfNeeded: endpoints.insi_lport))
+            let foreign = UInt16(bigEndian: UInt16(truncatingIfNeeded: endpoints.insi_fport))
+            if tcp.tcpsi_state == TSI_S_LISTEN {
+                result.append(LoopbackTCP(listening: true, localPort: local, foreignPort: 0))
+            } else if tcp.tcpsi_state == TSI_S_ESTABLISHED,
+                      isLoopback(endpoints.insi_laddr, version: endpoints.insi_vflag),
+                      isLoopback(endpoints.insi_faddr, version: endpoints.insi_vflag) {
+                result.append(LoopbackTCP(listening: false, localPort: local, foreignPort: foreign))
+            }
+        }
+        return result
+    }
+
+    /// `address` is the 16-byte `in4in6_addr`/`in6_addr` union of `in_sockinfo`.
+    private static func isLoopback<Address>(_ address: Address, version: UInt8) -> Bool {
+        withUnsafeBytes(of: address) { bytes in
+            guard bytes.count == 16 else { return false }
+            if version & 0x1 != 0 { return bytes[12] == 127 } // INI_IPV4: address in the last four bytes
+            guard version & 0x2 != 0 else { return false }    // INI_IPV6
+            if bytes.prefix(15).allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true }
+            return bytes.prefix(10).allSatisfy { $0 == 0 } && bytes[10] == 0xff && bytes[11] == 0xff && bytes[12] == 127
+        }
+    }
+
+    /// Whether `client` holds an established loopback connection that `server`
+    /// accepted on one of its listening ports. Both ends must agree, so the
+    /// connection reaches that server process, not another listener.
+    static func isConnected(_ client: pid_t, to server: pid_t) -> Bool {
+        let accepted = loopbackTCP(server)
+        let ports = Set(accepted.filter(\.listening).map(\.localPort))
+        let peers = Set(accepted.filter { !$0.listening && ports.contains($0.localPort) }.map(\.foreignPort))
+        guard !peers.isEmpty else { return false }
+        return loopbackTCP(client).contains { !$0.listening && ports.contains($0.foreignPort) && peers.contains($0.localPort) }
     }
 }
 
