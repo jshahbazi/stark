@@ -62,15 +62,32 @@ study. Their results stay separately labeled and never enter study statistics.
 Any change to a workload or protocol after a pilot is recorded before the
 replacement measurements; failed pilots and exclusions are retained.
 
+## Pre-measurement amendment
+
+The original protocol at `bd03e29ffc9695a668b63cb716d457aba99916f8` required
+a new 4096-context numerical comparison before timing: eight short controls
+plus corpus prefixes 128, 1024, and 3840, with sixteen candidates each and the
+unchanged 0.001 maximum log-probability error threshold.
+
+That attempt ended after 1016.023 seconds during the reference-worker pass,
+before the candidate started and without a comparison report. Source and
+artifact pins remained unchanged, process cleanup completed, and the parent
+reported `receipt_boundary_invalid` because the report was absent. This is
+not a numerical mismatch result; the underlying failure cause is unknown.
+The complete failed attempt is retained separately.
+
+Before any throughput study measurements, separate timing eligibility from
+the unresolved long-context numerical gate. Keep the three planned workloads,
+ordering, repetition counts, output requirements, and host screens unchanged.
+The source-bound 512-context, 192-point comparison and F64 kernel checks remain
+the bounded numerical evidence. They do not qualify numerical equivalence of
+the new longer requests. Report the failed extension and its unresolved status
+alongside the throughput results. Do not claim long-context equivalence,
+answer-quality equivalence, or long-context stability. Do not retry the long
+reference as part of this throughput pass.
+
 ## Controls and acceptance
 
-- Before timing, extend the existing next-token scorer check to exact corpus
-  prefixes of 128, 1024, and 3840 tokens at scoring context 4096, retaining the
-  eight short rendered controls and sixteen candidates per context. Compare
-  the sealed F32 reference and candidate sequentially, with the existing
-  maximum absolute normalized log-probability delta threshold of 0.001. This
-  checks 176 points; it does not establish whole-model or answer-quality
-  equivalence.
 - Greedy sampling, temperature zero, no speculation, one request at a time.
 - No prefix reuse: native requests omit cache scope and reject reported reused
   input tokens; external prefix and tokenize caches are disabled and cached
