@@ -51,6 +51,24 @@ The [supported family profiles](VISION_FAMILY_CONTRACT.md) also admit complete m
 
 The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers the earlier exact-tuple attachment, GUI, recovery and cleanup checks. Public notarized distribution remains pending. Rebuilding or signing the worker changes its identity, requiring matching reference evidence or fresh local checks. See the [host gate](../tools/converter/stark_convert/vision_runtime.py) and [local checker](../tools/converter/stark_convert/image_checks.py).
 
+## Chat template evaluation
+
+Model-provided Jinja chat templates are compiled and rendered in a fresh
+disposable process for each operation. The evaluator limits template source to
+256 KiB, the JSON request to 2 MiB, rendered output to 1 MiB, cumulative
+expansion and evaluation work to 16 MiB, CPU time to 2 seconds and wall time to
+5 seconds. The cumulative budget is not a peak-memory guarantee. A restricted
+Jinja environment controls available globals, calls and filters; arithmetic,
+collection sizes, nesting and output expansion are guarded. A template that
+uses unsupported features or exceeds a limit is rejected with a fixed error.
+
+On macOS, the parent samples child RSS every 10 ms and terminates evaluation
+above 256 MiB. This is a watchdog threshold, not a kernel-enforced memory
+ceiling. Other POSIX systems additionally apply an address-space resource
+limit. Cancellation terminates the disposable child. Template source,
+rendering inputs and rendered output are not logged or persisted by the
+evaluator. See the [runtime helper](../tools/converter/stark_convert/template_runtime.py).
+
 ## Private JSON-lines protocol
 
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.

@@ -666,6 +666,41 @@ def test_same_model_worker_fault_after_cancellation_keeps_cancellation_category(
     assert desktop.job is None and desktop.api_queue == []
 
 
+@pytest.mark.parametrize(
+    "reason,status,code", [(None, 499, "request_cancelled"), ("deadline", 504, "request_timeout")]
+)
+def test_api_cancels_isolated_template_render_without_stopping_worker(desktop, model, reason, status, code):
+    import threading
+
+    from stark_convert.chat import load_template
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    original_worker = desktop.worker
+    config_path = model / "config.json"
+    config = json.loads(config_path.read_text())
+    config["token_codec_config"]["prompt_template"] = (
+        "{% for a in range(16000) %}{% for b in range(16000) %}{% if a + b < 0 %}x{% endif %}{% endfor %}{% endfor %}"
+    )
+    config_path.write_text(json.dumps(config))
+    _, desktop.template = load_template(model)
+    control = threading.Event()
+    control.reason = reason
+    timer = threading.Timer(0.1, control.set)
+    timer.start()
+    try:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(
+                {"messages": [{"role": "user", "content": "Synthetic cancellation."}]}, cancelled=control
+            )
+        assert error.value.status == status and error.value.code == code
+        assert desktop.worker is original_worker and original_worker.process.poll() is None
+        assert desktop.job is None and desktop.api_queue == []
+    finally:
+        timer.cancel()
+        timer.join()
+
+
 def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_desktop):
     import urllib.request
 
