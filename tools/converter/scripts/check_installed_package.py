@@ -106,6 +106,10 @@ def check():
         venv = root / "venv"
         run([uv, "venv", "--python", sys.executable, str(venv)], cwd=root, environment=environment)
         python = venv / "bin" / "python"
+        template_worker = PROJECT.parent.parent / "target/release/stark-template"
+        if not template_worker.is_file():
+            raise RuntimeError("missing_release_template_worker")
+        shutil.copy2(template_worker, venv / "bin/stark-template")
         run(
             [uv, "pip", "install", "--python", str(python), "--require-hashes", "-r", str(requirements)],
             cwd=root,
@@ -120,8 +124,10 @@ def check():
         inspect = (
             "import json,sys; from pathlib import Path; import stark_convert; "
             "from stark_convert.provenance import toolchain_provenance; "
+            "from stark_convert.template_runtime import IsolatedTemplate; "
             "assert Path(stark_convert.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()); "
             "assert list((Path(stark_convert.__file__).parent / '_build_inputs').rglob('*.pyc')); "
+            "assert IsolatedTemplate('{{ value }}').render(value='synthetic control') == 'synthetic control'; "
             "print(json.dumps(toolchain_provenance())); "
             "assert not any(n.split('.')[0] in {'lalamo','jax','torch'} for n in sys.modules)"
         )

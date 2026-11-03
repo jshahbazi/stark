@@ -4,7 +4,7 @@ CI, Security and CodeQL run for pull requests to `main`, pushes to `main` and ma
 
 | Workflow | Coverage |
 | --- | --- |
-| CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
+| CI | Repository policy, Rust formatting, locked dependency resolution, workflow syntax, native template evaluator build and tests, converter tests and lint, installer and app script tests, process lifecycle tests on Linux and macOS, Apple silicon builds, Clippy and tests of both inference workers in the default and `optimized` configurations, the CPU/grammar engine suite and compilation of Metal kernel tests on the pinned nightly compiler, and the vendored cxx panic-safety test with the engine's `grammar` feature. |
 | Build | Builds an unsigned development bundle on pushes to `main` or `codex/**` that touch source or build inputs, verifies it, and uploads it as a seven-day artifact. |
 | Security | cargo-deny advisories, soundness, licenses and sources across all Cargo features; OSV scans of the seven tracked lockfiles; dependency review on pull requests. |
 | CodeQL | Rust, C/C++, Python, JavaScript/TypeScript and GitHub Actions in build mode `none`. Metal kernels and Swift are not analyzed. |
@@ -21,7 +21,7 @@ The obsolete inherited `Tests` workflow was removed. The remaining inherited `Re
 
 ## What CI does and does not cover
 
-**Product code.** Both workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the generation worker's process isolation is checked by a Python harness. The converter runs its full model-free pytest suite with Hugging Face offline mode. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
+**Product code.** Both inference workers are built, linted with Clippy at `-D warnings`, and tested with synthetic inputs; the generation worker's process isolation is checked by a Python harness. The portable `stark-template` evaluator is built, unit-tested and checked with Clippy in the Linux repository job before the converter suite. Converter tests use the native evaluator and Hugging Face offline mode; installed-package checks copy the release helper beside the temporary environment's Python executable. Standalone and app builds include the helper, verify its fixed self-test protocol and render synthetic data after relocation. Installer, app builder, signer, updater and release-version scripts run their unit tests. The C process reaper is compiled with warnings as errors and exercised on Linux and macOS.
 
 **Engine unit tests.** The `engine-unit` job compiles the default `cpu,metal` target with `nightly-2026-10-01`, then runs the suite under `crates/stark-engine/unit` with `--no-default-features --features cpu,grammar` (the suite needs `custom_test_frameworks`). The compile check preserves coverage of the default native target; the hosted test command avoids requiring a Metal context because macOS 26 hosted runners currently fail with `CannotCreateResidencySet`. On a physical Apple silicon Mac with working Metal residency, run the full native command from [Contributing](../CONTRIBUTING.md#engine-tests) to exercise the kernel comparisons between Metal and the CPU reference backend in `src/backends/cpu`. The ignored tests that read a converted model from `STARK_TEST_MODEL_PATH` do not run in CI; run them locally as described in [Contributing](../CONTRIBUTING.md#engine-tests). See the [failed hosted run](https://github.com/jshahbazi/stark/actions/runs/40227058178/job/121270551189) for the current runner limitation.
 
@@ -66,6 +66,9 @@ Run the same checks CI runs before opening a pull request. Repository policy and
 ```sh
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py --test
+cargo +1.98.1 build --release --locked -p stark-template
+cargo +1.98.1 test --locked -p stark-template
+cargo +1.98.1 clippy --locked -p stark-template --all-targets -- -D warnings
 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
 uv run --project tools/converter --locked --python 3.13.13 ruff check tools/converter
 uv run --project tools/converter --locked --python 3.13.13 ruff format --check tools/converter
@@ -85,7 +88,7 @@ uv run --no-project --python 3.13.13 python -m unittest \
 Rust formatting, dependencies and the workers (Apple silicon with Xcode's Metal tools):
 
 ```sh
-cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate --check
+cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
 cargo metadata --locked --format-version=1 > /dev/null
 cargo deny --locked --all-features check --warn unmaintained advisories licenses bans sources
 cargo test --locked -p stark-generate --no-default-features

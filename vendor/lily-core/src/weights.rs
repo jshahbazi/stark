@@ -100,6 +100,12 @@ impl QuantWeights {
 
 pub type LinearWeights = QuantWeights;
 
+fn destination_end(offset: usize, length: usize, capacity: usize) -> Result<usize> {
+    let end = offset.checked_add(length).context("tensor destination overflow")?;
+    ensure!(end <= capacity, "tensor destination exceeds buffer");
+    Ok(end)
+}
+
 pub struct MlpWeights {
     /// `[2*inter, h]` — gate rows then up rows; `gate_proj`/`up_proj` are
     /// row-range views of it, so prefill's separate GEMMs and decode's single
@@ -255,16 +261,31 @@ impl Loader<'_> {
                 "{name} dtype mismatch in fuse"
             );
             dtype = Some(d);
-            rows += meta.shape[..meta.shape.len() - 1].iter().product::<usize>();
+            let leading = &meta.shape[..meta.shape.len() - 1];
+            let count = if leading.contains(&0) {
+                0
+            } else {
+                leading.iter().try_fold(1usize, |n, &dim| {
+                    n.checked_mul(dim).context("tensor row count overflow")
+                })?
+            };
+            rows = rows.checked_add(count).context("fused row count overflow")?;
         }
         let dtype = dtype.ok_or_else(|| anyhow::anyhow!("empty fuse list"))?;
-        let buf = self.ctx.new_buffer(rows * k * dtype.size())?;
+        let capacity = rows
+            .checked_mul(k)
+            .and_then(|n| n.checked_mul(dtype.size()))
+            .context("fused tensor size overflow")?;
+        let buf = self.ctx.new_buffer(capacity)?;
         let mut offset = 0usize;
         for name in names {
+            let meta =
+                self.ckpt.meta(name).with_context(|| format!("{name} missing"))?;
+            let end = destination_end(offset, meta.byte_len(), capacity)?;
             self.ckpt.read_with(name, |meta| {
                 let start = offset;
                 // SAFETY: freshly allocated shared buffer; [start,
-                // start+byte_len) is this tensor's disjoint row range.
+                // start+byte_len) was checked against its allocation above.
                 Ok(unsafe {
                     core::slice::from_raw_parts_mut(
                         buf.contents().as_ptr().cast::<u8>().add(start),
@@ -272,10 +293,9 @@ impl Loader<'_> {
                     )
                 })
             })?;
-            let meta =
-                self.ckpt.meta(name).with_context(|| format!("{name} missing"))?;
-            offset += meta.byte_len();
+            offset = end;
         }
+        ensure!(offset == capacity, "fused tensor byte length disagrees with shape");
         Tensor::from_buffer(buf, &[rows, k], dtype)
     }
 
@@ -410,4 +430,19 @@ impl Loader<'_> {
 pub(crate) fn expect_shape(t: &Tensor, shape: &[usize], name: &str) -> Result<()> {
     ensure!(t.shape() == shape, "{name} shape {:?} != expected {shape:?}", t.shape());
     Ok(())
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::destination_end;
+
+    #[test]
+    fn unsafe_destinations_require_a_bounded_nonoverflowing_span() {
+        assert!(destination_end(0, 65_536, 1_280).is_err());
+        assert!(destination_end(1_000, 400, 1_280).is_err());
+        assert!(destination_end(usize::MAX, 1, usize::MAX).is_err());
+        assert_eq!(destination_end(0, 640, 1_280).unwrap(), 640);
+        assert_eq!(destination_end(640, 640, 1_280).unwrap(), 1_280);
+        assert_eq!(destination_end(1_280, 0, 1_280).unwrap(), 1_280);
+    }
 }

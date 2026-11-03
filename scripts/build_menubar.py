@@ -490,17 +490,22 @@ def copy_runtime_for_application(
 def verify_worker(worker: Path, kind: str = "generation") -> None:
     try:
         reply = subprocess.run(
-            [str(worker)],
+            [str(worker), *(["--self-test"] if kind == "template" else [])],
             input=b"",
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=15,
             check=False,
         )
-        if reply.returncode != 1 or json.loads(reply.stdout) != {
-            "ready": False,
-            "error": "invalid_arguments",
-        }:
+        expected_reply = (
+            {"status": "ok", "protocol": "stark-template-v1"}
+            if kind == "template"
+            else {"ready": False, "error": "invalid_arguments"}
+        )
+        if (
+            reply.returncode != (0 if kind == "template" else 1)
+            or json.loads(reply.stdout) != expected_reply
+        ):
             raise ValueError
     except (OSError, ValueError, subprocess.TimeoutExpired):
         raise BuildError(f"{kind}_worker_self_check_failed") from None
@@ -1031,6 +1036,7 @@ def build(options: argparse.Namespace) -> Path:
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
+    template_worker = options.template_worker.expanduser().resolve()
     worker_record_path = getattr(options, "worker_build_record", None)
     if worker_record_path is not None:
         worker_record_path = worker_record_path.expanduser().resolve()
@@ -1064,6 +1070,16 @@ def build(options: argparse.Namespace) -> Path:
     ):
         raise BuildError("arm64_score_worker_missing")
     verify_worker(score_worker, "score")
+    if (
+        not template_worker.is_file()
+        or "arm64"
+        not in run(
+            ["/usr/bin/lipo", "-archs", str(template_worker)],
+            "template_worker_architecture",
+        ).split()
+    ):
+        raise BuildError("arm64_template_worker_missing")
+    verify_worker(template_worker, "template")
     source_directory = ROOT / "apps/menu-bar"
     sources = sorted((source_directory / "Sources").glob("*.swift"))
     if not sources or not (ROOT / "tools/converter/stark_convert/desktop.py").is_file():
@@ -1105,6 +1121,7 @@ def build(options: argparse.Namespace) -> Path:
         )
         shutil.copy2(worker, embedded / "libexec/stark-generate")
         shutil.copy2(score_worker, embedded / "libexec/stark-score")
+        shutil.copy2(template_worker, embedded / "libexec/stark-template")
         native_notices = install_native_notices(embedded, temporary)
         converter_package = install_converter(embedded, temporary)
         desktop_dependencies = install_desktop_dependencies(embedded, temporary)
@@ -1154,6 +1171,8 @@ def build(options: argparse.Namespace) -> Path:
             "assert callable(stark_convert.model_removal.prepare_removal); "
             "from stark_convert import cli,progress; "
             "from stark_convert.provenance import toolchain_provenance; "
+            "from stark_convert.template_runtime import IsolatedTemplate; "
+            "assert IsolatedTemplate('{{ value }}').render(value='synthetic control') == 'synthetic control'; "
             "assert 'progress' in inspect.signature(cli.convert).parameters; "
             "assert callable(progress.FDProgressSink); "
             "print(json.dumps(toolchain_provenance(),sort_keys=True))"
@@ -1204,6 +1223,7 @@ def build(options: argparse.Namespace) -> Path:
             "overlays_sha256": {
                 "libexec/stark-generate": sha256(embedded / "libexec/stark-generate"),
                 "libexec/stark-score": sha256(embedded / "libexec/stark-score"),
+                "libexec/stark-template": sha256(embedded / "libexec/stark-template"),
                 **native_notices["files_sha256"],
                 **converter_package["files_sha256"],
                 **desktop_dependencies["files_sha256"],
@@ -1318,6 +1338,12 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=ROOT / "target/release/stark-score",
         help="Probability scoring worker to embed",
+    )
+    parser.add_argument(
+        "--template-worker",
+        type=Path,
+        default=ROOT / "target/release/stark-template",
+        help="Native chat-template evaluator to embed",
     )
     parser.add_argument(
         "--worker-build-record",

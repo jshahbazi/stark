@@ -23,11 +23,11 @@ enum DesktopConnectionError: Error {
         let name = client.displayName
         switch self {
         case .unavailable:
-            return client == .openWork ? "Open OpenWork and a local workspace, then choose Connect to OpenWork."
-                : "Open OpenCode, then choose Connect to OpenCode."
+            return client == .openWork ? "Open OpenWork and a local workspace, then connect it under Stark’s Connections → Apps."
+                : "Open OpenCode, then connect it under Stark’s Connections → Apps."
         case .unapproved:
-            return client == .openWork ? "Connect OpenWork in Stark's Connection Details."
-                : "Allow this OpenCode engine in Stark's Connection Details."
+            return client == .openWork ? "Connect OpenWork under Stark’s Connections → Apps."
+                : "Allow this OpenCode engine in Stark’s Connections window."
         case .identity: return "Stark could not verify the running \(name) app. Use the official macOS app and reopen it without debugger or Node options."
         case .unsafePath: return "Stark could not safely update the \(name) connection files. Check their permissions and try again."
         case .busy: return "The \(name) connection is busy. Try again shortly."

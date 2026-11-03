@@ -59,7 +59,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
 
-    def bundle(self, version="0.1.0-test.1", *, doctor_ok=True, extra=None, app=False):
+    def bundle(
+        self, version="0.1.0-test.1", *, doctor_ok=True, extra=None, app=False, omit=()
+    ):
         archive = (
             self.root / f"bundle-{len(list(self.root.glob('bundle-*.tar.gz')))}.tar.gz"
         )
@@ -72,6 +74,7 @@ class InstallerTests(unittest.TestCase):
             ),
             "stark/libexec/stark-score": ("#!/bin/sh\nexit 0\n", 0o755),
             "stark/libexec/stark-generate": ("#!/bin/sh\nexit 0\n", 0o755),
+            "stark/libexec/stark-template": ("#!/bin/sh\nexit 0\n", 0o755),
             "stark/libexec/python/bin/python3.13": ("#!/bin/sh\nexit 0\n", 0o755),
         }
         if app:
@@ -112,6 +115,8 @@ class InstallerTests(unittest.TestCase):
                         path.read_bytes(),
                         path.stat().st_mode & 0o777,
                     )
+        for name in omit:
+            members.pop(name)
         with tarfile.open(archive, "w:gz") as output:
             for name, (text, mode) in members.items():
                 entry = tarfile.TarInfo(name)
@@ -198,6 +203,26 @@ class InstallerTests(unittest.TestCase):
             "release bundle unavailable",
             self.run_install("--version", "0.1.0", expected=1).stderr,
         )
+
+    def test_missing_template_helper_keeps_previous_installation(self):
+        # Rejection must happen before macOS-specific activation. Seed the
+        # existing managed state so this preflight check also runs on Linux.
+        base = self.prefix / "lib/stark"
+        previous = base / "releases/0.1.0-test.1"
+        previous.mkdir(parents=True)
+        (base / "INSTALL_FORMAT").write_text("1\n")
+        (base / "current").symlink_to("releases/0.1.0-test.1")
+        marker = previous / "previous-installation"
+        marker.write_bytes(b"preserve existing release")
+        archive = self.bundle("0.1.0-test.2", omit=("stark/libexec/stark-template",))
+        result = self.run_install("--archive", archive, expected=1)
+        self.assertIn("bundle component missing: libexec/stark-template", result.stderr)
+        self.assertEqual(
+            (base / "current").readlink(),
+            Path("releases/0.1.0-test.1"),
+        )
+        self.assertEqual(marker.read_bytes(), b"preserve existing release")
+        self.assertFalse((base / "releases/0.1.0-test.2").exists())
 
     def mock_downloads(
         self, archive, latest="https://github.com/jshahbazi/stark/releases/tag/v0.3.0"

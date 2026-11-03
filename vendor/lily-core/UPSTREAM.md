@@ -116,6 +116,14 @@ available under their existing precision and geometry admission checks.
 
 ## Validation boundary
 
+Stark bounds native shard header allocation against both a fixed maximum and
+the opened regular file's length. Native tensor admission checks offset
+arithmetic, file bounds and shape/dtype byte agreement before publishing
+metadata, including the external MLX n-gram table. Fused weight loading also
+checks destination spans against the allocation before constructing native
+mutable slices. These host parsing changes preserve checkpoint values and the
+separate canonical Uzu physical-to-logical storage validation.
+
 This document records source lineage, implementation boundaries and licensing;
 it does not publish dated run results. Exact component controls, whole-model
 numerical controls and sampled throughput are separate evidence levels and are

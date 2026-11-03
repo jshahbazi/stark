@@ -254,14 +254,23 @@ def verify_native(binary: Path, environment: dict[str, str]) -> None:
     ).stdout.decode()
     if re.search(r"\bminos\s+26\.4(?:\.0)?\s", load_commands) is None:
         raise BuildError("native_deployment_target_must_be_macos_26_4")
+    template = binary.name == "stark-template"
     result = run(
-        [str(binary)], "native_invalid_arguments_smoke", environment, expected=1
+        [str(binary), *(["--self-test"] if template else [])],
+        "native_template_self_test" if template else "native_invalid_arguments_smoke",
+        environment,
+        expected=0 if template else 1,
     )
     try:
         reply = json.loads(result.stdout)
     except (UnicodeDecodeError, ValueError) as error:
         raise BuildError("native_invalid_arguments_reply") from error
-    if reply != {"ready": False, "error": "invalid_arguments"} or result.stderr:
+    expected_reply = (
+        {"status": "ok", "protocol": "stark-template-v1"}
+        if template
+        else {"ready": False, "error": "invalid_arguments"}
+    )
+    if reply != expected_reply or result.stderr:
         raise BuildError("native_invalid_arguments_reply")
 
 
@@ -271,6 +280,7 @@ def build_native(bundle: Path, cargo: str, environment: dict[str, str]) -> None:
     for name, features in (
         ("stark-score", ["--features", "optimized"]),
         ("stark-generate", []),
+        ("stark-template", []),
     ):
         print(f"Building {name} with locked dependencies", flush=True)
         # Keep these invocations separate: Cargo feature unification must not
@@ -616,7 +626,7 @@ def dependency_licenses(bundle: Path, cargo: str, environment: dict[str, str]) -
     pending = [
         key
         for key, package in packages.items()
-        if package["name"] in {"stark-score", "stark-generate"}
+        if package["name"] in {"stark-score", "stark-generate", "stark-template"}
     ]
     selected: set[str] = set()
     while pending:
@@ -763,6 +773,8 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             "assert importlib.util.find_spec('ensurepip') is None; "
             "import numpy, tokenizers, ml_dtypes, huggingface_hub, psutil; "
             "import stark_convert.chat; "
+            "from stark_convert.template_runtime import IsolatedTemplate; "
+            "assert IsolatedTemplate('{{ value }}').render(value='synthetic control') == 'synthetic control'; "
             "assert not any(n.split('.')[0] in {'lalamo','jax','torch'} for n in sys.modules)"
         )
         run(
@@ -829,7 +841,7 @@ def verify_relocation(bundle: Path, environment: dict[str, str]) -> None:
             or help_reply.stderr
         ):
             raise BuildError("relocated_launcher_converter_help_identity")
-        for name in ("stark-score", "stark-generate"):
+        for name in ("stark-score", "stark-generate", "stark-template"):
             verify_native(relocated / "libexec" / name, environment)
         if (relocated / "app" / "Stark.app").exists():
             verify_application(relocated / "app" / "Stark.app", environment)
@@ -865,7 +877,9 @@ def verify_application(app: Path, environment: dict[str, str]) -> None:
             "-c",
             (
                 "import stark_convert.desktop, stark_convert.chat, jinja2; "
-                "from stark_convert import progress; assert callable(progress.FDProgressSink)"
+                "from stark_convert import progress; assert callable(progress.FDProgressSink); "
+                "from stark_convert.template_runtime import IsolatedTemplate; "
+                "assert IsolatedTemplate('{{ value }}').render(value='synthetic control') == 'synthetic control'"
             ),
         ],
         "relocated_menu_bar_python_imports",
@@ -905,6 +919,8 @@ def build_application(
             str(bundle / "libexec/stark-generate"),
             "--score-worker",
             str(bundle / "libexec/stark-score"),
+            "--template-worker",
+            str(bundle / "libexec/stark-template"),
             "--output",
             str(output),
             "--version",

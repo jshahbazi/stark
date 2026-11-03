@@ -213,7 +213,7 @@ cache key. Normal Stop clears the live capability; the next Run must admit the
 model and validate the receipt again.
 
 Library metadata is informational. Attach Image and `capabilities.images` derive
-from the current worker's passing evidence. Connection Details and the composer
+from the current worker's passing evidence. Connections and the composer
 distinguish locally checked models from reference-verified models. None of these
 labels qualifies an arbitrary fine-tune against official model outputs.
 

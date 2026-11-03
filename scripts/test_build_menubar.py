@@ -410,6 +410,26 @@ class RuntimeVerificationTests(unittest.TestCase):
         ):
             builder.verify_worker(Path("score-worker"), "score")
 
+    def test_template_worker_probe_checks_native_renderer_protocol(self):
+        valid = subprocess.CompletedProcess(
+            [], 0, b'{"status":"ok","protocol":"stark-template-v1"}\n'
+        )
+        with patch.object(builder.subprocess, "run", return_value=valid) as probe:
+            builder.verify_worker(Path("template-worker"), "template")
+        self.assertEqual(probe.call_args.args[0], ["template-worker", "--self-test"])
+        for reply in (
+            subprocess.CompletedProcess([], 1, b"E"),
+            subprocess.CompletedProcess([], 0, b'{"ready":true}\n'),
+        ):
+            with (
+                self.subTest(reply=reply),
+                patch.object(builder.subprocess, "run", return_value=reply),
+                self.assertRaisesRegex(
+                    builder.BuildError, "template_worker_self_check_failed"
+                ),
+            ):
+                builder.verify_worker(Path("template-worker"), "template")
+
     def test_missing_score_worker_is_rejected_before_packaging(self):
         with self.assertRaisesRegex(
             builder.BuildError, "score_worker_self_check_failed"

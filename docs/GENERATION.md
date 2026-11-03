@@ -51,6 +51,62 @@ The [supported family profiles](VISION_FAMILY_CONTRACT.md) also admit complete m
 
 The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift-packaged-app.md) covers the earlier exact-tuple attachment, GUI, recovery and cleanup checks. Public notarized distribution remains pending. Rebuilding or signing the worker changes its identity, requiring matching reference evidence or fresh local checks. See the [host gate](../tools/converter/stark_convert/vision_runtime.py) and [local checker](../tools/converter/stark_convert/image_checks.py).
 
+## Chat template evaluation
+
+Model-provided Jinja chat templates are compiled and rendered by the Rust
+`stark-template` helper using MiniJinja 2.24.0. Each compilation check and render
+starts a fresh native process. No Python interpreter is started for evaluation,
+and there is no Python rendering fallback. The caller transfers only bounded
+JSON over private pipes and keeps the existing model-worker transaction
+serialized.
+
+The evaluator limits template source to 256 KiB, the JSON request to 2 MiB,
+rendered output to 1 MiB, source tokens to 16,384, VM fuel to 1,000,000 and
+runtime recursion to 128. Input collections, value depth and node counts are
+also bounded. A process-wide allocator rejects more than 16 MiB of cumulative
+requested heap allocations, including JSON parsing, compilation, intermediate
+values, captures, slices and output. Reallocation charges the full replacement
+size. This replaces the Python evaluator's estimated expansion/work budget with
+accounting of actual Rust allocation requests; it can reject expensive templates
+earlier. It does not measure resident memory, native stacks or allocator overhead.
+
+Each child has a hard 2-second CPU limit and disables core dumps and regular-file
+output. The parent enforces a 5-second wall deadline and samples RSS every 10 ms,
+terminating the child above 256 MiB. This RSS watchdog is not a kernel-enforced
+memory ceiling. Other POSIX systems additionally apply a 256 MiB address-space
+limit. Cancellation terminates and reaps the disposable child. Template source,
+inputs, rendered output and compiler diagnostics are never logged or persisted
+by the evaluator.
+
+The helper exposes a restricted set of globals, methods and filters, with no
+filesystem loader or network access API. Unsupported operations, reflective
+attributes, includes/imports and over-limit programs fail with fixed errors.
+Reviewed model templates are tested against Jinja2 for exact output, including
+tool history and JSON formatting. MiniJinja is not a complete Python runtime;
+unsupported method variants and out-of-range integer inputs are rejected.
+Tuple-valued expressions are unsupported because this MiniJinja version
+represents them as lists. Constant-string tuple literals are admitted only as
+direct `in` / `not in` membership operands, where those collection semantics
+agree. Other tuple literals are rejected; list literals and unpacking remain
+supported.
+See the [native implementation](../crates/stark-template/src/engine.rs) and
+[host lifecycle wrapper](../tools/converter/stark_convert/template_runtime.py).
+
+Fresh process startup and template compilation remain intentional security
+costs. Normal chat renders once per turn before tokenization and inference;
+decision scoring renders twice to verify the assistant answer boundary.
+The evaluator adds no work to the per-token decode loop. The
+[native latency study](benchmarks/NATIVE_CHAT_TEMPLATE_2026_11_03.md) compares
+this path with the preserved [Python isolation baseline](benchmarks/CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
+and records the scope and limits of the measurements.
+
+Installed distributions bundle `libexec/stark-template`, checked by `stark doctor`.
+Source checkouts must build it before running chat or converter tests:
+
+```sh
+cargo +1.98.1 build --release --locked -p stark-template
+```
+
 ## Private JSON-lines protocol
 
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
