@@ -135,11 +135,19 @@ def weights_sha256(model):
     return digest_text(manifest)
 
 
+def report_stage(enabled, **counts):
+    if enabled:
+        print(json.dumps(counts), file=sys.stderr, flush=True)
+
+
 class Worker:
     """One private worker process; replies are parsed in memory only."""
 
-    def __init__(self, binary, model, *, prefix_cache=False, timeout=900):
+    def __init__(
+        self, binary, model, *, prefix_cache=False, timeout=900, progress=False
+    ):
         self.timeout = timeout
+        started = time.monotonic()
         self.cancel_read, self.cancel_write = os.pipe()
         command = [binary, "--model-path", model] + (
             ["--prefix-cache"] if prefix_cache else []
@@ -158,6 +166,7 @@ class Worker:
             os.close(self.cancel_write)
             raise
         os.close(self.cancel_read)
+        report_stage(progress, phase="worker_spawned", prefix_cache=prefix_cache)
         self.request_id = 0
         self.buffer = bytearray()
         try:
@@ -166,6 +175,14 @@ class Worker:
                 raise SystemExit(
                     "worker failed to start: " + str(self.ready.get("error"))
                 )
+            report_stage(
+                progress,
+                phase="worker_ready",
+                startup_seconds=round(time.monotonic() - started, 3),
+                prefix_cache_enabled=(self.ready.get("prefix_cache") or {}).get(
+                    "enabled", False
+                ),
+            )
         except BaseException:
             self.close()
             raise
@@ -215,6 +232,10 @@ class Worker:
         return self.request({"operation": "tokenize", "text": text})["token_ids"]
 
     def close(self):
+        # EOF requests native cancellation before waiting for the worker.
+        if self.cancel_write is not None:
+            os.close(self.cancel_write)
+            self.cancel_write = None
         try:
             self.process.stdin.close()
         except (BrokenPipeError, OSError):
@@ -225,9 +246,6 @@ class Worker:
             self.process.kill()
             self.process.wait()
         self.process.stdout.close()
-        if self.cancel_write is not None:
-            os.close(self.cancel_write)
-            self.cancel_write = None
 
 
 def tool_definition(rng, index):
@@ -529,8 +547,7 @@ def comparison_key(ids, options):
 
 
 def report(args, **counts):
-    if args.progress:
-        print(json.dumps(counts), file=sys.stderr, flush=True)
+    report_stage(args.progress, **counts)
 
 
 def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None):
@@ -558,6 +575,7 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
         }
         if scopes is None:
             if key not in outcomes:
+                report(args, case_start=label, input_tokens=len(ids))
                 outcomes[key] = outcome(generate(worker, ids, **request), tools, parser)
                 report(args, case=label, successful="error" not in outcomes[key])
             continue
@@ -567,6 +585,7 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
             bool(options.get("mtp_drafts")),
         )
         predicted = expectation.predict(ids, cache_key)
+        report(args, case_start=label, input_tokens=len(ids))
         reply = generate(worker, ids, scope=scopes[options["scope"]], **request)
         expectation.record(ids, cache_key, reply)
         reused = reply.get("reused_input_tokens")
@@ -623,7 +642,9 @@ def preflight_sessions(args, template, codec):
 def run_exactness(args, template, codec, parser):
     started = time.monotonic()
     report(args, phase="cached")
-    with Worker(args.candidate, args.model, prefix_cache=True) as cached:
+    with Worker(
+        args.candidate, args.model, prefix_cache=True, progress=args.progress
+    ) as cached:
         settings = cached.ready.get("prefix_cache") or {}
         if settings.get("enabled") is not True:
             raise SystemExit("candidate did not enable prefix reuse for this model")
@@ -659,7 +680,7 @@ def run_exactness(args, template, codec, parser):
     for name, binary in (("fresh", args.candidate), ("baseline", args.baseline)):
         report(args, phase=name)
         started = time.monotonic()
-        with Worker(binary, args.model) as worker:
+        with Worker(binary, args.model, progress=args.progress) as worker:
             references[name], _ = run_cases(worker, steps, args, session.tools, parser)
         phase_seconds[name] = round(time.monotonic() - started, 1)
     checks, invalidations = [], []
@@ -687,7 +708,9 @@ def run_exactness(args, template, codec, parser):
         )
     # Reuse must not survive a worker restart, even with the same host scope.
     report(args, phase="restart")
-    with Worker(args.candidate, args.model, prefix_cache=True) as restarted:
+    with Worker(
+        args.candidate, args.model, prefix_cache=True, progress=args.progress
+    ) as restarted:
         reply = generate(
             restarted,
             turns[-1],
@@ -757,7 +780,9 @@ def run_timing(args, template, codec):
         ]
         for name, binary, cache in order if block % 2 == 0 else order[::-1]:
             report(args, phase="timing", worker=name, block=block + 1)
-            with Worker(binary, args.model, prefix_cache=cache) as worker:
+            with Worker(
+                binary, args.model, prefix_cache=cache, progress=args.progress
+            ) as worker:
                 if turns is None:
                     _, turns = build_turns(
                         worker,
@@ -898,6 +923,7 @@ def main():
     preflight_sessions(args, template, codec)
     tool_parser = tool_parser_for(codec)
     started = time.time()
+    report(args, phase="artifact_hashing")
     record = {
         "schema": "stark-prefix-cache-validation-v3",
         "harness_sha256": file_sha256(Path(__file__)),
@@ -955,6 +981,9 @@ def main():
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        print(json.dumps({"passed": False, "error": "validation_interrupted"}))
+        sys.exit(130)
     # Validation failures must never dump request content from an exception.
     except Exception as error:  # noqa: BLE001
         print(
