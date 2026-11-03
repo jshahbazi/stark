@@ -399,6 +399,277 @@ fn iq_indexed_batch_integer_route_copy_preserves_metadata_before_projection() {
 }
 
 #[stark_test]
+fn iq_indexed_batch_mma_matches_configured_projection_and_f64() {
+    let (experts, rows, tokens, selected) = (7usize, 35usize, 9usize, 3usize);
+    for kind in [17, 18] {
+        for columns in [2048usize, 4096] {
+            let (_, codes) = fixture(kind, experts, rows, columns);
+            let mut storage = vec![0xa5; 16];
+            storage.extend_from_slice(&codes);
+            let matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &storage).unwrap(),
+                    offset: 16,
+                    length: codes.len(),
+                    registered_length: storage.len(),
+                },
+                planes: None,
+            };
+            // Nine assignments per expert exercise full eight-route tiles and
+            // a one-route descriptor tail. Row35 also crosses a32-row tile.
+            let selections = (0..tokens * selected).map(|i| (i % 3) as u32).collect::<Vec<_>>();
+            for batched in [false, true] {
+                let input_rows = if batched {
+                    tokens * selected
+                } else {
+                    tokens
+                };
+                let values = (0..columns * input_rows).map(|i| (i as f32 * 0.019).sin()).collect::<Vec<_>>();
+                for schedule in [BatchSchedule::Mma4, BatchSchedule::Mma8] {
+                    let mut graph = DecodeGraph::new().unwrap();
+                    let input = graph.upload_into(&values).unwrap();
+                    let indices = ids(&mut graph, &selections);
+                    let configured = graph
+                        .indexed_batch_schedule(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected,
+                            &input,
+                            tokens,
+                            batched,
+                            BatchSchedule::Configured,
+                        )
+                        .unwrap();
+                    let candidate = graph
+                        .indexed_batch_schedule(
+                            &matrix,
+                            MatrixFormat::Packed(kind),
+                            [experts, rows, columns],
+                            &indices,
+                            selected,
+                            &input,
+                            tokens,
+                            batched,
+                            schedule,
+                        )
+                        .unwrap();
+                    let outputs = graph.finish(&[configured, candidate]).unwrap();
+                    let expert_bytes = codes.len() / experts;
+                    for (route, &expert) in selections.iter().enumerate() {
+                        let expert = expert as usize;
+                        let row = if batched {
+                            route
+                        } else {
+                            route / selected
+                        };
+                        let oracle = packed_f64_oracle(
+                            kind,
+                            &codes[expert * expert_bytes..(expert + 1) * expert_bytes],
+                            rows,
+                            columns,
+                            &values[row * columns..(row + 1) * columns],
+                            0,
+                        );
+                        for (output_row, &(truth, absolute)) in oracle.iter().enumerate() {
+                            let normalization = absolute.max(1.0);
+                            let baseline = f64::from(outputs[0][route * rows + output_row]);
+                            let candidate = f64::from(outputs[1][route * rows + output_row]);
+                            assert!((baseline - truth).abs() / normalization <= 2e-6, "configured IQ F64 bound");
+                            assert!((candidate - truth).abs() / normalization <= 2e-6, "MMA IQ F64 bound {schedule:?}");
+                            assert!(
+                                (candidate - baseline).abs() / normalization <= 2e-6,
+                                "MMA versus configured IQ bound {schedule:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[stark_test]
+fn iq_indexed_batch_mma_basis_proves_gather_and_scatter_lanes() {
+    let (experts, rows, tokens, selected) = (3usize, 35usize, 17usize, 1usize);
+    for kind in [17, 18] {
+        for columns in [256usize, 2048, 4096] {
+            let (matrix, codes) = fixture(kind, experts, rows, columns);
+            let basis = [0, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128, 255, 256, 511, 1023, 2047, 4095];
+            let mut values = vec![0.0; tokens * columns];
+            for (token, position) in basis.into_iter().enumerate() {
+                values[token * columns + position % columns] = 1.0;
+            }
+            for schedule in [BatchSchedule::Mma4, BatchSchedule::Mma8] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let input = graph.upload_into(&values).unwrap();
+                let indices = ids(&mut graph, &vec![2; tokens]);
+                let output = graph
+                    .indexed_batch_schedule(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected,
+                        &input,
+                        tokens,
+                        false,
+                        schedule,
+                    )
+                    .unwrap();
+                let output = graph.finish(&[output]).unwrap().remove(0);
+                let (_, block_bytes) = weights::block_layout(kind).unwrap();
+                let row_bytes = columns / 256 * block_bytes;
+                for (token, position) in basis.into_iter().enumerate() {
+                    let position = position % columns;
+                    for row in 0..rows {
+                        let at = (2 * rows + row) * row_bytes + position / 256 * block_bytes;
+                        let mut decoded = vec![0.0; 256];
+                        weights::decode_block(kind, &codes[at..at + block_bytes], &mut decoded).unwrap();
+                        assert!(
+                            (output[token * rows + row] - decoded[position % 256]).abs() <= 1e-7,
+                            "MMA basis lane kind={kind} K={columns} token={token} row={row} {schedule:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[stark_test]
+fn iq_indexed_batch_mma_extreme_fallback_preserves_vector8_and_failures() {
+    let (experts, rows, columns, tokens, selected) = (3usize, 35usize, 256usize, 9usize, 1usize);
+    for kind in [17, 18] {
+        let (matrix, _) = fixture(kind, experts, rows, columns);
+        for schedule in [BatchSchedule::Mma4, BatchSchedule::Mma8] {
+            for batched in [false, true] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let input = graph
+                    .upload_into(
+                        &(0..columns * tokens)
+                            .map(|i| {
+                                if i % 7 == 0 {
+                                    1e25
+                                } else {
+                                    -1e24
+                                }
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                let indices = ids(&mut graph, &vec![2; tokens]);
+                let expected = reference(
+                    &mut graph,
+                    &matrix,
+                    kind,
+                    [experts, rows, columns],
+                    &indices,
+                    selected,
+                    &input,
+                    tokens,
+                    batched,
+                );
+                let candidate = graph
+                    .indexed_batch_schedule(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected,
+                        &input,
+                        tokens,
+                        batched,
+                        schedule,
+                    )
+                    .unwrap();
+                let output = graph.finish(&[expected, candidate]).unwrap();
+                assert!(
+                    output[0].iter().zip(&output[1]).all(|(a, b)| a.to_bits() == b.to_bits()),
+                    "MMA extreme fallback altered vector8 bits"
+                );
+            }
+            for poison in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                let mut graph = DecodeGraph::new().unwrap();
+                let input = DecodeGraph::zeros(columns * tokens).unwrap();
+                unsafe { input.buffer.contents().as_ptr().cast::<f32>().add(columns + 17).write(poison) };
+                let indices = ids(&mut graph, &vec![2; tokens]);
+                let candidate = graph
+                    .indexed_batch_schedule(
+                        &matrix,
+                        MatrixFormat::Packed(kind),
+                        [experts, rows, columns],
+                        &indices,
+                        selected,
+                        &input,
+                        tokens,
+                        false,
+                        schedule,
+                    )
+                    .unwrap();
+                let clipped = graph
+                    .swiglu(&candidate, &DecodeGraph::upload(&vec![1.0; rows * tokens]).unwrap(), Some(1.0))
+                    .unwrap();
+                assert!(graph.finish(&[clipped]).is_err());
+            }
+            let (_, mut zero_codes) = fixture(kind, experts, rows, columns);
+            let (_, block_bytes) = weights::block_layout(kind).unwrap();
+            for block in zero_codes.chunks_exact_mut(block_bytes) {
+                block[..2].copy_from_slice(&0u16.to_le_bytes());
+            }
+            let zero_matrix = MappedMatrix {
+                codes: MappedSlice {
+                    buffer: buffer(executor().unwrap(), &zero_codes).unwrap(),
+                    offset: 0,
+                    length: zero_codes.len(),
+                    registered_length: zero_codes.len(),
+                },
+                planes: None,
+            };
+            let mut graph = DecodeGraph::new().unwrap();
+            let input = graph.upload_into(&vec![f32::MAX; columns * tokens]).unwrap();
+            let indices = ids(&mut graph, &vec![2; tokens]);
+            let candidate = graph
+                .indexed_batch_schedule(
+                    &zero_matrix,
+                    MatrixFormat::Packed(kind),
+                    [experts, rows, columns],
+                    &indices,
+                    selected,
+                    &input,
+                    tokens,
+                    false,
+                    schedule,
+                )
+                .unwrap();
+            assert!(graph.finish(&[candidate]).unwrap()[0].iter().all(|&value| value == 0.0));
+        }
+    }
+}
+
+#[stark_test]
+fn iq_indexed_batch_mma_admission_limits_device_shapes_and_route_geometry() {
+    let device = executor().unwrap().device.name() == "Apple M5 Max";
+    for kind in [17, 18] {
+        for shape in [[288, 2048, 4096], [288, 4096, 2048]] {
+            for tokens in [32, 64] {
+                assert_eq!(mma_admitted(MatrixFormat::Packed(kind), shape, 8, tokens).unwrap(), device);
+            }
+        }
+        for (shape, selected, tokens) in [
+            ([288, 13, 4096], 8, 64),
+            ([288, 2048, 4096], 7, 64),
+            ([288, 2048, 4096], 8, 8),
+            ([287, 2048, 4096], 8, 64),
+        ] {
+            assert!(!mma_admitted(MatrixFormat::Packed(kind), shape, selected, tokens).unwrap());
+        }
+    }
+    assert!(!mma_admitted(MatrixFormat::Packed(14), [288, 2048, 4096], 8, 64).unwrap());
+}
+
+#[stark_test]
 fn iq_indexed_batch_rejects_invalid_routes_nonfinite_inputs_and_overflow() {
     let (experts, rows, columns, tokens, selected) = (7, 5, 256, 5, 3);
     for kind in [17, 18] {
@@ -614,13 +885,13 @@ fn iq_indexed_batch_gpu_component_timings() {
                     .unwrap();
             let indices =
                 DecodeGraph::upload(&selections.iter().map(|&i| f32::from_bits(i)).collect::<Vec<_>>()).unwrap();
-            let mut samples: [Vec<f64>; 3] = std::array::from_fn(|_| Vec::new());
+            let mut samples: [Vec<f64>; 4] = std::array::from_fn(|_| Vec::new());
             // Warm each arm once, then reverse the order in consecutive blocks.
             for iteration in 0..7 {
                 let order = if iteration % 2 == 0 {
-                    [0, 1, 2, 2, 1, 0]
+                    [0, 1, 2, 3, 3, 2, 1, 0]
                 } else {
-                    [2, 1, 0, 0, 1, 2]
+                    [3, 2, 1, 0, 0, 1, 2, 3]
                 };
                 for arm in order {
                     profile::reset();
@@ -669,7 +940,7 @@ fn iq_indexed_batch_gpu_component_timings() {
                         }
                     } else {
                         graph
-                            .indexed_batch(
+                            .indexed_batch_schedule(
                                 &matrix,
                                 MatrixFormat::Packed(kind),
                                 [experts, rows, columns],
@@ -678,6 +949,11 @@ fn iq_indexed_batch_gpu_component_timings() {
                                 &input,
                                 tokens,
                                 batched,
+                                if arm == 2 {
+                                    BatchSchedule::Vector
+                                } else {
+                                    BatchSchedule::Mma8
+                                },
                             )
                             .unwrap();
                     }
@@ -692,7 +968,7 @@ fn iq_indexed_batch_gpu_component_timings() {
                 results.push(serde_json::json!({
                     "kind":kind, "rows":rows, "columns":columns, "experts":experts,
                     "tokens":tokens, "selected_per_token":selected, "input_batched":batched,
-                    "arm":(["vector8_reference", "configured_indexed_reference", "grouped_four_route"][arm]),
+                    "arm":(["vector8_reference", "configured_indexed_reference", "grouped_four_route", "gathered_eight_route_mma_nsg8"][arm]),
                     "warm_samples":values.len(), "median_gpu_milliseconds":(values[5]+values[6])*500.0,
                     "minimum_gpu_milliseconds":values[0]*1000.0,
                     "maximum_gpu_milliseconds":values[values.len()-1]*1000.0,

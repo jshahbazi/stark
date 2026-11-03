@@ -8,9 +8,10 @@
 // kernel body is copied here.
 
 // One bounded threadgroup packs all routes. Each expert's list is stable in
-// token/selected-slot order; descriptors contain only populated groups of four.
+// token/selected-slot order; descriptors contain only populated groups.
 // p: output rows, input columns, experts, selected/token, tokens, batched input,
-// total routes. Maps hold [count, route...] in an experts x (routes+1) array.
+// total routes, routes/descriptor. Maps hold [count, route...] in an experts x
+// (routes+1) array. The checked host submits width4 for vector8 and8 for MMA.
 kernel void hybrid_graph_route_copy(
     device const uint *input [[buffer(0)]], device uint *output [[buffer(1)]],
     constant uint *p [[buffer(2)]], uint i [[thread_position_in_grid]]) {
@@ -43,10 +44,10 @@ kernel void hybrid_graph_iq_batch_route_pack(
         for (uint expert = 0; expert < p[2]; ++expert) {
             const uint base = expert * stride;
             const uint count = maps[base];
-            for (uint first = 0; first < count; first += 4) {
+            for (uint first = 0; first < count; first += p[7]) {
                 descriptors[3 * emitted] = expert;
                 descriptors[3 * emitted + 1] = base + 1 + first;
-                descriptors[3 * emitted + 2] = min(4u, count - first);
+                descriptors[3 * emitted + 2] = min(p[7], count - first);
                 ++emitted;
             }
         }

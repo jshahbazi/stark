@@ -13,9 +13,13 @@ fn admitted(
     operation: &MappedOperation<'_>,
     tokens: usize,
 ) -> Result<bool> {
+    let legacy_shape = matches!((operation.rows, operation.columns), (8192, 4096) | (4096, 8192));
+    let wide_shape = std::env::var_os("STARK_GLM53_PREFILL_MMA_WIDE").is_some_and(|value| value == "1")
+        && tokens == 8
+        && matches!((operation.rows, operation.columns), (4096, 16384) | (4096, 12288) | (12288, 4096));
     Ok((tokens == 4 && operation.format == MatrixFormat::Packed(14)
         || tokens == 8 && matches!(operation.format, MatrixFormat::Packed(13 | 14)))
-        && matches!((operation.rows, operation.columns), (8192, 4096) | (4096, 8192))
+        && (legacy_shape || wide_shape)
         // thread_elements layout is implementation-defined in MSL. This is
         // the exact device on which basis/tail/source/F64 gates were run.
         && executor()?.device.name() == "Apple M5 Max")

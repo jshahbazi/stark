@@ -619,8 +619,13 @@ fn kquant_mma_preserves_f32_activation_detail_and_extreme_fallback() {
 
 #[stark_test]
 fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
+    let wide_enabled = std::env::var_os("STARK_GLM53_PREFILL_MMA_WIDE").is_some_and(|value| value == "1");
     for (kind, tokens) in [(14, 4), (13, 8), (14, 8)] {
-        for (rows, columns) in [(8192, 4096), (4096, 8192)] {
+        let mut geometries = vec![(8192, 4096), (4096, 8192)];
+        if wide_enabled && tokens == 8 {
+            geometries.extend([(4096, 16384), (4096, 12288), (12288, 4096)]);
+        }
+        for (rows, columns) in geometries {
             let shape = Shape {
                 kind,
                 rows,
@@ -671,7 +676,9 @@ fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
             let actual = graph.finish(&[output]).unwrap().remove(0);
             let after = profile::snapshot().get(counter).map_or(0, |c| c.calls);
             profile::enable(was_enabled);
-            let qualified = executor().unwrap().device.name() == "Apple M5 Max";
+            let legacy_shape = matches!((rows, columns), (8192, 4096) | (4096, 8192));
+            let qualified =
+                executor().unwrap().device.name() == "Apple M5 Max" && (legacy_shape || wide_enabled && tokens == 8);
             assert_eq!(after - before, u64::from(qualified), "actual route device admission mismatch");
             let (rrms, normalized, _) = numerical_errors(shape, &codes, &input, &actual, &source, 16);
             assert!(rrms <= 2e-5 && normalized <= 2e-6, "runtime MMA source/F64 tolerance failed");
@@ -738,7 +745,7 @@ fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
             let actual = graph.finish(&[output]).unwrap().remove(0);
             assert!(actual.iter().all(|&value| value == 0.0), "runtime MMA zero times MAX fallback failed");
 
-            for tail in (1..tokens).filter(|&tail| !(kind == 14 && tail == 4)) {
+            for tail in (1..tokens).filter(|&tail| !(legacy_shape && kind == 14 && tail == 4)) {
                 let input = DecodeGraph::upload(&input[..tail * columns]).unwrap();
                 let mut control = DecodeGraph::new().unwrap();
                 let expected = control.mapped_same_weight(&operation, &input, tail, false).unwrap();
@@ -757,4 +764,104 @@ fn kquant_mma_runtime_graph_actual_shapes_source_f64_and_failure_gates() {
             assert!(graph.mapped_same_weight(&operation, &extreme, 3, true).is_err());
         }
     }
+}
+
+/// Component timing only: complete T8 matrix projections, including checked
+/// finite scans, against the configured serial source path. This does not
+/// qualify full-model throughput or host quietness.
+#[stark_test]
+#[ignore]
+fn kquant_mma_wide_actual_shape_gpu_component_timings() {
+    assert_eq!(executor().unwrap().device.name(), "Apple M5 Max");
+    assert!(std::env::var_os("STARK_GLM53_PREFILL_MMA_WIDE").is_some_and(|value| value == "1"));
+    let previous = profile::enabled();
+    profile::enable(true);
+    let mut results = Vec::new();
+    for (kind, rows, columns) in [
+        (13u32, 4096usize, 16_384usize),
+        (14, 4096, 16_384),
+        (13, 4096, 12_288),
+        (14, 4096, 12_288),
+        (13, 12_288, 4096),
+        (14, 12_288, 4096),
+    ] {
+        let shape = Shape {
+            kind,
+            rows,
+            columns,
+            tokens: 8,
+        };
+        let codes = finite_codes(kind, rows, columns, rows.wrapping_add(columns));
+        let mut encoded = vec![0xa7; 19];
+        encoded.extend_from_slice(&codes);
+        encoded.extend_from_slice(&[0xa7; 19]);
+        let matrix = MappedMatrix {
+            codes: MappedSlice {
+                buffer: buffer(executor().unwrap(), &encoded).unwrap(),
+                offset: 19,
+                length: codes.len(),
+                registered_length: encoded.len(),
+            },
+            planes: None,
+        };
+        let operation = MappedOperation {
+            matrices: vec![matrix],
+            inputs: &[],
+            rows,
+            columns,
+            rows_per_batch: 0,
+            format: MatrixFormat::Packed(kind),
+        };
+        let input_values =
+            (0..shape.tokens * columns).map(|i| ((i * 31 % 149) as f32 - 74.0) * 0.0078125).collect::<Vec<_>>();
+        let input = DecodeGraph::upload(&input_values).unwrap();
+        let counter = if kind == 13 {
+            "native.glm.prefill.q5_mma"
+        } else {
+            "native.glm.prefill.q6_mma"
+        };
+        let mut samples: [Vec<f64>; 2] = std::array::from_fn(|_| Vec::new());
+        // Two warmups, followed by twelve reversed source/MMA pairs.
+        for iteration in 0..14 {
+            let order = if iteration % 2 == 0 {
+                [0, 1]
+            } else {
+                [1, 0]
+            };
+            for arm in order {
+                profile::reset();
+                let mut graph = DecodeGraph::new().unwrap();
+                let output = graph.mapped_same_weight(&operation, &input, shape.tokens, arm == 1).unwrap();
+                graph.finish(&[output]).unwrap();
+                let snapshot = profile::snapshot();
+                if arm == 1 {
+                    assert!(
+                        snapshot.get(counter).is_some_and(|value| value.calls > 0),
+                        "wide MMA selector did not admit the actual matrix shape"
+                    );
+                }
+                let gpu_seconds = snapshot.get("native.metal.gpu").map_or(0.0, |value| value.seconds);
+                assert!(gpu_seconds.is_finite() && gpu_seconds > 0.0, "missing completed GPU duration");
+                if iteration >= 2 {
+                    samples[arm].push(gpu_seconds);
+                }
+            }
+        }
+        for (arm, values) in samples.iter_mut().enumerate() {
+            assert_eq!(values.len(), 12);
+            values.sort_by(f64::total_cmp);
+            results.push(serde_json::json!({
+                "kind": kind, "rows": rows, "columns": columns, "tokens": shape.tokens,
+                "arm": if arm == 0 { "configured_serial_source" } else { "wide_q5_q6_mma" },
+                "warm_samples": values.len(),
+                "median_gpu_milliseconds": (values[5] + values[6]) * 500.0,
+                "minimum_gpu_milliseconds": values[0] * 1000.0,
+                "maximum_gpu_milliseconds": values[11] * 1000.0,
+                "timer_scope": "complete_projection_including_finite_checks",
+                "model_throughput_qualified": false
+            }));
+        }
+    }
+    profile::enable(previous);
+    println!("{}", serde_json::json!({"wide_kquant_mma_component":results}));
 }

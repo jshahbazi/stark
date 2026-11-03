@@ -1,25 +1,66 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Bounded multi-token expert projection with four-route decoded-weight reuse.
+//! Bounded multi-token expert projection with decoded-weight reuse.
 //! The GPU keeps stable route lists; no router readback or CPU synchronization
 //! is introduced. Output remains token/selected-slot/output-row major.
 
 use super::*;
 
 type IndexedBatchPipelines = (PipelineState, PipelineState);
-static PIPELINES: OnceLock<Mutex<HashMap<u32, IndexedBatchPipelines>>> = OnceLock::new();
+type IndexedBatchCache = Mutex<HashMap<(u32, BatchSchedule), IndexedBatchPipelines>>;
+static PIPELINES: OnceLock<IndexedBatchCache> = OnceLock::new();
 
-fn pipelines(kind: u32) -> Result<IndexedBatchPipelines> {
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum BatchSchedule {
+    Configured,
+    Vector,
+    #[cfg(test)]
+    Mma4,
+    Mma8,
+}
+
+impl BatchSchedule {
+    fn nsg(self) -> Option<usize> {
+        match self {
+            #[cfg(test)]
+            Self::Mma4 => Some(4),
+            Self::Mma8 => Some(8),
+            _ => None,
+        }
+    }
+}
+
+fn mma_admitted(
+    format: MatrixFormat,
+    shape: [usize; 3],
+    selected: usize,
+    tokens: usize,
+) -> Result<bool> {
+    Ok(matches!(format, MatrixFormat::Packed(17 | 18))
+        && matches!(shape, [288, 2048, 4096] | [288, 4096, 2048])
+        && selected == 8
+        && matches!(tokens, 32 | 64)
+        && executor()?.device.name() == "Apple M5 Max")
+}
+
+fn pipelines(
+    kind: u32,
+    schedule: BatchSchedule,
+) -> Result<IndexedBatchPipelines> {
     let mut cache = PIPELINES
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .map_err(|_| Error::Invalid("indexed batch pipeline cache failed"))?;
-    if let Some(pipelines) = cache.get(&kind) {
+    if let Some(pipelines) = cache.get(&(kind, schedule)) {
         return Ok(pipelines.clone());
     }
     let executor = executor()?;
     let constants = MTLFunctionConstantValues::new();
     for (index, value) in [(0, kind), (4, 256), (5, weights::block_layout(kind)?.1 as u32)] {
         constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
+    }
+    if let Some(nsg) = schedule.nsg() {
+        let value = nsg as u32;
+        constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, 80);
     }
     let create = |name, threads| -> Result<PipelineState> {
         let function = executor
@@ -35,8 +76,19 @@ fn pipelines(kind: u32) -> Result<IndexedBatchPipelines> {
         }
         Ok(pipeline)
     };
-    let pipelines = (create("hybrid_graph_iq_batch_route_pack", 256)?, create("hybrid_graph_iq_indexed_batch", 64)?);
-    cache.insert(kind, pipelines.clone());
+    let project = if let Some(nsg) = schedule.nsg() {
+        let pipeline = create("hybrid_graph_iq_indexed_batch_mma", nsg * 32)?;
+        if pipeline.static_threadgroup_memory_length() + nsg * 4 * 64 * 4
+            > executor.device.max_threadgroup_memory_length()
+        {
+            return Err(Error::Unsupported("indexed batch MMA threadgroup memory unavailable"));
+        }
+        pipeline
+    } else {
+        create("hybrid_graph_iq_indexed_batch", 64)?
+    };
+    let pipelines = (create("hybrid_graph_iq_batch_route_pack", 256)?, project);
+    cache.insert((kind, schedule), pipelines.clone());
     Ok(pipelines)
 }
 
@@ -52,6 +104,41 @@ impl DecodeGraph {
         input: &DeviceVector,
         tokens: usize,
         input_batched: bool,
+    ) -> Result<DeviceVector> {
+        let schedule = if std::env::var_os("STARK_GLM53_PREFILL_EXPERT_MMA").is_some_and(|value| value == "1") {
+            if mma_admitted(format, shape, selected_per_token, tokens)? {
+                BatchSchedule::Mma8
+            } else {
+                BatchSchedule::Configured
+            }
+        } else {
+            BatchSchedule::Vector
+        };
+        self.indexed_batch_schedule(
+            matrix,
+            format,
+            shape,
+            indices,
+            selected_per_token,
+            input,
+            tokens,
+            input_batched,
+            schedule,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "testable schedule plus explicit immutable bank and route geometry")]
+    fn indexed_batch_schedule(
+        &mut self,
+        matrix: &MappedMatrix,
+        format: MatrixFormat,
+        shape: [usize; 3],
+        indices: &DeviceVector,
+        selected_per_token: usize,
+        input: &DeviceVector,
+        tokens: usize,
+        input_batched: bool,
+        schedule: BatchSchedule,
     ) -> Result<DeviceVector> {
         let [experts, rows, columns] = shape;
         let routes = tokens.checked_mul(selected_per_token).ok_or(Error::Invalid("indexed batch route overflow"))?;
@@ -86,7 +173,12 @@ impl DecodeGraph {
         };
         operation.parameters_for_input(columns)?;
         let output = self.scratch(rows * routes)?;
-        let MatrixFormat::Packed(kind @ (17 | 18)) = format else {
+        let kind = if let MatrixFormat::Packed(kind @ (17 | 18)) = format {
+            Some(kind)
+        } else {
+            None
+        };
+        if kind.is_none() || schedule == BatchSchedule::Configured {
             for token in 0..tokens {
                 let input_first = if input_batched {
                     token * selected_per_token
@@ -113,7 +205,8 @@ impl DecodeGraph {
                 self.copy_into(&row, &output.slice(token * selected_per_token * rows, selected_per_token * rows)?)?;
             }
             return Ok(output);
-        };
+        }
+        let kind = kind.ok_or(Error::Invalid("indexed batch packed schedule"))?;
         if self.projection_level || self.encoding_dispatch != MTLDispatchType::SERIAL {
             return Err(Error::Unsupported("indexed batch requires serial dependent encoding"));
         }
@@ -132,8 +225,13 @@ impl DecodeGraph {
             tokens as u32,
             u32::from(input_batched),
             routes as u32,
+            if schedule.nsg().is_some() {
+                8
+            } else {
+                4
+            },
         ];
-        let (pack, project) = pipelines(kind)?;
+        let (pack, project) = pipelines(kind, schedule)?;
         self.check_finite(input)?;
         self.order_dispatch();
         self.encoding.set_compute_pipeline_state(&pack);
@@ -163,14 +261,21 @@ impl DecodeGraph {
         for (index, vector) in [&maps, &descriptors, &count].into_iter().enumerate() {
             self.encoding.set_buffer(Some(&vector.buffer), vector.offset, index + 4);
         }
+        if let Some(nsg) = schedule.nsg() {
+            self.encoding.set_threadgroup_memory_length(nsg * 4 * 64 * 4, 0);
+        }
         self.encoding.dispatch_threadgroups(
             MTLSize {
-                width: rows.div_ceil(4),
+                width: rows.div_ceil(if schedule.nsg().is_some() {
+                    32
+                } else {
+                    4
+                }),
                 height: routes,
                 depth: 1,
             },
             MTLSize {
-                width: 64,
+                width: schedule.nsg().map_or(64, |nsg| nsg * 32),
                 height: 1,
                 depth: 1,
             },
@@ -185,7 +290,15 @@ impl DecodeGraph {
             count.buffer.clone(),
         ]);
         self.check_finite(&output)?;
-        profile::record("native.glm.prefill.indexed_batch", 0.0, routes);
+        profile::record(
+            if schedule.nsg().is_some() {
+                "native.glm.prefill.indexed_batch_mma"
+            } else {
+                "native.glm.prefill.indexed_batch"
+            },
+            0.0,
+            routes,
+        );
         Ok(output)
     }
 }
