@@ -90,6 +90,18 @@ fn python_json_spacing_sorting_ascii_and_html_escaping_match() {
     success("{{ value | tojson }}", json!({"value": [1e-5, 1e16, -0.0]}), b"[1e-05, 1e+16, -0.0]");
     rejected("{{ ('nan' | float) | tojson }}", json!({}));
     rejected("{{ [('inf' | float)] | tojson }}", json!({}));
+    success(
+        "{{ value | tojson(ensure_ascii=false) }}",
+        json!({"value": {"é": "é😀<&>'\u{0}\n\u{85}"}}),
+        "{\"é\": \"é😀\\u003c\\u0026\\u003e\\u0027\\u0000\\n\u{85}\"}".as_bytes(),
+    );
+    success(
+        "{{ value | tojson(indent=2, ensure_ascii=false) }}",
+        json!({"value": {"é": ["é"]}}),
+        "{\n  \"é\": [\n    \"é\"\n  ]\n}".as_bytes(),
+    );
+    rejected("{{ value | tojson(ensure_ascii='false') }}", json!({"value": "synthetic"}));
+    rejected("{{ value | tojson(ensure_ascii=false, unknown=true) }}", json!({"value": "synthetic"}));
 }
 
 #[test]
@@ -129,6 +141,53 @@ fn adjacent_tool_results_keep_group_boundaries_across_completed_tool_cycles() {
         source,
         json!({"messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool", "content": "first"}, {"role": "tool", "content": "second"}, {"role": "assistant"}, {"role": "tool", "content": "third"}]}),
         b"[first,second][third]",
+    );
+}
+
+#[test]
+fn declared_single_underscore_temporaries_remain_bounded_data_only() {
+    success(
+        "{% set _args=arguments if arguments is mapping else dict() %}{{ _args | tojson }}",
+        json!({"arguments": {"key": "synthetic"}}),
+        br#"{"key": "synthetic"}"#,
+    );
+    success(
+        "{% for key,_value in arguments.items() %}{{ key }}={{ _value }};{% endfor %}",
+        json!({"arguments": {"key": "synthetic"}}),
+        b"key=synthetic;",
+    );
+    success("{% set _args %}synthetic{% endset %}{{ _args }}", json!({}), b"synthetic");
+    // String lookup remains a native string operation, with no Python object
+    // or introspection attributes behind an ordinary data value.
+    success("{% set _args='synthetic' %}{{ _args['__class__'] | default('unavailable') }}", json!({}), b"unavailable");
+    for source in [
+        "{{ _args }}",
+        "{% set __args='synthetic' %}{{ __args }}",
+        "{% set _args='synthetic' %}{{ _args.__class__ }}",
+        "{% set _args='synthetic' %}{{ _args._private }}",
+        "{% set _args=dict() %}{% set _private='synthetic' %}{{ _args._private }}",
+        "{% set _args='synthetic' %}{{ _args | attr('__class__') }}",
+        "{% set _args='synthetic' %}{{ _args.__getitem__('__class__') }}",
+        "{% set ns=namespace() %}{% set ns._args='synthetic' %}",
+    ] {
+        rejected(source, json!({"_args": "synthetic"}));
+    }
+}
+
+#[test]
+fn private_root_arguments_cannot_supply_unbound_template_locals() {
+    for source in [
+        "{{ _args }}{% set _args=1 %}",
+        "{% if false %}{% set _args=1 %}{% endif %}{{ _args }}",
+        "{% for _args in [] %}{% endfor %}{{ _args }}",
+    ] {
+        success(source, json!({"_args": "caller-private"}), b"");
+    }
+    success("{{ value }}", json!({"value": "public", "_unused": "ignored"}), b"public");
+    success(
+        "{% set _args=value %}{{ _args['_private'] }}",
+        json!({"value": {"_private": "nested data"}, "_args": "caller-private"}),
+        b"nested data",
     );
 }
 

@@ -84,6 +84,19 @@ attributes, includes/imports and over-limit programs fail with fixed errors.
 Reviewed model templates are tested against Jinja2 for exact output, including
 tool history and JSON formatting. MiniJinja is not a complete Python runtime;
 unsupported method variants and out-of-range integer inputs are rejected.
+Plain `set` and `for` bindings may declare single-underscore temporary names.
+Dunder names, undeclared underscore names and underscore-prefixed member access
+remain rejected. Underscore-prefixed root argument bindings are omitted before
+rendering, so an unbound local cannot fall back to caller-provided private data.
+Nested JSON keys are preserved. Loop metadata includes `previtem` and `nextitem` so templates
+can group tool results across multiple completed tool cycles.
+
+`tojson` accepts an optional `indent` from 0 through 16 or `none`, and an
+explicit boolean `ensure_ascii` (default `true`). Keys are sorted and HTML
+characters remain escaped under either ASCII policy. Other keywords and
+non-boolean ASCII options are rejected; the same allocation and output limits
+apply.
+
 Tuple-valued expressions are unsupported because this MiniJinja version
 represents them as lists. Constant-string tuple literals are admitted only as
 direct `in` / `not in` membership operands, where those collection semantics

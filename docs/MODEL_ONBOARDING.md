@@ -130,15 +130,19 @@ behavior; the artifact run establishes numerical behavior for the tested path.
 
 Measure both cold first-token cost and warm follow-up benefit with matching
 prompts, output budgets, sampling, context and model artifact. Alternate fresh
-and cached runs, serialize GPU work, record repeated timings and retained memory,
-and report the actual reused token counts. Keep timing observations separate
+and cached runs, serialize GPU work, record repeated timings and retained-state
+memory accounting, and report the actual reused token counts. Derive snapshot
+payload bytes from admitted allocations or measure them directly. Report retained
+cache capacity separately, and distinguish payload accounting from process RSS,
+allocator overhead and transient copies. Record observed peak memory when
+available. Keep timing observations separate
 from correctness results. A successful restore does not establish a speedup.
 
 Update the current support documentation with one of these dispositions:
 
 | Disposition | Required evidence |
 | --- | --- |
-| Implemented and qualified | Loaded capability, restoration design, passing model-free and artifact-bound exactness/lifecycle results, measured timing and memory with the tested scope. |
+| Implemented and qualified | Loaded capability, restoration design, passing model-free and artifact-bound exactness/lifecycle results, timing measurements and retained-state memory accounting with the tested scope. |
 | Implemented, artifact qualification pending | Supported code path and state proof, plus the exact formats/options/artifacts that still lack a model-bound run. Do not inherit another artifact's qualification. |
 | Blocked | State inventory, the concrete reason exact restoration or practical retention is unavailable, and the work needed to remove the blocker. Keep the runtime capability disabled for that path. |
 

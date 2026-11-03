@@ -165,6 +165,44 @@ def test_bounded_literal_containers_preserve_empty_values_and_unpacking():
     assert IsolatedTemplate(source).render() == expected
 
 
+@pytest.mark.parametrize("ensure_ascii", [True, False])
+@pytest.mark.parametrize("indent", [None, 2])
+def test_explicit_json_ascii_policy_matches_python_json_with_html_escaping(ensure_ascii, indent):
+    value = {"é": ["é😀<&>'\u0000\n\r\t\b\f\u001f\u007f\u0085\u2028"], "a": 1.0}
+    options = f"ensure_ascii={'true' if ensure_ascii else 'false'}"
+    if indent is not None:
+        options += f", indent={indent}"
+    source = "{{ value | tojson(" + options + ") }}"
+    expected = json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, indent=indent)
+    for character, escaped in (("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"), ("'", "\\u0027")):
+        expected = expected.replace(character, escaped)
+    assert IsolatedTemplate(source).render(value=value) == expected
+
+
+@pytest.mark.parametrize("options", ["ensure_ascii=none", "ensure_ascii=1", "ensure_ascii='false'", "unknown=true"])
+def test_json_options_reject_unsupported_values_and_keywords(options):
+    with pytest.raises(TemplateRuntimeError):
+        IsolatedTemplate("{{ value | tojson(" + options + ") }}").render(value="synthetic")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{{ _args }}{% set _args=1 %}",
+        "{% if false %}{% set _args=1 %}{% endif %}{{ _args }}",
+        "{% for _args in [] %}{% endfor %}{{ _args }}",
+    ],
+)
+def test_private_root_arguments_do_not_supply_unbound_locals(source):
+    assert IsolatedTemplate(source).render(_args="caller-private") == ""
+
+
+def test_unused_private_root_keys_and_nested_json_keep_their_public_behavior():
+    assert IsolatedTemplate("{{ value }}").render(value="public", _unused="ignored") == "public"
+    source = "{% set _args=value %}{{ _args['_private'] }}"
+    assert IsolatedTemplate(source).render(value={"_private": "nested data"}, _args="caller-private") == "nested data"
+
+
 @pytest.mark.parametrize(
     "source",
     ["{{ ('a','b') }}", "{% set pair=('a','b') %}{{ pair | join(',') }}", "{% set pair='a','b' %}{{ pair }}"],
