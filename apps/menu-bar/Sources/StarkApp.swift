@@ -1227,7 +1227,7 @@ final class EngineController: ObservableObject {
     var statusColor: Color {
         if state == "error" { return .red }
         if state == "ready" { return .green }
-        return busy ? .orange : .secondary
+        return busy ? .orange : .red
     }
 
     func start(resourceURL: URL? = Bundle.main.resourceURL, dataDirectory: URL? = nil) {
