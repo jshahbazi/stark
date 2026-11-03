@@ -91,6 +91,17 @@ materially, so the [power-mode study](QWEN38_POWER_MODES_2026_10_29.md) does not
 isolate a causal mode effect. All 60 outputs match their references, the
 77–80 tok/s target remains unmet, and the original preferences are restored.
 
+## Host request latency
+
+**Native chat-template isolation (2026-11-03).** A fresh Rust helper reduces
+median short rendering from 48 to 9 ms and 64 KiB-history rendering from 59 to
+12 ms in the matched component study. Decision scoring's two sequential renders
+fall from 100 to 18 ms. The [native study](NATIVE_CHAT_TEMPLATE_2026_11_03.md)
+records exact-output controls, resource limits, compatibility restrictions and
+source hashes. The [initial Python baseline](CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
+is retained unchanged. End-to-end inference latency was not measured; earlier
+engine throughput results remain bound to their original timing windows.
+
 ## Engine comparison history
 
 | Study | Date | Status |

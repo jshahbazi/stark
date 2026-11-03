@@ -250,7 +250,10 @@ def test_prefix_revoke_cancels_only_that_managed_clients_grants_and_requests(api
         with condition:
             entered[payload["messages"][0]["content"]] = cancelled
             condition.notify_all()
-        if cancelled.wait(3):
+        # Each synthetic client waits on its intended terminal event. Waiting
+        # three seconds for OpenWork cancellation races the caller's join.
+        if payload["messages"][0]["content"] == "opencode":
+            assert cancelled.wait(3)
             raise APIError(499, "Request cancelled.", "request_cancelled")
         assert release.wait(3)
         return {"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}]}

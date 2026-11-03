@@ -75,6 +75,7 @@ case "$command" in
     chat)
         if [ -f "$bundle/tools/converter/pyproject.toml" ] && [ -f "$bundle/Cargo.toml" ]; then
             [ -x "$bundle/target/release/stark-generate" ] || fail 'build the release stark-generate worker first'
+            [ -x "$bundle/target/release/stark-template" ] || fail 'build the release stark-template helper first'
             command -v uv >/dev/null 2>&1 || fail 'install uv to run chat from a source checkout'
             exec uv run --project "$bundle/tools/converter" --locked python -m stark_convert.chat \
                 --worker "$bundle/target/release/stark-generate" "$@"
@@ -99,6 +100,7 @@ case "$command" in
             || fail 'Stark requires macOS 26.4 or newer'
         [ -x "$python" ] || fail 'bundled Python is missing; reinstall Stark'
         [ -x "$bundle/libexec/stark-score" ] && [ -x "$bundle/libexec/stark-generate" ] \
+            && [ -x "$bundle/libexec/stark-template" ] \
             || fail 'native worker is missing; reinstall Stark'
         printf 'Platform: macOS %s (arm64)\n' "$macos"
         # Capture only the workers' fixed invalid-argument replies. Never print
@@ -121,11 +123,17 @@ try:
         )
         if result.returncode != 1 or json.loads(result.stdout) != {"ready": False, "error": "invalid_arguments"}:
             raise ValueError("worker_check_failed")
+    result = subprocess.run(
+        [str(root / "libexec" / "stark-template"), "--self-test"], input=b"", stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, timeout=15, check=False,
+    )
+    if result.returncode != 0 or json.loads(result.stdout) != {"status": "ok", "protocol": "stark-template-v1"}:
+        raise ValueError("template_check_failed")
 except BaseException:
     print("stark: bundled converter or native worker check failed; reinstall Stark", file=sys.stderr)
     raise SystemExit(1)
 print("Converter: stark-convert " + version + " (Python " + sys.version.split()[0] + ")")
-print("Workers: scoring and generation executables respond correctly")
+print("Workers: scoring, generation and template executables respond correctly")
 ' "$bundle"
         printf '%s\n' 'Installation checks passed. No model was loaded.'
         ;;

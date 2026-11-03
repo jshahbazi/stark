@@ -13,10 +13,16 @@ For normal use, install the [signed release](../../docs/INSTALLATION.md). The co
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --features optimized
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
-The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker` and `--score-worker` select a different CLI bundle, generation binary or scoring binary (default `target/release/stark-score`).
+The app is compiled directly with `swiftc` from `Sources/*.swift`. It installs to `~/Applications/Stark.app` and runs without the checkout, system Python, Rust or uv. The builder stages and verifies the new app, quits the running copy (force-killing that exact executable if it stalls), swaps the bundles atomically, and refuses to replace an unrelated application. Options: `--install-dir DIR` changes the parent folder; omitting `--install` leaves the app in the ignored `artifacts/menu-bar/` directory; `--runtime`, `--worker`, `--score-worker` and `--template-worker` select a different CLI bundle, generation binary, scoring binary or native template evaluator. Native binaries default to their corresponding `target/release/` paths.
+
+The builder embeds `stark-template` in the app's runtime and verifies a synthetic
+render through the installed converter. Chat and Decision modes require this
+helper; template execution has no Python fallback. Models and conversation
+content are not needed for the build checks.
 
 For release DMGs containing **Install Stark**, open the image and choose that launcher. It verifies and stages the complete app before asking the running copy to quit. It prefers the current running Stark location, including `~/Applications`, then an existing `/Applications` copy, then an existing `~/Applications` copy, or a writable Applications folder. It quits, replaces and launches the exact selected destination, and shows either success or the specific failure. Models remain installed; active chats stop. The Keychain API credential and saved endpoint are reused by subsequent launches. Older DMGs use drag-and-drop; after copying `Stark.app`, quit the running old app before opening the installed app. Drag-copying alone does not stop an older running copy.
 

@@ -40,6 +40,7 @@ from .chat import (
     Worker,
     load_template,
     read_model_config,
+    render_template,
 )
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
@@ -1615,7 +1616,9 @@ class Desktop:
                 raise ValueError
 
         try:
-            prompt = template.render(
+            prompt = render_template(
+                template,
+                cancelled=cancelled,
                 messages=messages,
                 tools=tools,
                 add_generation_prompt=True,
@@ -1623,6 +1626,8 @@ class Desktop:
                 bos_token=codec.get("bos_token") or "",
                 eos_token=codec.get("eos_token") or "",
             )
+        except (ChatCancelled, ChatRequestTooLarge):
+            raise
         except (TemplateError, ChatError):
             raise APIError(400, "The model's chat template rejected these messages.", "invalid_messages") from None
         if image is not None:

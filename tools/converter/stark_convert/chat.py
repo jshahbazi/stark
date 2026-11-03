@@ -20,7 +20,13 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
-from .template_compat import chat_template_environment
+from .template_runtime import (
+    IsolatedTemplate,
+    TemplateCancelled,
+    TemplateHelperMissing,
+    TemplateRuntimeError,
+    TemplateSizeLimit,
+)
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     family_image_input_contract,
@@ -94,6 +100,24 @@ class ChatImageError(ChatError):
     def __init__(self, code):
         self.code = code
         super().__init__("The image request could not be prepared or executed.")
+
+
+class _ChatTemplate(IsolatedTemplate):
+    def render_with_cancellation(self, cancelled, **arguments):
+        try:
+            return super().render_with_cancellation(cancelled, **arguments)
+        except TemplateCancelled:
+            raise ChatCancelled("Request cancelled.") from None
+        except TemplateSizeLimit:
+            raise ChatRequestTooLarge("Conversation exceeds the template request limit; use /reset.") from None
+        except TemplateRuntimeError:
+            raise ChatError("The model's chat template is unsupported or exceeded its resource limits.") from None
+
+
+def render_template(template, *, cancelled=None, **arguments):
+    if isinstance(template, IsolatedTemplate):
+        return template.render_with_cancellation(cancelled, **arguments)
+    return template.render(**arguments)
 
 
 _RECOVERABLE_IMAGE_ERRORS = {
@@ -181,14 +205,10 @@ def load_template(model, *, expected_hashes=None):
                 )
             ):
                 raise ValueError
-        environment = chat_template_environment()
-
-        def raise_exception(_message):
-            raise ChatError("The model's chat template rejected this conversation.")
-
-        environment.globals["raise_exception"] = raise_exception
-        template = environment.from_string(source)
+        template = _ChatTemplate(source)
         return codec, template
+    except TemplateHelperMissing:
+        raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
     except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):
         raise ChatError("Cannot read chat metadata; use a converted language model with a chat template.") from None
 

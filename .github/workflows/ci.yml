@@ -35,7 +35,7 @@ jobs:
           version: '0.12.24'
           enable-cache: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.98.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Install pinned formatter
         run: rustup toolchain install nightly-2026-10-01 --profile minimal --component rustfmt
       - uses: ./.github/actions/rust-cache
@@ -52,6 +52,11 @@ jobs:
           sh -n scripts/stark
           uv run --no-project --python 3.13.13 python -m unittest scripts/test_install.py scripts/test_install_app.py scripts/test_stark_cli.py scripts/test_build_distribution.py scripts/test_build_menubar.py scripts/test_sign_distribution.py scripts/test_apple_credentials.py
           uv run --no-project --python 3.13.13 python -m unittest scripts/test_sign_distribution.py scripts/test_build_dmg.py scripts/test_apple_credentials.py scripts/test_release_version.py
+      - name: Build and test native template evaluator
+        run: |
+          cargo build --release --locked -p stark-template
+          cargo test --locked -p stark-template
+          cargo clippy --locked -p stark-template --all-targets -- -D warnings
       - name: Test model-free converter contracts
         env:
           HF_HUB_OFFLINE: '1'
@@ -81,7 +86,7 @@ jobs:
       - name: Check Rust formatting
         run: |
           RUSTUP_TOOLCHAIN=nightly-2026-10-01 ./scripts/check-rustfmt-discovery.sh
-          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate --check
+          cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
       - name: Test model-free generation protocol
         run: cargo test --locked -p stark-generate --no-default-features
       - name: Check locked dependency resolution

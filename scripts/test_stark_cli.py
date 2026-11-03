@@ -142,6 +142,7 @@ class LauncherTests(unittest.TestCase):
         target = self.bundle / "target" / "release"
         target.mkdir(parents=True)
         self.fake_executable(target / "stark-generate", "exit 0\n")
+        self.fake_executable(target / "stark-template", "exit 0\n")
         commands = self.directory / "commands"
         commands.mkdir()
         self.fake_argument_echo(commands / "uv")
@@ -285,9 +286,30 @@ class LauncherTests(unittest.TestCase):
                 self.bundle / "libexec" / name,
                 "printf '%s\\n' '{\"ready\":false,\"error\":\"invalid_arguments\"}'\nprintf 'discarded diagnostic' >&2\nexit 1\n",
             )
+        self.fake_executable(
+            self.bundle / "libexec" / "stark-template",
+            'printf \'%s\\n\' \'{"status":"ok","protocol":"stark-template-v1"}\'\nprintf \'discarded diagnostic\' >&2\n',
+        )
         result = self.run_cli("doctor")
         self.assertIn("Installation checks passed", result.stdout)
         self.assertNotIn("discarded diagnostic", result.stdout + result.stderr)
+        (self.bundle / "libexec" / "stark-template").unlink()
+        self.assertIn(
+            "native worker is missing", self.run_cli("doctor", expected=1).stderr
+        )
+        self.fake_executable(
+            self.bundle / "libexec" / "stark-template",
+            "printf 'unexpected template diagnostic'\nexit 0\n",
+        )
+        result = self.run_cli("doctor", expected=1)
+        self.assertNotIn(
+            "unexpected template diagnostic", result.stdout + result.stderr
+        )
+        self.assertIn("check failed", result.stderr)
+        self.fake_executable(
+            self.bundle / "libexec" / "stark-template",
+            'printf \'%s\\n\' \'{"status":"ok","protocol":"stark-template-v1"}\'\n',
+        )
         self.fake_executable(
             self.bundle / "libexec" / "stark-generate",
             "printf 'unexpected diagnostic'\nexit 1\n",

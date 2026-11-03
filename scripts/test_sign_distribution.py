@@ -33,6 +33,7 @@ UUID = "12345678-1234-1234-1234-123456789abc"
 NATIVE_NAMES = (
     "libexec/stark-score",
     "libexec/stark-generate",
+    "libexec/stark-template",
     "libexec/python/bin/python3.13",
     "libexec/python/lib/libpython3.13.dylib",
     "libexec/python/lib/python3.13/site-packages/example/native.so",
@@ -882,7 +883,7 @@ class SigningTests(unittest.TestCase):
                     for call in verify.call_args_list
                     if call.kwargs.get("notarized")
                 ]
-                self.assertEqual(len(online), 3)
+                self.assertEqual(len(online), 4)
 
 
 if __name__ == "__main__":

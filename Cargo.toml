@@ -4,6 +4,7 @@ members = [
     "crates/stark-engine-macros",
     "crates/stark-score",
     "crates/stark-generate",
+    "crates/stark-template",
 ]
 resolver = "3"
 exclude = ["vendor/cxx", "vendor/lily-core"]
