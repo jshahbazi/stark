@@ -48,6 +48,42 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     }
   });
 }
+const appTabs = [...document.querySelectorAll('[data-app-panel]')];
+function selectApp(tab, updateHash = false) {
+  for (const item of appTabs) {
+    const selected = item === tab;
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.getElementById(item.dataset.appPanel).hidden = !selected;
+  }
+  if (updateHash) history.replaceState(null, '', '#' + tab.dataset.appPanel);
+}
+for (const tab of appTabs) {
+  tab.addEventListener('click', () => selectApp(tab, true));
+  tab.addEventListener('keydown', (event) => {
+    const index = appTabs.indexOf(tab);
+    const next = event.key === 'ArrowRight' ? (index + 1) % appTabs.length
+      : event.key === 'ArrowLeft' ? (index + appTabs.length - 1) % appTabs.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? appTabs.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectApp(appTabs[next], true);
+    appTabs[next].focus();
+  });
+}
+function selectLinkedApp(initial = false) {
+  const target = document.getElementById(location.hash.slice(1));
+  const panelId = target?.closest('.app-guide')?.id;
+  const linked = appTabs.find(tab => tab.dataset.appPanel === panelId);
+  if (linked || initial) selectApp(linked || appTabs[0]);
+  // A hidden panel cannot receive the browser's original fragment scroll.
+  if (linked && !initial) document.getElementById(panelId).scrollIntoView({ block: 'start' });
+}
+if (appTabs.length) {
+  selectLinkedApp(true);
+  window.addEventListener('hashchange', () => selectLinkedApp());
+}
+
 const modelTabs = [...document.querySelectorAll('[data-model-group]')];
 function selectModelGroup(tab) {
   for (const item of modelTabs) {
