@@ -919,6 +919,8 @@ code {
 .setup-steps a {display:inline-block;font-size:13px;margin-top:15px}
 .setup-steps .button {display:inline-flex;margin-top:20px}
 .setup-steps strong,.start-heading strong {font-weight:600;color:var(--ink)}
+.start-app-links {display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px}
+.start-app-links a {font-size:13px;line-height:1.6;margin-top:0}
 .terminal-install {grid-column:1/-1;border-block:1px solid var(--line)}
 .terminal-install>summary,.setup-help>summary {list-style:none;display:flex;align-items:center;justify-content:space-between;gap:22px;cursor:pointer;padding:20px 0;font-size:14px}
 .terminal-install>summary::-webkit-details-marker,.setup-help>summary::-webkit-details-marker {display:none}
@@ -975,12 +977,7 @@ code {
 .try-prompt>p {font-size:18px;line-height:1.5;letter-spacing:-.02em;margin-top:12px}
 .try-prompt>small {display:block;color:var(--muted);font-size:12px;margin-top:12px;line-height:1.6}
 .app-walkthrough {padding:32px;min-width:0}
-.connection-map {display:flex;align-items:center;gap:22px;background:var(--night);color:var(--paper);padding:22px;border-radius:2px}
-.connection-map strong {display:block;font-size:16px;font-weight:550;letter-spacing:-.03em}
-.connection-map small {display:block;color:#bdc5b4;font-size:10px;margin-top:4px}
-.connection-line {color:var(--gold);font-size:25px}
-.connection-map .local-label {margin-left:auto;font:8px/1.7 var(--mono);letter-spacing:.06em;max-width:48px;color:var(--gold)}
-.app-walkthrough h4 {font-size:15px;font-weight:600;margin:26px 0 0;letter-spacing:-.02em}
+.app-walkthrough h4 {font-size:15px;font-weight:600;margin:0;letter-spacing:-.02em}
 .connection-steps {list-style:none;margin:0;padding:0}
 .connection-steps li {display:flex;gap:17px;padding-top:21px}
 .connection-steps li>span {display:grid;place-items:center;flex:0 0 25px;height:25px;border:1px solid #bdc6b1;border-radius:50%;font:10px var(--mono)}
@@ -1003,7 +1000,6 @@ code {
   .app-tab-arrow {display:none}
   .app-intro {padding:28px}
   .app-walkthrough {padding:26px}
-  .connection-map {gap:16px;padding:18px}
 }
 @media(max-width:800px) {
   .apps-heading {grid-template-columns:1fr;gap:24px}
@@ -1031,9 +1027,6 @@ code {
   .code-icon {border-radius:2px}
   .app-intro,.app-walkthrough {padding:24px 20px}
   .developer-guide {padding:24px 20px}
-  .connection-map {gap:15px;padding:16px}
-  .connection-map strong {font-size:15px}
-  .connection-map .local-label {max-width:43px;font-size:7px}
   .connection-steps li {gap:12px}
   .help-grid {grid-template-columns:1fr}
   .setup-steps li {gap:16px}

@@ -8,7 +8,7 @@ const commandMetadata = {
   "http": {
     "heading": "HTTP / STREAMING CHAT",
     "detail": "Request shape · Successful SSE ends with [DONE]",
-    "note": "Use the Base URL in Connection Details. Omitting model targets the running model. Copy curl Example in Stark generates an authenticated request that keeps the key out of command arguments and environment variables."
+    "note": "Use the Base URL under Connections → Other apps. Omitting model targets the running model. Copy curl Example under Advanced settings generates an authenticated request that keeps the key out of command arguments and environment variables."
   },
   "generate": {
     "heading": "STDIN / GENERATE REQUEST",
