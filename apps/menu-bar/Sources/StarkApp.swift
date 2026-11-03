@@ -2159,7 +2159,7 @@ struct MenuView: View {
                 }
             }
             Divider()
-            Button("Connection Details…", action: connection)
+            Button("Connections", action: connection)
                 .frame(maxWidth: .infinity, alignment: .leading)
             AppUpdateView(updater: updater)
             HStack {
@@ -2827,7 +2827,7 @@ struct PlaygroundView: View {
             HStack {
                 Text("Stark").font(.title3.weight(.semibold))
                 Spacer()
-                Button("Connection Details…", action: connection)
+                Button("Connections", action: connection)
                 Picker("Mode", selection: Binding(get: { engine.mode }, set: engine.changeMode)) {
                     ForEach(PlaygroundMode.allCases) { Text($0.title).tag($0) }
                 }.pickerStyle(.segmented).frame(width: 180).disabled(engine.busy)
@@ -3198,11 +3198,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private func showConnection() {
         dismissMenu()
+        let view = ConnectionDetailsView(engine: engine,
+                                         manage: { [weak self] in self?.showModels() },
+                                         close: { [weak self] in self?.connectionWindow?.close() })
         if connectionWindow == nil {
-            connectionWindow = window(title: "Stark — Connection Details", view: ConnectionDetailsView(engine: engine), resizable: false)
+            connectionWindow = window(title: "Stark — Connections", view: view, resizable: false)
         } else {
             // Reset the inspected model so each opening defaults to the running model.
-            connectionWindow?.contentViewController = NSHostingController(rootView: ConnectionDetailsView(engine: engine))
+            connectionWindow?.contentViewController = NSHostingController(rootView: view)
         }
         present(connectionWindow)
     }

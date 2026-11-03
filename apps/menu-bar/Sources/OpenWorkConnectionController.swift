@@ -40,7 +40,7 @@ final class OpenWorkConnectionController: ObservableObject {
         let baseURL = event["base_url"] as? String ?? ""
         if !lastBaseURL.isEmpty, lastBaseURL != baseURL, approved {
             clientActive = false
-            message = "Stark's port changed. Choose Reconnect, then reopen OpenWork."
+            message = "Stark's port changed. Choose Manage, then Reconnect, and reopen OpenWork."
         }
         lastBaseURL = baseURL
         if brokerPath() == nil { message = "Stark could not start its private OpenWork connection. Reopen Stark and try again." }
@@ -181,7 +181,7 @@ final class OpenWorkConnectionController: ObservableObject {
                 if let result {
                     self.busy = false
                     guard self.snapshot()["api_base_url"] as? String == baseURL else {
-                        self.message = "Stark's port changed during connection. Choose Connect or Reconnect again."
+                        self.message = "Stark's port changed during connection. Connect again, or choose Manage then Reconnect if OpenWork already has access."
                         return
                     }
                     switch result {

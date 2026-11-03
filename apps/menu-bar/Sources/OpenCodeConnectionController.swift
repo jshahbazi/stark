@@ -5,7 +5,7 @@ import Foundation
 /// OpenCode Desktop runs one detached engine that outlives the app window and
 /// can be shared with the terminal. Stark therefore approves each engine
 /// instance once: Connect approves the engine it verified while installing,
-/// and any later engine waits for Allow or Deny in Connection Details.
+/// and any later engine waits for Allow or Deny in Connections.
 final class OpenCodeConnectionController: ObservableObject {
     @Published private(set) var approved = false
     @Published private(set) var busy = false
@@ -47,7 +47,7 @@ final class OpenCodeConnectionController: ObservableObject {
         let baseURL = event["base_url"] as? String ?? ""
         if !lastBaseURL.isEmpty, lastBaseURL != baseURL, approved {
             clientActive = false
-            message = "Stark's port changed. Choose Reconnect to update OpenCode."
+            message = "Stark's port changed. Choose Manage, then Reconnect to update OpenCode."
         }
         lastBaseURL = baseURL
         if brokerPath() == nil { message = "Stark could not start its private OpenCode connection. Reopen Stark and try again." }
@@ -172,7 +172,7 @@ final class OpenCodeConnectionController: ObservableObject {
         pendingEngine = nil
         if denied.count >= 16 { denied.removeAll() }
         denied.insert(engine.instanceID)
-        message = "OpenCode engine denied. Choose Connect to OpenCode to allow the current engine."
+        message = "OpenCode engine denied. Choose Manage, then Reconnect to allow the current engine."
     }
 
     func connect() {
@@ -263,7 +263,7 @@ final class OpenCodeConnectionController: ObservableObject {
                         self.denied.remove(engine.process.instanceID)
                         if self.pendingEngine == engine.process { self.pendingEngine = nil }
                         guard self.snapshot()["api_base_url"] as? String == baseURL else {
-                            self.message = "Stark's port changed during connection. Choose Reconnect to update OpenCode."
+                            self.message = "Stark's port changed during connection. Choose Manage, then Reconnect to update OpenCode."
                             return
                         }
                         self.message = changed
