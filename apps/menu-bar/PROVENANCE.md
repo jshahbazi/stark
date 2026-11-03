@@ -23,6 +23,16 @@ step preserves these source-bound build records and adds `signed_application`
 metadata for the delivered app. The release signing path assigns the selected
 stable version; `--sign-only` retains development identity.
 
+Local menu-bar builds also use Developer ID signing by default. The builder
+selects one available Developer ID Application certificate or requires an
+explicit `--sign-identity` when more than one is available. It signs embedded
+native files before the enclosing app, verifies the certificate, team, hardened
+runtime, timestamp and complete app seal, and records `signed_runtime`,
+`signed_application` and `signed_overlays_sha256` separately from the original
+build hashes. The original runtime manifest and overlay hashes remain build
+evidence; the signed view describes the delivered bytes. `--ad-hoc` records an
+explicit ad-hoc build. Neither path submits a local build for notarization.
+
 `--worker-build-record PATH` and `--score-worker-build-record PATH` embed optional worker build records after checking their `worker_sha256` against the selected binaries, preserving the distinction between a fresh locked Cargo build and a development worker that reused compiled engine libraries. The builder checks both workers' fixed invalid-argument replies before packaging.
 
 The builder checks imports of the attachment staging, common media pipeline and

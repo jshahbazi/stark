@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import io
 import json
@@ -14,8 +15,10 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 SPEC = importlib.util.spec_from_file_location(
     "build_menubar", Path(__file__).with_name("build_menubar.py")
 )
@@ -71,6 +74,261 @@ def make_converter_wheel(
         license_path = metadata + "/licenses/LICENSE.lalamo"
         if license_path != omit:
             archive.write(snapshot / "LICENSE.lalamo", license_path)
+
+
+class LocalSigningTests(unittest.TestCase):
+    identity: ClassVar = {"sha1": "B" * 40, "team_id": "ABCDEFGHIJ"}
+
+    def identity_result(self, output: bytes):
+        return subprocess.CompletedProcess([], 0, stdout=output, stderr=b"")
+
+    def identity_listing(self) -> bytes:
+        return (
+            f'  1) {self.identity["sha1"]} "Developer ID Application: Example ({self.identity["team_id"]})"\n'
+            '  2) AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA "Apple Development: Example (ABCDEFGHIJ)"\n'
+            "     2 valid identities found\n"
+        ).encode()
+
+    def test_default_selects_the_only_developer_id_and_queries_selected_keychain(self):
+        keychain = Path("/private/fixture.keychain-db")
+        with patch.object(
+            builder.signing,
+            "run",
+            return_value=self.identity_result(self.identity_listing()),
+        ) as command:
+            self.assertEqual(
+                builder.resolve_signing_identity(None, keychain), self.identity
+            )
+        self.assertEqual(str(command.call_args.args[0][-1]), str(keychain))
+
+    def test_missing_ambiguous_and_failed_identity_lookup_never_fall_back(self):
+        for output in (b"0 valid identities found\n", self.identity_listing() * 2):
+            with (
+                self.subTest(output=output),
+                patch.object(
+                    builder.signing, "run", return_value=self.identity_result(output)
+                ),
+                self.assertRaises(builder.BuildError),
+            ):
+                builder.resolve_signing_identity(None, None)
+        with (
+            patch.object(
+                builder.signing,
+                "run",
+                side_effect=builder.signing.SigningError("signing_identity_lookup"),
+            ),
+            self.assertRaisesRegex(builder.BuildError, "signing_identity_lookup"),
+        ):
+            builder.resolve_signing_identity(None, None)
+
+    def test_explicit_identity_is_resolved_without_selecting_a_different_certificate(
+        self,
+    ):
+        selected = "C" * 40
+        with (
+            patch.object(
+                builder.signing,
+                "run",
+                return_value=self.identity_result(self.identity_listing()),
+            ),
+            self.assertRaises(builder.BuildError),
+        ):
+            builder.resolve_signing_identity(selected, None)
+        with patch.object(
+            builder.signing,
+            "run",
+            return_value=self.identity_result(self.identity_listing()),
+        ):
+            self.assertEqual(
+                builder.resolve_signing_identity(self.identity["sha1"].lower(), None),
+                self.identity,
+            )
+
+    def test_ad_hoc_requires_explicit_opt_out_and_rejects_signer_options(self):
+        with patch.object(builder.signing, "run") as command:
+            self.assertIsNone(builder.resolve_signing_identity(None, None, ad_hoc=True))
+            for selected, keychain in (("certificate", None), (None, Path("test"))):
+                with self.assertRaisesRegex(
+                    builder.BuildError, "ad_hoc_signing_options_conflict"
+                ):
+                    builder.resolve_signing_identity(selected, keychain, ad_hoc=True)
+            command.assert_not_called()
+
+    def test_missing_identity_leaves_installed_app_untouched_before_building(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "Applications/Stark.app"
+            make_app(destination)
+            options = argparse.Namespace(install=True, install_dir=destination.parent)
+            with (
+                patch.object(builder.platform, "system", return_value="Darwin"),
+                patch.object(builder.platform, "machine", return_value="arm64"),
+                patch.object(
+                    builder.signing,
+                    "run",
+                    return_value=self.identity_result(b"0 valid identities found\n"),
+                ),
+                patch.object(builder, "verify_runtime") as runtime,
+                patch.object(builder, "stop_app") as stop,
+                patch.object(builder, "install_app") as install,
+                self.assertRaises(builder.BuildError),
+            ):
+                builder.build(options)
+            runtime.assert_not_called()
+            stop.assert_not_called()
+            install.assert_not_called()
+            self.assertEqual(
+                (destination / "Contents/payload").read_text(), "complete staged app"
+            )
+
+    def make_signing_app(self, root: Path) -> tuple[Path, dict]:
+        app = root / "Stark.app"
+        make_app(app)
+        metadata = app / "Contents/Info.plist"
+        info = plistlib.loads(metadata.read_bytes())
+        info.update(
+            CFBundleExecutable="Stark",
+            CFBundleShortVersionString="0.0.0",
+            CFBundleVersion="20261103000000000001",
+            StarkBuildChannel="development",
+        )
+        metadata.write_bytes(plistlib.dumps(info))
+        executable = app / "Contents/MacOS/Stark"
+        executable.parent.mkdir()
+        executable.write_bytes(b"compiled host")
+        runtime = app / "Contents/Resources/runtime"
+        make_runtime(runtime)
+        (runtime / "share/stark/VERSION").write_text("fixture\n")
+        (runtime / "libexec/stark-generate").write_bytes(b"compiled worker")
+        manifest = {
+            "source": {"revision": "a" * 40, "dirty": True},
+            "base_runtime": {"manifest_sha256": "c" * 64},
+            "executable_before_signing_sha256": builder.sha256(executable),
+            "overlays_sha256": {
+                "libexec/stark-generate": builder.sha256(
+                    runtime / "libexec/stark-generate"
+                )
+            },
+            "signature": "local ad-hoc; no Developer ID signature or notarization",
+        }
+        (app / "Contents/Resources/menu-bar-manifest.json").write_text(
+            json.dumps(manifest)
+        )
+        return app, manifest
+
+    def test_native_signing_precedes_host_seal_and_retains_source_bound_provenance(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            app, original = self.make_signing_app(Path(temporary))
+            runtime = app / "Contents/Resources/runtime"
+            keychain = Path("/private/fixture.keychain-db")
+            events = []
+
+            def sign_runtime(path, identity, selected_keychain, _environment):
+                self.assertEqual(
+                    (path, identity, selected_keychain),
+                    (runtime, self.identity, keychain),
+                )
+                events.append("native")
+                (runtime / "libexec/stark-generate").write_bytes(b"signed worker")
+
+            def command(arguments, _stage):
+                if "--sign" in arguments:
+                    events.append("host")
+                    self.assertEqual(
+                        arguments[arguments.index("--sign") + 1], self.identity["sha1"]
+                    )
+                    self.assertEqual(
+                        arguments[arguments.index("--identifier") + 1], builder.APP_ID
+                    )
+                    self.assertEqual(
+                        arguments[arguments.index("--options") + 1], "runtime"
+                    )
+                    self.assertEqual(
+                        arguments[arguments.index("--keychain") + 1], str(keychain)
+                    )
+                    self.assertIn("--timestamp", arguments)
+                    self.assertNotIn("--deep", arguments)
+                    recorded = json.loads(
+                        (app / "Contents/Resources/menu-bar-manifest.json").read_text()
+                    )
+                    self.assertIn("Developer ID", recorded["signature"])
+                else:
+                    events.append("seal")
+                    self.assertIn("--verify", arguments)
+                    self.assertIn("--deep", arguments)
+                    self.assertIn("--strict", arguments)
+                return ""
+
+            with (
+                patch.object(builder.signing, "sign_bundle", side_effect=sign_runtime),
+                patch.object(
+                    builder.signing,
+                    "verify_signature",
+                    side_effect=lambda *_args, **_kwargs: events.append("identity"),
+                ),
+                patch.object(builder, "run", side_effect=command),
+            ):
+                manifest = builder.sign_application(app, self.identity, keychain)
+            self.assertEqual(events, ["native", "host", "identity", "seal"])
+            for key in (
+                "source",
+                "base_runtime",
+                "executable_before_signing_sha256",
+                "overlays_sha256",
+            ):
+                self.assertEqual(manifest[key], original[key])
+            self.assertEqual(
+                manifest["signed_runtime"]["team_id"], self.identity["team_id"]
+            )
+            self.assertEqual(
+                manifest["signed_application"]["build_channel"], "development"
+            )
+            self.assertEqual(
+                manifest["signed_application"]["application_version"], "0.0.0"
+            )
+            self.assertEqual(
+                manifest["signed_overlays_sha256"]["libexec/stark-generate"],
+                builder.sha256(runtime / "libexec/stark-generate"),
+            )
+            self.assertNotEqual(
+                manifest["signed_overlays_sha256"], original["overlays_sha256"]
+            )
+
+    def test_native_signing_failure_never_attempts_ad_hoc_or_host_signature(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app, _manifest = self.make_signing_app(Path(temporary))
+            with (
+                patch.object(
+                    builder.signing,
+                    "sign_bundle",
+                    side_effect=builder.signing.SigningError("code_signing_failed"),
+                ),
+                patch.object(builder, "run") as command,
+                self.assertRaisesRegex(builder.BuildError, "code_signing_failed"),
+            ):
+                builder.sign_application(app, self.identity, None)
+            command.assert_not_called()
+
+    def test_explicit_ad_hoc_build_preserves_its_development_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            app, original = self.make_signing_app(Path(temporary))
+            with (
+                patch.object(builder.signing, "sign_bundle") as native,
+                patch.object(builder, "run", return_value="") as command,
+            ):
+                manifest = builder.sign_application(app, None, None)
+            self.assertEqual(manifest, original)
+            native.assert_not_called()
+            self.assertEqual(command.call_count, 2)
+            self.assertEqual(
+                command.call_args_list[0].args[0][
+                    command.call_args_list[0].args[0].index("--sign") + 1
+                ],
+                "-",
+            )
+            self.assertIn("--verify", command.call_args_list[1].args[0])
 
 
 class RuntimeVerificationTests(unittest.TestCase):
@@ -807,6 +1065,7 @@ class ConverterPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             code = (
                 "import json, runpy, sys; from pathlib import Path; "
+                "sys.path.insert(0, str(Path(sys.argv[1]).parent)); "
                 "builder = runpy.run_path(sys.argv[1]); "
                 "source = builder['converter_snapshot'](Path(sys.argv[2]), Path(sys.argv[3])); "
                 "assert not any(name.split('.')[0] in "

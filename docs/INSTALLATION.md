@@ -69,6 +69,14 @@ PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-ge
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
+Local app builds require a Developer ID Application certificate and private key
+already available in Keychain. The builder selects the unique identity by
+default; `--sign-identity` and `--keychain` select one explicitly. Rebuilds with
+the same signing team retain Keychain access identity. Missing certificates or
+signing failures leave the installed app in place. For isolated development
+without a certificate, `--ad-hoc` is an explicit opt-in and may require renewed
+Keychain access approval after rebuilding. See the [app build guide](../apps/menu-bar/README.md#build-and-install).
+
 ## Install a prebuilt archive
 
 A bundle contains both workers with embedded Metal kernels, a private Python runtime, the converter with locked dependencies, provenance and license notices. Combined bundles also contain `app/Stark.app`. Keep the archive, its `.sha256` file and the companion `install.sh` together:

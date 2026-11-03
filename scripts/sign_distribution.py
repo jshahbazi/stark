@@ -177,7 +177,7 @@ def extract_verified(
 
 
 def resolve_identity(
-    selected: str, keychain: Path | None, env: dict[str, str]
+    selected: str | None, keychain: Path | None, env: dict[str, str]
 ) -> dict[str, str]:
     arguments = ["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]
     if keychain is not None:
@@ -190,7 +190,9 @@ def resolve_identity(
             continue
         certificate, name = match.groups()
         team = re.fullmatch(r"Developer ID Application: .+ \(([A-Z0-9]{10})\)", name)
-        if team is not None and selected in {name, certificate, certificate.lower()}:
+        if team is not None and (
+            selected is None or selected in {name, certificate, certificate.lower()}
+        ):
             matches.append({"sha1": certificate.upper(), "team_id": team[1]})
     require(len(matches) == 1, "developer_id_application_identity_required")
     return matches[0]
@@ -388,6 +390,11 @@ def refresh_application_manifest(bundle: Path, identity: dict[str, str]) -> None
     app = application(bundle)
     if app is None:
         return
+    refresh_signed_application_manifest(app, identity)
+
+
+def refresh_signed_application_manifest(app: Path, identity: dict[str, str]) -> None:
+    """Preserve build evidence and record delivered bytes for a standalone app."""
     runtime = app / "Contents/Resources/runtime"
     runtime_manifest_path = runtime / MANIFEST
     runtime_manifest = json.loads(runtime_manifest_path.read_bytes())
