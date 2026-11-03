@@ -940,7 +940,7 @@ code {
 .app-tabs strong {display:block;font-size:21px;font-weight:550;letter-spacing:-.03em}
 .app-tabs small {display:block;margin-top:3px;font-size:12px}
 .app-tabs button[aria-selected=true] small {color:#c0c9b5}
-.app-icon {display:grid;place-items:center;flex:0 0 45px;height:45px;border:1px solid currentColor;border-radius:10px;font:18px var(--mono);letter-spacing:-.06em}
+.app-icon {display:grid;place-items:center;flex:0 0 45px;width:45px;height:45px;border:1px solid currentColor;border-radius:10px;font:18px var(--mono);letter-spacing:-.06em}
 .code-icon {border-radius:2px}
 .app-tab-arrow {font-size:22px;margin-left:auto}
 .app-guide {display:grid;grid-template-columns:1fr 1.4fr;border:1px solid #bac2ae;background:#f5f5ee;margin-top:16px}
