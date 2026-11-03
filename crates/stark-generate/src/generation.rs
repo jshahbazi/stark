@@ -2753,11 +2753,15 @@ mod tests {
         let reply = frames.last().unwrap();
         assert_eq!(reply["reused_input_tokens"], 2048);
         assert_eq!(reply["input_tokens"], 3_500);
-        let prefill = reply["prefill_seconds"].as_f64();
-        assert_eq!(
-            reply["input_tokens_per_second"].as_f64(),
-            tokens_per_second(3_500 - 2_048, prefill),
-            "the input rate counts processed tokens only"
+        let rate = reply["input_tokens_per_second"].as_f64();
+        let expected = tokens_per_second(3_500 - 2_048, reply["prefill_seconds"].as_f64());
+        // serde_json may parse a float one ulp off; counting one reused token would move the rate by 1/1452.
+        assert!(
+            match (rate, expected) {
+                (Some(rate), Some(expected)) => (rate - expected).abs() < expected * 1e-12,
+                _ => rate == expected,
+            },
+            "the input rate counts processed tokens only: {rate:?} != {expected:?}"
         );
         let progress: Vec<&Value> = frames.iter().filter(|frame| frame["event"] == "progress").collect();
         assert!(!progress.is_empty());
