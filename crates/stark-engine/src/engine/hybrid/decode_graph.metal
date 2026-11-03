@@ -8,6 +8,103 @@ kernel void hybrid_graph_finite(device const float *input [[buffer(0)]],
     if (i < p[0] && !isfinite(input[i])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
 }
 
+// Exact-span finite scans. Each group owns one <=1024-value tile; host-side
+// range union never fills holes between checked views or scans padding.
+kernel void hybrid_graph_finite_tiles(device const float *input [[buffer(0)]],
+    constant uint *p [[buffer(1)]], device atomic_uint *failure [[buffer(30)]],
+    uint tile [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]]) {
+    const uint start = p[tile * 2], count = p[tile * 2 + 1];
+    for (uint i = tid; i < count; i += 256) {
+        if (!isfinite(input[start + i])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+    }
+}
+
+// Integer IEEE ordering preserves subnormals even when floating comparisons
+// flush them. Normalize both zeros to one key; finite negatives reverse their
+// bits and nonnegative values flip their sign bit. No logit arithmetic occurs.
+inline uint hybrid_greedy_key(uint bits) {
+    if ((bits & 0x7fffffffu) == 0) bits = 0;
+    return bits & 0x80000000u ? ~bits : bits ^ 0x80000000u;
+}
+
+inline uint hybrid_greedy_bits(uint key) {
+    // An empty/all-poisoned tile already set failure. Its sentinel remains
+    // nonfinite when interpreted by any existing exact-span finite checks.
+    if (key == 0) return 0xff800000u;
+    return key & 0x80000000u ? key ^ 0x80000000u : ~key;
+}
+
+inline void hybrid_greedy_reduce(thread uint &best, thread uint &index,
+    threadgroup uint *values, threadgroup uint *indices, uint lane, uint sg) {
+    const uint maximum = simd_max(best);
+    const uint first = simd_min(best == maximum ? index : 0xffffffffu);
+    if (lane == 0) {
+        values[sg] = maximum;
+        indices[sg] = first;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        best = lane < 8 ? values[lane] : 0;
+        index = lane < 8 ? indices[lane] : 0xffffffffu;
+        const uint final_maximum = simd_max(best);
+        index = simd_min(best == final_maximum ? index : 0xffffffffu);
+        best = final_maximum;
+    }
+}
+
+kernel void hybrid_graph_greedy_partials(device const uint *input [[buffer(0)]],
+    device uint *output [[buffer(1)]], constant uint *p [[buffer(2)]],
+    device atomic_uint *failure [[buffer(30)]], uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint best = 0;
+    uint index = 0xffffffffu;
+    const uint end = min((group + 1) * 1024, p[0]);
+    for (uint i = group * 1024 + tid; i < end; i += 256) {
+        const uint bits = input[i];
+        const uint key = hybrid_greedy_key(bits);
+        if ((bits & 0x7f800000u) == 0x7f800000u) {
+            atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        } else if (key > best || (key == best && i < index)) {
+            best = key;
+            index = i;
+        }
+    }
+    threadgroup uint values[8];
+    threadgroup uint indices[8];
+    hybrid_greedy_reduce(best, index, values, indices, lane, sg);
+    if (tid == 0) {
+        // Keep original finite-value bits, rather than ordering-key bits,
+        // in the first plane. Index bits are <=8M (also finite as F32), and
+        // this private intermediate is consumed only by the integer reader.
+        output[group] = hybrid_greedy_bits(best);
+        output[p[1] + group] = index == 0xffffffffu ? 0u : index;
+    }
+}
+
+kernel void hybrid_graph_greedy_finish(device const uint *input [[buffer(0)]],
+    device float *output [[buffer(1)]], constant uint *p [[buffer(2)]],
+    device atomic_uint *failure [[buffer(30)]], uint tid [[thread_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) {
+    uint best = 0;
+    uint index = 0xffffffffu;
+    for (uint i = tid; i < p[0]; i += 256) {
+        const uint bits = input[i];
+        const uint key = hybrid_greedy_key(bits);
+        const uint candidate = input[p[0] + i];
+        if ((bits & 0x7f800000u) == 0x7f800000u) {
+            atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        } else if (key > best || (key == best && candidate < index)) {
+            best = key;
+            index = candidate;
+        }
+    }
+    threadgroup uint values[8];
+    threadgroup uint indices[8];
+    hybrid_greedy_reduce(best, index, values, indices, lane, sg);
+    if (tid == 0) output[0] = index == 0xffffffffu ? 0.0f : float(index);
+}
+
 kernel void hybrid_graph_copy(device const float *input [[buffer(0)]],
     device float *output [[buffer(1)]], constant uint *p [[buffer(2)]],
     device atomic_uint *failure [[buffer(30)]], uint i [[thread_position_in_grid]]) {
@@ -97,6 +194,121 @@ kernel void hybrid_graph_rms(device const float *input [[buffer(0)]], device con
         uint index = group * width + d;
         float w = weight[p[3] == width ? d : index];
         float value = input[index] * scale * w;
+        if (!isfinite(w) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        output[index] = value;
+    }
+}
+
+// Prefetch independent strided loads, then consume them in the original F32
+// lane chronology. The SIMD and threadgroup reduction tree remains unchanged.
+kernel void hybrid_graph_rms_prefetch(device const float *input [[buffer(0)]], device const float *weight [[buffer(1)]],
+    device float *output [[buffer(2)]], constant uint *p [[buffer(3)]],
+    device atomic_uint *failure [[buffer(30)]], uint group [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    if (group >= p[0]) return;
+    const uint width = p[1];
+    float sum = 0.0f;
+    uint d = tid;
+    for (; d + 7 * 256 < width; d += 8 * 256) {
+        float values[8];
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) values[i] = input[group * width + d + i * 256];
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            if (!isfinite(values[i])) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+            sum += values[i] * values[i];
+        }
+    }
+    for (; d < width; d += 256) {
+        const float value = input[group * width + d];
+        if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        sum += value * value;
+    }
+    threadgroup float partial[8];
+    threadgroup float scale;
+    float total = simd_sum(sum);
+    if (lane == 0) partial[sg] = total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        total = simd_sum(lane < 8 ? partial[lane] : 0.0f);
+        if (lane == 0) scale = 1.0f / sqrt(total / float(width) + as_type<float>(p[2]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    d = tid;
+    for (; d + 7 * 256 < width; d += 8 * 256) {
+        float values[8], weights[8];
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            const uint at = d + i * 256;
+            values[i] = input[group * width + at];
+            weights[i] = weight[p[3] == width ? at : group * width + at];
+        }
+        #pragma clang loop unroll(full)
+        for (uint i = 0; i < 8; ++i) {
+            const float value = values[i] * scale * weights[i];
+            if (!isfinite(weights[i]) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+            output[group * width + d + i * 256] = value;
+        }
+    }
+    for (; d < width; d += 256) {
+        const uint index = group * width + d;
+        const float w = weight[p[3] == width ? d : index];
+        const float value = input[index] * scale * w;
+        if (!isfinite(w) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        output[index] = value;
+    }
+}
+
+// Split wide norms across compute units. The F32 partial-sum association is
+// separately qualified; input, weight and final-value failure checks remain.
+kernel void hybrid_graph_rms_partials(device const float *input [[buffer(0)]],
+    device float *output [[buffer(1)]], constant uint *p [[buffer(2)]],
+    device atomic_uint *failure [[buffer(30)]], uint tile [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    const uint group = tile / p[4];
+    const uint start = (tile % p[4]) * 1024;
+    float sum = 0.0f;
+    for (uint d = start + tid; d < min(start + 1024, p[1]); d += 256) {
+        const float value = input[group * p[1] + d];
+        if (!isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        sum += value * value;
+    }
+    threadgroup float partial[8];
+    const float total = simd_sum(sum);
+    if (lane == 0) partial[sg] = total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        const float result = simd_sum(lane < 8 ? partial[lane] : 0.0f);
+        if (lane == 0) output[tile] = result;
+    }
+}
+
+kernel void hybrid_graph_rms_apply(device const float *input [[buffer(0)]],
+    device const float *weight [[buffer(1)]], device const float *partial [[buffer(2)]],
+    device float *output [[buffer(3)]], constant uint *p [[buffer(4)]],
+    device atomic_uint *failure [[buffer(30)]], uint tile [[threadgroup_position_in_grid]],
+    uint tid [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
+    uint sg [[simdgroup_index_in_threadgroup]]) {
+    const uint tiles = (p[1] + 255) / 256;
+    const uint group = tile / tiles;
+    threadgroup float scale;
+    threadgroup float sums[8];
+    const float sum = tid < p[4] ? partial[group * p[4] + tid] : 0.0f;
+    const float total = simd_sum(sum);
+    if (lane == 0) sums[sg] = total;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        const float result = simd_sum(lane < 8 ? sums[lane] : 0.0f);
+        if (lane == 0) scale = 1.0f / sqrt(result / float(p[1]) + as_type<float>(p[2]));
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint d = (tile % tiles) * 256 + tid;
+    if (d < p[1]) {
+        const uint index = group * p[1] + d;
+        const float w = weight[p[3] == p[1] ? d : index];
+        const float value = input[index] * scale * w;
         if (!isfinite(w) || !isfinite(value)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
         output[index] = value;
     }

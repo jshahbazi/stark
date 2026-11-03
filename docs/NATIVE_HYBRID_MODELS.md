@@ -323,6 +323,30 @@ in total. The graph uploads those controls once and releases the production CPU
 copy; larger layouts keep staged execution, whose bounded control cache uses
 CPU NEON arithmetic on Apple silicon.
 
+### GLM batched prefill experiment
+
+The experimental opt-in recipe is available through
+[`scripts/with_glm53_optimized.sh`](../scripts/with_glm53_optimized.sh). It sets
+the GLM-specific flags before starting the supplied command and enables the
+T8 prefill route (`STARK_GLM53_PREFILL_MMA=1`,
+`STARK_GLM53_PREFILL_CHUNK=8`). Keep the context at or below 4096 tokens. The
+measured configuration was an Apple M5 Max running the pinned GLM-5.3-Flash
+UD-Q2_K_XL GGUF; the MMA path was exercised on 68 Q6_K attention matrices with
+shape 8192×4096, alongside the measured Q5/Q6 route. The prefill path retains
+F32 activations and accumulation. The complete profile requires supported model
+inventory, compatible flags, and admission within its memory and context limits.
+Inner MMA admission restricts optimized projections to qualified shapes and
+devices; other shapes and devices use the non-MMA projection path. An admitted
+MMA pipeline that fails capability checks returns an error. The recipe is
+default-off, and engine-wide defaults remain unchanged.
+
+On a 128 GB host, the model and resident banks may reserve about 109 GB. Confirm
+available memory before use. The [November 3 validation](archive/runs/2026-11-03-glm53-prefill-merge-validation.md)
+records fresh correctness checks and a same-binary MMA off/on comparison for the
+focused branch. The [November 2 report](benchmarks/GLM53_BATCHED_PREFILL_2026_11_02.md)
+retains the historical v48 measurements. Each record certifies only its named
+source and workload; neither establishes general performance.
+
 For the pinned original-format checkpoints, the code schedules one command completion
 per token for Qwen and 43 for GLM: one for each of its 42 routed layers and one
 final completion. Three four-step release profiles confirm these counts;
