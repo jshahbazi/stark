@@ -205,14 +205,24 @@ class InstallerTests(unittest.TestCase):
         )
 
     def test_missing_template_helper_keeps_previous_installation(self):
-        self.run_install("--archive", self.bundle())
+        # Rejection must happen before macOS-specific activation. Seed the
+        # existing managed state so this preflight check also runs on Linux.
+        base = self.prefix / "lib/stark"
+        previous = base / "releases/0.1.0-test.1"
+        previous.mkdir(parents=True)
+        (base / "INSTALL_FORMAT").write_text("1\n")
+        (base / "current").symlink_to("releases/0.1.0-test.1")
+        marker = previous / "previous-installation"
+        marker.write_bytes(b"preserve existing release")
         archive = self.bundle("0.1.0-test.2", omit=("stark/libexec/stark-template",))
         result = self.run_install("--archive", archive, expected=1)
         self.assertIn("bundle component missing: libexec/stark-template", result.stderr)
         self.assertEqual(
-            (self.prefix / "lib/stark/current").readlink(),
+            (base / "current").readlink(),
             Path("releases/0.1.0-test.1"),
         )
+        self.assertEqual(marker.read_bytes(), b"preserve existing release")
+        self.assertFalse((base / "releases/0.1.0-test.2").exists())
 
     def mock_downloads(
         self, archive, latest="https://github.com/jshahbazi/stark/releases/tag/v0.3.0"
