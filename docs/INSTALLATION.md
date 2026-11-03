@@ -66,6 +66,8 @@ To rebuild only the app on top of an existing CLI installation:
 
 ```sh
 PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-generate
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-score --features optimized
+PATH="$HOME/.cargo/bin:$PATH" cargo +1.98.1 build --release --locked -p stark-template
 uv run --no-project --python 3.13.13 python scripts/build_menubar.py --install --open
 ```
 
