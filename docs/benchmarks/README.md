@@ -4,6 +4,16 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**GLM-5.3-Flash matched comparison (2026-11-03, partial).** One workload
+qualified: at 128 input / 256 greedy output tokens, the opt-in Stark profile
+measured 40.87 prefill tok/s, 33.04 useful decode tok/s, and 10.861 seconds
+per warm request. Installed MLX-Serve 26.10.2 using embedded llama.cpp measured
+260.21, 34.03, and 7.992 respectively. Ten accepted measurements per engine
+ran in counterbalanced load blocks. The native 1024-token block failed paging
+screens; the rest of the matrix is incomplete. See the [bounded partial report](GLM53_MATCHED_PARTIAL_2026_11_03.md)
+and [aggregate data](data/glm53-matched-partial-2026-11-03.json). This external
+comparison is separate from the within-profile MMA switch result below.
+
 **GLM-5.3-Flash focused prefill validation (2026-11-03).** The focused branch's
 same-binary MMA off/on comparison measured 34.90 to 40.87 prefill tok/s (+17.1%)
 and 2.970 to 2.565 seconds per warm request (13.7% lower), with four accepted
