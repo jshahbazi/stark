@@ -598,6 +598,28 @@ def session_options(args):
     }
 
 
+def preflight_sessions(args, template, codec):
+    """Reject unsupported synthetic histories before hashing/loading weights."""
+    seeds = [args.seed] if args.mode == "exactness" else [args.seed + 1]
+    if args.mode == "all":
+        seeds.insert(0, args.seed)
+    renders = 0
+    for seed in seeds:
+        session = Session(
+            seed, tools=args.tools, instruction_paragraphs=args.instruction_paragraphs
+        )
+        session.render(template, codec)
+        renders += 1
+        for sentences in args.follow_up_sentences[:2]:
+            session.add_tool_step(sentences)
+            session.render(template, codec)
+            renders += 1
+        session.add_user_turn(args.follow_up_sentences[2])
+        session.render(template, codec)
+        renders += 1
+    report(args, phase="template_preflight", renders=renders)
+
+
 def run_exactness(args, template, codec, parser):
     started = time.monotonic()
     report(args, phase="cached")
@@ -873,6 +895,7 @@ def main():
         parser.error("session sizes and run counts must be positive")
 
     codec, template = load_template(args.model)
+    preflight_sessions(args, template, codec)
     tool_parser = tool_parser_for(codec)
     started = time.time()
     record = {
@@ -930,4 +953,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    # Validation failures must never dump request content from an exception.
+    except Exception as error:  # noqa: BLE001
+        print(
+            json.dumps(
+                {
+                    "passed": False,
+                    "error": "validation_failed",
+                    "error_type": type(error).__name__,
+                }
+            ),
+            file=sys.stderr,
+        )
+        sys.exit(1)

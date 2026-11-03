@@ -4,6 +4,7 @@ import importlib.util
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 _spec = importlib.util.spec_from_file_location(
     "prefix_qualification",
@@ -86,6 +87,27 @@ class PrefixQualificationTests(unittest.TestCase):
         changed = harness.diverge(ids, 1)
         self.assertEqual(changed, [1, 2, 1, 2])
         self.assertEqual(ids, [1, 1, 1, 2])
+
+    def test_template_preflight_rejects_unsupported_completed_tool_cycles(self):
+        class RejectCompletedToolCycle:
+            def render(self, **arguments):
+                if (
+                    sum(message["role"] == "tool" for message in arguments["messages"])
+                    > 1
+                ):
+                    raise ValueError("synthetic rejection")
+                return "synthetic rendering"
+
+        args = SimpleNamespace(
+            seed=11,
+            mode="exactness",
+            tools=2,
+            instruction_paragraphs=2,
+            follow_up_sentences=(4, 3, 8),
+            progress=False,
+        )
+        with self.assertRaisesRegex(ValueError, "synthetic rejection"):
+            harness.preflight_sessions(args, RejectCompletedToolCycle(), {})
 
 
 if __name__ == "__main__":

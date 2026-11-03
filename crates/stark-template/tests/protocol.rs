@@ -118,6 +118,21 @@ fn methods_filters_namespaces_loopcontrols_and_slices_work() {
 }
 
 #[test]
+fn adjacent_tool_results_keep_group_boundaries_across_completed_tool_cycles() {
+    let source = "{% for message in messages %}{% if message.role == 'tool' %}{% if loop.previtem and loop.previtem.role != 'tool' %}[{% endif %}{{ message.content }}{% if not loop.last and loop.nextitem.role != 'tool' %}]{% elif loop.last %}]{% else %},{% endif %}{% endif %}{% endfor %}";
+    success(
+        source,
+        json!({"messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool", "content": "first"}, {"role": "assistant"}, {"role": "tool", "content": "second"}, {"role": "assistant"}]}),
+        b"[first][second]",
+    );
+    success(
+        source,
+        json!({"messages": [{"role": "user"}, {"role": "assistant"}, {"role": "tool", "content": "first"}, {"role": "tool", "content": "second"}, {"role": "assistant"}, {"role": "tool", "content": "third"}]}),
+        b"[first,second][third]",
+    );
+}
+
+#[test]
 fn tuple_literals_fail_closed_while_calls_groups_and_unpacking_remain_supported() {
     for source in [
         "{{ ('a', 'b') }}",
