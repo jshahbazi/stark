@@ -35,7 +35,7 @@ jobs:
           version: '0.12.24'
           enable-cache: false
       - name: Install pinned Rust
-        run: rustup toolchain install 1.98.1 --profile minimal
+        run: rustup toolchain install 1.98.1 --profile minimal --component clippy
       - name: Install pinned formatter
         run: rustup toolchain install nightly-2026-10-01 --profile minimal --component rustfmt
       - uses: ./.github/actions/rust-cache
