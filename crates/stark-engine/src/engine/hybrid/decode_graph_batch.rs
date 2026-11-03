@@ -13,13 +13,21 @@ fn admitted(
     operation: &MappedOperation<'_>,
     tokens: usize,
 ) -> Result<bool> {
+    let q8_shape = std::env::var_os("STARK_GLM53_PREFILL_Q8_MMA").is_some_and(|value| value == "1")
+        && tokens == 8
+        && operation.format == MatrixFormat::Packed(8)
+        && matches!((operation.rows, operation.columns), (8192, 4096) | (16384, 1536) | (4096, 1536) | (512, 4096))
+        // The scalar extreme fallback retains the configured Safe source's
+        // exact 256-lane reduction. Fast-math source parity is unqualified.
+        && executor()?.packed_fast_library.is_none();
     let legacy_shape = matches!((operation.rows, operation.columns), (8192, 4096) | (4096, 8192));
     let wide_shape = std::env::var_os("STARK_GLM53_PREFILL_MMA_WIDE").is_some_and(|value| value == "1")
         && tokens == 8
         && matches!((operation.rows, operation.columns), (4096, 16384) | (4096, 12288) | (12288, 4096));
-    Ok((tokens == 4 && operation.format == MatrixFormat::Packed(14)
+    let kquant_shape = (tokens == 4 && operation.format == MatrixFormat::Packed(14)
         || tokens == 8 && matches!(operation.format, MatrixFormat::Packed(13 | 14)))
-        && (legacy_shape || wide_shape)
+        && (legacy_shape || wide_shape);
+    Ok((q8_shape || kquant_shape)
         // thread_elements layout is implementation-defined in MSL. This is
         // the exact device on which basis/tail/source/F64 gates were run.
         && executor()?.device.name() == "Apple M5 Max")
@@ -64,7 +72,8 @@ fn pipeline(
     }
     let executor = executor()?;
     let constants = MTLFunctionConstantValues::new();
-    for (index, value) in [(0, kind), (4, 256), (5, weights::block_layout(kind)?.1 as u32), (80, nsg as u32)] {
+    let (block, block_bytes) = weights::block_layout(kind)?;
+    for (index, value) in [(0, kind), (4, block as u32), (5, block_bytes as u32), (80, nsg as u32)] {
         constants.set_constant_value_type_at_index(NonNull::from(&value).cast(), MTLDataType::UInt, index);
     }
     let function = executor
@@ -122,7 +131,12 @@ impl DecodeGraph {
         let MatrixFormat::Packed(kind) = operation.format else {
             return Err(Error::Invalid("prefill MMA packed format"));
         };
-        let bytes = operation.rows * (operation.columns / 256) * weights::block_layout(kind)?.1;
+        let (block, block_bytes) = weights::block_layout(kind)?;
+        let bytes = operation
+            .rows
+            .checked_mul(operation.columns / block)
+            .and_then(|n| n.checked_mul(block_bytes))
+            .ok_or(Error::Invalid("prefill MMA weight size overflow"))?;
         if matrix.planes.is_some()
             || matrix.codes.length < bytes
             || matrix.codes.offset.checked_add(bytes).is_none_or(|end| end > matrix.codes.buffer.length())
@@ -151,6 +165,13 @@ impl DecodeGraph {
             matrix.codes.offset as u32,
             (input.offset / 4) as u32,
             (output.offset / 4) as u32,
+            // Q8 grouped/block sources use the original 32-lane block dot
+            // for extremes. The default scalar source uses 256 lanes.
+            u32::from(
+                kind == 8
+                    && (q8_grouped8_shape(operation.format, operation.rows, operation.columns).is_some()
+                        || q8_block_shape(operation.format, operation.rows, operation.columns)),
+            ),
         ];
         self.encoding.set_bytes(NonNull::from(&p).cast(), std::mem::size_of_val(&p), 3);
         self.encoding.set_buffer(Some(&self.failure.buffer), self.failure.offset, 4);
@@ -170,10 +191,10 @@ impl DecodeGraph {
         self.resources.extend([matrix.codes.buffer.clone(), input.buffer.clone()]);
         self.check_finite(&output)?;
         profile::record(
-            if kind == 13 {
-                "native.glm.prefill.q5_mma"
-            } else {
-                "native.glm.prefill.q6_mma"
+            match kind {
+                8 => "native.glm.prefill.q8_mma",
+                13 => "native.glm.prefill.q5_mma",
+                _ => "native.glm.prefill.q6_mma",
             },
             0.0,
             bytes,

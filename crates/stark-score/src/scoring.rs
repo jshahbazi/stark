@@ -86,6 +86,36 @@ struct MmaScoreProbeRow {
     encoded_weight_bytes: u64,
     encoded_q5_dispatch_calls: u64,
     encoded_q5_weight_bytes: u64,
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    extra: Option<MmaScoreProbeExtra>,
+}
+
+#[derive(Serialize)]
+struct MmaScoreProbeExtra {
+    encoded_q8_dispatch_calls: u64,
+    encoded_q8_weight_bytes: u64,
+    mla_batch_calls: u64,
+    mla_batch_tokens: u64,
+}
+
+impl MmaScoreProbeExtra {
+    fn from_counters(
+        counters: &std::collections::BTreeMap<&'static str, stark_engine::engine::hybrid::profile::Counter>,
+        q8_enabled: bool,
+        mla_enabled: bool,
+    ) -> Option<Self> {
+        if !q8_enabled && !mla_enabled {
+            return None;
+        }
+        let q8 = counters.get("native.glm.prefill.q8_mma");
+        let mla = counters.get("native.glm.prefill.mla_batch");
+        Some(Self {
+            encoded_q8_dispatch_calls: q8.map_or(0, |counter| counter.calls),
+            encoded_q8_weight_bytes: q8.map_or(0, |counter| counter.bytes),
+            mla_batch_calls: mla.map_or(0, |counter| counter.calls),
+            mla_batch_tokens: mla.map_or(0, |counter| counter.bytes),
+        })
+    }
 }
 
 impl MmaScoreProbe<File> {
@@ -130,6 +160,11 @@ impl<W: Write> MmaScoreProbe<W> {
         let previous = self.previous_profile.take().ok_or("mma_score_probe_failed")?;
         let counters = profile::snapshot();
         profile::enable(previous);
+        let extra = MmaScoreProbeExtra::from_counters(
+            &counters,
+            std::env::var_os("STARK_GLM53_PREFILL_Q8_MMA").is_some_and(|value| value == "1"),
+            std::env::var_os("STARK_GLM53_PREFILL_MLA_BATCH").is_some_and(|value| value == "1"),
+        );
         let q6 = counters.get("native.glm.prefill.q6_mma");
         let q5 = counters.get("native.glm.prefill.q5_mma");
         let q5_calls = q5.map_or(0, |counter| counter.calls);
@@ -148,6 +183,7 @@ impl<W: Write> MmaScoreProbe<W> {
             encoded_weight_bytes: bytes,
             encoded_q5_dispatch_calls: q5_calls,
             encoded_q5_weight_bytes: q5_bytes,
+            extra,
         })
     }
 
@@ -972,6 +1008,7 @@ mod tests {
                 encoded_weight_bytes: 4096,
                 encoded_q5_dispatch_calls: 1,
                 encoded_q5_weight_bytes: 1024,
+                extra: None,
             })
             .unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
@@ -1004,6 +1041,7 @@ mod tests {
                 encoded_weight_bytes: 4096,
                 encoded_q5_dispatch_calls: 1,
                 encoded_q5_weight_bytes: 1024,
+                extra: None,
             };
             assert_eq!(probe.record(row()), Err("mma_score_probe_failed"));
             assert!(probe.failed);
@@ -1025,10 +1063,17 @@ mod tests {
         profile::record("native.glm.prefill.q6_mma", 123.0, 4096);
         profile::record("native.glm.prefill.q5_mma", 234.0, 2048);
         profile::record("native.glm.prefill.q5_mma", 345.0, 1024);
+        profile::record("native.glm.prefill.q8_mma", 456.0, 16384);
+        profile::record("native.glm.prefill.mla_batch", 567.0, 8);
         profile::record("synthetic.unrelated", 321.0, 999);
         probe.complete(true).unwrap();
         assert_eq!(profile::enabled(), previous);
         probe.begin().unwrap();
+        let reset_extra = MmaScoreProbeExtra::from_counters(&profile::snapshot(), true, true).unwrap();
+        assert_eq!(reset_extra.encoded_q8_dispatch_calls, 0);
+        assert_eq!(reset_extra.encoded_q8_weight_bytes, 0);
+        assert_eq!(reset_extra.mla_batch_calls, 0);
+        assert_eq!(reset_extra.mla_batch_tokens, 0);
         probe.complete(false).unwrap();
         assert_eq!(profile::enabled(), previous);
         let rows = std::str::from_utf8(&probe.output)
@@ -1044,6 +1089,46 @@ mod tests {
                 json!({"success":false,"encoded_dispatch_calls":0,"encoded_weight_bytes":0,
                     "encoded_q5_dispatch_calls":0,"encoded_q5_weight_bytes":0})
             ]
+        );
+    }
+
+    #[test]
+    fn mma_probe_extra_is_opt_in_aggregate_and_keeps_q8_out_of_existing_totals() {
+        use stark_engine::engine::hybrid::profile::Counter;
+        let mut counters = std::collections::BTreeMap::new();
+        counters.insert(
+            "native.glm.prefill.q8_mma",
+            Counter {
+                calls: 3,
+                bytes: 4096,
+                ..Counter::default()
+            },
+        );
+        counters.insert(
+            "native.glm.prefill.mla_batch",
+            Counter {
+                calls: 2,
+                bytes: 16,
+                ..Counter::default()
+            },
+        );
+        assert!(MmaScoreProbeExtra::from_counters(&counters, false, false).is_none());
+        let extra = MmaScoreProbeExtra::from_counters(&counters, true, true).unwrap();
+        let value = serde_json::to_value(MmaScoreProbeRow {
+            success: true,
+            encoded_dispatch_calls: 5,
+            encoded_weight_bytes: 7168,
+            encoded_q5_dispatch_calls: 2,
+            encoded_q5_weight_bytes: 3072,
+            extra: Some(extra),
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            json!({"success":true,"encoded_dispatch_calls":5,"encoded_weight_bytes":7168,
+            "encoded_q5_dispatch_calls":2,"encoded_q5_weight_bytes":3072,
+            "encoded_q8_dispatch_calls":3,"encoded_q8_weight_bytes":4096,
+            "mla_batch_calls":2,"mla_batch_tokens":16})
         );
     }
 

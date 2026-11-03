@@ -14,11 +14,14 @@ import compare_hybrid_score_workers as comparison
 
 LEGACY = {"success": True, "encoded_dispatch_calls": 4, "encoded_weight_bytes": 8192}
 CURRENT = {**LEGACY, "encoded_q5_dispatch_calls": 1, "encoded_q5_weight_bytes": 2048}
+EXTRA = {**CURRENT, "encoded_q8_dispatch_calls": 2, "encoded_q8_weight_bytes": 4096,
+         "mla_batch_calls": 1, "mla_batch_tokens": 8}
 
 
 @pytest.fixture(autouse=True)
 def clean_probe_environment(monkeypatch):
-    for key in (comparison.MMA_PROBE_ENV, "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_PREFILL_CHUNK"):
+    for key in (comparison.MMA_PROBE_ENV, "STARK_GLM53_PREFILL_MMA", "STARK_GLM53_PREFILL_CHUNK",
+                "STARK_GLM53_PREFILL_Q8_MMA", "STARK_GLM53_PREFILL_MLA_BATCH"):
         monkeypatch.delenv(key, raising=False)
 
 
@@ -151,6 +154,61 @@ def test_probe_legacy_current_and_chunk_policies_remain_strict(tmp_path, monkeyp
         zero = {key: (True if key == "success" else 0) for key in row}
         write_probe(path, [zero] * 8)
         assert comparison.read_mma_probe(path)["encoded_dispatch_calls"] == 0
+
+
+def test_probe_extra_selectors_require_positive_per_request_dispatch_and_preserve_old_totals(tmp_path, monkeypatch):
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("STARK_GLM53_PREFILL_MMA", "1")
+    monkeypatch.setenv("STARK_GLM53_PREFILL_CHUNK", "8")
+    monkeypatch.setenv("STARK_GLM53_PREFILL_Q8_MMA", "1")
+    monkeypatch.setenv("STARK_GLM53_PREFILL_MLA_BATCH", "1")
+    write_probe(path, [EXTRA] * 12)
+    result = comparison.read_mma_probe(path, expected_rows=12)
+    assert result["encoded_dispatch_calls"] == 48
+    assert result["encoded_weight_bytes"] == 98_304
+    assert result["encoded_q8_dispatch_calls"] == 24
+    assert result["encoded_q8_weight_bytes"] == 49_152
+    assert result["mla_batch_calls"] == 12
+    assert result["mla_batch_tokens"] == 96
+    write_probe(path, [{**EXTRA, "encoded_q8_dispatch_calls": 0}, *([EXTRA] * 11)])
+    assert_rejected(path, "mma_probe_q8_dispatch_missing", expected_rows=12)
+    write_probe(path, [{**EXTRA, "mla_batch_tokens": 0}, *([EXTRA] * 11)])
+    assert_rejected(path, "mma_probe_mla_dispatch_missing", expected_rows=12)
+    write_probe(path, [{**EXTRA, "mla_batch_calls": 0}, *([EXTRA] * 11)])
+    assert_rejected(path, "mma_probe_mla_dispatch_missing", expected_rows=12)
+    write_probe(path, [EXTRA, *([CURRENT] * 11)])
+    assert_rejected(path, "mma_probe_schema_changed", expected_rows=12)
+
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("encoded_q8_dispatch_calls", True), ("encoded_q8_weight_bytes", -1),
+    ("mla_batch_calls", 1.0), ("mla_batch_tokens", 1 << 64),
+])
+def test_probe_extra_counters_reject_invalid_types_and_ranges(tmp_path, field, value):
+    path = tmp_path / "probe.jsonl"
+    write_probe(path, [{**EXTRA, field: value}] * 8)
+    assert_rejected(path, "mma_probe_counter_invalid")
+
+
+def test_probe_extra_selector_schema_and_unknown_fields_are_strict(tmp_path, monkeypatch):
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("STARK_GLM53_PREFILL_Q8_MMA", "1")
+    write_probe(path, [CURRENT] * 8)
+    assert_rejected(path, "mma_probe_selector_schema_required")
+    write_probe(path, [{**EXTRA, "unknown": 1}] * 8)
+    assert_rejected(path, "mma_probe_schema_invalid")
+    write_probe(path, [{key: value for key, value in EXTRA.items() if key != "mla_batch_tokens"}] * 8)
+    assert_rejected(path, "mma_probe_schema_invalid")
+
+
+def test_new_schema_requires_q5_and_q6_per_request_at_non_eight_chunk(tmp_path, monkeypatch):
+    path = tmp_path / "probe.jsonl"
+    monkeypatch.setenv("STARK_GLM53_PREFILL_MMA", "1")
+    monkeypatch.setenv("STARK_GLM53_PREFILL_CHUNK", "32")
+    monkeypatch.setenv("STARK_GLM53_PREFILL_Q8_MMA", "1")
+    write_probe(path, [{**EXTRA, "encoded_q5_dispatch_calls": 0,
+                        "encoded_q5_weight_bytes": 0}, *([EXTRA] * 7)])
+    assert_rejected(path, "mma_probe_q5_dispatch_missing")
 
 
 @pytest.mark.parametrize(("changes", "code"), [

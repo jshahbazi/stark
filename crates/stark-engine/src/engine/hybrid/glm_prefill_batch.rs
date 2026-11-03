@@ -273,15 +273,19 @@ fn encode_layer(
     let attention = match state {
         LayerState::Kda(state) => encode_kda_batch(w, c, graph, &norm, &p, state, banks, tokens, use_mma)?,
         LayerState::Attention(_) => {
-            let output = graph.scratch(tokens * c.hidden)?;
             let state = decode.attention[layer].as_mut().ok_or(Error::Invalid("GLM chunk MLA state"))?;
-            // Append then attend each token before appending its successor.
-            // Cache pooling/tail compression therefore keeps causal chronology.
-            for token in 0..tokens {
-                let row = encode_mla(w, c, graph, &norm.slice(token * c.hidden, c.hidden)?, &p, state, false)?;
-                graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+            if std::env::var_os("STARK_GLM53_PREFILL_MLA_BATCH").is_some_and(|value| value == "1") {
+                encode_mla_batch(w, c, graph, &norm, &p, state, banks, tokens, use_mma)?
+            } else {
+                let output = graph.scratch(tokens * c.hidden)?;
+                // Append then attend each token before appending its successor.
+                // Cache pooling/tail compression therefore keeps causal chronology.
+                for token in 0..tokens {
+                    let row = encode_mla(w, c, graph, &norm.slice(token * c.hidden, c.hidden)?, &p, state, false)?;
+                    graph.copy_into(&row, &output.slice(token * c.hidden, c.hidden)?)?;
+                }
+                output
             }
-            output
         },
     };
     let residual = controls_post(&decode.controls[layer][0], graph, streams, &attention, &mix, c.hidden, c.hc)?;
@@ -390,6 +394,86 @@ fn encode_layer(
         output
     };
     controls_post(&decode.controls[layer][1], graph, &residual, &ffn, &mix, c.hidden, c.hc)
+}
+
+#[expect(clippy::too_many_arguments, reason = "batched stateless projections around chronological MLA cache writers")]
+fn encode_mla_batch(
+    w: &Weights,
+    c: &Config,
+    graph: &mut DecodeGraph,
+    input: &DeviceVector,
+    p: &str,
+    state: &mut super::super::glm_metal::Attention,
+    banks: &BoundedBankGroup<'_>,
+    tokens: usize,
+    use_mma: bool,
+) -> Result<DeviceVector> {
+    // Every input-dependent rank-two projection can share weights across the
+    // prompt chunk without observing or mutating attention state.
+    let q = project(banks, graph, p, "attn_q_a.weight", input, tokens, use_mma)?;
+    let latent = project(banks, graph, p, "attn_kv_a_mqa.weight", input, tokens, use_mma)?;
+    let key = project(banks, graph, p, "indexer.attn_k.weight", input, tokens, use_mma)?;
+    let gate = project(banks, graph, p, "indexer_compressor_gate.weight", input, tokens, use_mma)?;
+    let weights = project(banks, graph, p, "indexer.proj.weight", input, tokens, use_mma)?;
+
+    // These immutable, independently owned uploads stay outside the recyclable
+    // graph arena. Host writes into an earlier scratch scope would race with
+    // queued GPU reads when larger chunks rewind their per-layer workspace.
+    let qnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_q_a_norm.weight"))?)?;
+    let kvnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_kv_a_norm.weight"))?)?;
+    let keynorm = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.weight"))?)?;
+    let keybias = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.bias"))?)?;
+    let normalized_q = graph.scratch(tokens * c.q_rank)?;
+    let normalized_latent = graph.scratch(tokens * c.kv_rank)?;
+    let normalized_key = graph.scratch(tokens * c.index_dim)?;
+    for token in 0..tokens {
+        let row = graph.rms_norm(&q.slice(token * c.q_rank, c.q_rank)?, &qnorm, c.q_rank, c.rms_eps)?;
+        graph.copy_into(&row, &normalized_q.slice(token * c.q_rank, c.q_rank)?)?;
+        let row = graph.rms_norm(&latent.slice(token * c.kv_rank, c.kv_rank)?, &kvnorm, c.kv_rank, c.rms_eps)?;
+        graph.copy_into(&row, &normalized_latent.slice(token * c.kv_rank, c.kv_rank)?)?;
+        let row = super::super::glm_metal::index_layer_norm(
+            graph,
+            &key.slice(token * c.index_dim, c.index_dim)?,
+            &keynorm,
+            &keybias,
+        )?;
+        graph.copy_into(&row, &normalized_key.slice(token * c.index_dim, c.index_dim)?)?;
+    }
+    let query = project(banks, graph, p, "attn_q_b.weight", &normalized_q, tokens, use_mma)?;
+    let index_query = project(banks, graph, p, "indexer.attn_q_b.weight", &normalized_q, tokens, use_mma)?;
+
+    // Only these operations consume or mutate chronological MLA/indexer state.
+    // Attend to token t before appending token t+1, including each pool/tail
+    // compression boundary. Rank-three K_B/V_B retain their existing kernels.
+    let output_width = c.heads * c.value_dim;
+    let output = graph.scratch(tokens * output_width)?;
+    for token in 0..tokens {
+        state.append(
+            graph,
+            &normalized_latent.slice(token * c.kv_rank, c.kv_rank)?,
+            &normalized_key.slice(token * c.index_dim, c.index_dim)?,
+            &gate.slice(token * c.index_dim, c.index_dim)?,
+        )?;
+        let query = w.encode_batched_matvec(
+            graph,
+            &format!("{p}.attn_k_b.weight"),
+            &query.slice(token * c.heads * c.qk_dim, c.heads * c.qk_dim)?,
+        )?;
+        let attended = state.attend(
+            graph,
+            &query,
+            &index_query.slice(token * c.index_heads * c.index_dim, c.index_heads * c.index_dim)?,
+            &weights.slice(token * c.index_heads, c.index_heads)?,
+        )?;
+        let row = w.encode_batched_matvec(graph, &format!("{p}.attn_v_b.weight"), &attended)?;
+        graph.copy_into(&row, &output.slice(token * output_width, output_width)?)?;
+    }
+    // The final wide projection now reaches the existing same-weight eight-row
+    // tile admission. Its separately gated MMA policy controls reassociation;
+    // batching alone leaves normalization and attention/cache math unchanged.
+    let output = project(banks, graph, p, "attn_output.weight", &output, tokens, use_mma)?;
+    super::super::profile::record("native.glm.prefill.mla_batch", 0.0, tokens);
+    Ok(output)
 }
 
 #[expect(clippy::too_many_arguments, reason = "chronological recurrence between two same-weight projection levels")]

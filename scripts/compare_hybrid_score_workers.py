@@ -167,18 +167,28 @@ def read_mma_probe(path: Path, expected_rows: int = len(PROMPTS)) -> dict:
     weight_bytes = 0
     q5_calls = 0
     q5_weight_bytes = 0
+    q8_calls = 0
+    q8_weight_bytes = 0
+    mla_batch_calls = 0
+    mla_batch_tokens = 0
     legacy_keys = {"success", "encoded_dispatch_calls", "encoded_weight_bytes"}
     current_keys = legacy_keys | {"encoded_q5_dispatch_calls", "encoded_q5_weight_bytes"}
+    new_keys = current_keys | {"encoded_q8_dispatch_calls", "encoded_q8_weight_bytes",
+                               "mla_batch_calls", "mla_batch_tokens"}
     schema = None
     mma_enabled = os.environ.get("STARK_GLM53_PREFILL_MMA") == "1"
     require_q5 = mma_enabled and os.environ.get("STARK_GLM53_PREFILL_CHUNK") == "8"
+    require_q8 = os.environ.get("STARK_GLM53_PREFILL_Q8_MMA") == "1"
+    require_mla = os.environ.get("STARK_GLM53_PREFILL_MLA_BATCH") == "1"
+    require_extra = require_q8 or require_mla
     for row in rows:
-        require(isinstance(row, dict) and set(row) in (legacy_keys, current_keys), "mma_probe_schema_invalid")
+        require(isinstance(row, dict) and set(row) in (legacy_keys, current_keys, new_keys), "mma_probe_schema_invalid")
         keys = set(row)
         if schema is None:
             schema = keys
         require(keys == schema, "mma_probe_schema_changed")
-        require(not require_q5 or keys == current_keys, "mma_probe_q5_schema_required")
+        require(not require_q5 or keys in (current_keys, new_keys), "mma_probe_q5_schema_required")
+        require(not require_extra or keys == new_keys, "mma_probe_selector_schema_required")
         require(row["success"] is True, "mma_probe_request_failed")
         for key in keys - {"success"}:
             value = row[key]
@@ -191,17 +201,34 @@ def read_mma_probe(path: Path, expected_rows: int = len(PROMPTS)) -> dict:
                 and row_q5_bytes <= row["encoded_weight_bytes"], "mma_probe_subset_invalid")
         row_q6_calls = row["encoded_dispatch_calls"] - row_q5_calls
         row_q6_bytes = row["encoded_weight_bytes"] - row_q5_bytes
+        row_q8_calls = row.get("encoded_q8_dispatch_calls", 0)
+        row_q8_bytes = row.get("encoded_q8_weight_bytes", 0)
+        row_mla_calls = row.get("mla_batch_calls", 0)
+        row_mla_tokens = row.get("mla_batch_tokens", 0)
         if mma_enabled:
             require(row["encoded_dispatch_calls"] > 0, "mma_probe_dispatch_missing")
         if require_q5:
             require(row_q5_calls > 0 and row_q5_bytes > 0, "mma_probe_q5_dispatch_missing")
             require(row_q6_calls > 0 and row_q6_bytes > 0, "mma_probe_q6_dispatch_missing")
+        if keys == new_keys and mma_enabled:
+            require(row_q5_calls > 0 and row_q5_bytes > 0, "mma_probe_q5_dispatch_missing")
+            require(row_q6_calls > 0 and row_q6_bytes > 0, "mma_probe_q6_dispatch_missing")
+        if require_q8:
+            require(row_q8_calls > 0 and row_q8_bytes > 0, "mma_probe_q8_dispatch_missing")
+        if require_mla:
+            require(row_mla_calls > 0 and row_mla_tokens > 0, "mma_probe_mla_dispatch_missing")
         calls += row["encoded_dispatch_calls"]
         weight_bytes += row["encoded_weight_bytes"]
         q5_calls += row_q5_calls
         q5_weight_bytes += row_q5_bytes
-    require(calls <= U64_MAX and weight_bytes <= U64_MAX, "mma_probe_total_overflow")
-    return {
+        q8_calls += row_q8_calls
+        q8_weight_bytes += row_q8_bytes
+        mla_batch_calls += row_mla_calls
+        mla_batch_tokens += row_mla_tokens
+    require(all(value <= U64_MAX for value in
+                (calls, weight_bytes, q5_calls, q5_weight_bytes, q8_calls, q8_weight_bytes,
+                 mla_batch_calls, mla_batch_tokens)), "mma_probe_total_overflow")
+    result = {
         "request_count": len(rows),
         "encoded_dispatch_calls": calls,
         "encoded_weight_bytes": weight_bytes,
@@ -212,6 +239,10 @@ def read_mma_probe(path: Path, expected_rows: int = len(PROMPTS)) -> dict:
         "probe_sha256": hashlib.sha256(raw).hexdigest(),
         "qualification": "Software encoded-dispatch counters; successful records follow the request GPU completion fence and reset. Counts do not measure hardware utilization.",
     }
+    if schema == new_keys:
+        result.update(encoded_q8_dispatch_calls=q8_calls, encoded_q8_weight_bytes=q8_weight_bytes,
+                      mla_batch_calls=mla_batch_calls, mla_batch_tokens=mla_batch_tokens)
+    return result
 
 
 def collect_inputs(model: Path) -> tuple[list[list[int]], list[int], str]:
@@ -345,6 +376,11 @@ async def run(args) -> dict:
         "STARK_GLM53_PREFILL_QUEUED",
         "STARK_GLM53_PREFILL_MMA",
         "STARK_GLM53_PREFILL_CHUNK",
+        "STARK_GLM53_PREFILL_EXPERT_BATCH",
+        "STARK_GLM53_PREFILL_EXPERT_MMA",
+        "STARK_GLM53_PREFILL_MMA_WIDE",
+        "STARK_GLM53_PREFILL_MLA_BATCH",
+        "STARK_GLM53_PREFILL_Q8_MMA",
         "STARK_GLM53_IQ_FUSED_GATE_UP",
         "STARK_GLM53_IQ_FUSED_GATE_UP_R2",
         "STARK_GLM53_DECODE_GRAPH", "STARK_HYBRID_ORDERED_RMS",

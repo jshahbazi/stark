@@ -12,6 +12,9 @@
 // admitted 32-lane device/compiler are required before any runtime admission.
 // Runtime admission is restricted to the component-qualified Q6/T4 and
 // Q5/Q6/T8 shapes on Apple M5 Max; other uses remain test-only.
+// Q8_0/T8 is a separate opt-in candidate on exact GLM dense shapes. Q8's
+// 32-value blocks retain byte-safe half-scale and signed-byte reads. Its
+// extreme fallback preserves the selected Safe scalar or block chronology.
 
 constant uint hybrid_kquant_mma_nsg [[function_constant(80)]];
 
@@ -38,7 +41,7 @@ inline void hybrid_kquant_mma_impl(device const uchar *codes_base,
     const uint first_row = tile.x * (8 * NT);
     const uint first_token = tile.y * (8 * RT);
     const uint tid = sg * 32 + lane;
-    const ulong row_bytes = ulong(columns / 256) * hybrid_packed_block_bytes;
+    const ulong row_bytes = ulong(columns / hybrid_packed_block) * hybrid_packed_block_bytes;
     if (tid == 0) atomic_store_explicit(reference, 0u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -74,7 +77,9 @@ inline void hybrid_kquant_mma_impl(device const uchar *codes_base,
         // A lane's two elements address logical K columns fn and fn+1.
         // Each lane dequantizes the contiguous 16-value segment starting at
         // chunk*64 + (fn/2)*16. The first/second MMA elements take its first
-        // and second eight values. Existing Stark byte reads preserve Q5/Q6
+        // and second eight values. First is a multiple of 16, so it never
+        // crosses a Q8_0 block of 32 or a Q5/Q6 block of 256 values.
+        // Existing Stark byte reads preserve Q8_0/Q5/Q6
         // storage and avoid upstream typed-pointer alignment assumptions.
         const uint ci = chunk * 4 + fn / 2;
         #pragma clang loop unroll(full)
@@ -82,11 +87,11 @@ inline void hybrid_kquant_mma_impl(device const uchar *codes_base,
             const uint row = min(first_row + t * 8 + fm, rows - 1);
             const uint first = ci * 16;
             device const uchar *block = codes + ulong(row) * row_bytes
-                + ulong(first / 256) * hybrid_packed_block_bytes;
+                + ulong(first / hybrid_packed_block) * hybrid_packed_block_bytes;
             float4x4 weights;
             #pragma clang loop unroll(full)
             for (uint j = 0; j < 16; ++j) {
-                weights[j / 4][j % 4] = hybrid_quant(block, hybrid_packed_kind, first % 256 + j);
+                weights[j / 4][j % 4] = hybrid_quant(block, hybrid_packed_kind, first % hybrid_packed_block + j);
             }
             #pragma clang loop unroll(full)
             for (uint s = 0; s < 8; ++s) {
@@ -104,6 +109,40 @@ inline void hybrid_kquant_mma_impl(device const uchar *codes_base,
     if (nonfinite) atomic_store_explicit(failure, 1u, memory_order_relaxed);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     if (atomic_load_explicit(reference, memory_order_relaxed)) {
+        if (hybrid_packed_kind == 8 && p[6] == 0) {
+            // The configured scalar Q8 source uses 256 lanes per output:
+            // eight simd_sum partials followed by their sequential sum.
+            // Runtime Q8 admission supplies 8 or 16 SIMD groups. Reuse red
+            // for one or two independent outputs and keep all groups in
+            // the barriers, including clamped row/token tails.
+            const uint parallel_outputs = nsg / 8;
+            for (uint base = 0; base < (8 * NT) * (8 * RT); base += parallel_outputs) {
+                const uint flat = base + sg / 8;
+                const uint row = first_row + flat % (8 * NT);
+                const uint token = first_token + flat / (8 * NT);
+                const bool real = flat < (8 * NT) * (8 * RT) && row < rows && token < tokens;
+                float sum = 0.0f;
+                if (real) {
+                    for (uint col = (sg % 8) * 32 + lane; col < columns; col += 256) {
+                        device const uchar *block = codes + ulong(row) * row_bytes
+                            + ulong(col / hybrid_packed_block) * hybrid_packed_block_bytes;
+                        sum += hybrid_quant(block, hybrid_packed_kind, col % hybrid_packed_block)
+                            * input[ulong(token) * columns + col];
+                    }
+                }
+                const float partial = simd_sum(sum);
+                if (lane == 0) red[sg] = partial;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                if (sg % 8 == 0 && lane == 0 && real) {
+                    float total = 0.0f;
+                    for (uint i = 0; i < 8; ++i) total += red[sg + i];
+                    if (!isfinite(total)) atomic_store_explicit(failure, 1u, memory_order_relaxed);
+                    output[ulong(token) * rows + row] = total;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            return;
+        }
         // Uniform across all SIMD groups, including clamped output tails.
         // Re-evaluate each real output with the original block helper so an
         // MMA overflow cannot conceal or invent the zero*MAX contract.
