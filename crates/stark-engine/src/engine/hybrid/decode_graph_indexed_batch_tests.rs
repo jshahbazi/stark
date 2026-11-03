@@ -870,7 +870,20 @@ fn iq_indexed_batch_gpu_component_timings() {
     let mut results = Vec::new();
     for (kind, rows, columns) in [(17, 2048, 4096), (18, 2048, 4096), (17, 4096, 2048)] {
         let (experts, tokens, selected) = (288, 64, 8);
-        let (matrix, _) = fixture(kind, experts, rows, columns);
+        let (_, codes) = fixture(kind, experts, rows, columns);
+        // Production expert banks admit typed IQ reads. The original negative
+        // vector experiment's misaligned byte view remains in its source-bound
+        // record; this new comparison uses an aligned bank for every arm.
+        let matrix = MappedMatrix {
+            codes: MappedSlice {
+                buffer: buffer(executor().unwrap(), &codes).unwrap(),
+                offset: 0,
+                length: codes.len(),
+                registered_length: codes.len(),
+            },
+            planes: None,
+        };
+        drop(codes);
         let selections = (0..tokens * selected)
             .map(|route| ((route * 13 + route / selected * 7) % experts) as u32)
             .collect::<Vec<_>>();
@@ -968,6 +981,7 @@ fn iq_indexed_batch_gpu_component_timings() {
                 results.push(serde_json::json!({
                     "kind":kind, "rows":rows, "columns":columns, "experts":experts,
                     "tokens":tokens, "selected_per_token":selected, "input_batched":batched,
+                    "weight_view_aligned":true,
                     "arm":(["vector8_reference", "configured_indexed_reference", "grouped_four_route", "gathered_eight_route_mma_nsg8"][arm]),
                     "warm_samples":values.len(), "median_gpu_milliseconds":(values[5]+values[6])*500.0,
                     "minimum_gpu_milliseconds":values[0]*1000.0,
