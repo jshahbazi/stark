@@ -79,6 +79,16 @@ materially, so the [power-mode study](QWEN38_POWER_MODES_2026_10_29.md) does not
 isolate a causal mode effect. All 60 outputs match their references, the
 77–80 tok/s target remains unmet, and the original preferences are restored.
 
+## Host request latency
+
+**Chat-template isolation (2026-11-03).** The initial synthetic component
+baseline measures median rendering at 49 ms for a short conversation and 62 ms
+for 64 KiB of message content using a fresh restricted evaluator per render.
+The [latency record](CHAT_TEMPLATE_ISOLATION_2026_11_03.md) explains the security
+rationale, source, host and method. End-to-end inference latency was not measured.
+This is the first template-isolation baseline; earlier engine throughput results
+remain bound to their original implementations and timing windows.
+
 ## Engine comparison history
 
 | Study | Date | Status |

@@ -69,6 +69,23 @@ limit. Cancellation terminates the disposable child. Template source,
 rendering inputs and rendered output are not logged or persisted by the
 evaluator. See the [runtime helper](../tools/converter/stark_convert/template_runtime.py).
 
+Each render starts a fresh Python interpreter, transfers the request over private
+pipes and recompiles the template. This deliberately adds request startup
+latency: model-provided templates are untrusted programs, and a disposable
+process gives each evaluation its own resource budgets and lets the host
+terminate runaway or cancelled work. Loading a template also runs an initial
+compilation check in a disposable process.
+
+Normal chat renders once per turn before tokenization and inference. Decision
+scoring renders twice to verify the assistant answer boundary. A local synthetic
+Qwen3-template measurement found median render times of about 49 ms for a short
+conversation and 62 ms for 64 KiB of message content, compared with less than
+1 ms for the previous in-process renderer. The evaluator runs before native
+generation; it adds no work to the per-token decode loop. This startup cost can
+be a larger share of latency for short requests. See the
+[source-bound latency baseline](benchmarks/CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
+for the method, host, limits and future optimization requirements.
+
 ## Private JSON-lines protocol
 
 Start the worker with `--model-path PATH`, where `PATH` is a converted model directory. The owning host may also pass `--vision-staging-root PATH` to enable the private media-reference transport and `--prefix-cache` to request [prefix reuse](#prefix-reuse). Models that contain a `speculator` directory are refused.
