@@ -919,6 +919,12 @@ code {
 .setup-steps a {display:inline-block;font-size:13px;margin-top:15px}
 .setup-steps .button {display:inline-flex;margin-top:20px}
 .setup-steps strong,.start-heading strong {font-weight:600;color:var(--ink)}
+.start-apps {margin-top:28px;padding-top:25px;border-top:1px solid var(--line)}
+.start-apps h3 {font-size:22px}
+.start-apps p {font-size:14px;line-height:1.75;color:var(--muted);margin-top:10px}
+.start-apps strong {font-weight:600;color:var(--ink)}
+.start-app-links {display:flex;flex-wrap:wrap;gap:12px 24px;margin-top:16px}
+.start-app-links a {font-size:13px;line-height:1.6}
 .terminal-install {grid-column:1/-1;border-block:1px solid var(--line)}
 .terminal-install>summary,.setup-help>summary {list-style:none;display:flex;align-items:center;justify-content:space-between;gap:22px;cursor:pointer;padding:20px 0;font-size:14px}
 .terminal-install>summary::-webkit-details-marker,.setup-help>summary::-webkit-details-marker {display:none}
