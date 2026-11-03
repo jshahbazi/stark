@@ -1,0 +1,451 @@
+{
+  "schema_version": 1,
+  "date": "2026-11-03",
+  "status": "bounded_same_host_performance_comparison_qualified",
+  "qualification_scope": "One screened, serialized, greedy native GLM-5.3 workload at 96 input tokens and context 104, with one control-then-enabled sweep and four accepted measured requests per arm. This qualifies only the recorded workload and host.",
+  "source_binding": {
+    "validation_commit": "cbb66f481c75e16ed8c076290392bcad35df29be",
+    "validation_tree": "be90407c3ffc3c065b2d8f808136397b451f7edd",
+    "clean_source_at_run": true,
+    "tracked_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "hybrid_source_bundle_sha256": "dbc5545e912b3dc6fdd47402a30a8a78387cdc8b5049f917dba09c547d31cbad",
+    "later_integration": {
+      "incoming_main_commit": "4545a409d32703bbf69ccc9be85d2d2f43aa5c4d",
+      "scope": [
+        "menu-bar README",
+        "menu-bar status-color fallback"
+      ],
+      "engine_worker_benchmark_and_harness_sources_changed": false,
+      "exact_final_head_checks": "pending"
+    },
+    "boundary": "All native, worker, benchmark, harness, scorer, and smoke evidence in this record is bound to cbb and the tree above. The later UI-only integration is not covered by these source-bound receipts; exact final-head checks remain pending."
+  },
+  "historical_v48_reference": {
+    "report_date": "2026-11-02",
+    "source_commit": "379e5c79d1cfae249e947740732b783b1a6fec82",
+    "tracked_diff_sha256": "3e8a7f2ed4c63c159657209f732398bcce9706180c0b5736a09f5e6633c15c0c",
+    "archived_patch_sha256": "3e8a7f2ed4c63c159657209f732398bcce9706180c0b5736a09f5e6633c15c0c",
+    "hybrid_source_bundle_sha256": "0ba85f6a4aa181a39651c2fb83491bdef4d1f2c399a2cf818f1e7df5313eccb2",
+    "generator_sha256": "41fd421767f14cf9fa5a6dd441eec73b5a2c0e4ec1eeba10e11951b6cc11cedf",
+    "scorer_sha256": "49045d592af366a9af405cc3eddead7eb8596a107136954bcc1e5a55148e61fd",
+    "use_in_this_record": "Historical reference only; not reused or relabeled as a result for the cbb validation source."
+  },
+  "hardware": {
+    "model": "Mac17,7",
+    "architecture": "arm64",
+    "physical_memory_bytes": 137438953472,
+    "os_version": "26.7.1"
+  },
+  "model_artifact": {
+    "name": "GLM-5.3-Flash",
+    "quantization": "UD-Q2_K_XL",
+    "revision_note": "Weights and metadata provenance are pinned by native-source.json, identified by source_receipt_sha256.",
+    "artifact_receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb",
+    "shards": [
+      {
+        "name": "GLM-5.3-Flash-UD-Q2_K_XL-00001-of-00004.gguf",
+        "bytes": 9429984,
+        "sha256": "2f32eba33ebc75a715e9c85a010faac4c67542e38e8970bd961d544bfe815f9e"
+      },
+      {
+        "name": "GLM-5.3-Flash-UD-Q2_K_XL-00002-of-00004.gguf",
+        "bytes": 49294975936,
+        "sha256": "f4a9e1ab13d5d9620f5590c9a4aba4c169e6707a1554f3be3fe3112f80a66825"
+      },
+      {
+        "name": "GLM-5.3-Flash-UD-Q2_K_XL-00003-of-00004.gguf",
+        "bytes": 49949266048,
+        "sha256": "330a8ad76c787b3ab6df062dd30abea7aafe6a0e3d5860e8720dfa4abb2434a5"
+      },
+      {
+        "name": "GLM-5.3-Flash-UD-Q2_K_XL-00004-of-00004.gguf",
+        "bytes": 9466399584,
+        "sha256": "5c294f42edc5d69cf00a79ab444e61f0742e9933105fc5c85f97da54dab8946f"
+      }
+    ],
+    "metadata_revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0",
+    "weights_source": {
+      "repo": "unsloth/GLM-5.3-Flash-GGUF",
+      "revision": "a38483c8cd5df544f53d70fb281afe97369d5ab6"
+    },
+    "metadata_source": {
+      "repo": "zai-org/GLM-5.3-Flash",
+      "revision": "04c4e9e95c5da8862dced7e5056455116f83a7e0"
+    },
+    "source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d"
+  },
+  "implementation_policy": {
+    "opt_in": true,
+    "engine_defaults_changed": false,
+    "context_limit_tokens": 4096,
+    "prefill_chunk_tokens": 8,
+    "activation_and_accumulation": "F32",
+    "resident_bank_admission": "Full-profile inventory and memory requirements fail closed; resident banks, static views, and context-dependent state are admitted within 95% of Metal recommended working-set size.",
+    "scratch_cap_bytes_per_graph": 536870912,
+    "scratch_graph_count_with_greedy_overlap": 2,
+    "unsupported_inner_mma_shape": "Pipeline capability failures after MMA admission surface as errors; no fallback claim is made for those failures.",
+    "observed_planning_estimate": "About 109 GB on the recorded 128 GiB host; not a guarantee of available memory on another host or with other applications."
+  },
+  "source_and_binary_hashes": {
+    "generator_worker_sha256": "29163c3a12d88cc78003b252903c906c7408ee8b1817bc74d0735d6b5c5e769b",
+    "scorer_worker_sha256": "b9293a544d492b4a79398b6e5870b762c71776cd5bac0f967df3dc0858d92ec5",
+    "engine_test_binary_sha256": "f5fe83f16aeddc7a1510facbd58734b86901f0d3e0ebf1b0642ae5e2ae761df2",
+    "scorer_harness_sha256": "a027b774410322eae5228f171648be32696a275fc8f71d9ed49a2d8791b8cb32",
+    "score_launcher_source_sha256": "9b95798f571758a50fefbe4e5734961b8491bd93bd0feb712469642e6c8f746c",
+    "score_harness_output_sha256": "e69808ffe3d29b613e979833bdc4be96b4a125633da663fd078b129ad15c5f0f",
+    "q5_q6_probe_sha256": "88ce9ab71135d2a3ecd73111e297e72e56ca7f1fed60c3af35fe17fcdb36fd08",
+    "benchmark_configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+    "benchmark_harness_sha256": "1f25296a96b5942407f8e54377ca8a53b5dde1eb8dcd89b3e76f30d9e7df5bd2",
+    "recipe_wrapper_source_sha256": "be7e0a5400c9325b11800819a57e56ab946f35bd4264b129327340f304dbfcab",
+    "benchmark_dependency_source_sha256": {
+      "benchmark_hybrid_context.py": "1f25296a96b5942407f8e54377ca8a53b5dde1eb8dcd89b3e76f30d9e7df5bd2",
+      "benchmark_hybrid.py": "c2e8bc1d8222b2869b319ca78c5368667fd9a9c72aa183c0d2848721f4874201",
+      "stark_convert/chat.py": "18e32d569b2714a6275dc735da3371413cfb3ff7c95746c09745d61c467c6b70",
+      "benchmark_clean_qwen.py": "3eb193c53b2a06990cc263de8efa84c1e82124a9eefc57c4fb154af290193665",
+      "benchmark_glm_mlx_serve.py": "0839dd3e6d0546361cc4cee5d376bb0f240e210cf8bd98c6480e86df8fc44acc"
+    },
+    "short_smoke_harness_sha256": "c2e8bc1d8222b2869b319ca78c5368667fd9a9c72aa183c0d2848721f4874201",
+    "native_profile_receipt_sha256": "dbdd1bc1390fa9d1d08ddfedf30adbfc1c82f5be0d91fffc2d1b4f1ffb1dd631",
+    "generator_test_runner_sha256": "4e3b1b7b38943b06104596aa1040e702e108e52568b9c8934acc027fda32dd39",
+    "scorer_test_runner_sha256": "4e3b1b7b38943b06104596aa1040e702e108e52568b9c8934acc027fda32dd39",
+    "engine_test_runner_sha256": "4e3b1b7b38943b06104596aa1040e702e108e52568b9c8934acc027fda32dd39",
+    "weight_receipt_sha256": "e66e3765594055986f34125c430c646723b16a43b6b8c3642f782432a5c2c0fb",
+    "score_build_receipt_sha256": "4c4994a383eefe21c9ec2acfb1da09d10910a8a94a72413d06776fbc5c7dd15d",
+    "reference_v46_build_receipt_sha256": "e2d81b02cfffc43019a5573463eb6f71b2bdf1c01cf6c0ba8cfdd7105ee6efaf",
+    "native_source_receipt_sha256": "7b8a61782577efbc30f6791f26e91d539a0934f14671f82d9548a313ec67903d",
+    "harness_schema_versions": {
+      "performance": 3,
+      "scorer": 1,
+      "short_smoke": 1,
+      "recipe_smoke_off": 1,
+      "recipe_smoke_on": 1,
+      "native_profile": 1
+    }
+  },
+  "local_gates": {
+    "generator": {
+      "release_build_exit_code": 0,
+      "clippy_exit_code": 0,
+      "tests_passed": 112,
+      "tests_ignored": 2
+    },
+    "scorer": {
+      "release_build_exit_code": 0,
+      "clippy_exit_code": 0,
+      "test_targets": [
+        1,
+        25,
+        25
+      ],
+      "tests_passed": 51
+    },
+    "engine": {
+      "tests_passed": 761,
+      "tests_ignored": 78,
+      "test_binary_sha256": "f5fe83f16aeddc7a1510facbd58734b86901f0d3e0ebf1b0642ae5e2ae761df2"
+    },
+    "focused_metal_runtime_cases": {
+      "passed": 25,
+      "source_binary_and_fixtures_unchanged": true
+    },
+    "hosted_checks_on_validation_commit": [
+      {
+        "name": "CI",
+        "run_id": "41581861625",
+        "status": "success"
+      },
+      {
+        "name": "Build",
+        "run_id": "41581770120",
+        "status": "success"
+      },
+      {
+        "name": "Security",
+        "run_id": "41581863934",
+        "status": "success"
+      }
+    ],
+    "exact_final_head_hosted_checks": "pending"
+  },
+  "scorer_agreement": {
+    "passed": true,
+    "reference": {
+      "identity": "sealed v46 reference worker",
+      "sha256": "52150ee9fabd300fc5b6bc70d13f7680b31158f3344055aac58c24ba6b8c4ea7"
+    },
+    "candidate_worker_sha256": "b9293a544d492b4a79398b6e5870b762c71776cd5bac0f967df3dc0858d92ec5",
+    "contexts": 12,
+    "fixed_candidates_per_context": 16,
+    "score_points": 192,
+    "threshold_max_absolute_logprob_delta": 0.001,
+    "observed_max_absolute_logprob_delta": 0.000013879155950746735,
+    "observed_rms_logprob_delta": 0.000004188137035436993,
+    "prefixes_tokens": [
+      96,
+      128,
+      256,
+      512
+    ],
+    "corpus_sha256": "0be89f00dd2df144bc175cfbb659450516ff0af7613042ba9b6f15de1e41362b",
+    "corpus_binding": "Hash identifies input bytes recorded on validation commit cbb; it is not a hash claim about a later HEAD.",
+    "q5_dispatch_calls": 9724,
+    "q6_dispatch_calls": 10268,
+    "total_dispatch_calls": 19992,
+    "contexts_with_positive_q5_and_q6_dispatch": 12,
+    "dispatch_counter_limit": "Software dispatch counters after request completion; not hardware utilization or answer quality.",
+    "candidate_configuration_flags": {
+      "STARK_GLM53_BATCH_FINITE": "1",
+      "STARK_GLM53_BOUNDED_GRAPH": "0",
+      "STARK_GLM53_CONCURRENT_ENCODER": "0",
+      "STARK_GLM53_CONTROL_CHUNKS": "32",
+      "STARK_GLM53_CONTROL_FUSED_PARALLEL": "1",
+      "STARK_GLM53_CONTROL_RMS_PROJECT": "1",
+      "STARK_GLM53_CONTROL_SIMD": "0",
+      "STARK_GLM53_CONTROL_SPLIT": "1",
+      "STARK_GLM53_DECODE_GRAPH": "1",
+      "STARK_GLM53_ENCODER_BANKS": "1",
+      "STARK_GLM53_FINITE_SELECTIVE": "1",
+      "STARK_GLM53_GPU_GREEDY": "1",
+      "STARK_GLM53_GREEDY_OVERLAP": "1",
+      "STARK_GLM53_IQ4_VECTOR": "1",
+      "STARK_GLM53_IQ_GPU_BOUND": "1",
+      "STARK_GLM53_IQ_MULTIROW": "1",
+      "STARK_GLM53_IQ_SIGNED_FACTOR": "1",
+      "STARK_GLM53_IQ_TYPED16": "1",
+      "STARK_GLM53_KDA_FUSED_STATE": "1",
+      "STARK_GLM53_KDA_PARALLEL_NORM": "1",
+      "STARK_GLM53_KDA_TRANSPOSED": "1",
+      "STARK_GLM53_KQUANT_FACTORED": "1",
+      "STARK_GLM53_PACKED_FAST_MATH": "0",
+      "STARK_GLM53_PARALLEL_PROJECTIONS": "0",
+      "STARK_GLM53_PARALLEL_RMS": "1",
+      "STARK_GLM53_POLL_WAIT": "1",
+      "STARK_GLM53_PREFILL_CHUNK": "8",
+      "STARK_GLM53_PREFILL_MMA": "1",
+      "STARK_GLM53_PREFILL_OVERLAP": "1",
+      "STARK_GLM53_PREFILL_QUEUED": "0",
+      "STARK_GLM53_Q4K_BLOCK": "1",
+      "STARK_GLM53_Q4_GROUPED32": "1",
+      "STARK_GLM53_Q5_GROUPED32": "1",
+      "STARK_GLM53_Q6_GROUPED16": "1",
+      "STARK_GLM53_Q8_GROUPED8": "1",
+      "STARK_GLM53_Q8_SHAPES": "1",
+      "STARK_GLM53_RESIDENT_BANKS": "1",
+      "STARK_GLM53_RMS_PREFETCH": "1",
+      "STARK_GLM53_SCRATCH_HEAP": "1",
+      "STARK_GLM53_SERIAL_FINITE_ORDER": "1",
+      "STARK_GLM53_SERIAL_ROUTER": "0",
+      "STARK_GLM53_UNRETAINED_GRAPH": "1",
+      "STARK_GLM53_WIDE_ENCODER": "1",
+      "STARK_HYBRID_BYTE_LOADS": "0",
+      "STARK_HYBRID_FACTORED_AFFINE": "0",
+      "STARK_HYBRID_ORDERED_RMS": "0",
+      "STARK_HYBRID_PACKED_REFERENCE": "0",
+      "STARK_HYBRID_SCALAR_UINT_LOADS": "0",
+      "STARK_HYBRID_SEPARATE_FINITE": "0",
+      "STARK_HYBRID_VECTOR8": "0",
+      "STARK_QWEN38_SERIAL_LEVELS": "0"
+    }
+  },
+  "smoke_replays": {
+    "workload": {
+      "input_tokens": 14,
+      "context_tokens": 512,
+      "requested_output_tokens": 32,
+      "sampling": "greedy",
+      "warmups": 1,
+      "total_replays": 3
+    },
+    "output_token_id_sha256": "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c",
+    "default_profile": {
+      "qualified": true,
+      "output_hashes": [
+        "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c"
+      ]
+    },
+    "opt_in_mma_disabled": {
+      "qualified": true,
+      "output_hashes": [
+        "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c"
+      ]
+    },
+    "opt_in_mma_enabled": {
+      "qualified": true,
+      "output_hashes": [
+        "5377eeb8513c16603090026f7a432327b456842a96d54565044e24bdb5986e1c"
+      ]
+    },
+    "native_profile_counter_timing_qualified": false,
+    "scope_note": "Replay consistency only; these short runs do not establish long-context stability or performance.",
+    "mma_enabled_native_scratch_counter_max_bytes": 337641472,
+    "native_scratch_counter_field": "Counter.max_bytes",
+    "native_profile_counter_scope": "Allocator counter maximum from profiled smoke; not model-wide memory or process peak RSS; timing is not qualified."
+  },
+  "performance": {
+    "qualified": true,
+    "protocol": {
+      "scope": "Serialized native text generation; entire prefill route, including chunk scheduling; not an isolated MMA kernel measurement.",
+      "sampling": "Greedy, no speculation",
+      "execution_order": "MMA disabled control followed by MMA enabled candidate; one sweep, not randomized or repeated independent sweeps.",
+      "input_tokens": 96,
+      "output_tokens": 8,
+      "context_tokens": 104,
+      "quiet_seconds_before_each_measured_attempt": 10,
+      "warmup_replays_per_arm": 1,
+      "accepted_measured_replays_per_arm": 4,
+      "excluded_attempts_per_arm": 4,
+      "same_generator_binary_sha256": "29163c3a12d88cc78003b252903c906c7408ee8b1817bc74d0735d6b5c5e769b",
+      "same_configuration_sha256": "d1e229307a382fc1deae8e4a48b6ffc2f47fc47769ab8789c023bdbd806072fd",
+      "pins_unchanged_for_both_arms": true,
+      "output_sha256_all_18_attempts": "8669bd40bd02bcc35680c255fc660be01a22a86ff01201463acfa7c457d64cad",
+      "only_configuration_flag_changed": "STARK_GLM53_PREFILL_MMA",
+      "accepted_measured_screen_eligible": true,
+      "accepted_measured_pageouts_and_swapouts": 0,
+      "warmups_used_for_screen_acceptance": false,
+      "warmup_screen_note": "Warmups were recorded but excluded from measured-request screen acceptance."
+    },
+    "observed_configuration_flags": {
+      "mma_disabled": {
+        "STARK_GLM53_BOUNDED_GRAPH": "0",
+        "STARK_GLM53_Q4K_BLOCK": "1",
+        "STARK_GLM53_KQUANT_FACTORED": "1",
+        "STARK_GLM53_CONTROL_SPLIT": "1",
+        "STARK_GLM53_CONTROL_SIMD": "0",
+        "STARK_HYBRID_PACKED_REFERENCE": "0",
+        "STARK_GLM53_KDA_TRANSPOSED": "1",
+        "STARK_GLM53_ENCODER_BANKS": "1",
+        "STARK_GLM53_PACKED_FAST_MATH": "0",
+        "STARK_GLM53_PARALLEL_PROJECTIONS": "0",
+        "STARK_GLM53_BANK_GROUP_LAYERS": null,
+        "STARK_GLM53_Q8_SHAPES": "1",
+        "STARK_GLM53_CONCURRENT_ENCODER": "0",
+        "STARK_GLM53_KDA_FUSED_STATE": "1",
+        "STARK_GLM53_SERIAL_ROUTER": "0",
+        "STARK_GLM53_CONTROL_CHUNKS": "32",
+        "STARK_GLM53_PARALLEL_RMS": "1",
+        "STARK_GLM53_RMS_PREFETCH": "1",
+        "STARK_GLM53_IQ4_VECTOR": "1",
+        "STARK_GLM53_RESIDENT_BANKS": "1",
+        "STARK_GLM53_BATCH_FINITE": "1",
+        "STARK_GLM53_IQ_MULTIROW": "1",
+        "STARK_GLM53_Q6_GROUPED16": "1",
+        "STARK_GLM53_Q5_GROUPED32": "1",
+        "STARK_GLM53_CONTROL_RMS_PROJECT": "1",
+        "STARK_GLM53_IQ_GPU_BOUND": "1",
+        "STARK_GLM53_GREEDY_OVERLAP": "1",
+        "STARK_GLM53_FINITE_SELECTIVE": "1",
+        "STARK_GLM53_IQ_TYPED16": "1",
+        "STARK_GLM53_WIDE_ENCODER": "1",
+        "STARK_GLM53_IQ_SIGNED_FACTOR": "1",
+        "STARK_GLM53_POLL_WAIT": "1",
+        "STARK_GLM53_SERIAL_FINITE_ORDER": "1",
+        "STARK_GLM53_UNRETAINED_GRAPH": "1",
+        "STARK_GLM53_SCRATCH_HEAP": "1",
+        "STARK_GLM53_CONTROL_FUSED_PARALLEL": "1",
+        "STARK_GLM53_Q8_GROUPED8": "1",
+        "STARK_GLM53_Q4_GROUPED32": "1",
+        "STARK_GLM53_GPU_GREEDY": "1",
+        "STARK_GLM53_PREFILL_OVERLAP": "1",
+        "STARK_GLM53_KDA_PARALLEL_NORM": "1",
+        "STARK_GLM53_PREFILL_QUEUED": "0",
+        "STARK_GLM53_PREFILL_MMA": "0",
+        "STARK_GLM53_PREFILL_CHUNK": "8",
+        "STARK_GLM53_IQ_FUSED_GATE_UP": null,
+        "STARK_GLM53_IQ_FUSED_GATE_UP_R2": null,
+        "STARK_GLM53_DECODE_GRAPH": "1",
+        "STARK_HYBRID_ORDERED_RMS": "0",
+        "STARK_HYBRID_BYTE_LOADS": "0",
+        "STARK_HYBRID_VECTOR8": "0",
+        "STARK_HYBRID_SCALAR_UINT_LOADS": "0",
+        "STARK_HYBRID_FACTORED_AFFINE": "0",
+        "STARK_HYBRID_SEPARATE_FINITE": "0",
+        "STARK_QWEN38_SERIAL_LEVELS": "0"
+      },
+      "mma_enabled": {
+        "STARK_GLM53_BOUNDED_GRAPH": "0",
+        "STARK_GLM53_Q4K_BLOCK": "1",
+        "STARK_GLM53_KQUANT_FACTORED": "1",
+        "STARK_GLM53_CONTROL_SPLIT": "1",
+        "STARK_GLM53_CONTROL_SIMD": "0",
+        "STARK_HYBRID_PACKED_REFERENCE": "0",
+        "STARK_GLM53_KDA_TRANSPOSED": "1",
+        "STARK_GLM53_ENCODER_BANKS": "1",
+        "STARK_GLM53_PACKED_FAST_MATH": "0",
+        "STARK_GLM53_PARALLEL_PROJECTIONS": "0",
+        "STARK_GLM53_BANK_GROUP_LAYERS": null,
+        "STARK_GLM53_Q8_SHAPES": "1",
+        "STARK_GLM53_CONCURRENT_ENCODER": "0",
+        "STARK_GLM53_KDA_FUSED_STATE": "1",
+        "STARK_GLM53_SERIAL_ROUTER": "0",
+        "STARK_GLM53_CONTROL_CHUNKS": "32",
+        "STARK_GLM53_PARALLEL_RMS": "1",
+        "STARK_GLM53_RMS_PREFETCH": "1",
+        "STARK_GLM53_IQ4_VECTOR": "1",
+        "STARK_GLM53_RESIDENT_BANKS": "1",
+        "STARK_GLM53_BATCH_FINITE": "1",
+        "STARK_GLM53_IQ_MULTIROW": "1",
+        "STARK_GLM53_Q6_GROUPED16": "1",
+        "STARK_GLM53_Q5_GROUPED32": "1",
+        "STARK_GLM53_CONTROL_RMS_PROJECT": "1",
+        "STARK_GLM53_IQ_GPU_BOUND": "1",
+        "STARK_GLM53_GREEDY_OVERLAP": "1",
+        "STARK_GLM53_FINITE_SELECTIVE": "1",
+        "STARK_GLM53_IQ_TYPED16": "1",
+        "STARK_GLM53_WIDE_ENCODER": "1",
+        "STARK_GLM53_IQ_SIGNED_FACTOR": "1",
+        "STARK_GLM53_POLL_WAIT": "1",
+        "STARK_GLM53_SERIAL_FINITE_ORDER": "1",
+        "STARK_GLM53_UNRETAINED_GRAPH": "1",
+        "STARK_GLM53_SCRATCH_HEAP": "1",
+        "STARK_GLM53_CONTROL_FUSED_PARALLEL": "1",
+        "STARK_GLM53_Q8_GROUPED8": "1",
+        "STARK_GLM53_Q4_GROUPED32": "1",
+        "STARK_GLM53_GPU_GREEDY": "1",
+        "STARK_GLM53_PREFILL_OVERLAP": "1",
+        "STARK_GLM53_KDA_PARALLEL_NORM": "1",
+        "STARK_GLM53_PREFILL_QUEUED": "0",
+        "STARK_GLM53_PREFILL_MMA": "1",
+        "STARK_GLM53_PREFILL_CHUNK": "8",
+        "STARK_GLM53_IQ_FUSED_GATE_UP": null,
+        "STARK_GLM53_IQ_FUSED_GATE_UP_R2": null,
+        "STARK_GLM53_DECODE_GRAPH": "1",
+        "STARK_HYBRID_ORDERED_RMS": "0",
+        "STARK_HYBRID_BYTE_LOADS": "0",
+        "STARK_HYBRID_VECTOR8": "0",
+        "STARK_HYBRID_SCALAR_UINT_LOADS": "0",
+        "STARK_HYBRID_FACTORED_AFFINE": "0",
+        "STARK_HYBRID_SEPARATE_FINITE": "0",
+        "STARK_QWEN38_SERIAL_LEVELS": "0"
+      },
+      "flag_semantics": "Known selector environment values, including inactive selectors; not dispatch proof."
+    },
+    "arms": {
+      "mma_disabled": {
+        "qualified": true,
+        "median_warm_wall_seconds": 2.970159437492839,
+        "median_warm_prefill_tokens_per_second": 34.89580522016995,
+        "median_warm_decode_tokens_per_second": 34.48796762480821,
+        "corpus_sha256": "0be89f00dd2df144bc175cfbb659450516ff0af7613042ba9b6f15de1e41362b"
+      },
+      "mma_enabled": {
+        "qualified": true,
+        "median_warm_wall_seconds": 2.5645637289999286,
+        "median_warm_prefill_tokens_per_second": 40.87290297933809,
+        "median_warm_decode_tokens_per_second": 34.382681241389065,
+        "corpus_sha256": "0be89f00dd2df144bc175cfbb659450516ff0af7613042ba9b6f15de1e41362b"
+      }
+    },
+    "comparison_percent": {
+      "prefill_rate_change": 17.128413347840876,
+      "warm_wall_time_reduction": 13.655688087750617,
+      "decode_rate_change": -0.3052843953130324
+    },
+    "interpretation": "Bounded result for this host, model artifact, context, and configuration. Four accepted measured requests per arm support an observed comparison, not a statistical or general throughput floor."
+  },
+  "provenance_and_limits": [
+    "Fresh results above are bound only to cbb66f481c75e16ed8c076290392bcad35df29be and tree be90407c3ffc3c065b2d8f808136397b451f7edd.",
+    "The 2026-11-02 v48 report and aggregates remain historical, bound to their earlier source HEAD 379e5c79d1cfae249e947740732b783b1a6fec82 and recorded patch/source hashes; they are not relabeled as results for this run.",
+    "No answer-quality, broad context-length, MLX comparison, or general throughput claim is established.",
+    "Raw prompts, generated text, token vectors, probabilities, absolute paths, and per-replay payloads are excluded from this aggregate."
+  ]
+}
