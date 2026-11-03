@@ -73,6 +73,22 @@ _XML_RESERVED = (
     "<think",
     "</think",
 )
+# Fixed categories for rejected generated calls, safe to show clients. They
+# never include generated text, tool names, argument names or values.
+_INVALID_CALL_REASONS = {
+    "limit": "generation stopped at the output or context limit",
+    "unfinished": "generation did not end normally",
+    "disabled": "this request does not allow tool calls",
+    "markup": "tool-call markup appeared outside a complete call",
+    "prefix": "text before the call contains a code block, quotation or unclosed reasoning",
+    "format": "the call does not follow the model's tool-call format",
+    "trailing": "text follows the call",
+    "tool": "the call names a tool that this request does not offer or allow",
+    "argument": "the call uses an argument that the tool does not define, or repeats one",
+    "value": "an argument value does not match the tool's schema",
+    "limits": "the call's arguments exceed the size or nesting limits",
+    "count": "the reply has more tool calls than this request allows",
+}
 
 
 def _bad(message: str, code: str = "invalid_request") -> APIError:
@@ -531,12 +547,12 @@ def _tool_prefix_safe(prefix):
 
 def _xml_parameter_value(body, types, invalid, parser):
     if any(marker in body for marker in _XML_RESERVED):
-        raise invalid()
+        raise invalid("format")
     # The pinned renderer adds exactly one LF before and after each value.
     # Inline values are also lossless; a half frame cannot be repaired safely.
     if body.startswith("\n") or body.endswith("\n"):
         if len(body) < 2 or not (body.startswith("\n") and body.endswith("\n")):
-            raise invalid()
+            raise invalid("format")
         body = body[1:-1]
     if types == {"string"}:
         return body
@@ -548,7 +564,7 @@ def _xml_parameter_value(body, types, invalid, parser):
         except (ValueError, RecursionError):
             if "string" in types:
                 return body
-            raise invalid() from None
+            raise invalid("value") from None
     kind = (
         "null"
         if value is None
@@ -567,10 +583,10 @@ def _xml_parameter_value(body, types, invalid, parser):
     matches = kind in types or (kind == "integer" and "number" in types)
     if "string" in types:
         if matches and kind != "string":
-            raise invalid()  # Both the raw string and JSON value fit: no guessed coercion.
+            raise invalid("value")  # Both the raw string and JSON value fit: no guessed coercion.
         return body
     if not matches:
-        raise invalid()
+        raise invalid("value")
     bounded_json(value, MAX_ARGUMENT_BYTES, label="Function arguments")
     return value
 
@@ -587,36 +603,39 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
 
     def named_tag(position, prefix):
         if not text.startswith(prefix, position):
-            raise invalid()
+            raise invalid("format")
         end = text.find(">", position + len(prefix), position + len(prefix) + 65)
         if end < 0:
-            raise invalid()
+            raise invalid("format")
         name = text[position + len(prefix) : end]
         if not _NAME.fullmatch(name):
-            raise invalid()
+            raise invalid("format")
         return name, end + 1
 
     while cursor < len(text):
-        if len(calls) >= MAX_CALLS or not text.startswith("<tool_call>", cursor):
-            raise invalid()
+        if len(calls) >= MAX_CALLS:
+            raise invalid("count")
+        if not text.startswith("<tool_call>", cursor):
+            raise invalid("trailing" if calls else "format")
         cursor = whitespace(cursor + len("<tool_call>"))
         name, cursor = named_tag(cursor, "<function=")
         if name not in names:
-            raise invalid()
+            raise invalid("tool")
         cursor = whitespace(cursor)
         arguments = {}
         argument_bytes = 0
         while text.startswith("<parameter=", cursor):
             parameter, cursor = named_tag(cursor, "<parameter=")
             if parameter not in schemas[name] or parameter in arguments:
-                raise invalid()
+                raise invalid("argument")
             end = text.find("</parameter>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</parameter>") + 1)
             if end < 0:
-                raise invalid()
+                # A closing tag beyond the bounded window means an oversized value.
+                raise invalid("limits" if text.find("</parameter>", cursor) >= 0 else "format")
             body = text[cursor:end]
             argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
             if argument_bytes > MAX_ARGUMENT_BYTES:
-                raise invalid()
+                raise invalid("limits")
             if schemas[name][parameter] is _XML_UNKNOWN:
                 raise APIError(
                     502,
@@ -626,19 +645,24 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
                 )
             try:
                 arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, parser)
-            except APIError:
-                raise invalid() from None
+            except APIError as error:
+                if error.code == "invalid_tool_call":
+                    raise
+                raise invalid("limits") from None
             cursor = whitespace(end + len("</parameter>"))
         if not text.startswith("</function>", cursor):
-            raise invalid()
+            raise invalid("format")
         cursor = whitespace(cursor + len("</function>"))
         if not text.startswith("</tool_call>", cursor):
-            raise invalid()
+            raise invalid("format")
         try:
             bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+        except (APIError, ValueError, RecursionError):
+            raise invalid("limits") from None
+        try:
             encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        except (APIError, ValueError, RecursionError, OverflowError):
-            raise invalid() from None
+        except (ValueError, RecursionError, OverflowError):
+            raise invalid("value") from None
         calls.append(
             {
                 "id": f"call_{call_id_prefix}_{len(calls)}",
@@ -648,7 +672,7 @@ def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_ca
         )
         cursor = whitespace(cursor + len("</tool_call>"))
     if not parallel_tool_calls and len(calls) != 1:
-        raise invalid()
+        raise invalid("count")
     return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
@@ -746,9 +770,14 @@ def parse_tool_output(
     message = {"role": "assistant", "content": text}
     reason = "length" if finish_reason in {"length", "context"} else "stop"
 
-    def invalid():
+    def invalid(category):
+        # Clients see which rule rejected the call, never what the model wrote.
         return APIError(
-            502, "The model produced an incomplete, invalid or unavailable tool call.", "invalid_tool_call"
+            502,
+            "The model produced an incomplete, invalid or unavailable tool call: "
+            + _INVALID_CALL_REASONS[category]
+            + ".",
+            "invalid_tool_call",
         )
 
     start = text.find("<tool_call")
@@ -756,22 +785,21 @@ def parse_tool_output(
         if parser in _XML_PARSERS and any(
             marker in text for marker in ("<function", "</function", "<parameter", "</parameter")
         ):
-            raise invalid()
+            raise invalid("markup")
         if tool_choice == "required" or isinstance(tool_choice, dict):
             raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
         return message, reason
 
-    if (
-        parser not in {_PARSER, *_XML_PARSERS}
-        or tool_choice == "none"
-        or not tools
-        or finish_reason not in {"eos", "stop_token", "stop"}
-    ):
-        raise invalid()
+    if parser not in {_PARSER, *_XML_PARSERS} or tool_choice == "none" or not tools:
+        raise invalid("disabled")
+    if finish_reason not in {"eos", "stop_token", "stop"}:
+        raise invalid("limit" if reason == "length" else "unfinished")
     if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
         raise ValueError("Invalid private tool-call ID prefix")
-    if start < 0 or "</tool_call" in text[:start] or not _tool_prefix_safe(text[:start]):
-        raise invalid()
+    if start < 0 or "</tool_call" in text[:start]:
+        raise invalid("markup")
+    if not _tool_prefix_safe(text[:start]):
+        raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
@@ -782,37 +810,45 @@ def parse_tool_output(
     decoder = json.JSONDecoder(object_pairs_hook=_pairs, parse_constant=_constant)
     while cursor < len(text):
         if not text.startswith("<tool_call>", cursor):
-            raise invalid()
+            raise invalid("trailing" if calls else "format")
         body_start = cursor + len("<tool_call>")
         while body_start < len(text) and text[body_start].isspace():
             body_start += 1
         if len(calls) >= MAX_CALLS:
-            raise invalid()
+            raise invalid("count")
         try:
             # Decode one JSON value before checking its closing delimiter. A
             # delimiter inside an argument string is ordinary argument data.
             body = text[body_start : body_start + MAX_ARGUMENT_BYTES + 1024]
             call, body_size = decoder.raw_decode(body)
-            body = body[:body_size]
-            if len(body.encode("utf-8")) > MAX_ARGUMENT_BYTES + 1024:
-                raise invalid()
-            if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
-                raise invalid()
-            if (
-                not isinstance(call["name"], str)
-                or call["name"] not in names
-                or not isinstance(call["arguments"], dict)
-            ):
-                raise invalid()
+            oversized = len(body[:body_size].encode("utf-8")) > MAX_ARGUMENT_BYTES + 1024
+        except (ValueError, RecursionError):
+            # A value cut off by the bounded window is oversized rather than malformed.
+            raise invalid("limits" if len(text) > body_start + len(body) else "format") from None
+        if oversized:
+            raise invalid("limits")
+        if (
+            not isinstance(call, dict)
+            or set(call) != {"name", "arguments"}
+            or not isinstance(call["name"], str)
+            or not isinstance(call["arguments"], dict)
+        ):
+            raise invalid("format")
+        if call["name"] not in names:
+            raise invalid("tool")
+        try:
             bounded_json(call["arguments"], MAX_ARGUMENT_BYTES, label="Function arguments")
+        except (APIError, ValueError, TypeError, RecursionError):
+            raise invalid("limits") from None
+        try:
             arguments = json.dumps(call["arguments"], ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        except (APIError, ValueError, TypeError, RecursionError, OverflowError):
-            raise invalid() from None
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise invalid("value") from None
         end = body_start + body_size
         while end < len(text) and text[end].isspace():
             end += 1
         if not text.startswith("</tool_call>", end):
-            raise invalid()
+            raise invalid("format")
         calls.append(
             {
                 "id": f"call_{call_id_prefix}_{len(calls)}",
@@ -824,7 +860,7 @@ def parse_tool_output(
         while cursor < len(text) and text[cursor].isspace():
             cursor += 1
     if not parallel_tool_calls and len(calls) != 1:
-        raise invalid()
+        raise invalid("count")
     message["content"] = text[:start].rstrip() or None
     message["tool_calls"] = calls
     return message, "tool_calls"
