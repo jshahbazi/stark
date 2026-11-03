@@ -106,23 +106,37 @@ open "$HOME/Applications/Stark.app"</code></pre>
           </ol><p class="connection-note">The engine is OpenCode's background helper. After an update or restart, Stark may ask you to allow the new helper before it can use your model.</p></div>
         </article>
         <article class="app-guide developer-guide" id="engine" role="tabpanel" aria-labelledby="tab-integrate" tabindex="0">
-          <div class="section-heading"><p class="eyebrow">FOR DEVELOPERS</p><h2 id="engine-title">Integrate Stark.</h2><p>Use the menu bar app's local <a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">OpenAI-style text-chat API</a>, or start generation and scoring workers from your application. Workers exchange JSON-lines requests and replies over private stdin/stdout pipes.</p></div>
-          <p class="engine-provenance">Derived from Uzu, Stark adds direct scoring APIs, Rust/Metal optimizations and a streaming model converter. Direct worker integrations control their own chat templates, tools and interface; no Stark SDK packages are published. <a href="https://github.com/jshahbazi/stark/blob/main/README.md">Read the project overview</a>.</p>
+          <div class="section-heading"><p class="eyebrow">HTTP / JSONL / RUST + METAL</p><h2 id="engine-title">Integrate Stark.</h2><p>Target the menu bar app's loopback HTTP API, or spawn native generation and scoring workers over private stdin/stdout pipes.</p></div>
+          <p class="engine-provenance">Uzu-derived Rust/Metal runtime. HTTP handles chat-template rendering and tool-call parsing; direct worker hosts own templates, tool execution and the agent loop. No Stark SDK packages are published.</p>
           <div class="engine-grid">
             <div class="capabilities">
-              <article><span class="index">01</span><div><h3>Generate locally.</h3><p>Use the generation worker to tokenize, decode and generate text. Your application renders the model's chat template and sends token IDs through private pipes. <a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md">Generation protocol</a>.</p></div></article>
-              <article><span class="index">02</span><div><h3>Score candidate tokens.</h3><p>Compare next-token scores for choices such as single-token yes/no labels. Get logits, log probabilities and a temperature-scaled distribution over your chosen candidates. Your application decides how to use the results. <a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md">Scoring protocol</a>.</p></div></article>
-              <article><span class="index">03</span><div><h3>Prepare your models.</h3><p>Convert selected Hugging Face and MLX checkpoints for Stark. Check the <a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md#catalog-coverage-and-qualification">converter catalog and runtime qualification</a> for the exact model and format you plan to use.</p></div></article>
+              <article><span class="index">01</span><div><h3>Local HTTP API</h3><p>Default base: <code>http://127.0.0.1:8000/v1</code>. Bearer authentication uses the persistent Keychain key. Discover the active Chat model and its context, output and tool capabilities at runtime.</p><dl class="integration-endpoints"><div><dt><code>GET /v1/models</code></dt><dd>Active model and limits</dd></div><div><dt><code>GET /v1/capabilities</code></dt><dd>Live capability flags</dd></div><div><dt><code>POST /v1/chat/completions</code></dt><dd>JSON or SSE streaming</dd></div></dl><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/LOCAL_API.md">HTTP contract</a></p></div></article>
+              <article><span class="index">02</span><div><h3>Native worker processes</h3><p class="worker-launch"><code>stark generate --model-path /path/to/model</code><code>stark score --score-model-path /path/to/model</code></p><p>Read readiness before writing UTF-8 JSONL. Serialize request transactions and consume all stream events through the terminal reply. Generation accepts a rendered prompt or token IDs; your host owns process supervision, chat templates and tool execution.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/WORKER_PROTOCOLS.md">Framing &amp; lifecycle</a> · <a href="https://github.com/jshahbazi/stark/blob/main/docs/GENERATION.md#private-json-lines-protocol">Generation schema</a></p></div></article>
+              <article><span class="index">03</span><div><h3>Candidate token scoring</h3><p><code>stark score</code> returns next-token logits for 2–16 candidate IDs. <code>log_probabilities</code> normalizes over the full vocabulary; <code>candidate_probabilities</code> computes <code>softmax(candidate_logits / T)</code>. The caller owns the decision rule.</p><p><a href="https://github.com/jshahbazi/stark/blob/main/docs/SCORING.md#score">Scoring schema &amp; cache policy</a> · <a href="https://github.com/jshahbazi/stark/blob/main/tools/converter/README.md#catalog-coverage-and-qualification">Artifact compatibility</a></p></div></article>
             </div>
+            <div class="integration-example">
             <div class="terminal">
-              <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span>INSTALLED COMMANDS</span></div>
-              <div class="code-tabs" role="tablist" aria-label="Stark commands"><button type="button" role="tab" id="tab-chat" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="chat">Chat</button><button type="button" role="tab" id="tab-generate" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
-              <div id="command-panel" role="tabpanel" aria-labelledby="tab-chat" tabindex="0"><pre><code id="command-code">stark chat \
-  --model-path /path/to/converted-model</code></pre></div>
-              <div class="terminal-bottom"><span>Run after installing Stark</span><button type="button" class="copy-button" id="copy-command" data-copy="command-code" data-copy-status="copy-status">Copy commands</button></div>
+              <div class="terminal-heading"><span class="terminal-lights" aria-hidden="true"><i></i><i></i><i></i></span><span id="command-heading">HTTP / STREAMING CHAT</span></div>
+              <div class="code-tabs" role="tablist" aria-label="Integration examples"><button type="button" role="tab" id="tab-http" aria-selected="true" aria-controls="command-panel" tabindex="0" data-command="http">HTTP</button><button type="button" role="tab" id="tab-generate" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="generate">Generate</button><button type="button" role="tab" id="tab-score" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="score">Score</button><button type="button" role="tab" id="tab-convert" aria-selected="false" aria-controls="command-panel" tabindex="-1" data-command="convert">Convert</button></div>
+              <div id="command-panel" role="tabpanel" aria-labelledby="tab-http" tabindex="0"><pre><code id="command-code">POST /v1/chat/completions
+Authorization: Bearer &lt;API_KEY&gt;
+Content-Type: application/json
+
+{
+  "messages": [
+    {"role": "user", "content": "Reply with OK."}
+  ],
+  "stream": true,
+  "max_tokens": 128,
+  "temperature": 0
+}</code></pre></div>
+              <div class="terminal-bottom"><span id="command-detail">Request shape · Successful SSE ends with [DONE]</span><button type="button" class="copy-button" id="copy-command" data-copy="command-code" data-copy-status="copy-status">Copy example</button></div>
               <p class="copy-status" id="copy-status" aria-live="polite"></p>
             </div>
+            <p class="integration-example-note" id="command-note">Use the Base URL in Connection Details. Omitting <code>model</code> targets the running model. <strong>Copy curl Example</strong> in Stark generates an authenticated request that keeps the key out of command arguments and environment variables.</p>
+            </div>
           </div>
+          <dl class="integration-contract"><div><dt>HTTP execution</dt><dd>One active completion + 8 FIFO waiters. 300-second request deadline. Loopback only; browser-origin requests are rejected.</dd></div><div><dt>Framing &amp; defaults</dt><dd>1 MiB text HTTP body / worker request line. HTTP defaults: temperature 0, output ≤512 tokens. Per-model output cap ≤4,096.</dd></div><div><dt>Capability boundaries</dt><dd>Tool calls require model/template support; clients execute tools and own approvals. Images require host qualification. No embeddings, Responses API or JSON-schema output.</dd></div></dl>
         </article>
         <div data-app-support>
           <p class="app-model-note">For tasks that read files or use tools, your model must support <strong>tool calling</strong>. In Stark's <strong>Connection Details</strong>, look for “supports function tool requests.” Results depend on the model and the task; start small and review its work.</p>
