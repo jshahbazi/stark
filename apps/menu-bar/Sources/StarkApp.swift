@@ -1,5 +1,4 @@
 import AppKit
-import Combine
 import Darwin
 import ImageIO
 import Metal
@@ -3016,7 +3015,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
-    private var modelStatusObserver: AnyCancellable?
     private let menuPanel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var localMenuMonitor: Any?
     private var globalMenuMonitor: Any?
@@ -3061,33 +3059,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let ratio = icon.size.height / icon.size.width
             icon.size = NSSize(width: 24, height: 24 * ratio); icon.isTemplate = true
             status.button?.image = icon
-            if let button = status.button {
-                let badge = MenuBarStatusBadge(iconSize: icon.size)
-                badge.translatesAutoresizingMaskIntoConstraints = false
-                button.addSubview(badge)
-                NSLayoutConstraint.activate([
-                    badge.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                    badge.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                    badge.widthAnchor.constraint(equalToConstant: icon.size.width),
-                    badge.heightAnchor.constraint(equalToConstant: icon.size.height),
-                ])
-                modelStatusObserver = engine.$loadedID.combineLatest(engine.$state)
-                    .map { id, state in
-                        !id.isEmpty && !["idle", "error", "loading", "stopping"].contains(state)
-                    }
-                    .removeDuplicates()
-                    .sink { [weak badge, weak button] running in
-                        badge?.modelRunning = running
-                        let description = running ? "Stark — model running" : "Stark — no model running"
-                        button?.toolTip = description
-                        button?.setAccessibilityLabel(description)
-                    }
-            }
         } else { status.button?.title = "Stark" }
-        if modelStatusObserver == nil {
-            status.button?.toolTip = "Stark"
-            status.button?.setAccessibilityLabel("Stark menu bar")
-        }
+        status.button?.toolTip = "Stark"
+        status.button?.setAccessibilityLabel("Stark menu bar")
         status.button?.target = self; status.button?.action = #selector(toggle)
         status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         menuPanel.level = .popUpMenu
