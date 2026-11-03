@@ -2,6 +2,8 @@
 
 The source RMS reuse and Gemma PLE residual fusions on `codex/native-olmo3-gemma4` pass fresh end-to-end qualification. This change is based on `3394cbe72fed7450c531d33cc333771ad1104cba`. The implementation and frozen builds were prepared in the [2026-10-29 checkpoint](2026-10-29-gemma4-source-residual-fusions.md); their source and executable hashes were verified unchanged before and after the new checks.
 
+Performance follow-up: after the user closed the Stark desktop app, the [separate source fusion comparison](../../benchmarks/OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) passed all four paired blocks for both models with these unchanged executables. It records Gemma's 2.57% gain over C3 and MLX parity, and OLMo's unchanged C3 performance. The timing section below preserves the earlier rejected campaigns and their original qualification status.
+
 ## Changes
 
 Source RMS normalization on both families retains each thread's four BF16-rounded values through the existing reduction, then reuses them during normalization. This removes a second buffer read without changing the reduction tree or materialization boundaries. The enforced source row limit remains 4,096 elements.
@@ -54,7 +56,7 @@ The fresh campaigns for both families use the existing balanced baseline/candida
 
 Opt-in aggregate diagnostics use the Qwen branch's `hybrid_host_metrics.py` from revision `6f953e8ccc9934d89889a812482faa256fc5199f`. The private wrapper applies identical polling to all arms, records whole-load/request windows, and leaves acceptance gates unchanged. GPU-client counters have unverified units; appearing/disappearing clients and sample boundaries limit coverage. Thermal state was nominal throughout the covered Gemma windows. These observations do not prove exclusive GPU ownership or stable clock frequency.
 
-The [2026-10-29 repaired comparison](../../benchmarks/OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) remains the last qualified speed result for its frozen C3 build. The new fusions have no qualified throughput result yet; closure of the remaining Gemma/MLX gap is not established.
+At this checkpoint, the [2026-10-29 repaired comparison](../../benchmarks/OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) remained the last qualified speed result for its frozen C3 build. These rejected campaigns established no qualified throughput result or closure of the remaining Gemma/MLX gap.
 
 | Private timing evidence | SHA-256 |
 | --- | --- |

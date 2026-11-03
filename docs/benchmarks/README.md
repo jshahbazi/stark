@@ -8,9 +8,7 @@ Measured results, each bound to the source revision, build and host named inside
 
 **Conversion time and memory against Lalamo.** Collected across converter milestones; see [conversion benchmarks](CONVERSION_BENCHMARKS.md).
 
-**Source-qualified OLMo 3 and Gemma 4 Q4 text (2026-10-29).** On Apple M5 Max, repaired Stark has a median paired combined-work rate 1.55% above MLX for OLMo and 2.15% below for Gemma. Relative to the numerically repaired C2 native baseline, paired request latency falls 19.46% and 3.07%. Four loads per engine, three measured requests per load, and matching 128-token hashes accompany the numerical qualification. Rates cover the complete 512-input/128-return request. See the [repaired comparison](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) and [aggregate results](olmo3-gemma4-q4-repaired-2026-10-29.json).
-
-The subsequent [2026-11-02 source fusions](../archive/runs/2026-11-02-olmo3-gemma4-source-fusions.md) pass fresh correctness checks. Their timing is unqualified; the October rates above describe the earlier frozen C3 build.
+**Source-qualified OLMo 3 and Gemma 4 Q4 text (2026-11-02).** On Apple M5 Max, Gemma's source fusions improve median paired combined-work rate 2.57% over C3 and reach MLX parity (measured paired rate 0.44% above MLX). OLMo shows no material change from C3 (-0.05%) and measures 2.31% above MLX. Four loads per engine, three measured requests per load, all guards passing and matching 128-token hashes accompany the numerical qualification. Rates cover the complete 512-input/128-return request. See the [source fusion comparison](OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) and [aggregate results](olmo3-gemma4-source-fusions-2026-11-02.json). The [2026-10-29 C3 results](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) remain historical.
 
 **Native GLM-5.3-Flash and Qwen3.8-Flash-Next optimization (2026-10-28).**
 GPU decode graphs measured Qwen at 22.94 tok/s versus 11.21 staged, and GLM at
@@ -31,7 +29,8 @@ and kernel measurements remain historical records for their named builds.
 | [Benchmark brief](STARK_BENCHMARK_BRIEF_2026_10_21.md) | 2026-10-21 | Summary of the 7.36% result; superseded |
 | [Inference comparison evidence inventory](INFERENCE_COMPARISON_EVIDENCE.md) | rolling | Inventory of every recorded engine, reference and conversion result up to 2026-10-21 |
 | [OLMo 3 and Gemma 4 Mac engine evidence](OLMO3_GEMMA4_MAC_ENGINES.md) | 2026-10-28 | Published benchmark evidence, comparison limits, source licensing and native implementation techniques |
-| [Repaired OLMo 3 and Gemma 4 Q4 comparison](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) | 2026-10-29 | Current for these pinned Q4 sources: all numerical gates pass; paired Stark/MLX rates 1.0155 and 0.9785; 128-token hashes agree |
+| [OLMo 3 and Gemma 4 source fusion comparison](OLMO3_GEMMA4_SOURCE_FUSIONS_2026_11_02.md) | 2026-11-02 | Current for these pinned Q4 sources: Gemma +2.57% over C3 and at MLX parity; OLMo unchanged from C3; all guards and output hashes pass |
+| [Repaired OLMo 3 and Gemma 4 Q4 comparison](OLMO3_GEMMA4_Q4_REPAIRED_2026_10_29.md) | 2026-10-29 | Superseded timing by the 2026-11-02 source fusion comparison; original qualification and paired Stark/MLX rates 1.0155 and 0.9785 preserved |
 | [Matched native OLMo 3 and Gemma 4 comparison](OLMO3_GEMMA4_NATIVE_MATCHED.md) | 2026-10-28 | Historical diagnostic: original failed numerical qualification and timings preserved; superseded for these checkpoints by the repaired 2026-10-29 comparison |
 
 ## Optimization records
