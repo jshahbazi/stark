@@ -4,9 +4,9 @@ import hashlib
 import json
 from argparse import Namespace
 
+import benchmark_hybrid_context as context_benchmark
 import pytest
 from benchmark_hybrid_context import model_provenance, run
-import benchmark_hybrid_context as context_benchmark
 
 
 class FakeWorker:
@@ -377,6 +377,45 @@ def test_screened_rejects_retries_and_aggregates_only_accepted_warm_rows(context
     assert "public corpus text" not in context_args.output.read_text()
 
 
+def test_six_replays_preserve_five_measured_rows_and_exclude_warmup(context_args, monkeypatch):
+    context_args.replays = 6
+    kwargs, workers, _monitor, _host, admissions = screened_fakes(monkeypatch)
+    report = run(context_args, **kwargs)
+
+    assert len(report["replays"]) == 6
+    assert len(workers[0].generation_requests) == 6
+    assert report["warmup_replays"] == 1
+    assert report["median_warm_wall_seconds"] == 8.0
+    assert report["median_warm_decode_tokens_per_second"] == 40.0
+    assert admissions == [1, 2, 3, 4, 5]
+
+
+def test_prefix_reuse_invalidates_uncached_benchmark_and_closes_worker(context_args, monkeypatch):
+    kwargs, workers, _monitor, _host, _admissions = screened_fakes(monkeypatch)
+    factory = kwargs["worker_factory"]
+
+    def reused_factory(*args):
+        worker = factory(*args)
+        original = worker.request
+
+        def request(item):
+            result = original(item)
+            if item["operation"] == "generate":
+                result["reused_input_tokens"] = 2
+            return result
+
+        worker.request = request
+        return worker
+
+    kwargs["worker_factory"] = reused_factory
+    with pytest.raises(context_benchmark.BenchmarkFailure, match="native_context_benchmark_failed"):
+        run(context_args, **kwargs)
+    report = json.loads(context_args.output.read_text())
+    assert report["passed"] is False
+    assert report["failed_stage"] == "response_validation"
+    assert workers[0].closed
+
+
 def test_screened_attempt_bound_preserves_partial_receipt_and_cleans_up(context_args, monkeypatch):
     context_args.max_attempts = 5
     kwargs, workers, monitor, host, _ = screened_fakes(monkeypatch, rejected={1, 2, 3, 4})
@@ -491,8 +530,9 @@ def test_verified_weight_metadata_and_chunk_flag_survive_screening(context_args,
 
 @pytest.mark.parametrize("screened", [False, True])
 def test_execution_profile_records_full_known_selectors_and_source_pins(context_args, monkeypatch, screened):
-    import benchmark_hybrid
     from pathlib import Path
+
+    import benchmark_hybrid
     from stark_convert import chat
 
     expected_flags = {

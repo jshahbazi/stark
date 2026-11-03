@@ -7,10 +7,8 @@ import json
 from argparse import Namespace
 from types import SimpleNamespace
 
-import pytest
-
 import compare_hybrid_score_workers as comparison
-
+import pytest
 
 LEGACY = {"success": True, "encoded_dispatch_calls": 4, "encoded_weight_bytes": 8192}
 CURRENT = {**LEGACY, "encoded_q5_dispatch_calls": 1, "encoded_q5_weight_bytes": 2048}
@@ -49,15 +47,16 @@ class FakeTokenizer:
         return {str(value): value for value in range(1024)}
 
 
-@pytest.mark.parametrize("value", ["", "0", "513", "-1", "1,1", "1,", ",2", "1.0", "True", "1;2", "１２８"])
+@pytest.mark.parametrize("value", ["", "0", "4097", "-1", "1,1", "1,", ",2", "1.0", "True", "1;2", "１２８"])
 def test_prefix_length_parser_rejects_invalid_lengths(value):
-    with pytest.raises(argparse.ArgumentTypeError, match="^prefix-lengths must be distinct integers from 1 through 512$"):
+    with pytest.raises(argparse.ArgumentTypeError, match="^prefix-lengths must be distinct integers from 1 through 4096$"):
         comparison.parse_prefix_lengths(value)
 
 
 def test_prefix_length_parser_preserves_requested_order_and_context_boundary():
     assert comparison.parse_prefix_lengths("96, 128,256,512") == [96, 128, 256, 512]
     assert comparison.parse_prefix_lengths("512,1") == [512, 1]
+    assert comparison.parse_prefix_lengths("128,1024,3840,4096") == [128, 1024, 3840, 4096]
 
 
 @pytest.mark.parametrize("lengths", [[], [True], [1.0], [0], [513], [1, 1], "128"])
@@ -233,8 +232,13 @@ def test_probe_file_boundaries_permissions_and_fresh_path(tmp_path, monkeypatch)
         comparison.requested_probe_path()
 
 
-@pytest.mark.parametrize("expanded", [False, True])
-def test_run_report_binds_actual_lengths_hashes_and_probe_count_without_payloads(tmp_path, monkeypatch, expanded):
+@pytest.mark.parametrize(("prefix_lengths", "context_tokens"), [
+    (None, None), ([96, 128, 256, 512], 512), ([128, 1024, 3840], 4096),
+])
+def test_run_report_binds_actual_lengths_hashes_and_probe_count_without_payloads(
+    tmp_path, monkeypatch, prefix_lengths, context_tokens,
+):
+    expanded = prefix_lengths is not None
     model = tmp_path / "model"
     model.mkdir()
     (model / "config.json").write_text("{}")
@@ -255,14 +259,15 @@ def test_run_report_binds_actual_lengths_hashes_and_probe_count_without_payloads
     short_inputs = [list(range(14 + row)) for row in range(8)]
     candidates = list(range(16))
     monkeypatch.setattr(comparison, "collect_inputs", lambda _model: ([row[:] for row in short_inputs], candidates, "template_hash"))
-    tokenizer = FakeTokenizer(list(range(600)))
+    tokenizer = FakeTokenizer([index % 1024 for index in range(4096)])
     monkeypatch.setattr(comparison, "Tokenizer", SimpleNamespace(from_file=lambda _path: tokenizer))
     monkeypatch.setattr(comparison, "weight_identity", lambda *_args: {"weights_sha256": "unchanged"})
     monkeypatch.setattr(comparison, "checkout_identity", lambda: {"source": "synthetic"})
     calls = []
 
-    async def fake_worker(binary, model_path, inputs, candidate_ids, inherited_flags, probe_path=None):
-        calls.append((binary, [row[:] for row in inputs], candidate_ids, inherited_flags))
+    async def fake_worker(binary, model_path, inputs, candidate_ids, inherited_flags, probe_path=None,
+                          context_tokens=comparison.CONTEXT):
+        calls.append((binary, [row[:] for row in inputs], candidate_ids, inherited_flags, context_tokens))
         if probe_path is not None:
             write_probe(probe_path, [CURRENT] * len(inputs))
         return [[-2.0 - column / 1000 for column in range(16)] for _row in inputs]
@@ -272,25 +277,30 @@ def test_run_report_binds_actual_lengths_hashes_and_probe_count_without_payloads
                      output=output, verified_weights=None, max_logprob_error=0.001)
     if expanded:
         args.corpus = corpus
-        args.prefix_lengths = [96, 128, 256, 512]
+        args.prefix_lengths = prefix_lengths
+    if context_tokens is not None:
+        args.context_tokens = context_tokens
     report = asyncio.run(comparison.run(args))
     expected = short_inputs + ([tokenizer.ids[:length] for length in args.prefix_lengths] if expanded else [])
-    assert report["context_count"] == len(expected) == (12 if expanded else 8)
-    assert report["score_point_count"] == (192 if expanded else 128)
+    assert report["context_count"] == len(expected) == 8 + len(prefix_lengths or [])
+    assert report["candidate_count"] == 16
+    assert report["score_point_count"] == len(expected) * 16
+    assert report["context_tokens"] == (context_tokens or 512)
     assert report["min_input_tokens"] == 14
-    assert report["max_input_tokens"] == (512 if expanded else 21)
+    assert report["max_input_tokens"] == (max(prefix_lengths) if expanded else 21)
     assert report["total_input_tokens"] == sum(map(len, expected))
     assert report["input_token_ids_sha256"] == comparison.token_hash(expected)
     assert report["candidate_token_ids_sha256"] == comparison.token_hash([candidates])
     assert report["mma_score_probe"]["request_count"] == len(expected)
     assert [call[3] for call in calls] == [False, True]
     assert all(call[1] == expected and call[2] == candidates for call in calls)
+    assert all(call[4] == (context_tokens or 512) for call in calls)
     assert report["candidate_flags"]["STARK_GLM53_PREFILL_CHUNK"] == "8"
     assert report["diagnostic_profile_output_requested"] is True
     assert report["native_profile_output_requested"] is True
     if expanded:
         assert report["corpus_sha256"] == hashlib.sha256(corpus.read_bytes()).hexdigest()
-        assert report["requested_prefix_lengths"] == [96, 128, 256, 512]
+        assert report["requested_prefix_lengths"] == prefix_lengths
         assert tokenizer.encodings == [(corpus_text, False)]
     else:
         assert "corpus_sha256" not in report
@@ -312,10 +322,18 @@ def test_run_report_binds_actual_lengths_hashes_and_probe_count_without_payloads
 
 @pytest.mark.parametrize("options", [
     {"corpus": "public.txt"}, {"prefix_lengths": [96]}, {"corpus": "public.txt", "prefix_lengths": [513]},
+    {"corpus": "public.txt", "prefix_lengths": [1025], "context_tokens": 1024},
+    {"corpus": "public.txt", "prefix_lengths": [4097], "context_tokens": 4096},
 ])
 def test_run_rejects_invalid_prefix_options_before_any_worker_or_model_io(options):
     with pytest.raises(comparison.CheckFailed, match="^(corpus_prefix_options_required_together|prefix_lengths_invalid)$"):
         asyncio.run(comparison.run(Namespace(**options)))
+
+
+@pytest.mark.parametrize("context_tokens", [0, -1, 4097, True, 512.0])
+def test_invalid_context_rejected_before_any_worker_or_model_io(context_tokens):
+    with pytest.raises(comparison.CheckFailed, match="^context_tokens_invalid$"):
+        asyncio.run(comparison.run(Namespace(context_tokens=context_tokens)))
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("PRIVATE_EXCEPTION_PAYLOAD"), KeyboardInterrupt()])
@@ -362,6 +380,79 @@ class FakePipe:
 
     def close(self):
         self.closed = True
+
+
+@pytest.mark.parametrize("selected_context", [None, 4096])
+def test_workers_send_selected_context_and_finish_teardown_before_next_launch(
+    tmp_path, monkeypatch, selected_context,
+):
+    lengths = [2] if selected_context is None else [128, 1024, 3840, 4096]
+    inputs = [[index % 1024 for index in range(length)] for length in lengths]
+    candidates = list(range(16))
+    processes = []
+    events = []
+
+    async def create(binary, *_args, **_kwargs):
+        if processes:
+            assert processes[-1].stdin.closed
+            assert processes[-1].waited
+        events.append(("launch", comparison.Path(binary).name))
+        replies = [{"ready": True, "cache_enabled": True}]
+        replies.extend({
+            "input_tokens": length, "candidate_token_ids": candidates,
+            "log_probabilities": [-2.0] * 16,
+        } for length in lengths)
+        process = SimpleNamespace(
+            stdin=FakePipe(), stdout=FakePipe([json.dumps(reply).encode() + b"\n" for reply in replies]),
+            returncode=0, waited=False,
+        )
+
+        async def wait():
+            process.waited = True
+            events.append(("wait", comparison.Path(binary).name))
+            return 0
+
+        process.wait = wait
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create)
+
+    async def exercise():
+        options = {} if selected_context is None else {"context_tokens": selected_context}
+        for name, inherited_flags in (("reference", False), ("candidate", True)):
+            rows = await comparison.run_worker(
+                tmp_path / name, tmp_path / "model", inputs, candidates, inherited_flags, **options,
+            )
+            assert len(rows) == len(lengths)
+
+    asyncio.run(exercise())
+
+    assert events == [("launch", "reference"), ("wait", "reference"),
+                      ("launch", "candidate"), ("wait", "candidate")]
+    for process in processes:
+        requests = [json.loads(data) for data in process.stdin.writes]
+        assert [request["input_token_ids"] for request in requests] == inputs
+        assert all(request["context_tokens"] == (selected_context or 512) for request in requests)
+        assert all(request["candidate_token_ids"] == candidates for request in requests)
+        assert process.stdin.closed and process.waited
+
+
+@pytest.mark.parametrize(("context_tokens", "input_tokens", "error"), [
+    (512, 513, "input_length_out_of_range"),
+    (4096, 4097, "input_length_out_of_range"),
+    (4097, 1, "context_tokens_invalid"),
+])
+def test_worker_limits_rejected_before_process_launch(tmp_path, monkeypatch, context_tokens, input_tokens, error):
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("worker_must_not_launch")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    with pytest.raises(comparison.CheckFailed, match=f"^{error}$"):
+        asyncio.run(comparison.run_worker(
+            tmp_path / "worker", tmp_path / "model", [[1] * input_tokens], [3], False,
+            context_tokens=context_tokens,
+        ))
 
 
 @pytest.mark.parametrize(("reply", "code"), [

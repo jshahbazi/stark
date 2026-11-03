@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -62,6 +63,8 @@ def safe_settings(value):
     keep = ("version", "engine", "kv_quant", "kv_attn_mode", "decode_attn_quant",
             "prefill_chunk", "mtp", "drafter", "max_concurrent")
     out = {key: source[key] for key in keep if key in source and isinstance(source[key], (str, int, float, bool, type(None)))}
+    if "version" not in out and isinstance(value.get("version"), (str, int, float)):
+        out["version"] = value["version"]
     cache = source.get("prefix_cache")
     if isinstance(cache, dict):
         out["prefix_cache"] = {
@@ -69,6 +72,116 @@ def safe_settings(value):
             if key in cache and isinstance(cache[key], (str, int, float, bool, type(None)))
         }
     return out
+
+
+def validate_args(args) -> int:
+    """Resolve the context and reject unsupported shapes before server launch."""
+    corpus = getattr(args, "corpus", None)
+    input_tokens = getattr(args, "input_tokens", None)
+    context_tokens = getattr(args, "context_tokens", None)
+    if (corpus is None) != (input_tokens is None):
+        raise ValueError("corpus_and_input_tokens_required_together")
+    if (
+        type(args.tokens) is not int or not 8 <= args.tokens <= 256
+        or type(args.replays) is not int or not 2 <= args.replays <= 8
+        or (input_tokens is not None and (type(input_tokens) is not int or input_tokens < 1))
+    ):
+        raise ValueError("invalid_benchmark_limits")
+    if getattr(args, "screened", False) and (
+        type(args.max_attempts) is not int or not args.replays <= args.max_attempts <= 40
+    ):
+        raise ValueError("invalid_screened_attempt_limit")
+    if context_tokens is None:
+        context_tokens = input_tokens + args.tokens if input_tokens is not None else 512
+    if type(context_tokens) is not int or not 1 <= context_tokens <= 16384:
+        raise ValueError("context_limit_exceeded")
+    if (input_tokens if input_tokens is not None else 1) + args.tokens > context_tokens:
+        raise ValueError("context_too_small")
+    return context_tokens
+
+
+def prepare_input(args, tokenizer: Path, context_tokens: int):
+    """Keep content and IDs in memory; expose only source hashes and counts."""
+    from tokenizers import Tokenizer
+
+    corpus = getattr(args, "corpus", None)
+    if corpus is not None:
+        from benchmark_hybrid_context import exact_prefix
+
+        corpus_bytes = corpus.read_bytes()
+        try:
+            text = corpus_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("corpus_not_utf8") from None
+        if not text:
+            raise ValueError("corpus_empty")
+        metadata = {
+            "prompt_mode": "corpus_exact_prefix",
+            "corpus_sha256": hashlib.sha256(corpus_bytes).hexdigest(),
+            "requested_input_tokens": args.input_tokens,
+        }
+    else:
+        from stark_convert.chat import load_template
+
+        codec, template = load_template(tokenizer)
+        text = template.render(
+            messages=[{"role": "user", "content": "Hello."}],
+            tools=None,
+            add_generation_prompt=True,
+            enable_thinking=True,
+            bos_token=codec.get("bos_token") or "",
+            eos_token=codec.get("eos_token") or "",
+        )
+        metadata = {
+            "prompt_mode": "rendered_short_fixture",
+            "requested_input_tokens": None,
+            "prompt_text_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        }
+    try:
+        source_tokenizer = Tokenizer.from_file(str(tokenizer / "tokenizer.json"))
+        ids = source_tokenizer.encode(text, add_special_tokens=False).ids
+    except Exception:
+        raise ValueError("source_tokenizer_unavailable") from None
+    if not isinstance(ids, list) or not ids or any(type(token) is not int or token < 0 for token in ids):
+        raise ValueError("tokenization_invalid")
+    if corpus is not None:
+        metadata["corpus_token_count"] = len(ids)
+        ids = exact_prefix(ids, args.input_tokens)
+    if len(ids) + args.tokens > context_tokens:
+        raise ValueError("context_too_small")
+    metadata.update(
+        input_tokens=len(ids),
+        input_token_sha256=compact_sha(ids),
+        # Same field and compact integer encoding as the native context harness.
+        input_sha256=compact_sha(ids),
+        context_tokens=context_tokens,
+    )
+    return ids, metadata
+
+
+def execution_profile(*, corpus_mode: bool, screened: bool):
+    """Bind local helpers and checkout without publishing paths or git content."""
+    import benchmark_hybrid
+    from stark_convert import chat
+
+    script_root = Path(__file__).resolve().parent
+    helpers = {
+        "benchmark_glm_mlx_serve.py": Path(__file__),
+        "benchmark_hybrid.py": Path(benchmark_hybrid.__file__),
+        "stark_convert/chat.py": Path(chat.__file__),
+    }
+    if corpus_mode:
+        import benchmark_hybrid_context
+
+        helpers["benchmark_hybrid_context.py"] = Path(benchmark_hybrid_context.__file__)
+    if screened:
+        helpers["benchmark_clean_qwen.py"] = script_root / "benchmark_clean_qwen.py"
+    return {
+        "dependency_source_sha256": {name: sha(path) for name, path in helpers.items()},
+        "converter_lock_sha256": sha(script_root.parent / "tools/converter/uv.lock"),
+        "tokenizers_version": importlib.metadata.version("tokenizers"),
+        "harness_checkout": benchmark_hybrid.checkout_identity(),
+    }
 
 
 def model_identity(base, requested_engine):
@@ -189,8 +302,7 @@ def screen_attempt(monitor, phase, before, after):
 
 
 def run(args):
-    from stark_convert.chat import load_template
-
+    context_tokens = validate_args(args)
     model = args.model.resolve()
     tokenizer = args.tokenizer.resolve()
     binary = args.binary.resolve()
@@ -198,18 +310,7 @@ def run(args):
         raise ValueError("input_path_invalid")
     weights_before = weight_identity(model, args.weights_manifest)
 
-    codec, template = load_template(tokenizer)
-    def render_prompt(repetitions: int) -> str:
-        return template.render(
-            messages=[{"role": "user", "content": " ".join(["Hello."] * repetitions)}],
-            tools=None,
-            add_generation_prompt=True,
-            enable_thinking=True,
-            bos_token=codec.get("bos_token") or "",
-            eos_token=codec.get("eos_token") or "",
-        )
-
-    prompt_text = render_prompt(1)
+    ids, input_metadata = prepare_input(args, tokenizer, context_tokens)
     config_path = tokenizer / "config.json"
     provenance_path = tokenizer / "native-source.json"
     port = free_port()
@@ -218,7 +319,7 @@ def run(args):
         str(binary), "--model", str(model), "--engine", args.engine,
         "--host", "127.0.0.1", "--port", str(port),
         "--no-mtp", "--no-drafter", "--no-pld", "--no-ds4-mtp",
-        "--serve", "--ctx-size", "512", "--max-tokens", str(args.tokens),
+        "--serve", "--ctx-size", str(context_tokens), "--max-tokens", str(args.tokens),
         "--metrics", "--log-file", "off", "--no-vision",
         "--llama-mtp-drafts", "0",
         "--prefix-cache-entries", "0", "--prefix-cache-disk", "off",
@@ -233,10 +334,15 @@ def run(args):
         "model_files": model_files(model),
         "weights": weights_before,
         "tokenizer_config_sha256": sha(config_path),
+        "tokenizer_sha256": sha(tokenizer / "tokenizer.json"),
         "native_source_sha256": sha(provenance_path) if provenance_path.is_file() else None,
         "mlx_serve_executable_sha256": sha(binary),
         "harness_sha256": sha(Path(__file__)),
-        "context_tokens": 512,
+        **input_metadata,
+        "requested_context_tokens": getattr(args, "context_tokens", None),
+        "execution_profile": execution_profile(
+            corpus_mode=getattr(args, "corpus", None) is not None, screened=args.screened,
+        ),
         "sampling": "greedy_no_speculation",
         "requested_output_tokens": args.tokens,
         "requested_replays": args.replays,
@@ -269,22 +375,14 @@ def run(args):
             report["effective_settings"] = safe_settings(http_json(base, "/props", timeout=5))
         except Exception:
             report["effective_settings"] = None
-        try:
-            from tokenizers import Tokenizer
-            source_tokenizer = Tokenizer.from_file(str(tokenizer / "tokenizer.json"))
-            ids = source_tokenizer.encode(prompt_text, add_special_tokens=False).ids
-        except Exception as exc:
-            raise ValueError("source_tokenizer_unavailable") from exc
-        if not isinstance(ids, list) or not ids:
-            raise ValueError("tokenization_invalid")
-        report["input_tokens"] = len(ids)
-        report["input_token_sha256"] = compact_sha(ids)
-        report["prompt_text_sha256"] = hashlib.sha256(prompt_text.encode()).hexdigest()
+        report["mlx_serve_reported_version"] = (report["effective_settings"] or {}).get("version")
         stage = "model_identity"
         model_id, model_info = model_identity(base, args.engine)
         if model_info["loaded"] is not True or model_info["state"] != "ready":
             raise ValueError("model_not_ready")
         report["loaded_model"] = model_info
+        if type(model_info["context_length"]) is int and context_tokens > model_info["context_length"]:
+            raise ValueError("model_context_limit_exceeded")
 
         if args.screened:
             from benchmark_clean_qwen import Monitor, paging
@@ -331,7 +429,10 @@ def run(args):
             usage = response.get("usage") or {}
             output_tokens = usage.get("completion_tokens")
             prompt_tokens = usage.get("prompt_tokens")
-            if type(output_tokens) is not int or type(prompt_tokens) is not int or output_tokens < 1:
+            if (
+                type(output_tokens) is not int or type(prompt_tokens) is not int
+                or not 1 <= output_tokens <= args.tokens
+            ):
                 raise ValueError("usage_invalid")
             if prompt_tokens != len(ids):
                 raise ValueError("source_tokenizer_disagreement")
@@ -345,7 +446,9 @@ def run(args):
                 durations[name] = float(new["sum"]) - float(old["sum"])
             prefill_s = durations["prefill_time_seconds"]
             decode_s = durations["decode_time_seconds"]
-            cached_tokens = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0))
+            prompt_details = usage.get("prompt_tokens_details") or {}
+            reported_cached = prompt_details.get("cached_tokens")
+            cached_tokens = int(prompt_details.get("cached_tokens", 0))
             if not all(math.isfinite(x) and x > 0 for x in (prefill_s, decode_s)) or cached_tokens != 0:
                 raise ValueError("timing_or_cache_invalid")
             row = {
@@ -361,6 +464,7 @@ def run(args):
                 "prefill_seconds": prefill_s,
                 "decode_seconds": decode_s,
                 "cached_tokens": cached_tokens,
+                "reported_cached_tokens": reported_cached if type(reported_cached) is int else None,
                 "metric_count_delta": 1,
                 "prefill_tokens_per_second": (prompt_tokens - cached_tokens) / prefill_s,
                 "output_tokens_per_second": output_tokens / decode_s,
@@ -388,6 +492,12 @@ def run(args):
         ) if len(report["replays"]) > 1 else report["replays"][0]["output_tokens_per_second"]
         report["median_warm_useful_decode_tokens_per_second"] = statistics.median(
             x["useful_decode_tokens_per_second"] for x in report["replays"][1:]
+        )
+        report["median_warm_prefill_tokens_per_second"] = statistics.median(
+            x["prefill_tokens_per_second"] for x in report["replays"][1:]
+        )
+        report["median_warm_wall_seconds"] = statistics.median(
+            x["wall_seconds"] for x in report["replays"][1:]
         )
         report["timer_note"] = "Phase durations are per-request server histogram deltas, each bracketed count advances once; wall time includes local HTTP transport and client overhead. Both server completion-count and first-token-excluded useful decode numerators are retained."
         stage = "weight_identity_guard"
@@ -425,10 +535,13 @@ def main():
     parser.add_argument("--binary", type=Path, required=True, help="MLX-Serve executable")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--weights-manifest", type=Path, help="prior verified per-shard hash receipt; payloads are not rehashed")
+    parser.add_argument("--corpus", type=Path, help="UTF-8 corpus for the native harness's exact cycled token prefix")
+    parser.add_argument("--input-tokens", type=int, help="exact input count; requires --corpus")
+    parser.add_argument("--context-tokens", type=int, help="input/output capacity, at most 16384; default: input + output in corpus mode, otherwise 512")
     parser.add_argument("--engine", choices=("auto", "llama", "ds4"), default="auto")
     parser.add_argument("--screened", action="store_true", help="admit and screen each measured request for host interference")
     parser.add_argument("--max-attempts", type=int, default=20, choices=range(5, 41))
-    parser.add_argument("--tokens", type=int, default=32, choices=range(8, 129))
+    parser.add_argument("--tokens", type=int, default=32, choices=range(8, 257))
     parser.add_argument("--replays", type=int, default=5, choices=range(2, 9))
     args = parser.parse_args()
     if args.output.exists():

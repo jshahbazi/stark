@@ -107,7 +107,7 @@ def exact_prefix(ids: list[int], count: int) -> list[int]:
 
 
 def validate_args(args: argparse.Namespace) -> None:
-    if args.input_tokens < 1 or args.tokens < 1 or args.replays not in (3, 5):
+    if args.input_tokens < 1 or args.tokens < 1 or args.replays not in (3, 5, 6):
         raise ValueError("invalid_benchmark_limits")
     if args.input_tokens + args.tokens > 16384:
         raise ValueError("context_limit_exceeded")
@@ -219,6 +219,7 @@ def run(
         "context_tokens": args.input_tokens + args.tokens,
         "replay_count": args.replays,
         "warmup_replays": 1,
+        "request_cache_scope": None,
         "screened": screened,
         "execution_profile": execution_profile(screened=screened),
         "excluded_attempts": [],
@@ -227,7 +228,11 @@ def run(
     verified_weights = getattr(args, "verified_weights", None)
     weights_before = None
     if verified_weights is not None:
-        from benchmark_hybrid import checkout_identity, hardware_identity, weight_identity
+        from benchmark_hybrid import (
+            checkout_identity,
+            hardware_identity,
+            weight_identity,
+        )
 
         weights_before = weight_identity(args.model, verified_weights)
         report.update(
@@ -360,11 +365,15 @@ def run(
                 or (not stopped and stop is not None)
             ):
                 raise ValueError("generation_failed_or_too_short")
+            reused = result.get("reused_input_tokens")
+            if reused is not None and (type(reused) is not int or reused != 0):
+                raise ValueError("unexpected_prefix_reuse")
             active_item.update(
                 sampled_tokens=sampled,
                 output_tokens=len(generated),
                 finish_reason=finish,
                 output_sha256=token_ids_sha256(generated),
+                reported_reused_input_tokens=reused,
             )
             for key in (
                 "prefill_seconds", "decode_seconds", "input_tokens_per_second",
@@ -494,7 +503,7 @@ def main(argv=None) -> int:
     parser.add_argument("--verified-weights", type=Path, help="Prior GGUF hash receipt; check shard identity before and after.")
     parser.add_argument("--input-tokens", type=int, default=4096)
     parser.add_argument("--tokens", type=int, default=256)
-    parser.add_argument("--replays", type=int, choices=(3, 5), default=5)
+    parser.add_argument("--replays", type=int, choices=(3, 5, 6), default=5)
     parser.add_argument("--screened", action="store_true", help="Use the existing quiet-admission and paging policy for every measured attempt.")
     parser.add_argument("--max-attempts", type=int, default=24, help="Bound screened attempts, including the accepted warmup.")
     parser.add_argument("--sampling", choices=("greedy", "stochastic"), default="greedy")

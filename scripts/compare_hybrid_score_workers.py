@@ -22,6 +22,7 @@ from stark_convert.chat import load_template
 from tokenizers import Tokenizer
 
 CONTEXT = 512
+MAX_CONTEXT = 4096
 MMA_PROBE_ENV = "STARK_GLM53_MMA_SCORE_PROBE"
 MMA_PROBE_LIMIT = 65_536
 U64_MAX = (1 << 64) - 1
@@ -56,6 +57,11 @@ def require(ok: bool, code: str) -> None:
         raise CheckFailed(code)
 
 
+def validate_context_tokens(context_tokens: int) -> None:
+    require(type(context_tokens) is int and 1 <= context_tokens <= MAX_CONTEXT,
+            "context_tokens_invalid")
+
+
 def token_hash(rows: list[list[int]]) -> str:
     return hashlib.sha256(
         json.dumps(rows, separators=(",", ":")).encode("ascii")
@@ -82,7 +88,10 @@ class PipeWorker:
 
 
 async def run_worker(binary: Path, model: Path, inputs: list[list[int]], candidates: list[int],
-                     inherited_flags: bool, probe_path: Path | None = None) -> list[list[float]]:
+                     inherited_flags: bool, probe_path: Path | None = None,
+                     context_tokens: int = CONTEXT) -> list[list[float]]:
+    validate_context_tokens(context_tokens)
+    require(all(1 <= len(ids) <= context_tokens for ids in inputs), "input_length_out_of_range")
     env = dict(os.environ)
     if not inherited_flags:
         env = {k: v for k, v in env.items() if not k.startswith(("STARK_", "UZU_"))}
@@ -103,7 +112,7 @@ async def run_worker(binary: Path, model: Path, inputs: list[list[int]], candida
         for ids in inputs:
             result = await worker.request({
                 "operation": "score", "input_token_ids": ids,
-                "candidate_token_ids": candidates, "context_tokens": CONTEXT,
+                "candidate_token_ids": candidates, "context_tokens": context_tokens,
                 "temperature": 1.0,
             })
             require("error" not in result and result.get("input_tokens") == len(ids), "score_request_failed")
@@ -248,27 +257,28 @@ def collect_inputs(model: Path) -> tuple[list[list[int]], list[int], str]:
     return inputs, candidate_ids, template_hash
 
 
-def validate_prefix_lengths(lengths: list[int]) -> None:
+def validate_prefix_lengths(lengths: list[int], context_tokens: int = CONTEXT) -> None:
+    validate_context_tokens(context_tokens)
     require(isinstance(lengths, list) and bool(lengths)
-            and all(type(length) is int and 1 <= length <= CONTEXT for length in lengths)
+            and all(type(length) is int and 1 <= length <= context_tokens for length in lengths)
             and len(set(lengths)) == len(lengths), "prefix_lengths_invalid")
 
 
 def parse_prefix_lengths(value: str) -> list[int]:
     fields = value.split(",")
     if not all(field.strip().isascii() and field.strip().isdecimal() for field in fields):
-        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 512")
+        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 4096")
     try:
         lengths = [int(field) for field in fields]
-        validate_prefix_lengths(lengths)
+        validate_prefix_lengths(lengths, MAX_CONTEXT)
     except (ValueError, CheckFailed):
-        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 512") from None
+        raise argparse.ArgumentTypeError("prefix-lengths must be distinct integers from 1 through 4096") from None
     return lengths
 
 
 def collect_corpus_prefixes(tokenizer: Tokenizer, corpus: Path,
-                           lengths: list[int]) -> tuple[list[list[int]], str]:
-    validate_prefix_lengths(lengths)
+                           lengths: list[int], context_tokens: int = CONTEXT) -> tuple[list[list[int]], str]:
+    validate_prefix_lengths(lengths, context_tokens)
     require(corpus.is_file(), "corpus_path_invalid")
     raw = corpus.read_bytes()
     try:
@@ -285,11 +295,13 @@ def collect_corpus_prefixes(tokenizer: Tokenizer, corpus: Path,
 
 
 async def run(args) -> dict:
+    context_tokens = getattr(args, "context_tokens", CONTEXT)
+    validate_context_tokens(context_tokens)
     prefix_lengths = getattr(args, "prefix_lengths", None)
     corpus = getattr(args, "corpus", None)
     require((corpus is None) == (prefix_lengths is None), "corpus_prefix_options_required_together")
     if prefix_lengths is not None:
-        validate_prefix_lengths(prefix_lengths)
+        validate_prefix_lengths(prefix_lengths, context_tokens)
     model = args.model.resolve(strict=True)
     reference = args.reference_worker.resolve(strict=True)
     candidate = args.candidate_worker.resolve(strict=True)
@@ -304,16 +316,17 @@ async def run(args) -> dict:
     corpus_sha = None
     if corpus is not None:
         prefixes, corpus_sha = collect_corpus_prefixes(
-            Tokenizer.from_file(str(model / "tokenizer.json")), corpus, prefix_lengths,
+            Tokenizer.from_file(str(model / "tokenizer.json")), corpus, prefix_lengths, context_tokens,
         )
         inputs.extend(prefixes)
     input_lengths = [len(ids) for ids in inputs]
-    require(all(1 <= length <= CONTEXT for length in input_lengths), "input_length_out_of_range")
+    require(all(1 <= length <= context_tokens for length in input_lengths), "input_length_out_of_range")
     input_hash = token_hash(inputs)
     candidate_hash = token_hash([candidates])
     probe_path = requested_probe_path()
-    reference_rows = await run_worker(reference, model, inputs, candidates, False)
-    candidate_rows = await run_worker(candidate, model, inputs, candidates, True, probe_path)
+    reference_rows = await run_worker(reference, model, inputs, candidates, False, context_tokens=context_tokens)
+    candidate_rows = await run_worker(candidate, model, inputs, candidates, True, probe_path,
+                                      context_tokens=context_tokens)
     mma_probe = read_mma_probe(probe_path, expected_rows=len(inputs)) if probe_path is not None else None
     deltas = [b - a for ref, cand in zip(reference_rows, candidate_rows, strict=True)
               for a, b in zip(ref, cand, strict=True)]
@@ -385,7 +398,7 @@ async def run(args) -> dict:
         "tokenizer_sha256": sha(model / "tokenizer.json"), "prompt_template_sha256": template_hash,
         "input_token_ids_sha256": input_hash, "candidate_token_ids_sha256": candidate_hash,
         "harness_checkout": checkout_identity(), "weights": weights_before,
-        "context_tokens": CONTEXT, "temperature": 1.0, "candidate_flags": flags,
+        "context_tokens": context_tokens, "temperature": 1.0, "candidate_flags": flags,
         "candidate_set_note": "Distinct single-token encodings of fixed public continuation words; candidate IDs and text are not stored.",
     }
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -404,10 +417,14 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--verified-weights", type=Path)
     parser.add_argument("--corpus", type=Path, help="Public UTF-8 document for additional exact token prefixes")
+    parser.add_argument("--context-tokens", type=int, default=CONTEXT,
+                        help="Scoring context capacity from 1 through 4096 (default: 512)")
     parser.add_argument("--prefix-lengths", type=parse_prefix_lengths,
-                        help="Distinct comma-separated token lengths, each at most the 512-token context")
+                        help="Distinct comma-separated token lengths, each at most --context-tokens")
     parser.add_argument("--max-logprob-error", type=float, default=0.001)
     args = parser.parse_args()
+    if not 1 <= args.context_tokens <= MAX_CONTEXT:
+        parser.error("context-tokens must be from 1 through 4096")
     if not math.isfinite(args.max_logprob_error) or args.max_logprob_error <= 0:
         parser.error("max-logprob-error must be finite and positive")
     if (args.corpus is None) != (args.prefix_lengths is None):
