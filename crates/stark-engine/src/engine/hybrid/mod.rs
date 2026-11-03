@@ -385,8 +385,38 @@ impl Model {
         result
     }
 
-    /// A native GPU greedy readout is available for the mixed-precision core.
+    /// Ingest a known prefix, leaving its final readout token for `step`.
+    /// Returns only after every submitted state writer is checked and fenced.
+    /// The control callback may run more than once per token; an error stops
+    /// submission, drains in-flight work, and resets the model before return.
+    pub fn ingest_prefix(
+        &mut self,
+        tokens: &[u32],
+        mut before_token: impl FnMut() -> Result<()>,
+    ) -> Result<()> {
+        #[cfg(feature = "metal")]
+        if let Forward::Glm(model) = &mut self.forward {
+            let result = model.ingest_prefix(tokens, &mut before_token);
+            if result.is_err() {
+                self.reset();
+            }
+            return result;
+        }
+        for &token in tokens {
+            if let Err(error) = before_token().and_then(|_| self.ingest(token)) {
+                self.reset();
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Native greedy continuation is available for selected Metal backends.
     pub fn supports_greedy_readout(&self) -> bool {
+        #[cfg(feature = "metal")]
+        if let Forward::Glm(model) = &self.forward {
+            return model.supports_greedy_readout();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if matches!(self.forward, Forward::Lily(_)) {
             return true;
@@ -412,7 +442,11 @@ impl Model {
 
     /// The mixed-precision backend can overlap encoding around a host sampler.
     pub fn supports_sampled_decode(&self) -> bool {
-        self.supports_greedy_readout()
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        if matches!(self.forward, Forward::Lily(_)) {
+            return true;
+        }
+        false
     }
 
     pub fn supports_mtp(&self) -> bool {
@@ -502,6 +536,8 @@ impl Model {
             Err(Error::Invalid("token ID"))
         } else {
             match &mut self.forward {
+                #[cfg(feature = "metal")]
+                Forward::Glm(model) => model.step_greedy(token),
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 Forward::Lily(model) => model.step_greedy(token),
                 _ => Err(Error::Unsupported("native greedy readout unavailable")),
@@ -520,6 +556,8 @@ impl Model {
         remaining: usize,
     ) -> Result<Box<dyn Iterator<Item = Result<u32>> + '_>> {
         match &mut self.forward {
+            #[cfg(feature = "metal")]
+            Forward::Glm(model) => Ok(Box::new(model.greedy_decode(first, remaining)?)),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => Ok(Box::new(model.greedy_decode(first, remaining)?)),
             _ => {
@@ -585,6 +623,10 @@ impl Model {
 
     /// Includes failures found while draining an early-dropped greedy stream.
     pub fn is_fenced(&self) -> bool {
+        #[cfg(feature = "metal")]
+        if let Forward::Glm(model) = &self.forward {
+            return model.is_fenced();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.is_fenced();

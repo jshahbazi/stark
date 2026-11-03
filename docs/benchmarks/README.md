@@ -4,6 +4,8 @@ Measured results, each bound to the source revision, build and host named inside
 
 ## Current result
 
+**GLM-5.3-Flash batched prefill experiment (2026-11-02).** Historical v48 T8 receipts qualify a default-off recipe for the measured M5 Max workloads: screened 96-token prefill was 16.6% faster and request time 13.2% lower than the matched v46c control. The experiment's source receipt binds to its recorded v48 source revision, not this branch. See the [bounded experiment report](GLM53_BATCHED_PREFILL_2026_11_02.md) and [public aggregate data](data/glm53-batched-prefill-2026-11-02.json).
+
 **Qwen3.8, identical checkpoint, maximum sampled throughput (2026-10-30).**
 Stark peaks at **66.81 tok/s** versus **61.17** for stock MLX-Serve 26.10.3,
 **9.21% higher**, with the same verified files, quantization and no speculation.
