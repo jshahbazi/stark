@@ -1069,7 +1069,11 @@ print(String(data: try! JSONSerialization.data(withJSONObject: result), encoding
                     ),
                     *[
                         str(path)
-                        for pattern in ("Desktop*.swift", "OpenWork*.swift")
+                        for pattern in (
+                            "Desktop*.swift",
+                            "OpenWork*.swift",
+                            "OpenCode*.swift",
+                        )
                         for path in sorted(
                             (builder.ROOT / "apps/menu-bar/Sources").glob(pattern)
                         )

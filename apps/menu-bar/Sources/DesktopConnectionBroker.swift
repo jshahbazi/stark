@@ -2,11 +2,12 @@ import CryptoKit
 import Darwin
 import Foundation
 
-/// Small, owner-private transport. It never reads or returns the persistent API
-/// credential. The host supplies only backend-acknowledged, expiring capabilities.
+/// Small, owner-private transport shared by every managed client. It never reads
+/// or returns the persistent API credential. The host supplies only
+/// backend-acknowledged, expiring capabilities.
 final class DesktopConnectionBroker {
     typealias Reply = (Result<[String: Any], DesktopConnectionError>) -> Void
-    typealias Handler = (String, DesktopProcessIdentity, @escaping Reply) -> Void
+    typealias Handler = (DesktopClient, String, DesktopProcessIdentity, @escaping Reply) -> Void
     let path: String
     private let queue = DispatchQueue(label: "stark.desktop.connection.listener")
     private let workers = DispatchQueue(label: "stark.desktop.connection.requests", attributes: .concurrent)
@@ -16,13 +17,14 @@ final class DesktopConnectionBroker {
     private var descriptors = Set<Int32>()
     private var stopped = true
     private var socketIdentity: (dev_t, ino_t)?
-    private let application: () -> OpenWorkApplicationIdentity?
+    private let applications: () -> [DesktopApplicationIdentity]
     private let handler: Handler
 
-    init(service: String, application: @escaping () -> OpenWorkApplicationIdentity?, handler: @escaping Handler) {
+    /// `applications` returns the verified running app of each client, at most one each.
+    init(service: String, applications: @escaping () -> [DesktopApplicationIdentity], handler: @escaping Handler) {
         let namespace = SHA256.hash(data: Data(service.utf8)).prefix(8).map { String(format: "%02x", $0) }.joined()
         path = "/private/tmp/stark-\(getuid())-\(namespace)/openwork.sock"
-        self.application = application
+        self.applications = applications
         self.handler = handler
     }
 
@@ -132,30 +134,38 @@ final class DesktopConnectionBroker {
             lock.lock(); descriptors.remove(descriptor); Darwin.close(descriptor); lock.unlock()
             slots.signal()
         }
-        var approved: OpenWorkApplicationIdentity?
-        DispatchQueue.main.sync { approved = application() }
-        guard let approved, let peer = DesktopClientPeer.authenticate(socket: descriptor, application: approved) else {
-            write(["version": 1, "status": "unapproved", "error": "OpenWork identity could not be verified."], descriptor)
+        var candidates: [DesktopApplicationIdentity] = []
+        DispatchQueue.main.sync { candidates = applications() }
+        // Engine signing identifiers and teams differ, so at most one client matches.
+        var match: (DesktopApplicationIdentity, DesktopProcessIdentity)?
+        for application in candidates {
+            if let peer = DesktopClientPeer.authenticate(socket: descriptor, application: application) {
+                match = (application, peer); break
+            }
+        }
+        guard let (approved, peer) = match else {
+            write(["version": 1, "status": "unapproved", "error": "Stark could not verify this desktop client."], descriptor)
             return
         }
+        let client = approved.client
         guard let operation = readOperation(descriptor) else {
-            write(["version": 1, "status": "unavailable", "error": DesktopConnectionError.protocolError.message], descriptor)
+            write(["version": 1, "status": "unavailable", "error": DesktopConnectionError.protocolError.message(client)], descriptor)
             return
         }
         let result = ResponseBox()
         let signal = DispatchSemaphore(value: 0)
         DispatchQueue.main.async { [weak self] in
             guard let self else { result.set(.failure(.unavailable)); signal.signal(); return }
-            self.handler(operation, peer) { response in result.set(response); signal.signal() }
+            self.handler(client, operation, peer) { response in result.set(response); signal.signal() }
         }
         guard signal.wait(timeout: .now() + 6) == .success, peer.isCurrent,
               approved.process.isCurrent, let response = result.get() else {
-            write(["version": 1, "status": "unavailable", "error": DesktopConnectionError.backend.message], descriptor)
+            write(["version": 1, "status": "unavailable", "error": DesktopConnectionError.backend.message(client)], descriptor)
             return
         }
         switch response {
         case .success(let value): write(value, descriptor)
-        case .failure(let error): write(["version": 1, "status": "unavailable", "error": error.message], descriptor)
+        case .failure(let error): write(["version": 1, "status": "unavailable", "error": error.message(client)], descriptor)
         }
     }
 

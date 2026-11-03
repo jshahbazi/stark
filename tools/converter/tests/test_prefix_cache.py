@@ -192,7 +192,8 @@ def test_revocation_and_session_changes_reset_the_worker_and_rotate_scopes(deskt
     running(desktop, model)
     revoked = []
     desktop.api = SimpleNamespace(
-        api_session=SESSION, revoke_clients=lambda session, client=None: revoked.append((session, client))
+        api_session=SESSION,
+        revoke_clients=lambda session, client=None, prefix=None: revoked.append((session, client)),
     )
     payload = {"messages": [{"role": "user", "content": "hello"}]}
     desktop.api_complete(payload, cancelled=principal(SESSION, "openwork-peer"))
@@ -215,6 +216,34 @@ def test_revocation_and_session_changes_reset_the_worker_and_rotate_scopes(deskt
     desktop.api.api_session = "c" * 32
     desktop.api_complete(payload, cancelled=principal("c" * 32))
     assert generated_scopes(log)[4] not in scopes
+
+
+def test_prefix_revocation_rotates_only_that_managed_clients_scopes(desktop, model, log):
+    running(desktop, model)
+    revoked = []
+    desktop.api = SimpleNamespace(
+        api_session=SESSION,
+        revoke_clients=lambda session, client=None, prefix=None: revoked.append((session, client, prefix)),
+    )
+    payload = {"messages": [{"role": "user", "content": "hello"}]}
+    peers = (principal(SESSION, "opencode.1.2.3"), principal(SESSION, "openwork.4.5.6"), principal(SESSION))
+    for peer in peers:
+        desktop.api_complete(payload, cancelled=peer)
+    desktop.api_client_command(
+        {
+            "command": "revoke_api_clients",
+            "request_id": "12345678-1234-4234-8234-123456789012",
+            "api_session": SESSION,
+            "client_prefix": "opencode.",
+        }
+    )
+    assert revoked == [(SESSION, None, "opencode.")]
+    assert [entry["operation"] for entry in requests(log)[1:]][-1] == "reset_cache"
+    for peer in peers:
+        desktop.api_complete(payload, cancelled=peer)
+    scopes = generated_scopes(log)
+    assert scopes[0] != scopes[3], "every scope under the revoked prefix rotates"
+    assert scopes[1] == scopes[4] and scopes[2] == scopes[5], "the other client and the master key keep theirs"
 
 
 def test_reset_waits_for_a_running_request(desktop, model, log):

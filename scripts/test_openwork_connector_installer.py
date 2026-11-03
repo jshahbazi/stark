@@ -34,6 +34,7 @@ SCENARIOS = (
     "installer-lock",
     "invalid-socket",
     "port-reconnect",
+    "shared-client-entry",
     "namespace-reconnect",
     "app-location-migration",
     "combined-migration",
