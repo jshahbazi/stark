@@ -68,6 +68,10 @@ Python, invoked with `-I -B`, rendered a synthetic Lily tool-history follow-up
 through the packaged native helper and matched the reference. The signed
 helper SHA-256 is
 `73fe9b462b8d542b98ed0d91158323d1692e0362c76d8df17480588b04ffa704`.
+Independent final verification confirmed that the installed executable and
+helper were byte-identical to the staged files, deep strict signatures passed,
+and the installed private Python/helper successfully rendered the same
+synthetic Lily tool-history follow-up.
 
 The user's failing OpenWork conversation was not replayed. Native inference
 performance and model quality were not remeasured. Only synthetic rendering
