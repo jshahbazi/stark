@@ -26,7 +26,28 @@ content are not needed for the build checks.
 
 For release DMGs containing **Install Stark**, open the image and choose that launcher. It verifies and stages the complete app before asking the running copy to quit. It prefers the current running Stark location, including `~/Applications`, then an existing `/Applications` copy, then an existing `~/Applications` copy, or a writable Applications folder. It quits, replaces and launches the exact selected destination, and shows either success or the specific failure. Models remain installed; active chats stop. The Keychain API credential and saved endpoint are reused by subsequent launches. Older DMGs use drag-and-drop; after copying `Stark.app`, quit the running old app before opening the installed app. Drag-copying alone does not stop an older running copy.
 
-Local builds are ad-hoc signed; they are not notarized and cannot be installed by the updater. Moving between an ad-hoc build and a signed installed app changes the private OpenWork socket namespace. Open **Connections → Apps**, choose **Manage** for OpenWork, then **Reconnect** to repair the Stark-owned public connection entry. If the app is not set up, choose **Connect** instead. Quit OpenWork completely and reopen it when instructed. Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
+Local builds use the unique available **Developer ID Application** identity by
+default. The builder signs and verifies every embedded native executable, then
+seals the app with its canonical bundle identifier, hardened runtime and a secure
+timestamp. Rebuilds with the same signing team retain the app's Keychain identity.
+The certificate and private key must already be available in your Keychain;
+the builder does not import credentials. Missing or ambiguous identities and
+signing failures stop the build before replacing the previous app.
+
+Use `--sign-identity 'Developer ID Application: NAME (TEAMID)'` or a certificate
+SHA-1 to choose an identity explicitly, and `--keychain PATH` to select its
+Keychain. `--ad-hoc` explicitly opts into an ad-hoc build for isolated development
+or unsigned distribution staging. Such rebuilds may require renewed Keychain
+approval. Local builds remain development builds and are not notarized or
+published by this command.
+
+Moving from an ad-hoc build to a Developer ID signed build switches to the
+installed API credential, port preferences and private OpenWork socket namespace.
+You may need one access approval and to update copied API keys in connected apps.
+Open **Connections → Apps**, choose **Manage** for OpenWork, then **Reconnect** to
+repair the Stark-owned public connection entry. If the app is not set up, choose
+**Connect** instead. Quit OpenWork completely and reopen it when instructed.
+Build provenance records are described in [PROVENANCE.md](PROVENANCE.md).
 
 Local apps display **Development build NUMBER**. The build number is a UTC
 timestamp with microseconds by default; `--build-number NUMBER` supplies a unique

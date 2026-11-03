@@ -136,6 +136,7 @@ class BundleConstructionTests(unittest.TestCase):
             def command_result(command, stage, *_args, **_kwargs):
                 self.assertEqual(stage, "menu_bar_build")
                 calls.append(command)
+                self.assertIn("--ad-hoc", command)
                 self.assertEqual(command[command.index("--runtime") + 1], str(bundle))
                 self.assertEqual(command[command.index("--worker") + 1], str(worker))
                 self.assertEqual(

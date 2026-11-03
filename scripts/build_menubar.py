@@ -25,6 +25,8 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import sign_distribution as signing
+
 ROOT = Path(__file__).resolve().parent.parent
 APP_ID = "com.starkengine.menubar"
 MIN_MACOS = "26.4"
@@ -963,9 +965,74 @@ def install_app(app: Path, destination: Path) -> None:
             stage.rename(destination)
 
 
+def resolve_signing_identity(
+    selected: str | None, keychain: Path | None, *, ad_hoc: bool = False
+) -> dict[str, str] | None:
+    """Require a unique Developer ID by default; never silently change to ad-hoc."""
+    if ad_hoc:
+        if selected is not None or keychain is not None:
+            raise BuildError("ad_hoc_signing_options_conflict")
+        return None
+    try:
+        return signing.resolve_identity(selected, keychain, signing.environment())
+    except signing.SigningError as error:
+        raise BuildError(str(error)) from None
+
+
+def sign_application(
+    app: Path, identity: dict[str, str] | None, keychain: Path | None
+) -> dict:
+    """Sign the staged app before publication, retaining source-bound build hashes."""
+    manifest_path = app / "Contents/Resources/menu-bar-manifest.json"
+    if identity is None:
+        run(
+            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app)],
+            "app_signature",
+        )
+    else:
+        env = signing.environment()
+        try:
+            # Seal each embedded executable first. --deep signing can preserve
+            # stale ad-hoc signatures in an otherwise Developer ID signed app.
+            signing.sign_bundle(
+                app / "Contents/Resources/runtime", identity, keychain, env
+            )
+            signing.refresh_signed_application_manifest(app, identity)
+            arguments = [
+                "/usr/bin/codesign",
+                "--force",
+                "--sign",
+                identity["sha1"],
+                "--options",
+                "runtime",
+                "--timestamp",
+                "--identifier",
+                APP_ID,
+            ]
+            if keychain is not None:
+                arguments.extend(["--keychain", str(keychain)])
+            run([*arguments, str(app)], "app_signature")
+            signing.verify_signature(app, identity, env)
+        except signing.SigningError as error:
+            raise BuildError(str(error)) from None
+    run(
+        ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(app)],
+        "app_signature_verification",
+    )
+    return json.loads(manifest_path.read_bytes())
+
+
 def build(options: argparse.Namespace) -> Path:
     if platform.system() != "Darwin" or platform.machine() != "arm64":
         raise BuildError("build_requires_native_apple_silicon_macos")
+    keychain = getattr(options, "keychain", None)
+    if keychain is not None:
+        keychain = keychain.expanduser().resolve()
+    identity = resolve_signing_identity(
+        getattr(options, "sign_identity", None),
+        keychain,
+        ad_hoc=getattr(options, "ad_hoc", False),
+    )
     runtime = options.runtime.expanduser().resolve()
     worker = options.worker.expanduser().resolve()
     score_worker = options.score_worker.expanduser().resolve()
@@ -1225,14 +1292,7 @@ def build(options: argparse.Namespace) -> Path:
         (resources / "menu-bar-manifest.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n"
         )
-        run(
-            ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(staged)],
-            "app_signature",
-        )
-        run(
-            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(staged)],
-            "app_signature_verification",
-        )
+        manifest = sign_application(staged, identity, keychain)
         if app.exists():
             stop_app(app)
             exchange_paths(staged, app)
@@ -1306,6 +1366,21 @@ def main(argv: list[str] | None = None) -> int:
         help="Allow local connector source while its lock is explicitly unpinned; records a development override",
     )
     parser.add_argument("--output", type=Path, default=ROOT / "artifacts/menu-bar")
+    signing_options = parser.add_mutually_exclusive_group()
+    signing_options.add_argument(
+        "--sign-identity",
+        help="Developer ID Application name or certificate SHA-1 (default: the unique available Developer ID)",
+    )
+    signing_options.add_argument(
+        "--ad-hoc",
+        action="store_true",
+        help="Explicitly use an ad-hoc signature for isolated development; rebuilds may require Keychain approval",
+    )
+    parser.add_argument(
+        "--keychain",
+        type=Path,
+        help="Keychain containing the Developer ID identity (default: user search list)",
+    )
     parser.add_argument(
         "--version",
         help="archive identifier recorded in build provenance; app stays a development build",

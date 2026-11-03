@@ -34,6 +34,7 @@ RUST_VERSION = "1.98.1"
 RECIPE_INPUTS = (
     "scripts/build_distribution.py",
     "scripts/build_menubar.py",
+    "scripts/sign_distribution.py",
     "scripts/install_app.py",
     "scripts/update_app.py",
     "scripts/stark",
@@ -911,6 +912,7 @@ def build_application(
             sys.executable,
             "-B",
             str(ROOT / "scripts/build_menubar.py"),
+            "--ad-hoc",
             "--runtime",
             str(bundle),
             "--worker",
