@@ -42,19 +42,11 @@ kernel void hybrid_affine_matvec_vector8(
     if (lane == 0) output[row] = total;
 }
 
-kernel void hybrid_iq_matvec_vector8(
-    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
-    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
-    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
-    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
-    const uint row = tile * 8 + simd_group;
-    if (row >= p.rows) return;
+inline float hybrid_iq_dot_vector8(device const uchar *codes, device const float *input,
+    ulong row_offset, ulong input_offset, uint columns, uint lane) {
     const uint kind = hybrid_packed_kind;
-    device const uchar *codes = codes_base + offsets.x;
-    const ulong row_offset = ulong(row) * (p.columns >> 8) * hybrid_packed_block_bytes;
-    const ulong input_offset = p.group ? ulong(row / p.group) * p.columns : 0;
     float sum = 0;
-    for (uint col = lane * 8; col < p.columns; col += 256) {
+    for (uint col = lane * 8; col < columns; col += 256) {
         device const uchar *block = codes + row_offset + ulong(col >> 8) * hybrid_packed_block_bytes;
         const uint part = (col & 255) >> 5;
         const uint l = (col & 31) >> 3;
@@ -80,8 +72,43 @@ kernel void hybrid_iq_matvec_vector8(
             sum += w * input[input_offset + col + j];
         }
     }
-    const float total = simd_sum(sum);
+    return simd_sum(sum);
+}
+
+kernel void hybrid_iq_matvec_vector8(
+    device const uchar *codes_base [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant HybridMatrixParams &p [[buffer(3)]],
+    constant uint4 &offsets [[buffer(6)]], uint tile [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]], uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    const uint row = tile * 8 + simd_group;
+    if (row >= p.rows) return;
+    const ulong row_offset = ulong(row) * (p.columns >> 8) * hybrid_packed_block_bytes;
+    const ulong input_offset = p.group ? ulong(row / p.group) * p.columns : 0;
+    const float total = hybrid_iq_dot_vector8(codes_base + offsets.x, input, row_offset, input_offset, p.columns, lane);
     if (lane == 0) output[row] = total;
+}
+
+kernel void hybrid_graph_iq_indexed_vector8(
+    device const uchar *codes [[buffer(0)]], device const float *input [[buffer(1)]],
+    device float *output [[buffer(2)]], constant uint *p [[buffer(3)]],
+    device const uint *indices [[buffer(6)]], device atomic_uint *failure [[buffer(30)]],
+    uint2 grid [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]],
+    uint simd_group [[simdgroup_index_in_threadgroup]]) {
+    const uint row = grid.x * 8 + simd_group;
+    if (row >= p[0]) return;
+    const uint batch = grid.y;
+    const uint expert = indices[batch];
+    if (expert >= p[2]) {
+        if (lane == 0) {
+            output[batch * p[0] + row] = 0.0f;
+            atomic_store_explicit(failure, 1u, memory_order_relaxed);
+        }
+        return;
+    }
+    const ulong at = (ulong(expert) * p[0] + row) * (p[1] >> 8) * hybrid_packed_block_bytes;
+    const ulong input_offset = p[3] ? ulong(batch) * p[1] : 0;
+    const float total = hybrid_iq_dot_vector8(codes, input, at, input_offset, p[1], lane);
+    if (lane == 0) output[batch * p[0] + row] = total;
 }
 
 // Graph GEMV checks the unmodified reduction before any activation can hide
