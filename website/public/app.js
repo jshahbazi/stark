@@ -56,6 +56,7 @@ function selectApp(tab, updateHash = false) {
     item.tabIndex = selected ? 0 : -1;
     document.getElementById(item.dataset.appPanel).hidden = !selected;
   }
+  document.querySelector('[data-app-support]').hidden = tab.dataset.appPanel === 'engine';
   if (updateHash) history.replaceState(null, '', '#' + tab.dataset.appPanel);
 }
 for (const tab of appTabs) {
