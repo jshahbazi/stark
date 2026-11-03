@@ -731,6 +731,16 @@ struct DesktopConnectionsTests {
             controller.handle("status", peer: current) { status = $0 }
             try check(notConnected(status) && controller.pendingEngine == current)
             try check(controller.message.contains("asking to use Stark"))
+            // A newer engine replaces the pending one; an older one does not.
+            let newer = try child()
+            guard let restarted = DesktopProcessIdentity.read(newer) else { reap(newer); throw CheckFailure() }
+            controller.handle("status", peer: restarted) { _ in }
+            try check(controller.pendingEngine == restarted)
+            controller.handle("status", peer: current) { _ in }
+            try check(controller.pendingEngine == restarted)
+            reap(newer)
+            controller.handle("status", peer: current) { _ in }
+            try check(controller.pendingEngine == current)
             var connection: Result<[String: Any], DesktopConnectionError>?
             controller.handle("connection", peer: current) { connection = $0 }
             guard case .failure(.unapproved) = connection else { throw CheckFailure() }
@@ -811,6 +821,24 @@ struct DesktopConnectionsTests {
         try check(!early.busy && early.message.contains("still reading"))
         try wait { early.approved }
         try check(try approvals(saved).engines == ["1.1.1"] && saved.adds == 0 && saved.replacements == 0)
+        // A locked read is not an empty list: Connect reads the approvals again before saving.
+        let locked = openCodeStorage(enabled: true, engines: ["1.1.1"])
+        locked.readStatus = errSecInteractionNotAllowed
+        let lockedService = namespace()
+        let unlocked = OpenCodeConnectionController(service: lockedService,
+            storage: OpenCodeEngineApprovalStore(service: lockedService, storage: locked), send: { _ in true },
+            snapshot: { ["api_base_url": "http://127.0.0.1:8000/v1", "models": []] },
+            brokerPath: { "/private/tmp/stark-synthetic-broker/openwork.sock" })
+        defer { unlocked.shutdown(); pump() }
+        unlocked.receiveConnection(["api_session": firstSession, "base_url": "http://127.0.0.1:8000/v1"])
+        try wait { unlocked.message.contains("Unlock your login Keychain") }
+        locked.readStatus = nil
+        let reads = locked.reads
+        unlocked.connect()
+        try check(!unlocked.busy && unlocked.message.contains("still reading"))
+        try wait { unlocked.approved }
+        try check(locked.reads > reads)
+        try check(try approvals(locked).engines == ["1.1.1"] && locked.adds == 0 && locked.replacements == 0)
     }
 
     private static func openCodeRevoke() throws {

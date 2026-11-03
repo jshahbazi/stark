@@ -230,7 +230,7 @@ private struct OpenCodeConnectionView: View {
                     Button("Allow") { connection.allow() }.disabled(connection.busy)
                 }
             }
-            Text("Uses OpenCode Desktop's background engine and a private connection on this Mac. Stark asks once for each new engine. The terminal opencode command is not managed; give it the copied API key instead.")
+            Text("Uses OpenCode Desktop's background engine and a private connection on this Mac. Stark asks once for each new engine. A terminal opencode session that shares that engine can also use Stark; an opencode command that runs its own engine is not managed, so give it the copied API key instead.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Text("OpenCode's engine keeps running after OpenCode quits. If Stark does not appear in OpenCode, quit OpenCode, run opencode service stop in Terminal, reopen OpenCode and choose Allow.")
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

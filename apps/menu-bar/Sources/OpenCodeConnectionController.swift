@@ -78,7 +78,10 @@ final class OpenCodeConnectionController: ObservableObject {
                     self.approved = value.enabled
                     self.engines = value.engines
                     self.message = value.enabled ? "OpenCode is authorized. Select Stark in OpenCode." : "OpenCode is not connected."
-                case .failure(let error): self.message = Self.storageMessage(error)
+                case .failure(let error):
+                    // Only a corrupt item may be replaced; otherwise Connect reads the list again first.
+                    if case .corrupt? = error as? APICredentialError {} else { self.approvalLoaded = false }
+                    self.message = Self.storageMessage(error)
                 }
                 if self.brokerPath() == nil {
                     self.message = "Stark could not start its private OpenCode connection. Reopen Stark and try again."
@@ -125,10 +128,12 @@ final class OpenCodeConnectionController: ObservableObject {
     }
 
     /// Records an unapproved, verified engine once OpenCode is connected. A
-    /// denied engine is not asked about again while Stark runs.
+    /// newer engine replaces an older pending one, and a denied engine is not
+    /// asked about again while Stark runs.
     private func notice(_ peer: DesktopProcessIdentity) {
         guard approved, !busy, !disconnectPending, peer.isCurrent, !denied.contains(peer.instanceID) else { return }
-        if let pending = pendingEngine, pending == peer || pending.isCurrent { return }
+        if let pending = pendingEngine, pending == peer
+            || (pending.isCurrent && (peer.seconds, peer.microseconds) <= (pending.seconds, pending.microseconds)) { return }
         pendingEngine = peer
         message = "A new OpenCode engine is asking to use Stark. Allow it if you opened or restarted OpenCode."
     }
@@ -177,7 +182,11 @@ final class OpenCodeConnectionController: ObservableObject {
             return
         }
         // Connect saves approvals on top of the loaded ones; never on top of an unread list.
-        guard approvalLoaded, !approvalLoading else { message = "Stark is still reading its OpenCode approval. Try again shortly."; return }
+        guard approvalLoaded, !approvalLoading else {
+            if !approvalLoading { loadApproval() }
+            message = "Stark is still reading its OpenCode approval. Try again shortly."
+            return
+        }
         guard connectorDirectory != nil else { message = "This Stark build is missing its OpenCode connector. Reinstall Stark."; return }
         busy = true
         operation = UUID()
@@ -264,6 +273,7 @@ final class OpenCodeConnectionController: ObservableObject {
                            models.contains(where: { $0["context_capacity_known"] as? Bool == false }) {
                             self.message = "This model has no declared context limit. Run a model with a known context limit to use it in OpenCode."
                         }
+                        self.watch(engine.process, reported: self.message, operation: operation)
                     case .failure(let error):
                         self.message = (error as? OpenWorkConnectorInstallError)?.message(DesktopClient.openCode.displayName)
                             ?? Self.storageMessage(error)
@@ -277,6 +287,19 @@ final class OpenCodeConnectionController: ObservableObject {
                     self.message = "OpenCode's background engine is not running. Wait for OpenCode to finish opening, then connect again."
                 }
             }
+        }
+    }
+
+    /// OpenCode can lose the engine Connect just approved, for example when its
+    /// service port is already taken. Replace the success message if it does.
+    private func watch(_ engine: DesktopProcessIdentity, reported: String, operation: UUID, checks: Int = 6) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self, self.operation == operation, !self.closing, self.message == reported else { return }
+            guard !engine.isCurrent else {
+                if checks > 1 { self.watch(engine, reported: reported, operation: operation, checks: checks - 1) }
+                return
+            }
+            self.message = "OpenCode's background engine stopped after connecting. Reopen OpenCode, then choose Allow when Stark asks about the new engine."
         }
     }
 

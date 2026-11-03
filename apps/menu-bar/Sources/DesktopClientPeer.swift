@@ -82,14 +82,29 @@ struct DesktopApplicationIdentity {
     /// Isolated validation profile that a test bundle supplied, if any.
     var profile: URL?
 
+    /// The last app each client and profile verified, reused while that same
+    /// process instance runs. Broker peers still re-verify the app's signature.
+    private static let verified = VerifiedApplications()
+
+    private final class VerifiedApplications {
+        private let lock = NSLock()
+        private var values: [String: DesktopApplicationIdentity] = [:]
+        subscript(key: String) -> DesktopApplicationIdentity? {
+            get { lock.lock(); defer { lock.unlock() }; return values[key] }
+            set { lock.lock(); values[key] = newValue; lock.unlock() }
+        }
+    }
+
     /// Called on the main queue. A command-line invocation of the signed
     /// interpreter is not an approved, regular LaunchServices application.
     static func running(_ client: DesktopClient, configurationRoot: URL? = nil) -> DesktopApplicationIdentity? {
+        let key = client.bundleID + "\n" + (configurationRoot?.path ?? "")
         for app in NSWorkspace.shared.runningApplications {
             guard app.bundleIdentifier == client.bundleID, app.activationPolicy == .regular,
                   app.isFinishedLaunching, !app.isTerminated, let url = app.bundleURL,
-                  let identity = DesktopProcessIdentity.read(app.processIdentifier),
-                  DesktopClientPeer.verify(pid: identity.pid, identifier: client.bundleID, client: client),
+                  let identity = DesktopProcessIdentity.read(app.processIdentifier) else { continue }
+            if let cached = verified[key], cached.process == identity, identity.isCurrent { return cached }
+            guard DesktopClientPeer.verify(pid: identity.pid, identifier: client.bundleID, client: client),
                   let configPath = DesktopClientPeer.launchEnvironment(identity.pid, client: client)?.configDirectory,
                   identity.isCurrent else { continue }
             let candidate = Self(client: client, process: identity, bundleURL: url.resolvingSymlinksInPath(), profile: configurationRoot)
@@ -102,6 +117,7 @@ struct DesktopApplicationIdentity {
                 let engine = client == .openWork ? DesktopClientPeer.engineConfigDirectory(application: candidate) : nil
                 guard direct || engine.map({ DesktopClientPeer.isWithin($0.path, root: configurationRoot) }) == true else { continue }
             }
+            verified[key] = candidate
             return candidate
         }
         return nil
