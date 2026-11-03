@@ -7,7 +7,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | Page | What it covers |
 | --- | --- |
 | [Installation](INSTALLATION.md) | Install routes and what each verifies, source builds, prebuilt archives, updating, uninstalling, building an archive |
-| [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connection Details, where the app keeps state |
+| [Menu bar app](../apps/menu-bar/README.md) | Building, updating and using the app, Connections, where the app keeps state |
 | [Converter guide](../tools/converter/README.md) | `stark convert` usage, every option and limit, supported models, MLX and GGUF routes, offline replay, errors |
 | [Model-family support](MODEL_SUPPORT.md) | Family downloads, saved-model removal, mode/format coverage and installation checks |
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |

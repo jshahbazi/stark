@@ -1,8 +1,30 @@
 const commands = {
-  chat: 'stark chat \\\n  --model-path /path/to/converted-model',
-  generate: 'stark generate \\\n  --model-path /path/to/converted-model',
-  score: 'stark score \\\n  --score-model-path /path/to/converted-model',
-  convert: 'stark convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3',
+  "http": "POST /v1/chat/completions\nAuthorization: Bearer <API_KEY>\nContent-Type: application/json\n\n{\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Reply with OK.\"}\n  ],\n  \"stream\": true,\n  \"max_tokens\": 128,\n  \"temperature\": 0\n}",
+  "generate": "{\"operation\":\"generate\",\"rendered_prompt\":\"<complete rendered chat template>\",\"context_tokens\":8192,\"max_new_tokens\":128,\"sampling\":{\"mode\":\"greedy\"},\"stream\":true,\"request_id\":1}",
+  "score": "{\"operation\":\"score\",\"input_token_ids\":[1,2,3],\"candidate_token_ids\":[10,11],\"context_tokens\":8192,\"temperature\":1.0}",
+  "convert": "stark convert Qwen/Qwen3-0.6B \\\n  --output models/qwen3"
+};
+const commandMetadata = {
+  "http": {
+    "heading": "HTTP / STREAMING CHAT",
+    "detail": "Request shape · Successful SSE ends with [DONE]",
+    "note": "Use the Base URL in Connection Details. Omitting model targets the running model. Copy curl Example in Stark generates an authenticated request that keeps the key out of command arguments and environment variables."
+  },
+  "generate": {
+    "heading": "STDIN / GENERATE REQUEST",
+    "detail": "One JSON line · text-generation-v1",
+    "note": "Spawn stark generate --model-path /path/to/model and read readiness first. Supply a complete rendered chat template or input_token_ids. Consume progress/delta events and the terminal reply before the next request."
+  },
+  "score": {
+    "heading": "STDIN / SCORE REQUEST",
+    "detail": "One JSON line · candidate IDs are illustrative",
+    "note": "Spawn stark score --score-model-path /path/to/model and read readiness first. Use token IDs from the loaded tokenizer. Returns logits, full-vocabulary log probabilities and temperature-scaled candidate probabilities."
+  },
+  "convert": {
+    "heading": "SHELL / MODEL CONVERSION",
+    "detail": "Installed CLI · selected checkpoint formats",
+    "note": "Conversion prepares the artifact for Stark. Consult the converter catalog for family and precision support; runtime admission and numerical validation are separate from conversion."
+  }
 };
 const tabs = [...document.querySelectorAll('[data-command]')];
 const code = document.querySelector('#command-code');
@@ -15,6 +37,10 @@ const selectCommand = (tab) => {
     item.tabIndex = selected ? 0 : -1;
   }
   code.textContent = commands[tab.dataset.command];
+  const metadata = commandMetadata[tab.dataset.command];
+  document.querySelector('#command-heading').textContent = metadata.heading;
+  document.querySelector('#command-detail').textContent = metadata.detail;
+  document.querySelector('#command-note').textContent = metadata.note;
   panel.setAttribute('aria-labelledby', tab.id);
   copyStatus.textContent = '';
 };
@@ -37,17 +63,54 @@ for (const button of document.querySelectorAll('[data-copy]')) {
     const status = document.getElementById(button.dataset.copyStatus);
     try {
       await navigator.clipboard.writeText(target.textContent);
-      status.textContent = 'Commands copied.';
+      status.textContent = 'Copied to clipboard.';
     } catch {
       const selection = window.getSelection();
       const range = document.createRange();
       range.selectNodeContents(target);
       selection.removeAllRanges();
       selection.addRange(range);
-      status.textContent = 'Commands selected. Use your keyboard to copy.';
+      status.textContent = 'Text selected. Use your keyboard to copy.';
     }
   });
 }
+const appTabs = [...document.querySelectorAll('[data-app-panel]')];
+function selectApp(tab, updateHash = false) {
+  for (const item of appTabs) {
+    const selected = item === tab;
+    item.setAttribute('aria-selected', String(selected));
+    item.tabIndex = selected ? 0 : -1;
+    document.getElementById(item.dataset.appPanel).hidden = !selected;
+  }
+  document.querySelector('[data-app-support]').hidden = tab.dataset.appPanel === 'engine';
+  if (updateHash) history.replaceState(null, '', '#' + tab.dataset.appPanel);
+}
+for (const tab of appTabs) {
+  tab.addEventListener('click', () => selectApp(tab, true));
+  tab.addEventListener('keydown', (event) => {
+    const index = appTabs.indexOf(tab);
+    const next = event.key === 'ArrowRight' ? (index + 1) % appTabs.length
+      : event.key === 'ArrowLeft' ? (index + appTabs.length - 1) % appTabs.length
+        : event.key === 'Home' ? 0 : event.key === 'End' ? appTabs.length - 1 : null;
+    if (next === null) return;
+    event.preventDefault();
+    selectApp(appTabs[next], true);
+    appTabs[next].focus();
+  });
+}
+function selectLinkedApp(initial = false) {
+  const target = document.getElementById(location.hash.slice(1));
+  const panelId = target?.closest('.app-guide')?.id;
+  const linked = appTabs.find(tab => tab.dataset.appPanel === panelId);
+  if (linked || initial) selectApp(linked || appTabs[0]);
+  // A hidden panel cannot receive the browser's original fragment scroll.
+  if (linked && !initial) document.getElementById(panelId).scrollIntoView({ block: 'start' });
+}
+if (appTabs.length) {
+  selectLinkedApp(true);
+  window.addEventListener('hashchange', () => selectLinkedApp());
+}
+
 const modelTabs = [...document.querySelectorAll('[data-model-group]')];
 function selectModelGroup(tab) {
   for (const item of modelTabs) {

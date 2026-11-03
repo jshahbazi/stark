@@ -15,6 +15,14 @@ use super::{
     weights::Weights,
 };
 
+#[cfg(feature = "metal")]
+#[path = "glm_greedy.rs"]
+mod greedy;
+
+#[cfg(feature = "metal")]
+#[path = "glm_prefill_batch.rs"]
+mod prefill_batch;
+
 #[derive(Clone)]
 struct Config {
     hidden: usize,
@@ -285,6 +293,10 @@ pub struct GlmModel {
     #[cfg(feature = "metal")]
     decode_graph_enabled: bool,
     position: usize,
+    #[cfg(feature = "metal")]
+    last_greedy: Option<(u32, usize)>,
+    #[cfg(feature = "metal")]
+    cleanup_failed: bool,
     #[cfg(test)]
     layer_trace: Vec<Vec<f32>>,
 }
@@ -297,6 +309,16 @@ impl GlmModel {
         let config = Config::parse(config)?;
         validate_metadata(&weights, &config)?;
         validate_weights(&weights, &config)?;
+        #[cfg(feature = "metal")]
+        let config = {
+            let mut config = config;
+            // Validate source metadata before applying this experimental
+            // operational cap; workers expose it for pre-execution admission.
+            if std::env::var_os("STARK_GLM53_ENCODER_BANKS").is_some_and(|value| value == "1") {
+                config.max_context = config.max_context.min(4096);
+            }
+            config
+        };
         let states = config
             .layer_types
             .iter()
@@ -345,6 +367,10 @@ impl GlmModel {
             #[cfg(feature = "metal")]
             decode_graph_enabled,
             position: 0,
+            #[cfg(feature = "metal")]
+            last_greedy: None,
+            #[cfg(feature = "metal")]
+            cleanup_failed: false,
             #[cfg(test)]
             layer_trace: Vec::new(),
         })
@@ -370,6 +396,10 @@ impl GlmModel {
             }
         }
         self.position = 0;
+        #[cfg(feature = "metal")]
+        {
+            self.last_greedy = None;
+        }
         #[cfg(feature = "metal")]
         if let Some(decode) = &mut self.decode {
             for attention in decode.attention.iter_mut().flatten() {
@@ -416,6 +446,13 @@ impl GlmModel {
         token: u32,
         readout: bool,
     ) -> Result<Vec<f32>> {
+        #[cfg(feature = "metal")]
+        {
+            self.last_greedy = None;
+            if self.cleanup_failed {
+                return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
+            }
+        }
         let result = self.step_inner(token, readout);
         if result.is_err() {
             self.reset();
@@ -546,73 +583,134 @@ impl GlmModel {
             }
         }
         let decode = self.decode.as_mut().ok_or(Error::Invalid("glm_decode_state"))?;
-        let mut graph = DecodeGraph::new()?;
         let embedding = self.weights.row("token_embd.weight", token as usize)?;
         if embedding.len() != c.hidden {
             return Err(Error::Invalid("glm_embedding_shape"));
         }
         let mut streams = DecodeGraph::upload(&embedding.repeat(c.hc))?;
-        for (layer, state) in self.states.iter_mut().enumerate() {
-            let prefix = format!("blk.{layer}");
-            let norm = decode.controls[layer][0].pre(&mut graph, &streams)?;
-            let attention = match state {
-                LayerState::Kda(s) => encode_kda(&self.weights, c, &mut graph, &norm, &prefix, s)?,
-                LayerState::Attention(_) => encode_mla(
-                    &self.weights,
-                    c,
-                    &mut graph,
-                    &norm,
-                    &prefix,
-                    decode.attention[layer].as_mut().ok_or(Error::Invalid("glm_mla_decode_state"))?,
-                )?,
-            };
-            streams = decode.controls[layer][0].post(&mut graph, &streams, &attention)?;
-            let norm = decode.controls[layer][1].pre(&mut graph, &streams)?;
-            let ffn = if layer < c.dense_layers {
-                let gate = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate.weight"), &norm)?;
-                let up = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_up.weight"), &norm)?;
-                let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
-                self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_down.weight"), &activation)?
-            } else {
-                let logits = self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_inp.weight"), &norm)?;
-                let shared_gate =
-                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_shexp.weight"), &norm)?;
-                let shared_up =
-                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_up_shexp.weight"), &norm)?;
-                let rows = graph.finish(&[logits])?;
-                if let LayerState::Kda(s) = state {
-                    s.metal.as_ref().ok_or(Error::Invalid("glm_kda_decode_state"))?.check_completed()?;
+        if let Some(plan) = decode.bounded_plan.clone() {
+            if decode.encoder_banks {
+                let mut graph = new_encoder_graph(decode)?;
+                for group in &plan.groups {
+                    let banks = self.weights.encoder_indexed_group(&group.names, plan.budget)?;
+                    if banks.registered_bytes() > group.bytes {
+                        return Err(Error::Invalid("GLM encoder-bank accounting changed"));
+                    }
+                    for layer in group.start..group.end {
+                        (graph, streams) = encode_metal_layer(
+                            &self.weights,
+                            c,
+                            decode,
+                            layer,
+                            &mut self.states[layer],
+                            graph,
+                            streams,
+                            Some(&banks),
+                        )?;
+                        #[cfg(test)]
+                        {
+                            let trace = graph.finish(&[streams.clone()])?;
+                            self.layer_trace.push(trace[0].clone());
+                            graph = DecodeGraph::new()?;
+                        }
+                    }
+                    // The virtual registry retains wrappers across encoders.
+                    // Only this encoder's admitted allocations are referenced
+                    // by its GPU work (Apple Tech Talk 10580, 7:20-8:10).
+                    drop(banks);
+                    if group.end < c.layer_types.len() {
+                        graph.resource_boundary()?;
+                    }
                 }
-                let selected = route(&rows[0], &decode.biases[layer], c.active_experts, c.routed_scale)?;
-                let experts: Vec<_> = selected.iter().map(|&(index, _)| index).collect();
-                let probabilities: Vec<_> = selected.iter().map(|&(_, probability)| probability).collect();
-                graph = DecodeGraph::new()?;
-                let inputs = graph.repeat(&norm, experts.len())?;
-                let gate = self.weights.encode_selected_matvec(
-                    &mut graph,
-                    &format!("{prefix}.ffn_gate_exps.weight"),
-                    &experts,
-                    &inputs,
-                )?;
-                let up = self.weights.encode_selected_matvec(
-                    &mut graph,
-                    &format!("{prefix}.ffn_up_exps.weight"),
-                    &experts,
-                    &inputs,
-                )?;
-                let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
-                let down = self.weights.encode_selected_matvec(
-                    &mut graph,
-                    &format!("{prefix}.ffn_down_exps.weight"),
-                    &experts,
-                    &activation,
-                )?;
-                let shared = graph.swiglu(&shared_gate, &shared_up, Some(c.swiglu_limit))?;
-                let shared =
-                    self.weights.encode_matvec(&mut graph, &format!("{prefix}.ffn_down_shexp.weight"), &shared)?;
-                graph.weighted_sum(&down, &probabilities, &shared, 1.0)?
-            };
-            streams = decode.controls[layer][1].post(&mut graph, &streams, &ffn)?;
+                let outputs = if readout {
+                    let mean = super::glm_metal::stream_mean(&mut graph, &streams, c.hidden, c.hc)?;
+                    let norm = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+                    vec![self.weights.encode_matvec(&mut graph, "output.weight", &norm)?]
+                } else {
+                    graph.check_finite(&streams)?;
+                    Vec::new()
+                };
+                graph.diagnostic_checkpoint("glm.readout")?;
+                let mut values = graph.finish(&outputs)?;
+                for state in &self.states {
+                    if let LayerState::Kda(state) = state
+                        && let Some(metal) = &state.metal
+                    {
+                        metal.check_completed()?;
+                    }
+                }
+                let result = values.pop().unwrap_or_default();
+                if readout && result.len() != c.vocab {
+                    return Err(Error::Invalid("glm_empty_readout"));
+                }
+                self.position += 1;
+                return Ok(result);
+            }
+            let mut logits = Vec::new();
+            for group in &plan.groups {
+                let last = group.end == c.layer_types.len();
+                let (next, values) = objc2::rc::autoreleasepool(|_| -> Result<_> {
+                    let banks = self.weights.bounded_indexed_group(&group.names)?;
+                    if banks.registered_bytes() > group.bytes {
+                        return Err(Error::Invalid("GLM bounded bank accounting changed"));
+                    }
+                    let mut graph = DecodeGraph::new()?;
+                    let mut current = streams.clone();
+                    for layer in group.start..group.end {
+                        (graph, current) = encode_metal_layer(
+                            &self.weights,
+                            c,
+                            decode,
+                            layer,
+                            &mut self.states[layer],
+                            graph,
+                            current,
+                            Some(&banks),
+                        )?;
+                        #[cfg(test)]
+                        {
+                            let trace = graph.finish(&[current.clone()])?;
+                            self.layer_trace.push(trace[0].clone());
+                            graph = DecodeGraph::new()?;
+                        }
+                    }
+                    let outputs = if last && readout {
+                        let mean = super::glm_metal::stream_mean(&mut graph, &current, c.hidden, c.hc)?;
+                        let norm = graph.rms_norm(&mean, &decode.output_norm, c.hidden, c.rms_eps)?;
+                        vec![self.weights.encode_matvec(&mut graph, "output.weight", &norm)?]
+                    } else {
+                        graph.check_finite(&current)?;
+                        Vec::new()
+                    };
+                    graph.diagnostic_checkpoint("glm.readout")?;
+                    let values = graph.finish(&outputs)?;
+                    // Metal command objects are autoreleased. The nested pool
+                    // drains after this group and before another bank group is
+                    // constructed; only retained scratch streams cross it.
+                    drop(banks);
+                    Ok((current, values))
+                })?;
+                streams = next;
+                if last && readout {
+                    logits = values.into_iter().next().ok_or(Error::Invalid("glm_empty_readout"))?;
+                }
+            }
+            for state in &self.states {
+                if let LayerState::Kda(state) = state
+                    && let Some(metal) = &state.metal
+                {
+                    metal.check_completed()?;
+                }
+            }
+            if readout && logits.len() != c.vocab {
+                return Err(Error::Invalid("glm_nonfinite_output"));
+            }
+            self.position += 1;
+            return Ok(logits);
+        }
+        let mut graph = DecodeGraph::new()?;
+        for (layer, state) in self.states.iter_mut().enumerate() {
+            (graph, streams) = encode_metal_layer(&self.weights, c, decode, layer, state, graph, streams, None)?;
             #[cfg(test)]
             {
                 let trace = graph.finish(&[streams.clone()])?;
@@ -631,6 +729,7 @@ impl GlmModel {
             graph.check_finite(&streams)?;
             Vec::new()
         };
+        graph.diagnostic_checkpoint("glm.readout")?;
         let mut result = graph.finish(&output)?;
         for state in &self.states {
             if let LayerState::Kda(s) = state
@@ -653,11 +752,315 @@ impl GlmModel {
 }
 
 #[cfg(feature = "metal")]
+fn unretained_encoder_enabled() -> Result<bool> {
+    let enabled = |name| std::env::var_os(name).is_some_and(|value| value == "1");
+    if !enabled("STARK_GLM53_UNRETAINED_GRAPH") {
+        return Ok(false);
+    }
+    if !enabled("STARK_GLM53_ENCODER_BANKS")
+        || !enabled("STARK_GLM53_RESIDENT_BANKS")
+        || !enabled("STARK_GLM53_WIDE_ENCODER")
+        || enabled("STARK_GLM53_CONCURRENT_ENCODER")
+        || enabled("STARK_GLM53_PARALLEL_PROJECTIONS")
+        || enabled("STARK_QWEN38_PHASE_TIMING")
+        || enabled("STARK_QWEN38_ENCODER_TIMING")
+    {
+        return Err(Error::Unsupported("GLM unretained graph requires serial resident wide-encoder execution"));
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "metal")]
+fn scratch_heap_enabled() -> Result<bool> {
+    let enabled = |name| std::env::var_os(name).is_some_and(|value| value == "1");
+    if !enabled("STARK_GLM53_SCRATCH_HEAP") {
+        return Ok(false);
+    }
+    if !enabled("STARK_GLM53_ENCODER_BANKS")
+        || !enabled("STARK_GLM53_RESIDENT_BANKS")
+        || !enabled("STARK_GLM53_WIDE_ENCODER")
+        || !enabled("STARK_GLM53_GREEDY_OVERLAP")
+        || enabled("STARK_GLM53_CONCURRENT_ENCODER")
+        || enabled("STARK_GLM53_PARALLEL_PROJECTIONS")
+        || enabled("STARK_QWEN38_PHASE_TIMING")
+        || enabled("STARK_QWEN38_ENCODER_TIMING")
+    {
+        return Err(Error::Unsupported("GLM scratch heap requires serial resident wide-encoder overlap"));
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "metal")]
+fn new_encoder_graph(decode: &MetalDecode) -> Result<super::weight_metal::DecodeGraph> {
+    use super::weight_metal::DecodeGraph;
+    let unretained = unretained_encoder_enabled()?;
+    if let Some(heap) = &decode.scratch_heap {
+        DecodeGraph::new_with_scratch_heap(heap, unretained)
+    } else if unretained {
+        DecodeGraph::new_unretained()
+    } else if std::env::var_os("STARK_GLM53_CONCURRENT_ENCODER").is_some_and(|value| value == "1") {
+        DecodeGraph::new_parallel()
+    } else {
+        DecodeGraph::new()
+    }
+}
+
+#[cfg(feature = "metal")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "explicit layer state, graph ownership and optional admitted bank capability"
+)]
+fn encode_metal_layer(
+    w: &Weights,
+    c: &Config,
+    decode: &mut MetalDecode,
+    layer: usize,
+    state: &mut LayerState,
+    mut graph: super::weight_metal::DecodeGraph,
+    mut streams: super::weight_metal::DeviceVector,
+    banks: Option<&super::weights::BoundedBankGroup<'_>>,
+) -> Result<(super::weight_metal::DecodeGraph, super::weight_metal::DeviceVector)> {
+    use super::weight_metal::DecodeGraph;
+    let prefix = format!("blk.{layer}");
+    let norm = decode.controls[layer][0].pre(&mut graph, &streams)?;
+    graph.diagnostic_checkpoint("glm.attn_pre")?;
+    let attention = match state {
+        LayerState::Kda(s) => encode_kda(w, c, &mut graph, &norm, &prefix, s, decode.parallel_projections)?,
+        LayerState::Attention(_) => encode_mla(
+            w,
+            c,
+            &mut graph,
+            &norm,
+            &prefix,
+            decode.attention[layer].as_mut().ok_or(Error::Invalid("glm_mla_decode_state"))?,
+            decode.parallel_projections,
+        )?,
+    };
+    graph.diagnostic_checkpoint(if matches!(state, LayerState::Kda(_)) {
+        "glm.kda"
+    } else {
+        "glm.mla"
+    })?;
+    streams = decode.controls[layer][0].post(&mut graph, &streams, &attention)?;
+    graph.diagnostic_checkpoint("glm.attn_post")?;
+    let norm = decode.controls[layer][1].pre(&mut graph, &streams)?;
+    graph.diagnostic_checkpoint("glm.ffn_pre")?;
+    let ffn = if layer < c.dense_layers {
+        if decode.parallel_projections {
+            graph.begin_projection_level()?;
+        }
+        let gate = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate.weight"), &norm)?;
+        let up = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_up.weight"), &norm)?;
+        if decode.parallel_projections {
+            graph.end_projection_level()?;
+        }
+        let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+        let down = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_down.weight"), &activation)?;
+        graph.diagnostic_checkpoint("glm.dense_ffn")?;
+        down
+    } else {
+        if decode.parallel_projections {
+            graph.begin_projection_level()?;
+        }
+        let logits = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_inp.weight"), &norm)?;
+        let shared_gate = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_gate_shexp.weight"), &norm)?;
+        let shared_up = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_up_shexp.weight"), &norm)?;
+        if decode.parallel_projections {
+            graph.end_projection_level()?;
+        }
+        graph.diagnostic_checkpoint("glm.router_shared")?;
+        if let Some(banks) = banks {
+            let bias = decode.routing_biases[layer].as_ref().ok_or(Error::Invalid("glm_device_router_bias"))?;
+            let (indices, probabilities) =
+                super::glm_metal::route(&mut graph, &logits, bias, c.active_experts, c.routed_scale)?;
+            graph.diagnostic_checkpoint("glm.router")?;
+            let gate_name = format!("{prefix}.ffn_gate_exps.weight");
+            let up_name = format!("{prefix}.ffn_up_exps.weight");
+            if decode.parallel_projections {
+                graph.begin_projection_level()?;
+            }
+            let gate = banks.encode_indexed_matvec(&mut graph, &gate_name, &indices, c.active_experts, &norm, false)?;
+            let up = banks.encode_indexed_matvec(&mut graph, &up_name, &indices, c.active_experts, &norm, false)?;
+            if decode.parallel_projections {
+                graph.end_projection_level()?;
+            }
+            let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+            let down = banks.encode_indexed_matvec(
+                &mut graph,
+                &format!("{prefix}.ffn_down_exps.weight"),
+                &indices,
+                c.active_experts,
+                &activation,
+                true,
+            )?;
+            graph.diagnostic_checkpoint("glm.routed_experts")?;
+            let shared = graph.swiglu(&shared_gate, &shared_up, Some(c.swiglu_limit))?;
+            let shared = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_down_shexp.weight"), &shared)?;
+            graph.diagnostic_checkpoint("glm.shared")?;
+            let shared_scale = graph.upload_into(&[1.0])?;
+            graph.weighted_sum_device(&down, &probabilities, &shared, &shared_scale)?
+        } else {
+            let rows = graph.finish(&[logits])?;
+            if let LayerState::Kda(s) = state {
+                s.metal.as_ref().ok_or(Error::Invalid("glm_kda_decode_state"))?.check_completed()?;
+            }
+            let selected = route(&rows[0], &decode.biases[layer], c.active_experts, c.routed_scale)?;
+            let experts: Vec<_> = selected.iter().map(|&(index, _)| index).collect();
+            let probabilities: Vec<_> = selected.iter().map(|&(_, probability)| probability).collect();
+            graph = DecodeGraph::new()?;
+            let inputs = graph.repeat(&norm, experts.len())?;
+            let gate =
+                w.encode_selected_matvec(&mut graph, &format!("{prefix}.ffn_gate_exps.weight"), &experts, &inputs)?;
+            let up =
+                w.encode_selected_matvec(&mut graph, &format!("{prefix}.ffn_up_exps.weight"), &experts, &inputs)?;
+            let activation = graph.swiglu(&gate, &up, Some(c.swiglu_limit))?;
+            let down =
+                w.encode_selected_matvec(&mut graph, &format!("{prefix}.ffn_down_exps.weight"), &experts, &activation)?;
+            graph.diagnostic_checkpoint("glm.routed_experts")?;
+            let shared = graph.swiglu(&shared_gate, &shared_up, Some(c.swiglu_limit))?;
+            let shared = w.encode_matvec(&mut graph, &format!("{prefix}.ffn_down_shexp.weight"), &shared)?;
+            graph.diagnostic_checkpoint("glm.shared")?;
+            graph.weighted_sum(&down, &probabilities, &shared, 1.0)?
+        }
+    };
+    graph.diagnostic_checkpoint("glm.ffn")?;
+    streams = decode.controls[layer][1].post(&mut graph, &streams, &ffn)?;
+    graph.diagnostic_checkpoint("glm.ffn_post")?;
+    Ok((graph, streams))
+}
+
+#[cfg(feature = "metal")]
 struct MetalDecode {
+    scratch_heap: Option<super::weight_metal::ScratchHeap>,
     controls: Vec<[super::glm_metal::Control; 2]>,
     attention: Vec<Option<super::glm_metal::Attention>>,
     biases: Vec<Vec<f32>>,
     output_norm: super::weight_metal::DeviceVector,
+    bounded_plan: Option<std::sync::Arc<BoundedPlan>>,
+    routing_biases: Vec<Option<super::weight_metal::DeviceVector>>,
+    encoder_banks: bool,
+    parallel_projections: bool,
+}
+
+#[cfg(feature = "metal")]
+struct BoundedCommandGroup {
+    start: usize,
+    end: usize,
+    names: Vec<String>,
+    bytes: usize,
+}
+
+#[cfg(feature = "metal")]
+struct BoundedPlan {
+    groups: Vec<BoundedCommandGroup>,
+    budget: usize,
+}
+
+#[cfg(feature = "metal")]
+impl BoundedPlan {
+    fn new(
+        weights: &Weights,
+        config: &Config,
+        state_allowance: usize,
+    ) -> Result<Self> {
+        let prospective_budget = if std::env::var_os("STARK_GLM53_WIDE_ENCODER").is_some_and(|value| value == "1") {
+            weights.wide_encoder_bank_budget()?
+        } else {
+            weights.bounded_indexed_budget()?
+        };
+        let budget = prospective_budget
+            .checked_sub(state_allowance)
+            .ok_or(Error::Invalid("GLM encoder state inventory exceeds working-set allowance"))?;
+        super::profile::record("native.glm.bank_state_allowance", 0.0, state_allowance);
+        super::profile::record("native.glm.bank_group_budget", 0.0, budget);
+        let group_layers = match std::env::var("STARK_GLM53_BANK_GROUP_LAYERS") {
+            Ok(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|&value| (1..=config.layer_types.len()).contains(&value))
+                .ok_or(Error::Invalid("invalid GLM bank group layer limit"))?,
+            Err(std::env::VarError::NotPresent) => config.layer_types.len(),
+            Err(_) => return Err(Error::Invalid("invalid GLM bank group layer limit")),
+        };
+        let mut groups = Vec::new();
+        let mut current = BoundedCommandGroup {
+            start: 0,
+            end: 0,
+            names: Vec::new(),
+            bytes: 0,
+        };
+        for layer in 0..config.layer_types.len() {
+            let names: Vec<_> = if layer < config.dense_layers {
+                Vec::new()
+            } else {
+                ["gate", "up", "down"].into_iter().map(|part| format!("blk.{layer}.ffn_{part}_exps.weight")).collect()
+            };
+            let bytes = weights.bounded_bank_bytes(&names)?;
+            if bytes > budget {
+                return Err(Error::Invalid("GLM expert layer exceeds bounded bank budget"));
+            }
+            if !current.names.is_empty()
+                && (current.bytes.checked_add(bytes).is_none_or(|total| total > budget)
+                    || layer - current.start >= group_layers)
+            {
+                current.end = layer;
+                groups.push(current);
+                current = BoundedCommandGroup {
+                    start: layer,
+                    end: layer,
+                    names: Vec::new(),
+                    bytes: 0,
+                };
+            }
+            current.bytes += bytes;
+            current.names.extend(names);
+            current.end = layer + 1;
+        }
+        if current.names.is_empty() {
+            return Err(Error::Invalid("GLM bounded graph requires routed layers"));
+        }
+        groups.push(current);
+        super::profile::record("native.glm.bounded_group_count", 0.0, groups.len());
+        Ok(Self {
+            groups,
+            budget,
+        })
+    }
+}
+
+#[cfg(feature = "metal")]
+fn encoder_state_allowance(c: &Config) -> Result<usize> {
+    let layers = c.layer_types.len() as u128;
+    let kda_layers = c.layer_types.iter().filter(|&&kda| kda).count() as u128;
+    let attention_layers = layers - kda_layers;
+    let hidden = c.hidden as u128;
+    let streams = c.hc as u128;
+    let rows = (2 + streams) * streams;
+    let columns = hidden * streams;
+    let controls = 2 * layers * (rows * columns + columns + 2 * hidden + 34 * rows + 3);
+    let inner = c.kda_heads as u128 * c.kda_dim as u128;
+    let kda_state = 3 * inner * (c.conv_kernel as u128 - 1) + inner * c.kda_dim as u128;
+    let kda_weights = 3 * inner * c.conv_kernel as u128 + inner + c.kda_dim as u128 + c.kda_heads as u128;
+    let kda_io = 6 * inner + c.kda_heads as u128 + 1;
+    let kda = kda_layers * (kda_state + kda_weights + kda_io);
+    let context = c.max_context as u128;
+    let pool = c.index_pool as u128;
+    let index = c.index_dim as u128;
+    // Cover old/new attention allocations during growth, persistent tails/APE,
+    // all mHC buffers (up to 32 split projections), KDA state/weights/I/O,
+    // graph scratch's enforced 512MiB cap, and small independent allocations.
+    let attention = attention_layers
+        * (2 * (context * c.kv_rank as u128 + context.div_ceil(pool) * index) + 3 * pool * index + context);
+    let outside = hidden * streams + hidden + (layers - c.dense_layers as u128) * c.experts as u128;
+    // Overlap owns one submitted and one unsubmitted graph at once. Reserve
+    // both enforced scratch caps before admitting resident bank allocations.
+    let graphs = if std::env::var_os("STARK_GLM53_GREEDY_OVERLAP").is_some_and(|value| value == "1") {
+        2
+    } else {
+        1
+    };
+    let bytes = 4 * (controls + kda + attention + outside) + graphs * 512 * 1024 * 1024 + 8 * 1024 * 1024;
+    usize::try_from(bytes).map_err(|_| Error::Invalid("GLM encoder state inventory overflow"))
 }
 
 #[cfg(feature = "metal")]
@@ -668,6 +1071,19 @@ impl MetalDecode {
         cached: Option<&[[HcProjection; 2]]>,
     ) -> Result<Self> {
         use super::glm_metal::{Attention, AttentionGeometry, Control, ControlGeometry};
+        let unretained_graph = unretained_encoder_enabled()?;
+        let pooled_scratch = scratch_heap_enabled()?;
+        let bounded_commands = std::env::var_os("STARK_GLM53_BOUNDED_GRAPH").is_some_and(|value| value == "1");
+        let encoder_banks = std::env::var_os("STARK_GLM53_ENCODER_BANKS").is_some_and(|value| value == "1");
+        if bounded_commands && encoder_banks {
+            return Err(Error::Invalid("GLM command and encoder bank modes are mutually exclusive"));
+        }
+        if !encoder_banks && std::env::var_os("STARK_GLM53_RESIDENT_BANKS").is_some_and(|value| value == "1") {
+            return Err(Error::Invalid("GLM resident banks require encoder-bank mode"));
+        }
+        if encoder_banks && c.max_context > 4096 {
+            return Err(Error::Unsupported("GLM encoder-bank experiment supports at most 4096 context tokens"));
+        }
         let mut controls = Vec::with_capacity(c.layer_types.len());
         let mut attention = Vec::with_capacity(c.layer_types.len());
         let mut biases = Vec::with_capacity(c.layer_types.len());
@@ -719,11 +1135,56 @@ impl MetalDecode {
                 w.vector(&format!("{prefix}.exp_probs_b.bias"))?
             });
         }
+        let bounded_plan = if bounded_commands || encoder_banks {
+            Some(std::sync::Arc::new(BoundedPlan::new(
+                w,
+                c,
+                if encoder_banks {
+                    encoder_state_allowance(c)?
+                } else {
+                    0
+                },
+            )?))
+        } else {
+            None
+        };
+        if (unretained_graph || pooled_scratch) && bounded_plan.as_ref().is_none_or(|plan| plan.groups.len() != 1) {
+            return Err(Error::Unsupported("GLM owned graph experiments require one admitted bank group"));
+        }
+        // The overlap admission already reserves two 512MiB graph caps. Heap
+        // children suballocate that same capacity and remain non-aliasable
+        // while any DeviceVector or pending graph still owns their buffer.
+        let scratch_heap = if pooled_scratch {
+            Some(super::weight_metal::ScratchHeap::new(2 * 512 * 1024 * 1024)?)
+        } else {
+            None
+        };
+        if encoder_banks {
+            let plan = bounded_plan.as_ref().ok_or(Error::Invalid("GLM encoder-bank plan unavailable"))?;
+            let names = plan.groups.iter().flat_map(|group| group.names.iter().cloned()).collect::<Vec<_>>();
+            w.configure_encoder_residency(&names, encoder_state_allowance(c)?)?;
+        }
+        let routing_biases = biases
+            .iter()
+            .map(|bias| {
+                if bounded_plan.is_some() && !bias.is_empty() {
+                    Ok(Some(super::weight_metal::DecodeGraph::upload(bias)?))
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            scratch_heap,
             controls,
             attention,
             biases,
             output_norm: super::weight_metal::DecodeGraph::upload(&w.vector("output_norm.weight")?)?,
+            bounded_plan,
+            routing_biases,
+            encoder_banks,
+            parallel_projections: std::env::var_os("STARK_GLM53_PARALLEL_PROJECTIONS")
+                .is_some_and(|value| value == "1"),
         })
     }
 }
@@ -1235,15 +1696,12 @@ fn kda(
 }
 
 #[cfg(feature = "metal")]
-fn encode_kda(
+fn initialize_kda(
     w: &Weights,
     c: &Config,
-    graph: &mut super::weight_metal::DecodeGraph,
-    x: &super::weight_metal::DeviceVector,
     p: &str,
     state: &mut KdaState,
-) -> Result<super::weight_metal::DeviceVector> {
-    use super::weight_metal::DeviceVector;
+) -> Result<()> {
     if state.metal.is_none() {
         state.metal = Some(super::glm_metal::Kda::new(
             super::glm_metal::Geometry {
@@ -1263,6 +1721,21 @@ fn encode_kda(
             &w.vector(&format!("{p}.ssm_a"))?,
         )?);
     }
+    Ok(())
+}
+
+#[cfg(feature = "metal")]
+fn encode_kda(
+    w: &Weights,
+    c: &Config,
+    graph: &mut super::weight_metal::DecodeGraph,
+    x: &super::weight_metal::DeviceVector,
+    p: &str,
+    state: &mut KdaState,
+    parallel: bool,
+) -> Result<super::weight_metal::DeviceVector> {
+    use super::weight_metal::DeviceVector;
+    initialize_kda(w, c, p, state)?;
     let metal = state.metal.as_mut().ok_or(Error::Invalid("glm_kda_decode_state"))?;
     let inner = metal.inner();
     let input = DeviceVector {
@@ -1270,27 +1743,58 @@ fn encode_kda(
         offset: 0,
         len: 5 * inner + metal.heads(),
     };
-    for (name, offset, length) in [
-        ("attn_q.weight", 0, inner),
-        ("attn_k.weight", inner, inner),
-        ("attn_v.weight", 2 * inner, inner),
-        ("ssm_beta.weight", 5 * inner, metal.heads()),
-    ] {
-        let projection = w.encode_matvec(graph, &format!("{p}.{name}"), x)?;
-        graph.copy_into(&projection, &input.slice(offset, length)?)?;
+    if parallel {
+        graph.begin_projection_level()?;
+        let projections =
+            ["attn_q.weight", "attn_k.weight", "attn_v.weight", "ssm_beta.weight", "ssm_f_a.weight", "ssm_g_a.weight"]
+                .into_iter()
+                .map(|name| w.encode_matvec(graph, &format!("{p}.{name}"), x))
+                .collect::<Result<Vec<_>>>()?;
+        graph.end_projection_level()?;
+        graph.begin_projection_level()?;
+        let forget = w.encode_matvec(graph, &format!("{p}.ssm_f_b.weight"), &projections[4])?;
+        let gate = w.encode_matvec(graph, &format!("{p}.ssm_g_b.weight"), &projections[5])?;
+        graph.end_projection_level()?;
+        // Copy only after both dependency levels are complete. In particular,
+        // copies may not consume outputs inside the independent-projection
+        // level or introduce shared-input-buffer dependencies between GEMVs.
+        for (projection, offset, length) in [
+            (&projections[0], 0, inner),
+            (&projections[1], inner, inner),
+            (&projections[2], 2 * inner, inner),
+            (&projections[3], 5 * inner, metal.heads()),
+            (&forget, 3 * inner, inner),
+            (&gate, 4 * inner, inner),
+        ] {
+            graph.copy_into(projection, &input.slice(offset, length)?)?;
+        }
+    } else {
+        for (name, offset, length) in [
+            ("attn_q.weight", 0, inner),
+            ("attn_k.weight", inner, inner),
+            ("attn_v.weight", 2 * inner, inner),
+            ("ssm_beta.weight", 5 * inner, metal.heads()),
+        ] {
+            let projection = w.encode_matvec(graph, &format!("{p}.{name}"), x)?;
+            graph.copy_into(&projection, &input.slice(offset, length)?)?;
+        }
+        for (part, offset) in [("f", 3 * inner), ("g", 4 * inner)] {
+            let low = w.encode_matvec(graph, &format!("{p}.ssm_{part}_a.weight"), x)?;
+            let projection = w.encode_matvec(graph, &format!("{p}.ssm_{part}_b.weight"), &low)?;
+            graph.copy_into(&projection, &input.slice(offset, inner)?)?;
+        }
     }
-    for (part, offset) in [("f", 3 * inner), ("g", 4 * inner)] {
-        let low = w.encode_matvec(graph, &format!("{p}.ssm_{part}_a.weight"), x)?;
-        let projection = w.encode_matvec(graph, &format!("{p}.ssm_{part}_b.weight"), &low)?;
-        graph.copy_into(&projection, &input.slice(offset, inner)?)?;
-    }
+    graph.diagnostic_checkpoint("glm.kda.projections")?;
     metal.encode_graph(graph)?;
+    graph.diagnostic_checkpoint("glm.kda.recurrence")?;
     let recurrent = DeviceVector {
         buffer: metal.output_buffer().clone(),
         offset: 0,
         len: inner,
     };
-    w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &recurrent)
+    let output = w.encode_matvec(graph, &format!("{p}.attn_output.weight"), &recurrent)?;
+    graph.diagnostic_checkpoint("glm.kda.output")?;
+    Ok(output)
 }
 
 #[cfg(feature = "metal")]
@@ -1301,17 +1805,30 @@ fn encode_mla(
     x: &super::weight_metal::DeviceVector,
     p: &str,
     state: &mut super::glm_metal::Attention,
+    parallel: bool,
 ) -> Result<super::weight_metal::DeviceVector> {
     use super::weight_metal::DecodeGraph;
+    if parallel {
+        graph.begin_projection_level()?;
+    }
     let q = w.encode_matvec(graph, &format!("{p}.attn_q_a.weight"), x)?;
     let latent = w.encode_matvec(graph, &format!("{p}.attn_kv_a_mqa.weight"), x)?;
     let key = w.encode_matvec(graph, &format!("{p}.indexer.attn_k.weight"), x)?;
     let gate = w.encode_matvec(graph, &format!("{p}.indexer_compressor_gate.weight"), x)?;
     let weights = w.encode_matvec(graph, &format!("{p}.indexer.proj.weight"), x)?;
+    if parallel {
+        graph.end_projection_level()?;
+    }
     let qnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_q_a_norm.weight"))?)?;
     let q = graph.rms_norm(&q, &qnorm, c.q_rank, c.rms_eps)?;
+    if parallel {
+        graph.begin_projection_level()?;
+    }
     let query = w.encode_matvec(graph, &format!("{p}.attn_q_b.weight"), &q)?;
     let index_query = w.encode_matvec(graph, &format!("{p}.indexer.attn_q_b.weight"), &q)?;
+    if parallel {
+        graph.end_projection_level()?;
+    }
     let kvnorm = DecodeGraph::upload(&w.vector(&format!("{p}.attn_kv_a_norm.weight"))?)?;
     let latent = graph.rms_norm(&latent, &kvnorm, c.kv_rank, c.rms_eps)?;
     let keynorm = DecodeGraph::upload(&w.vector(&format!("{p}.indexer.k_norm.weight"))?)?;
@@ -1592,6 +2109,46 @@ mod tests {
     ) {
         assert_eq!(actual.len(), expected.len());
         assert!(actual.iter().zip(expected).all(|(&a, &b)| (a - b).abs() < tolerance));
+    }
+
+    #[cfg(feature = "metal")]
+    #[stark_test]
+    fn encoder_state_allowance_includes_context_growth_and_persistent_state() {
+        let mut config = Config {
+            hidden: 4096,
+            heads: 32,
+            kda_heads: 48,
+            kda_dim: 128,
+            conv_kernel: 4,
+            layer_types: (0..45).map(|layer| layer % 4 != 3).collect(),
+            dense_layers: 3,
+            intermediate: 11_008,
+            expert_intermediate: 2048,
+            experts: 288,
+            active_experts: 8,
+            shared_experts: 1,
+            hc: 4,
+            hc_iters: 20,
+            rms_eps: 1e-5,
+            hc_eps: 1e-6,
+            decay_lower_bound: -5.0,
+            q_rank: 512,
+            kv_rank: 512,
+            qk_dim: 256,
+            value_dim: 256,
+            index_heads: 4,
+            index_dim: 128,
+            index_pool: 4,
+            index_topk: 2048,
+            swiglu_limit: 10.0,
+            routed_scale: 2.5,
+            vocab: 154_880,
+            max_context: 4096,
+        };
+        let bounded = encoder_state_allowance(&config).unwrap();
+        assert!(bounded > 512 * 1024 * 1024 && bounded < 2 * 1024 * 1024 * 1024);
+        config.max_context = 1_048_576;
+        assert!(encoder_state_allowance(&config).unwrap() > 8 * 1024 * 1024 * 1024);
     }
 
     #[stark_test]
