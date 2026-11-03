@@ -73,3 +73,8 @@ records the same checks for recurrent-state snapshots on the native Lily-format
 Qwen3.8 backend.
 The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
 records reuse and first-text timing for one real agent session.
+The [OpenCode Desktop managed-client record](archive/runs/2026-11-01-opencode-managed-client.md)
+covers adding OpenCode Desktop as a second managed client, and the
+[OpenCode desktop run](archive/runs/2026-11-02-opencode-desktop-live.md)
+records Connect, live configuration reload, chat, per-engine Allow and
+Disconnect with the official 2.2.5 app.
