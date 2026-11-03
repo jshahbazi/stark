@@ -1,0 +1,81 @@
+{
+  "abba_blocks": 10,
+  "all_outputs_match": true,
+  "baseline_runtime_sha256": "1ca2a313bfd7b48059aeab52d5f3077053cb7ea663b15db91b1e48813f6d9353",
+  "cases": {
+    "construction": {
+      "native": {
+        "max_ms": 12.07354199141264,
+        "median_ms": 10.79333300003782,
+        "min_ms": 6.719917000737041,
+        "samples": 20
+      },
+      "python": {
+        "max_ms": 53.78379195462912,
+        "median_ms": 49.49991698958911,
+        "min_ms": 45.84645899012685,
+        "samples": 20
+      }
+    },
+    "decision_pair": {
+      "native": {
+        "max_ms": 33.002874988596886,
+        "median_ms": 18.24762500473298,
+        "min_ms": 12.725999986287206,
+        "samples": 20
+      },
+      "python": {
+        "max_ms": 115.39029196137562,
+        "median_ms": 99.5584795018658,
+        "min_ms": 91.43695799866691,
+        "samples": 20
+      }
+    },
+    "history_64k": {
+      "message_content_bytes": 65536,
+      "native": {
+        "max_ms": 25.00108303502202,
+        "median_ms": 11.529667011927813,
+        "min_ms": 6.79433299228549,
+        "samples": 20
+      },
+      "python": {
+        "max_ms": 68.49612499354407,
+        "median_ms": 59.10658300854266,
+        "min_ms": 45.81762501038611,
+        "samples": 20
+      }
+    },
+    "short": {
+      "message_content_bytes": 128,
+      "native": {
+        "max_ms": 11.869875015690923,
+        "median_ms": 8.963916479842737,
+        "min_ms": 7.263458974193782,
+        "samples": 20
+      },
+      "python": {
+        "max_ms": 53.73058299301192,
+        "median_ms": 47.780166467418894,
+        "min_ms": 43.90379099640995,
+        "samples": 20
+      }
+    }
+  },
+  "fixture_sha256": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5",
+  "native_worker_sha256": "eda0036eeb558500e3fe0c72c542f681b2ebd1732a140631dd3e790335cccdb9",
+  "platform": "macOS-26.7.1-arm64-arm-64bit-Mach-O",
+  "python_version": "3.13.13",
+  "source_sha256": {
+    "Cargo.lock": "7bf15d29c7591376613ecee2688e309e2ee94aba7c8bc7f067fd057181384956",
+    "crates/stark-template/src/engine.rs": "45dc08d72b33c5cdf82d72ce2ce5be3adf1f172d08e15218409c91a139018888",
+    "crates/stark-template/src/limits.rs": "483ea21c6f9dafbb4445b555dfbe5b7dfd490095c8fd1e008f506241e7dc3a0d",
+    "crates/stark-template/src/main.rs": "bf1f3f76cdcce289800f616ef3846dfe6ad371fd7fbeb739a5e2a5cc004c0f47",
+    "crates/stark-template/tests/protocol.rs": "7935b01f169614509e584a8de9a921cfc30a596ee7e16901016a2a20a27c7e7a",
+    "tools/converter/scripts/benchmark_template_runtime.py": "d4f5cde1c811f06064f33d454b33ff449761dd8f0ada04a5c758f5b5beb4e145",
+    "tools/converter/stark_convert/template_runtime.py": "dc7b959320bcd3fc5f19dd94db995169e6d954e52a0c14731f5eaebfd68683ac",
+    "tools/converter/tests/fixtures/qwen3_4b_chat_template.jinja": "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
+  },
+  "status": "ok",
+  "warmup_pairs": 3
+}

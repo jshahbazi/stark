@@ -264,6 +264,7 @@ def macho_files(bundle: Path) -> list[Path]:
     required = {
         "libexec/stark-score",
         "libexec/stark-generate",
+        "libexec/stark-template",
         "libexec/python/bin/python3.13",
     }
     names = {path.relative_to(bundle).as_posix() for path in result}
@@ -676,6 +677,7 @@ def sign(options: argparse.Namespace) -> dict:
             for name in (
                 "libexec/stark-score",
                 "libexec/stark-generate",
+                "libexec/stark-template",
                 "libexec/python/bin/python3.13",
             ):
                 verify_signature(bundle / name, identity, env, notarized=True)

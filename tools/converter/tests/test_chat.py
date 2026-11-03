@@ -7,7 +7,6 @@ from argparse import Namespace
 from unittest.mock import patch
 
 import pytest
-from jinja2.exceptions import SecurityError
 
 from stark_convert.chat import ChatError, ChatRequestTooLarge, Worker, load_template, main, run_chat, terminal_text
 
@@ -149,9 +148,9 @@ def test_bad_metadata_and_sandbox(model):
             }
         )
     )
-    _, template = load_template(model)
-    with pytest.raises(SecurityError):
-        template.render(messages=[])
+    # The native evaluator rejects reflective access during admission.
+    with pytest.raises(ChatError, match="chat metadata"):
+        load_template(model)
 
 
 def test_template_loopcontrols_compile_and_run(model):

@@ -211,7 +211,7 @@ bundle_version=$(cat "$bundle/share/stark/VERSION")
 valid_version "$bundle_version" \
     || fail 'invalid bundle version'
 [ -z "$version" ] || [ "$bundle_version" = "$version" ] || fail 'bundle version does not match requested release'
-for file in bin/stark libexec/stark-score libexec/stark-generate libexec/python/bin/python3.13; do
+for file in bin/stark libexec/stark-score libexec/stark-generate libexec/stark-template libexec/python/bin/python3.13; do
     [ -x "$bundle/$file" ] || fail "bundle component missing: $file"
 done
 # Doctor exercises the relocated Python environment and the workers without a model.

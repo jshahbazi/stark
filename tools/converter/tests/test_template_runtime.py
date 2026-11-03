@@ -27,12 +27,43 @@ def test_compilation_and_rendering_never_execute_in_the_host(monkeypatch):
     assert template.render(messages=["synthetic", " control"]) == "synthetic control"
 
 
+def test_template_evaluation_does_not_launch_or_require_a_python_executable(monkeypatch):
+    import sys
+
+    commands = []
+    popen = template_runtime.Popen
+
+    def capture(command, **kwargs):
+        commands.append(command)
+        return popen(command, **kwargs)
+
+    monkeypatch.setattr(sys, "executable", "/nonexistent/template-python")
+    monkeypatch.setattr(template_runtime, "Popen", capture)
+    assert IsolatedTemplate("{{ value }}").render(value="synthetic control") == "synthetic control"
+    assert len(commands) == 2
+    assert all(len(command) == 1 and Path(command[0]).name == "stark-template" for command in commands)
+
+
+def test_missing_native_helper_has_an_actionable_chat_error(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(
+        json.dumps({"token_codec_config": {"type": "ChatCodecConfig", "prompt_template": "{{ value }}"}})
+    )
+
+    def missing():
+        raise template_runtime.TemplateHelperMissing(
+            "Native chat-template helper is missing; rebuild or reinstall Stark."
+        )
+
+    monkeypatch.setattr(template_runtime, "_template_executable", missing)
+    with pytest.raises(ChatError, match="helper is missing; rebuild or reinstall"):
+        load_template(tmp_path)
+
+
 @pytest.mark.parametrize("source", ["{{ 'x' * 1000000000 }}", "{{ 2 ** 1000000000 }}"])
 def test_compile_time_constant_expansion_is_guarded(source):
     started = time.monotonic()
-    template = IsolatedTemplate(source)
     with pytest.raises(TemplateRuntimeError):
-        template.render()
+        IsolatedTemplate(source).render()
     assert time.monotonic() - started < template_runtime.WALL_SECONDS + 1
 
 
@@ -76,48 +107,35 @@ def test_all_output_buffers_are_capped(source):
         IsolatedTemplate(source).render(messages=["x" * 1024])
 
 
-@pytest.mark.parametrize("route", ["capture", "concat", "list", "tuple", "dict", "call", "method", "filter"])
-def test_aggregate_expansion_is_charged_before_eager_arguments_accumulate(route):
-    # Every expansion is only 256 bytes; a deliberately small private budget
-    # exercises the production guard without making a large allocation.
-    values = ["p * 16"] * 64
+@pytest.mark.parametrize("route", ["capture", "concat", "list", "dict", "call", "method", "filter"])
+def test_aggregate_expansion_is_bounded_in_the_native_child(route):
+    # Individual results stay below the output cap; retained intermediates
+    # exceed the native allocator's cumulative limit before they can escape.
+    values = ["p * 16"] * 512
     if route == "capture":
         source = "{% set captured %}" + "".join("{{ " + value + " }}" for value in values) + "{% endset %}ok"
     elif route == "concat":
         source = "{{ " + " ~ ".join(values) + " }}"
-    elif route in {"list", "tuple"}:
-        left, right = ("[", "]") if route == "list" else ("(", ")")
-        source = "{% set captured = " + left + ",".join(values) + right + " %}ok"
+    elif route == "list":
+        source = "{% set captured = [" + ",".join(values) + "] %}ok"
     elif route == "dict":
         source = "{% set captured = {" + ",".join(f"'k{index}': {value}" for index, value in enumerate(values))
         source += "} %}ok"
     else:
         if route == "method":
-            values = ["p.upper()"] * 64
+            values = ["p.upper()"] * 512
         elif route == "filter":
-            values = ["p | upper"] * 64
+            values = ["p | upper"] * 512
         source = "{% set captured = dict(" + ",".join(f"k{index}={value}" for index, value in enumerate(values))
         source += ") %}ok"
-    budget = template_runtime._ExpansionBudget(16 * 1024)
-    template = template_runtime._child_environment(expansion_budget=budget)(source)
-    assert budget.used == 0
     with pytest.raises(TemplateRuntimeError):
-        template.render(p="x" * (256 if route in {"method", "filter"} else 16))
-    assert budget.used <= budget.limit
-
-
-def test_output_constant_folding_cannot_execute_filters_while_compiling():
-    budget = template_runtime._ExpansionBudget(16 * 1024)
-    template = template_runtime._child_environment(expansion_budget=budget)("{{ 'x' | replace('x', 'synthetic') }}")
-    assert budget.used == 0
-    assert template.render() == "synthetic"
-    assert budget.used > 0
+        IsolatedTemplate(source).render(p="x" * (65536 if route in {"method", "filter"} else 4096))
+    assert IsolatedTemplate("{{ value }}").render(value="healthy control") == "healthy control"
 
 
 @pytest.mark.parametrize("route", ["list", "dict", "call"])
-@pytest.mark.parametrize("value", ["x" * 256, ["x"] * 256, tuple(["x"] * 256)])
-def test_slices_charge_the_shared_budget_before_copying_into_eager_containers(route, value):
-    values = ["p[1:]"] * 64
+def test_retained_slice_copies_are_bounded_in_the_native_child(route):
+    values = ["p[1:]"] * 512
     if route == "list":
         source = "{% set captured = [" + ",".join(values) + "] %}ok"
     elif route == "dict":
@@ -126,11 +144,8 @@ def test_slices_charge_the_shared_budget_before_copying_into_eager_containers(ro
     else:
         source = "{% set captured = dict(" + ",".join(f"k{index}={item}" for index, item in enumerate(values))
         source += ") %}ok"
-    budget = template_runtime._ExpansionBudget(16 * 1024)
-    template = template_runtime._child_environment(expansion_budget=budget)(source)
     with pytest.raises(TemplateRuntimeError):
-        template.render(p=value)
-    assert budget.used <= budget.limit
+        IsolatedTemplate(source).render(p="x" * 65536)
 
 
 def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
@@ -140,36 +155,33 @@ def test_bounded_slicing_preserves_indexes_steps_and_empty_slices():
     assert IsolatedTemplate(source).render(**arguments) == expected
 
 
-@pytest.mark.parametrize("kind", ["list", "tuple", "dict"])
-def test_loop_retained_literal_containers_use_the_shared_allocation_budget(kind):
-    if kind == "dict":
-        value = "{" + ",".join(f"'k{index}': ns.value" for index in range(8)) + "}"
-    else:
-        left, right = ("[", "]") if kind == "list" else ("(", ")")
-        value = left + ",".join(["ns.value"] * 8) + right
-    source = "{% set ns=namespace(value=none) %}{% for n in range(100) %}{% set ns.value="
-    source += value + " %}{% endfor %}ok"
-    budget = template_runtime._ExpansionBudget(800)
-    template = template_runtime._child_environment(expansion_budget=budget)(source)
-    with pytest.raises(TemplateRuntimeError):
-        template.render()
-    assert budget.used <= budget.limit
-
-
-def test_bounded_literal_containers_preserve_empty_values_and_tuple_assignment():
+def test_bounded_literal_containers_preserve_empty_values_and_unpacking():
     source = (
-        "{% set empty=[] %}{% set record={'a':1, 'b':2} %}{% set pair=('x', 'y') %}"
+        "{% set empty=[] %}{% set record={'a':1, 'b':2} %}{% set pair=['x', 'y'] %}{% set left,right=pair %}"
         "{% for key,value in record.items() %}{{ key }}={{ value }};{% endfor %}"
-        "{{ empty | length }};{{ pair | join(',') }};{{ {} | length }};{{ () | length }}"
+        "{{ empty | length }};{{ pair | join(',') }};{{ left }}{{ right }};{{ {} | length }}"
     )
     expected = chat_template_environment().from_string(source).render()
     assert IsolatedTemplate(source).render() == expected
 
 
-def test_busy_template_cpu_limit_and_cleanup(monkeypatch):
-    import resource
-    import signal
+@pytest.mark.parametrize(
+    "source",
+    ["{{ ('a','b') }}", "{% set pair=('a','b') %}{{ pair | join(',') }}", "{% set pair='a','b' %}{{ pair }}"],
+)
+def test_tuple_literals_fail_closed_instead_of_changing_python_representation(source):
+    with pytest.raises(TemplateRuntimeError):
+        IsolatedTemplate(source).render()
 
+
+@pytest.mark.parametrize("role", ["user", "assistant", "unsupported"])
+def test_constant_string_membership_tuples_match_jinja(role):
+    source = "{% if role not in ('user','assistant','system') %}unsupported{% else %}{{ role }}{% endif %}"
+    expected = chat_template_environment().from_string(source).render(role=role)
+    assert IsolatedTemplate(source).render(role=role) == expected
+
+
+def test_busy_template_native_budget_and_cleanup(monkeypatch):
     template = IsolatedTemplate(BUSY)
     children = []
     popen = template_runtime.Popen
@@ -181,21 +193,26 @@ def test_busy_template_cpu_limit_and_cleanup(monkeypatch):
 
     monkeypatch.setattr(template_runtime, "Popen", capture)
     started = time.monotonic()
-    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     with pytest.raises(TemplateRuntimeError):
         template.render()
-    after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    cpu_seconds = (after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)
-    assert cpu_seconds >= template_runtime.CPU_SECONDS - 0.5
     assert time.monotonic() - started < template_runtime.WALL_SECONDS + 1
     assert len(children) == 1
     assert children[0].poll() is not None
-    assert children[0].returncode in {-signal.SIGKILL, -signal.SIGXCPU}
     assert children[0].stdin.closed and children[0].stdout.closed
 
 
 def test_wall_deadline_and_cancellation_reap_children(monkeypatch):
-    template = IsolatedTemplate(BUSY)
+    template = IsolatedTemplate("healthy control")
+    children = []
+    popen = template_runtime.Popen
+
+    def stalled_child(_command, **kwargs):
+        # Exercise the parent's deadline independently of native VM fuel.
+        child = popen(["/bin/sleep", "30"], **kwargs)
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(template_runtime, "Popen", stalled_child)
     monkeypatch.setattr(template_runtime, "WALL_SECONDS", 0.1)
     with pytest.raises(TemplateRuntimeError):
         template.render()
@@ -211,6 +228,8 @@ def test_wall_deadline_and_cancellation_reap_children(monkeypatch):
     finally:
         timer.cancel()
         timer.join()
+    assert len(children) == 2
+    assert all(child.poll() is not None and child.stdin.closed and child.stdout.closed for child in children)
 
 
 def test_source_input_and_ast_limits_fail_closed():
@@ -259,6 +278,29 @@ def test_tool_history_matches_the_existing_reviewed_template_renderer():
         "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
         "add_generation_prompt": True,
         "enable_thinking": False,
+    }
+    expected = chat_template_environment().from_string(source).render(**arguments)
+    assert IsolatedTemplate(source).render(**arguments) == expected
+
+
+@pytest.mark.parametrize(
+    "profile", ["gemma-3", "lfm2.5-instruct", "qwen3", "qwen3-instruct", "qwen3-thinking", "qwen3.5"]
+)
+@pytest.mark.parametrize("generation_prompt", [False, True])
+@pytest.mark.parametrize("thinking", [False, True])
+def test_inherited_model_templates_match_jinja_output(profile, generation_prompt, thinking):
+    fixture = json.loads((Path(__file__).parent / "fixtures/rendering_templates.json").read_text())
+    source = fixture["templates"][profile]
+    arguments = {
+        "messages": [
+            {"role": "system", "content": "Synthetic system."},
+            {"role": "user", "content": "Synthetic évidence with literal <think> text."},
+        ],
+        "tools": None,
+        "add_generation_prompt": generation_prompt,
+        "enable_thinking": thinking,
+        "bos_token": "synthetic-bos",
+        "eos_token": "synthetic-eos",
     }
     expected = chat_template_environment().from_string(source).render(**arguments)
     assert IsolatedTemplate(source).render(**arguments) == expected

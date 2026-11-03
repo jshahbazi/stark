@@ -53,38 +53,59 @@ The [Swift and local signed-package replay](archive/runs/2026-10-27-qwen35-swift
 
 ## Chat template evaluation
 
-Model-provided Jinja chat templates are compiled and rendered in a fresh
-disposable process for each operation. The evaluator limits template source to
-256 KiB, the JSON request to 2 MiB, rendered output to 1 MiB, cumulative
-expansion and evaluation work to 16 MiB, CPU time to 2 seconds and wall time to
-5 seconds. The cumulative budget is not a peak-memory guarantee. A restricted
-Jinja environment controls available globals, calls and filters; arithmetic,
-collection sizes, nesting and output expansion are guarded. A template that
-uses unsupported features or exceeds a limit is rejected with a fixed error.
+Model-provided Jinja chat templates are compiled and rendered by the Rust
+`stark-template` helper using MiniJinja 2.24.0. Each compilation check and render
+starts a fresh native process. No Python interpreter is started for evaluation,
+and there is no Python rendering fallback. The caller transfers only bounded
+JSON over private pipes and keeps the existing model-worker transaction
+serialized.
 
-On macOS, the parent samples child RSS every 10 ms and terminates evaluation
-above 256 MiB. This is a watchdog threshold, not a kernel-enforced memory
-ceiling. Other POSIX systems additionally apply an address-space resource
-limit. Cancellation terminates the disposable child. Template source,
-rendering inputs and rendered output are not logged or persisted by the
-evaluator. See the [runtime helper](../tools/converter/stark_convert/template_runtime.py).
+The evaluator limits template source to 256 KiB, the JSON request to 2 MiB,
+rendered output to 1 MiB, source tokens to 16,384, VM fuel to 1,000,000 and
+runtime recursion to 128. Input collections, value depth and node counts are
+also bounded. A process-wide allocator rejects more than 16 MiB of cumulative
+requested heap allocations, including JSON parsing, compilation, intermediate
+values, captures, slices and output. Reallocation charges the full replacement
+size. This replaces the Python evaluator's estimated expansion/work budget with
+accounting of actual Rust allocation requests; it can reject expensive templates
+earlier. It does not measure resident memory, native stacks or allocator overhead.
 
-Each render starts a fresh Python interpreter, transfers the request over private
-pipes and recompiles the template. This deliberately adds request startup
-latency: model-provided templates are untrusted programs, and a disposable
-process gives each evaluation its own resource budgets and lets the host
-terminate runaway or cancelled work. Loading a template also runs an initial
-compilation check in a disposable process.
+Each child has a hard 2-second CPU limit and disables core dumps and regular-file
+output. The parent enforces a 5-second wall deadline and samples RSS every 10 ms,
+terminating the child above 256 MiB. This RSS watchdog is not a kernel-enforced
+memory ceiling. Other POSIX systems additionally apply a 256 MiB address-space
+limit. Cancellation terminates and reaps the disposable child. Template source,
+inputs, rendered output and compiler diagnostics are never logged or persisted
+by the evaluator.
 
-Normal chat renders once per turn before tokenization and inference. Decision
-scoring renders twice to verify the assistant answer boundary. A local synthetic
-Qwen3-template measurement found median render times of about 49 ms for a short
-conversation and 62 ms for 64 KiB of message content, compared with less than
-1 ms for the previous in-process renderer. The evaluator runs before native
-generation; it adds no work to the per-token decode loop. This startup cost can
-be a larger share of latency for short requests. See the
-[source-bound latency baseline](benchmarks/CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
-for the method, host, limits and future optimization requirements.
+The helper exposes a restricted set of globals, methods and filters, with no
+filesystem loader or network access API. Unsupported operations, reflective
+attributes, includes/imports and over-limit programs fail with fixed errors.
+Reviewed model templates are tested against Jinja2 for exact output, including
+tool history and JSON formatting. MiniJinja is not a complete Python runtime;
+unsupported method variants and out-of-range integer inputs are rejected.
+Tuple-valued expressions are unsupported because this MiniJinja version
+represents them as lists. Constant-string tuple literals are admitted only as
+direct `in` / `not in` membership operands, where those collection semantics
+agree. Other tuple literals are rejected; list literals and unpacking remain
+supported.
+See the [native implementation](../crates/stark-template/src/engine.rs) and
+[host lifecycle wrapper](../tools/converter/stark_convert/template_runtime.py).
+
+Fresh process startup and template compilation remain intentional security
+costs. Normal chat renders once per turn before tokenization and inference;
+decision scoring renders twice to verify the assistant answer boundary.
+The evaluator adds no work to the per-token decode loop. The
+[native latency study](benchmarks/NATIVE_CHAT_TEMPLATE_2026_11_03.md) compares
+this path with the preserved [Python isolation baseline](benchmarks/CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
+and records the scope and limits of the measurements.
+
+Installed distributions bundle `libexec/stark-template`, checked by `stark doctor`.
+Source checkouts must build it before running chat or converter tests:
+
+```sh
+cargo +1.98.1 build --release --locked -p stark-template
+```
 
 ## Private JSON-lines protocol
 

@@ -6,7 +6,7 @@ Read [AGENTS.md](AGENTS.md) for the repository rules (provenance, logging, cachi
 
 | Tool | Version | Used for |
 | --- | --- | --- |
-| Rust | 1.98.1 via rustup (`rust-toolchain.toml`) | Building and testing the engine and workers |
+| Rust | 1.98.1 via rustup (`rust-toolchain.toml`) | Building and testing the engine, inference workers and template evaluator |
 | Rust nightly | `nightly-2026-10-01` | `cargo fmt`, because the inherited rustfmt configuration needs nightly options, and the engine unit suite (see below) |
 | Xcode with the Metal Toolchain | current | Compiling `.metal` kernels; the Command Line Tools package alone is not enough |
 | uv | 0.12.24 | Every Python environment |
@@ -20,6 +20,7 @@ Run commands from the repository root. Keep dependencies locked: `Cargo.lock`, `
 | --- | --- | --- |
 | Engine | `crates/stark-engine/src`, kernels under `src/backends/metal/kernel`, build script under `build/` | `crates/stark-engine/unit` (nightly, see below), `tests/cxx_string.rs` |
 | Workers | `crates/stark-generate/src`, `crates/stark-score/src` | Unit tests inside each module; `scripts/test_generation_process.py`, `scripts/test_scoring_process.py` |
+| Template evaluator | `crates/stark-template/src` | Rust unit tests and `tools/converter/tests/test_template_runtime.py` |
 | Converter, chat, API, app backend | `tools/converter/stark_convert` | `tools/converter/tests` (pytest, model-free, fixtures with recorded provenance) |
 | Menu bar app | `apps/menu-bar/Sources` | `scripts/test_build_menubar.py`, `scripts/test_app_update.py`, `scripts/test_menubar_controller.py`, `scripts/test_menubar_windows.py`, `scripts/test_desktop_connections.py`, `scripts/test_openwork_connector_installer.py`, `DesktopConnectionsTests`, `OpenWorkConnectorInstallerTests` (some need Xcode, not run in CI) |
 | Installer and release | `install.sh`, `scripts/stark`, `scripts/*.py`, `.github/workflows` | `scripts/test_*.py`, `scripts/ci/test_*.py` |
@@ -36,10 +37,11 @@ uv run --locked --python 3.12.13 --script scripts/ci/check_repository.py
 
 For API credential or connection-setting changes, also run `uv run --project tools/converter --locked --python 3.13.13 python scripts/test_api_credentials.py` on macOS. These checks use injected storage and a disposable Keychain service, including child-process reuse; they never access the installed app's credential. The menu-bar controller harness checks private-pipe activation, recovery failures, blocked Keychain operations and persisted port settings. Packaged relaunch/upgrade checks use a separate test bundle identifier and credential namespace; signed production upgrades need separate evidence.
 
-Then run the checks for the area you changed; the complete list, matching CI, is in [CI local checks](docs/CI.md#local-checks). The two commands most changes need:
+Then run the checks for the area you changed; the complete list, matching CI, is in [CI local checks](docs/CI.md#local-checks). Most changes need these checks. Build the native template evaluator before running the converter suite:
 
 ```sh
-cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate --check
+cargo +nightly-2026-10-01 fmt -p stark-engine -p stark-engine-macros -p stark-score -p stark-generate -p stark-template --check
+cargo +1.98.1 build --release --locked -p stark-template
 HF_HUB_OFFLINE=1 TOKENIZERS_PARALLELISM=false uv run --project tools/converter --locked --python 3.13.13 pytest tools/converter/tests -q
 ```
 
@@ -48,7 +50,13 @@ Build the workers separately so the scorer's `optimized` features never unify in
 ```sh
 cargo +1.98.1 build --release --locked -p stark-generate
 cargo +1.98.1 build --release --locked -p stark-score --features optimized
+cargo +1.98.1 build --release --locked -p stark-template
 ```
+
+The `stark-template` helper is required for chat and decision rendering; there
+is no Python evaluator fallback. Standalone and app builds include it in
+`libexec/stark-template` and verify it with a model-free self-test and a synthetic
+render after relocation. Source-checkout tools use `target/release/stark-template`.
 
 Use a distinct `CARGO_TARGET_DIR` for every experimental source checkout or
 copied workspace. Reusing one target across same-named path dependencies can

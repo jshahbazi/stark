@@ -59,7 +59,9 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
 
-    def bundle(self, version="0.1.0-test.1", *, doctor_ok=True, extra=None, app=False):
+    def bundle(
+        self, version="0.1.0-test.1", *, doctor_ok=True, extra=None, app=False, omit=()
+    ):
         archive = (
             self.root / f"bundle-{len(list(self.root.glob('bundle-*.tar.gz')))}.tar.gz"
         )
@@ -72,6 +74,7 @@ class InstallerTests(unittest.TestCase):
             ),
             "stark/libexec/stark-score": ("#!/bin/sh\nexit 0\n", 0o755),
             "stark/libexec/stark-generate": ("#!/bin/sh\nexit 0\n", 0o755),
+            "stark/libexec/stark-template": ("#!/bin/sh\nexit 0\n", 0o755),
             "stark/libexec/python/bin/python3.13": ("#!/bin/sh\nexit 0\n", 0o755),
         }
         if app:
@@ -112,6 +115,8 @@ class InstallerTests(unittest.TestCase):
                         path.read_bytes(),
                         path.stat().st_mode & 0o777,
                     )
+        for name in omit:
+            members.pop(name)
         with tarfile.open(archive, "w:gz") as output:
             for name, (text, mode) in members.items():
                 entry = tarfile.TarInfo(name)
@@ -197,6 +202,16 @@ class InstallerTests(unittest.TestCase):
         self.assertIn(
             "release bundle unavailable",
             self.run_install("--version", "0.1.0", expected=1).stderr,
+        )
+
+    def test_missing_template_helper_keeps_previous_installation(self):
+        self.run_install("--archive", self.bundle())
+        archive = self.bundle("0.1.0-test.2", omit=("stark/libexec/stark-template",))
+        result = self.run_install("--archive", archive, expected=1)
+        self.assertIn("bundle component missing: libexec/stark-template", result.stderr)
+        self.assertEqual(
+            (self.prefix / "lib/stark/current").readlink(),
+            Path("releases/0.1.0-test.1"),
         )
 
     def mock_downloads(

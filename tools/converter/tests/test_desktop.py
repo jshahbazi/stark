@@ -669,9 +669,12 @@ def test_same_model_worker_fault_after_cancellation_keeps_cancellation_category(
 @pytest.mark.parametrize(
     "reason,status,code", [(None, 499, "request_cancelled"), ("deadline", 504, "request_timeout")]
 )
-def test_api_cancels_isolated_template_render_without_stopping_worker(desktop, model, reason, status, code):
+def test_api_cancels_isolated_template_render_without_stopping_worker(
+    desktop, model, reason, status, code, monkeypatch
+):
     import threading
 
+    from stark_convert import template_runtime
     from stark_convert.chat import load_template
     from stark_convert.local_api import APIError
 
@@ -684,6 +687,9 @@ def test_api_cancels_isolated_template_render_without_stopping_worker(desktop, m
     )
     config_path.write_text(json.dumps(config))
     _, desktop.template = load_template(model)
+    popen = template_runtime.Popen
+    # A stalled child exercises cancellation independently of native VM fuel.
+    monkeypatch.setattr(template_runtime, "Popen", lambda _command, **kwargs: popen(["/bin/sleep", "30"], **kwargs))
     control = threading.Event()
     control.reason = reason
     timer = threading.Timer(0.1, control.set)

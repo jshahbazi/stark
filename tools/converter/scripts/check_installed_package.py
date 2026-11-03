@@ -106,6 +106,10 @@ def check():
         venv = root / "venv"
         run([uv, "venv", "--python", sys.executable, str(venv)], cwd=root, environment=environment)
         python = venv / "bin" / "python"
+        template_worker = PROJECT.parent.parent / "target/release/stark-template"
+        if not template_worker.is_file():
+            raise RuntimeError("missing_release_template_worker")
+        shutil.copy2(template_worker, venv / "bin/stark-template")
         run(
             [uv, "pip", "install", "--python", str(python), "--require-hashes", "-r", str(requirements)],
             cwd=root,

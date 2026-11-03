@@ -81,13 +81,14 @@ isolate a causal mode effect. All 60 outputs match their references, the
 
 ## Host request latency
 
-**Chat-template isolation (2026-11-03).** The initial synthetic component
-baseline measures median rendering at 49 ms for a short conversation and 62 ms
-for 64 KiB of message content using a fresh restricted evaluator per render.
-The [latency record](CHAT_TEMPLATE_ISOLATION_2026_11_03.md) explains the security
-rationale, source, host and method. End-to-end inference latency was not measured.
-This is the first template-isolation baseline; earlier engine throughput results
-remain bound to their original implementations and timing windows.
+**Native chat-template isolation (2026-11-03).** A fresh Rust helper reduces
+median short rendering from 48 to 9 ms and 64 KiB-history rendering from 59 to
+12 ms in the matched component study. Decision scoring's two sequential renders
+fall from 100 to 18 ms. The [native study](NATIVE_CHAT_TEMPLATE_2026_11_03.md)
+records exact-output controls, resource limits, compatibility restrictions and
+source hashes. The [initial Python baseline](CHAT_TEMPLATE_ISOLATION_2026_11_03.md)
+is retained unchanged. End-to-end inference latency was not measured; earlier
+engine throughput results remain bound to their original timing windows.
 
 ## Engine comparison history
 

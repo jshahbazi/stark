@@ -20,7 +20,13 @@ from ._build_metadata import ConversionError, file_hash, open_regular
 from .generation_eta import progress_frame
 from .media import MAX_IMAGE_BYTES, ImageData, MediaError, PrivateMediaStore
 from .mtp import mtp_capabilities, resolve_mtp
-from .template_runtime import IsolatedTemplate, TemplateCancelled, TemplateRuntimeError, TemplateSizeLimit
+from .template_runtime import (
+    IsolatedTemplate,
+    TemplateCancelled,
+    TemplateHelperMissing,
+    TemplateRuntimeError,
+    TemplateSizeLimit,
+)
 from .vision_runtime import (
     CONFIGURED_FAMILY_PROFILE,
     family_image_input_contract,
@@ -201,6 +207,8 @@ def load_template(model, *, expected_hashes=None):
                 raise ValueError
         template = _ChatTemplate(source)
         return codec, template
+    except TemplateHelperMissing:
+        raise ChatError("Native chat-template helper is missing; rebuild or reinstall Stark.") from None
     except (OSError, ValueError, KeyError, TypeError, ConversionError, TemplateError, SyntaxError):
         raise ChatError("Cannot read chat metadata; use a converted language model with a chat template.") from None
 

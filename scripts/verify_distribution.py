@@ -239,6 +239,7 @@ def verify(
             executables = {
                 "libexec/stark-score",
                 "libexec/stark-generate",
+                "libexec/stark-template",
                 "libexec/python/bin/python3.13",
             }
             for path in paths:

@@ -1,0 +1,17 @@
+[package]
+name = "stark-template"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["preserve_order", "float_roundtrip"] }
+minijinja = { version = "=2.24.0", default-features = false, features = ["builtins", "serde", "macros", "multi_template", "loop_controls", "fuel", "preserve_order", "unstable_machinery"] }
+minijinja-contrib = { version = "=2.24.0", default-features = false, features = ["pycompat"] }
+
+[lints]
+workspace = true

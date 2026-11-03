@@ -129,6 +129,8 @@ class BundleConstructionTests(unittest.TestCase):
             worker.write_bytes(b"fresh release worker")
             score_worker = bundle / "libexec/stark-score"
             score_worker.write_bytes(b"fresh release score worker")
+            template_worker = bundle / "libexec/stark-template"
+            template_worker.write_bytes(b"fresh release template worker")
             calls = []
 
             def command_result(command, stage, *_args, **_kwargs):
@@ -138,6 +140,10 @@ class BundleConstructionTests(unittest.TestCase):
                 self.assertEqual(command[command.index("--worker") + 1], str(worker))
                 self.assertEqual(
                     command[command.index("--score-worker") + 1], str(score_worker)
+                )
+                self.assertEqual(
+                    command[command.index("--template-worker") + 1],
+                    str(template_worker),
                 )
                 self.assertNotEqual(
                     command[command.index("--score-worker") + 1],
@@ -664,15 +670,36 @@ class BundleConstructionTests(unittest.TestCase):
             (rust_docs / "COPYRIGHT-library.html").write_text("rust library notice")
             score_id = "path+file:///workspace#stark-score@0.1.0"
             generate_id = "path+file:///workspace#stark-generate@0.1.0"
+            template_id = "path+file:///workspace#stark-template@0.1.0"
+            renderer_id = "registry+https://example.test/index#renderer@1.0.0"
+            renderer = root / "renderer"
+            renderer.mkdir()
+            (renderer / "LICENSE").write_text("synthetic renderer license\n")
             metadata = {
                 "packages": [
                     {"id": score_id, "name": "stark-score", "source": None},
                     {"id": generate_id, "name": "stark-generate", "source": None},
+                    {"id": template_id, "name": "stark-template", "source": None},
+                    {
+                        "id": renderer_id,
+                        "name": "renderer",
+                        "version": "1.0.0",
+                        "source": "registry+https://example.test/index",
+                        "manifest_path": str(renderer / "Cargo.toml"),
+                        "license": "MIT",
+                    },
                 ],
                 "resolve": {
                     "nodes": [
                         {"id": score_id, "deps": []},
                         {"id": generate_id, "deps": []},
+                        {
+                            "id": template_id,
+                            "deps": [
+                                {"pkg": renderer_id, "dep_kinds": [{"kind": None}]}
+                            ],
+                        },
+                        {"id": renderer_id, "deps": []},
                     ]
                 },
             }
@@ -693,6 +720,12 @@ class BundleConstructionTests(unittest.TestCase):
             ):
                 distribution.dependency_licenses(bundle, "cargo", {})
 
+            self.assertEqual(
+                (
+                    bundle / "share/stark/licenses/cargo/renderer-1.0.0/LICENSE"
+                ).read_text(),
+                "synthetic renderer license\n",
+            )
             self.assertEqual(
                 (bundle / "share/stark/licenses/pytorch-LICENSE").read_text(),
                 "scripts/licenses/distribution/pytorch-LICENSE\n",
@@ -840,7 +873,7 @@ class BundleConstructionTests(unittest.TestCase):
             root = Path(temporary)
             release = root / "target" / "release"
             release.mkdir(parents=True)
-            for name in ("stark-score", "stark-generate"):
+            for name in ("stark-score", "stark-generate", "stark-template"):
                 (release / name).write_bytes(name.encode())
             bundle = root / "bundle"
             with (
@@ -851,18 +884,22 @@ class BundleConstructionTests(unittest.TestCase):
             ):
                 distribution.build_native(bundle, "cargo", {})
             calls = [call.args[0] for call in command.call_args_list]
-            self.assertEqual(len(calls), 2)
+            self.assertEqual(len(calls), 3)
             self.assertEqual(calls[0][-2:], ["--features", "optimized"])
             self.assertNotIn("--features", calls[1])
+            self.assertNotIn("--features", calls[2])
             self.assertTrue(
                 all("--locked" in call and "+1.98.1" in call for call in calls)
             )
-            self.assertEqual(verify.call_count, 2)
+            self.assertEqual(verify.call_count, 3)
             self.assertEqual(
                 (bundle / "libexec" / "stark-score").read_bytes(), b"stark-score"
             )
             self.assertEqual(
                 (bundle / "libexec" / "stark-generate").read_bytes(), b"stark-generate"
+            )
+            self.assertEqual(
+                (bundle / "libexec" / "stark-template").read_bytes(), b"stark-template"
             )
 
     def test_version_cannot_escape_archive_or_install_directory(self):
@@ -953,6 +990,33 @@ class BundleConstructionTests(unittest.TestCase):
                 ),
             ):
                 distribution.verify_native(Path("/binary"), {})
+
+    def test_template_native_smoke_checks_fixed_self_test_protocol(self):
+        for stdout, valid in (
+            (b'{"status":"ok","protocol":"stark-template-v1"}\n', True),
+            (b'{"ready":true}\n', False),
+        ):
+            replies = [
+                subprocess.CompletedProcess([], 0, stdout=b"arm64\n", stderr=b""),
+                subprocess.CompletedProcess([], 0, stdout=b"binary:\n", stderr=b""),
+                subprocess.CompletedProcess(
+                    [], 0, stdout=b"      minos 26.4\n", stderr=b""
+                ),
+                subprocess.CompletedProcess([], 0, stdout=stdout, stderr=b""),
+            ]
+            with (
+                self.subTest(valid=valid),
+                patch.object(distribution, "run", side_effect=replies) as probe,
+            ):
+                if valid:
+                    distribution.verify_native(Path("/stark-template"), {})
+                else:
+                    with self.assertRaisesRegex(distribution.BuildError, "reply"):
+                        distribution.verify_native(Path("/stark-template"), {})
+            self.assertEqual(
+                probe.call_args.args[0], ["/stark-template", "--self-test"]
+            )
+            self.assertEqual(probe.call_args.kwargs["expected"], 0)
 
     def test_runtime_dereferences_internal_aliases_and_refuses_external_files(self):
         with tempfile.TemporaryDirectory() as temporary:
