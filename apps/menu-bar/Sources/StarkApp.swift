@@ -3062,22 +3062,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             icon.size = NSSize(width: 24, height: 24 * ratio); icon.isTemplate = true
             status.button?.image = icon
             if let button = status.button {
-                let eyes = MenuBarStatusEyes(template: icon)
-                eyes.translatesAutoresizingMaskIntoConstraints = false
-                button.addSubview(eyes)
+                let badge = MenuBarStatusBadge(iconSize: icon.size)
+                badge.translatesAutoresizingMaskIntoConstraints = false
+                button.addSubview(badge)
                 NSLayoutConstraint.activate([
-                    eyes.centerXAnchor.constraint(equalTo: button.centerXAnchor),
-                    eyes.centerYAnchor.constraint(equalTo: button.centerYAnchor),
-                    eyes.widthAnchor.constraint(equalToConstant: icon.size.width),
-                    eyes.heightAnchor.constraint(equalToConstant: icon.size.height),
+                    badge.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                    badge.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                    badge.widthAnchor.constraint(equalToConstant: icon.size.width),
+                    badge.heightAnchor.constraint(equalToConstant: icon.size.height),
                 ])
                 modelStatusObserver = engine.$loadedID.combineLatest(engine.$state)
                     .map { id, state in
                         !id.isEmpty && !["idle", "error", "loading", "stopping"].contains(state)
                     }
                     .removeDuplicates()
-                    .sink { [weak eyes, weak button] running in
-                        eyes?.modelRunning = running
+                    .sink { [weak badge, weak button] running in
+                        badge?.modelRunning = running
                         let description = running ? "Stark — model running" : "Stark — no model running"
                         button?.toolTip = description
                         button?.setAccessibilityLabel(description)
