@@ -112,6 +112,16 @@ impl DecodeGraph {
             return Err(Error::Invalid("same-weight prefill shape"));
         }
         let parameters = operation.parameters_for_input(operation.columns)?;
+        // Validate backing spans before either dispatch policy. The legacy
+        // fallback must reject malformed internal views just like MMA does.
+        let in_bounds =
+            |view: &MappedSlice| view.offset.checked_add(view.length).is_some_and(|end| end <= view.buffer.length());
+        let matrix = &operation.matrices[0];
+        if !in_bounds(&matrix.codes)
+            || matrix.planes.as_ref().is_some_and(|(scales, biases)| !in_bounds(scales) || !in_bounds(biases))
+        {
+            return Err(Error::Invalid("same-weight prefill backing span"));
+        }
         let output = self.scratch(operation.rows * tokens)?;
         if !use_mma || !admitted(operation, tokens)? {
             for token in 0..tokens {
