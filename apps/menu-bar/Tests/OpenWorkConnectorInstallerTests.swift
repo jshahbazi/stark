@@ -302,6 +302,26 @@ struct OpenWorkConnectorInstallerTests {
                                                         socketPath: fixture.socket, apiBaseURL: "http://127.0.0.1:18134/v1")
             try check(try otherPort.remove())
             try check(!(try fixture.installer.remove()))
+        case "shared-client-entry":
+            // OpenWork and OpenCode can read the same global configuration and
+            // install the same entry: one client's install is the other's no-op.
+            try fixture.write("{\"plugins\":[\"other-plugin\"]}")
+            try check(try fixture.installer.install())
+            let first = try Data(contentsOf: fixture.file)
+            let second = OpenWorkConnectorInstaller(configDirectory: fixture.config, connectorDirectory: fixture.connector,
+                                                     socketPath: fixture.socket, apiBaseURL: fixture.apiBaseURL)
+            try check(!(try second.install()))
+            try check(try Data(contentsOf: fixture.file) == first)
+            let moved = OpenWorkConnectorInstaller(configDirectory: fixture.config, connectorDirectory: fixture.connector,
+                                                    socketPath: fixture.socket, apiBaseURL: "http://127.0.0.1:18134/v1")
+            try check(try moved.install())
+            let text = try fixture.text()
+            try check(text.components(separatedBy: OpenWorkConnectorInstaller.ownershipMarker).count == 2)
+            try check(text.contains("\"other-plugin\"") && text.contains("http://127.0.0.1:18134/v1"))
+            try check(!(try moved.install()) && !(try moved.install()))
+            try check(OpenWorkConnectorInstallError.invalidConfiguration.message == OpenWorkConnectorInstallError.invalidConfiguration.message("OpenWork"))
+            try check(OpenWorkConnectorInstallError.invalidConfiguration.message("OpenCode")
+                      == "OpenCode's settings are invalid or too large. Fix them in OpenCode, then reconnect.")
         case "namespace-reconnect":
             let oldSocket = "/private/tmp/stark-\(geteuid())-0123456789abcdef/openwork.sock"
             let entry = try fixture.ownedEntry(socket: oldSocket)

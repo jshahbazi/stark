@@ -1994,6 +1994,11 @@ class ControllerLifecycleTests(unittest.TestCase):
                         ROOT
                         / "apps/menu-bar/Sources/OpenWorkConnectionController.swift"
                     ),
+                    str(
+                        ROOT
+                        / "apps/menu-bar/Sources/OpenCodeConnectionController.swift"
+                    ),
+                    str(ROOT / "apps/menu-bar/Sources/DesktopConnections.swift"),
                     "-o",
                     str(cls.executable),
                 ],

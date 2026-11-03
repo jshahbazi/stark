@@ -1124,7 +1124,7 @@ final class EngineController: ObservableObject {
     private let apiCredentialQueue = DispatchQueue(label: "stark.api.credentials", qos: .userInitiated)
     private var apiCredentialOperation: UUID?
 
-    lazy var openWorkConnection = OpenWorkConnectionController(service: apiCredentials.service,
+    lazy var desktopConnections = DesktopConnections(service: apiCredentials.service,
         send: { [weak self] value in self?.send(value) ?? false },
         snapshot: { [weak self] in
             guard let self else { return ["api_base_url": "", "models": []] }
@@ -1322,9 +1322,9 @@ final class EngineController: ObservableObject {
         case "connection":
             apiBaseURL = event["base_url"] as? String ?? ""
             apiMessage = event["message"] as? String ?? "Local API is available on this Mac."
-            openWorkConnection.receiveConnection(event)
+            desktopConnections.receiveConnection(event)
         case "api_client":
-            openWorkConnection.receiveAcknowledgement(event)
+            desktopConnections.receiveAcknowledgement(event)
         case "models":
             models = (event["models"] as? [[String: Any]] ?? []).compactMap {
                 guard let id = $0["id"] as? String, let name = $0["name"] as? String,
@@ -2034,7 +2034,7 @@ final class EngineController: ObservableObject {
 
     func shutdown() {
         shuttingDown = true
-        openWorkConnection.shutdown()
+        desktopConnections.shutdown()
 #if STARK_CONNECTION_VALIDATION
         ConnectionPrivacyAudit.finish()
 #endif

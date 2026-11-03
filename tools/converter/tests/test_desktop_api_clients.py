@@ -37,7 +37,7 @@ def command(controller, **overrides):
     return events(controller)[-1]
 
 
-def revoke(controller, *, all_clients=False):
+def revoke(controller, *, all_clients=False, **overrides):
     payload = {
         "command": "revoke_api_clients",
         "request_id": str(uuid.uuid4()),
@@ -45,6 +45,7 @@ def revoke(controller, *, all_clients=False):
     }
     if not all_clients:
         payload["client_id"] = "openwork-peer"
+    payload.update(overrides)
     controller.dispatch(payload)
     return events(controller)[-1]
 
@@ -102,6 +103,35 @@ def test_grants_require_a_live_configured_listener_and_revoke_all_is_explicit(de
         assert ack["error_code"] == "api_not_running"
     finally:
         desktop.api.close()
+
+
+def test_client_prefix_revoke_is_scoped_to_one_managed_client(server):
+    assert command(server, client_id="openwork.10.1.2")["ok"] is True
+    assert command(server, client_id="opencode.20.3.4", api_key=REPLACEMENT)["ok"] is True
+    ack = revoke(server, all_clients=True, client_prefix="opencode.")
+    assert ack["ok"] is True and set(ack) == {"event", "request_id", "ok", "api_session"}
+    assert request(server.api, REPLACEMENT)[0] == 401
+    assert request(server.api, CAP)[0] == 200
+    assert revoke(server, all_clients=True, client_prefix="openwork.")["ok"] is True
+    assert request(server.api, CAP)[0] == 401 and request(server.api, MASTER)[0] == 200
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"client_prefix": None},
+        {"client_prefix": ""},
+        {"client_prefix": "opencode/"},
+        {"client_prefix": "opencode.", "client_id": "opencode.20.3.4"},
+        {"client_prefix": "opencode.", "api_key": CAP},
+    ],
+)
+def test_client_prefix_revoke_validation_is_strict_and_content_free(server, overrides):
+    assert command(server, client_id="opencode.20.3.4")["ok"] is True
+    ack = revoke(server, all_clients=True, **overrides)
+    assert ack["ok"] is False and ack["error_code"] == "invalid_api_client_command"
+    assert CAP not in server.output.getvalue() and MASTER not in server.output.getvalue()
+    assert request(server.api, CAP)[0] == 200
 
 
 def test_port_failure_preserves_client_grant_and_successful_rebind_fences_it(server):

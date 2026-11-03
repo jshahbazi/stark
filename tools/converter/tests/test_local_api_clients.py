@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from stark_convert.local_api import APIError, LocalAPI
+from stark_convert.local_api import MAX_API_CLIENTS, APIError, LocalAPI
 
 MASTER = "a" * 64
 CAP = "b" * 64
@@ -134,7 +134,7 @@ def test_grants_reject_invalid_or_escalating_values(api, client, key, ttl):
 
 def test_grants_are_bounded_refreshable_and_expired_idle_entries_are_reclaimed(api):
     value, clock = api
-    for index in range(16):
+    for index in range(MAX_API_CLIENTS):
         grant(value, f"{index + 1:064x}", f"peer-{index}")
     with pytest.raises(APIError) as error:
         grant(value, CAP, "overflow")
@@ -237,6 +237,85 @@ def test_explicit_revoke_cancels_requests_from_current_and_retired_tokens(api):
         value.revoke_clients(value.api_session)
         for thread in threads:
             thread.join(3)
+
+
+def test_prefix_revoke_cancels_only_that_managed_clients_grants_and_requests(api):
+    value, _clock = api
+    entered = {}
+    condition = threading.Condition()
+    release = threading.Event()
+
+    def complete(payload, on_delta, cancelled):
+        on_delta("partial")
+        with condition:
+            entered[payload["messages"][0]["content"]] = cancelled
+            condition.notify_all()
+        if cancelled.wait(3):
+            raise APIError(499, "Request cancelled.", "request_cancelled")
+        assert release.wait(3)
+        return {"choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}]}
+
+    value._complete = complete
+    grant(value, CAP, "openwork.10.1.2")
+    grant(value, REPLACEMENT, "opencode.20.3.4")
+    results = {}
+    threads = []
+    try:
+        for name, key in [("openwork", CAP), ("opencode", REPLACEMENT)]:
+            body = {"stream": True, "messages": [{"role": "user", "content": name}]}
+            thread = threading.Thread(
+                target=lambda token=key, label=name, payload=body: results.__setitem__(
+                    label, request(value, token, "POST", "/v1/chat/completions", payload)
+                )
+            )
+            threads.append(thread)
+            thread.start()
+            with condition:
+                assert condition.wait_for(lambda expected=name: expected in entered, 3)
+        value.revoke_clients(value.api_session, client_prefix="opencode.")
+        threads[1].join(3)
+        assert not threads[1].is_alive()
+        assert entered["opencode"].is_set() and not entered["openwork"].is_set()
+        assert b"request_cancelled" in results["opencode"][1]
+        assert request(value, REPLACEMENT)[0] == 401
+        assert request(value, CAP)[0] == 200
+        release.set()
+        threads[0].join(3)
+        assert results["openwork"][0] == 200 and b"[DONE]" in results["openwork"][1]
+        assert set(value._clients) == {"openwork.10.1.2"} and not value._client_requests
+    finally:
+        release.set()
+        value.revoke_clients(value.api_session)
+        for thread in threads:
+            thread.join(3)
+
+
+@pytest.mark.parametrize(
+    "client,prefix",
+    [
+        (None, ""),
+        (None, "opencode/"),
+        (None, "x" * 65),
+        (None, 1),
+        ("opencode.1.2.3", "opencode."),
+    ],
+)
+def test_revocations_reject_invalid_prefixes_and_ambiguous_scopes(api, client, prefix):
+    value, _clock = api
+    grant(value)
+    with pytest.raises(APIError) as error:
+        value.revoke_clients(value.api_session, client, prefix)
+    assert error.value.code == "invalid_api_client_command"
+    assert request(value, CAP)[0] == 200
+
+
+def test_prefix_revoke_without_matches_keeps_other_clients(api):
+    value, _clock = api
+    grant(value)
+    value.revoke_clients(value.api_session, client_prefix="opencode.")
+    assert request(value, CAP)[0] == 200
+    value.revoke_clients(value.api_session, client_prefix="openwork-")
+    assert request(value, CAP)[0] == 401
 
 
 @pytest.mark.parametrize("action", ["key-change", "restart"])

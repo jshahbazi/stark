@@ -1708,13 +1708,15 @@ class Desktop:
             return None
         return scopes.setdefault(principal, secrets.token_hex(16))
 
-    def reset_prefix_cache(self, api_session=None, client_id=None):
+    def reset_prefix_cache(self, api_session=None, client_id=None, client_prefix=None):
         """Forget API scopes and release the worker's retained prefix state."""
         with self.lock:
 
             def kept(key):
                 if api_session is None or key[0] != api_session:
                     return api_session is not None
+                if client_prefix is not None:
+                    return not (isinstance(key[1], str) and key[1].startswith(client_prefix))
                 return client_id is not None and key[1] != client_id
 
             self.api_cache_scopes = {
@@ -1827,7 +1829,7 @@ class Desktop:
         valid_fields = (
             set(payload) == fields | {"api_key", "ttl_seconds"}
             if grant
-            else set(payload) in (fields, fields - {"client_id"})
+            else set(payload) in (fields, fields - {"client_id"}, fields - {"client_id"} | {"client_prefix"})
         )
         result = {"request_id": request_id if valid_id else "", "ok": False}
         api = self.api
@@ -1838,6 +1840,7 @@ class Desktop:
                 or not isinstance(payload.get("api_session"), str)
                 or re.fullmatch(r"[a-f0-9]{32}", payload["api_session"]) is None
                 or ("client_id" in payload and payload["client_id"] is None)
+                or ("client_prefix" in payload and payload["client_prefix"] is None)
             ):
                 raise APIError(400, "Invalid API client command.", "invalid_api_client_command")
             if api is None:
@@ -1847,8 +1850,8 @@ class Desktop:
                     payload["client_id"], payload["api_key"], payload["ttl_seconds"], payload["api_session"]
                 )
             else:
-                api.revoke_clients(payload["api_session"], payload.get("client_id"))
-                self.reset_prefix_cache(payload["api_session"], payload.get("client_id"))
+                api.revoke_clients(payload["api_session"], payload.get("client_id"), payload.get("client_prefix"))
+                self.reset_prefix_cache(payload["api_session"], payload.get("client_id"), payload.get("client_prefix"))
             result["ok"] = True
         except APIError as error:
             result["error_code"] = error.code
