@@ -395,6 +395,8 @@ class LocalAPI:
                 with api._lock:
                     expected = api._api_key
                     if expected and hmac.compare_digest(encoded, ("Bearer " + expected).encode("ascii")):
+                        # In-memory principal for prefix-reuse scoping; never sent or logged.
+                        cancelled.cache_principal = (api._api_session, None)
                         return None
                     digest = hmac.digest(api._api_session.encode("ascii"), encoded, "sha256")
                     now = api._clock()
@@ -405,6 +407,7 @@ class LocalAPI:
                             # Register while holding the same lock as revoke.
                             # Body readers and queued requests cannot escape it.
                             api._client_requests.setdefault(client_id, set()).add(cancelled)
+                            cancelled.cache_principal = (api._api_session, client_id)
                             return client_id
                 raise APIError(401, "Invalid API key", "invalid_api_key")
 

@@ -3,20 +3,24 @@
 //! BF16. Attention K/V uses Q8; reductions and GDN state use F32. Official
 //! external-MLX head values are BF16-rounded in F32 buffers. Lily/reference
 //! head values retain unrounded F32 accumulation outputs.
-//! Every request has fresh logical state. Pending prompt tokens exist only
-//! until its next readout; no prefix/session persistence. Optional MTP uses
-//! complete host-sampled F32 readouts and request-local rollback captures.
+//! Every request starts from reset logical state. Pending prompt tokens exist
+//! only until its next readout. A caller may capture the recurrent state at a
+//! prefill chunk boundary and resume a later request there; nothing is
+//! persisted. Optional MTP uses complete host-sampled F32 readouts and
+//! request-local rollback captures.
 
 use std::{collections::VecDeque, path::Path, time::Instant};
 
 use stark_lily_core::{
-    engine::{DecodeStateApi, Draw, ScratchApi, VisionMode},
+    engine::{DecodeStateApi, Draw, ScratchApi, SnapshotApi, VisionMode},
     kernels::{
         attention::{KvFormat, MAX_SEQ},
         sample::SamplingParams,
     },
     metal::{EncodedPass, MetalContext, PendingPass, stage_profile},
-    qwen4exp::{DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig},
+    qwen4exp::{
+        DecodeState, HostVerification, NgramStorage, Qwen4ExpModel, Scratch, config::Qwen4ExpConfig, model::Snapshot,
+    },
 };
 
 use super::{Error, MtpSampler, MtpStats, Result, profile};
@@ -204,6 +208,26 @@ struct GreedyReadout {
     position: usize,
 }
 
+/// Recurrent state at a prefill chunk boundary: GDN states and convolution
+/// windows, the n-gram history and window, and the draft head's last hidden.
+/// Attention, indexer and draft-head caches below its position stay in the
+/// model's own state, so it is valid only for the model that captured it and
+/// only while every request since then has kept that prompt prefix.
+pub struct PrefixSnapshot {
+    snapshot: Snapshot,
+    mtp_enabled: bool,
+}
+
+impl PrefixSnapshot {
+    pub fn position(&self) -> usize {
+        self.snapshot.pos()
+    }
+
+    pub fn mtp_enabled(&self) -> bool {
+        self.mtp_enabled
+    }
+}
+
 pub struct LilyModel {
     model: Qwen4ExpModel,
     state: DecodeState,
@@ -217,6 +241,8 @@ pub struct LilyModel {
     last_full_readout: Option<usize>,
     mtp_enabled: bool,
     mtp_stats: MtpStats,
+    capture_at: Option<usize>,
+    captured: Option<PrefixSnapshot>,
     // Context ownership outlives every model/state/scratch allocation on drop.
     context: MetalContext,
 }
@@ -305,6 +331,8 @@ impl LilyModel {
             last_full_readout: None,
             mtp_enabled: false,
             mtp_stats: MtpStats::default(),
+            capture_at: None,
+            captured: None,
             context,
         })
     }
@@ -429,11 +457,81 @@ impl LilyModel {
         }
     }
 
+    /// Prompt tokens per batched prefill pass. Passes are counted from the
+    /// position a prefill starts at, so prefix snapshots use multiples of it.
+    pub fn prefill_chunk_tokens(&self) -> usize {
+        self.model.prefill_chunk()
+    }
+
+    /// Capture the recurrent state when this request's prefill reaches
+    /// `position`, a multiple of the prefill chunk beyond the current
+    /// position. The prefill is split there, which leaves every pass's tokens,
+    /// offsets and draw unchanged. Cleared by `reset`.
+    pub fn capture_prefix_at(
+        &mut self,
+        position: usize,
+    ) -> Result<()> {
+        let chunk = self.prefill_chunk_tokens();
+        if self.is_fenced()
+            || !self.pending.is_empty()
+            || position <= self.state.pos
+            || position >= self.max_context
+            || chunk == 0
+            || !position.is_multiple_of(chunk)
+            || !self.state.pos.is_multiple_of(chunk)
+        {
+            return Err(Error::Invalid("mixed precision prefix capture position"));
+        }
+        self.capture_at = Some(position);
+        self.captured = None;
+        Ok(())
+    }
+
+    /// The snapshot the last prefill captured, if it reached its position.
+    pub fn take_prefix_snapshot(&mut self) -> Option<PrefixSnapshot> {
+        self.captured.take()
+    }
+
+    /// Resume a reset request at `snapshot`'s position. Recurrent state comes
+    /// from the snapshot; caches below that position are kept. The caller
+    /// must only resume the prompt prefix the snapshot was captured from,
+    /// with the same MTP selection.
+    pub fn restore_prefix(
+        &mut self,
+        snapshot: &PrefixSnapshot,
+    ) -> Result<()> {
+        let position = snapshot.position();
+        let chunk = self.prefill_chunk_tokens();
+        if self.is_fenced()
+            || self.state.pos != 0
+            || !self.pending.is_empty()
+            || snapshot.mtp_enabled != self.mtp_enabled
+            || position == 0
+            || chunk == 0
+            || !position.is_multiple_of(chunk)
+        {
+            self.reset();
+            return Err(Error::Invalid("mixed precision prefix restore admission"));
+        }
+        let _scope = profile::Scope::new("qwen.mixed.prefix_restore");
+        // Reset zero-fills everything a partial restore may have written; a
+        // faulted context still fences the model.
+        if self.state.restore(&self.context, &snapshot.snapshot).is_err() || self.state.pos != position {
+            self.reset();
+            return Err(Error::Invalid("mixed precision prefix restore failed"));
+        }
+        self.last_greedy = None;
+        self.last_full_readout = None;
+        Ok(())
+    }
+
     pub fn reset(&mut self) {
         let _scope = profile::Scope::new("qwen.mixed.reset");
         self.pending.clear();
         self.last_greedy = None;
         self.last_full_readout = None;
+        self.capture_at = None;
+        self.captured = None;
         self.mtp_stats = MtpStats::default();
         // Core waits drain submitted GPU work even on execution failure.
         // A faulted context stays unusable until the worker reloads the model.
@@ -684,9 +782,7 @@ impl LilyModel {
             {
                 // Match the official server's N-1 prompt forward followed by
                 // one initialized S1 logits forward. The prefix cannot draw.
-                self.model
-                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..prefix_len], None)
-                    .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+                self.prefill_pending(prefix_len, None)?;
                 if self.state.pos.checked_add(1) != Some(expected_position) {
                     return Err(Error::Invalid("mixed precision prefill position"));
                 }
@@ -706,9 +802,7 @@ impl LilyModel {
                 Ok(1)
             } else {
                 // Preserve legacy/reference execution and cold N1 prefill.
-                self.model
-                    .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending, Some(draw))
-                    .map_err(|_| Error::Invalid("mixed precision prefill failed"))?;
+                self.prefill_pending(self.pending.len(), Some(draw))?;
                 self.usable = true;
                 self.pending.clear();
                 if self.state.pos != expected_position {
@@ -726,6 +820,62 @@ impl LilyModel {
                 return Err(Error::Invalid("mixed precision decode position"));
             }
             Ok(1)
+        }
+    }
+
+    /// Prefills `pending[..end]`, the final pass drawing when `draw` is set.
+    /// A requested prefix capture inside the span splits it at a multiple of
+    /// the prefill chunk from the starting position, so both parts run the
+    /// same passes as one call.
+    fn prefill_pending(
+        &mut self,
+        end: usize,
+        draw: Option<Draw<'_>>,
+    ) -> Result<()> {
+        let chunk = self.prefill_chunk_tokens();
+        let split = self.capture_at.and_then(|position| position.checked_sub(self.state.pos)).filter(|&split| {
+            (split < end || (split == end && draw.is_none()))
+                && chunk != 0
+                && split.is_multiple_of(chunk)
+                && self.state.pos.is_multiple_of(chunk)
+        });
+        let failed = |_| Error::Invalid("mixed precision prefill failed");
+        let Some(split) = split else {
+            return self
+                .model
+                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..end], draw)
+                .map_err(failed);
+        };
+        if split > 0 {
+            self.model
+                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[..split], None)
+                .map_err(failed)?;
+        }
+        self.capture_prefix()?;
+        if split < end {
+            self.model
+                .prefill(&self.context, &mut self.state, &mut self.scratch, &self.pending[split..end], draw)
+                .map_err(failed)?;
+        }
+        Ok(())
+    }
+
+    /// Copies the recurrent state at the current position. The GPU is idle
+    /// between prefill passes. A failure that leaves the context healthy only
+    /// forgoes the snapshot; the request continues unchanged.
+    fn capture_prefix(&mut self) -> Result<()> {
+        self.capture_at = None;
+        let _scope = profile::Scope::new("qwen.mixed.prefix_snapshot");
+        match self.state.snapshot(&self.context) {
+            Ok(snapshot) => {
+                self.captured = Some(PrefixSnapshot {
+                    snapshot,
+                    mtp_enabled: self.mtp_enabled,
+                });
+                Ok(())
+            },
+            Err(_) if self.context.fault().is_none() => Ok(()),
+            Err(_) => Err(Error::Invalid("mixed precision prefix snapshot failed")),
         }
     }
 
@@ -2021,6 +2171,67 @@ mod tests {
                 previous = Some(next);
             }
         }
+    }
+
+    #[stark_test]
+    #[ignore]
+    fn private_checkpoint_prefix_capture_and_restore_match_fresh_prefill() {
+        fn run(
+            model: &mut LilyModel,
+            input: &[u32],
+            restore: Option<&PrefixSnapshot>,
+            capture: Option<usize>,
+        ) -> (Vec<f32>, Option<PrefixSnapshot>) {
+            model.reset();
+            let start = restore.map_or(0, |snapshot| {
+                model.restore_prefix(snapshot).unwrap();
+                snapshot.position()
+            });
+            assert_eq!(model.position(), start);
+            if let Some(position) = capture {
+                model.capture_prefix_at(position).unwrap();
+            }
+            for &token in &input[start..input.len() - 1] {
+                model.ingest(token).unwrap();
+            }
+            let mut logits = model.step(*input.last().unwrap()).unwrap();
+            let greedy = logits.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)).unwrap().0 as u32;
+            logits.extend(model.step(greedy).unwrap());
+            (logits, model.take_prefix_snapshot())
+        }
+        let path = std::env::var_os("STARK_LILY_TEST_MODEL_PATH").expect("private model fixture path");
+        let path = Path::new(&path);
+        let tokenizer = tokenizers::Tokenizer::from_file(path.join("tokenizer.json"))
+            .unwrap_or_else(|_| panic!("private model tokenizer failed"));
+        let seed = tokenizer
+            .encode("Resume the recurrent prefix exactly where it stopped.", false)
+            .unwrap_or_else(|_| panic!("private model tokenization failed"))
+            .get_ids()
+            .to_vec();
+        let mut model = LilyModel::load(path).unwrap();
+        let chunk = model.prefill_chunk_tokens();
+        let prompt: Vec<u32> = seed.iter().copied().cycle().take(chunk + 37).collect();
+        let longer: Vec<u32> = prompt.iter().copied().chain(seed.iter().copied().rev()).collect();
+        let same =
+            |a: &[f32], b: &[f32]| a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.to_bits() == b.to_bits());
+
+        let (plain, none) = run(&mut model, &prompt, None, None);
+        assert!(none.is_none());
+        let (split, snapshot) = run(&mut model, &prompt, None, Some(chunk));
+        assert!(same(&plain, &split), "capturing must not change the prefill");
+        let snapshot = snapshot.expect("prefix snapshot");
+        assert_eq!(snapshot.position(), chunk);
+        assert!(!snapshot.mtp_enabled());
+        let (fresh, _) = run(&mut model, &longer, None, None);
+        let (resumed, _) = run(&mut model, &longer, Some(&snapshot), None);
+        assert!(same(&fresh, &resumed), "a resumed prefix must match a fresh prefill");
+        // Admission: restoring after input or capturing off the grid is refused.
+        model.reset();
+        model.ingest(seed[0]).unwrap();
+        assert!(model.restore_prefix(&snapshot).is_err());
+        assert_eq!(model.position(), 0);
+        assert!(model.capture_prefix_at(chunk + 1).is_err());
+        assert!(model.capture_prefix_at(0).is_err());
     }
 
     #[stark_test]

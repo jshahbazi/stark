@@ -1,4 +1,4 @@
-"""Bounded Chat Completions tools and the pinned Qwen3 tool wire format.
+"""Bounded Chat Completions tools and reviewed Qwen tool wire formats.
 
 Tools are requests for client execution. JSON schemas are supplied to the model
 as hints; this module does not promise schema-constrained generation. The client
@@ -14,6 +14,7 @@ import re
 from typing import Any
 
 from .local_api import APIError
+from .template_compat import MAX_TEMPLATE_BYTES, template_program_sha256
 
 MAX_TOOLS = 64
 MAX_CALLS = 16
@@ -26,15 +27,68 @@ MAX_JSON_NODES = 16384
 _NAME = re.compile(r"[A-Za-z0-9_-]{1,64}\Z")
 _CALL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 _PARSER = "qwen3-hermes-v1"
+_XML_PARSER = "qwen38-xml-v1"
+_QWEN35_XML_PARSER = "qwen35-xml-v1"
+_XML_PARSERS = frozenset({_XML_PARSER, _QWEN35_XML_PARSER})
 # Official Qwen/Qwen3-0.6B tokenizer_config.json chat_template at revision
 # c1899de289a04d12100db370d81485cdf75e47ca, verified 2026-10-31. Admission
-# binds the exact template program, not a model name.
+# binds the reviewed template program, not a model name.
 QWEN3_TEMPLATE_SHA256 = "a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8"
 # Official mlx-community/Qwen3-4B-4bit tokenizer_config.json chat_template at
 # revision 4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25, independently reviewed
 # for the same Qwen3-Hermes tool-call wire markers and history ordering.
 QWEN3_4B_TEMPLATE_SHA256 = "87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5"
 _SUPPORTED_TEMPLATE_HASHES = frozenset({QWEN3_TEMPLATE_SHA256, QWEN3_4B_TEMPLATE_SHA256})
+# fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl tokenizer_config.json chat_template,
+# revision 0f94842e3682b49acace4daeb4cf2e65a6f94f83. The same exact program
+# is retained in the raw checkpoint's token_codec_config. Unlike Hermes JSON,
+# it renders named XML-like function/parameter blocks. No other template is
+# admitted by model family/name, and no upstream template text is copied here.
+QWEN38_XML_TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+# alibiserikbay/JevK5's converted Qwen3.5 template at revision
+# c4f7fdb3aeab5582336406e78d3bef11bf98833d, reviewed in memory against typed
+# synthetic history. Its top-level boolean/null values use the exact
+# literals True/False/None; nested object/array values still use JSON.
+QWEN35_XML_TEMPLATE_SHA256 = "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+# Version-1 Jinja AST fingerprints of the four hash-verified sources above.
+# They admit only syntax-equivalent programs, independently of model metadata.
+_SUPPORTED_TEMPLATE_PROGRAMS = {
+    "2537497c84cb9ae2a885de78e7531cd44c62f38dadfcfa7565793ce9e38481ac": _PARSER,
+    "813d6e292f35cf32a98357c5382ec57ae39ddb658e5b16559c957b119a2859b5": _PARSER,
+    "ece3bd43a4194cae4a2d3b6079214373b84f9083ff6258940d0b03634e93f08e": _XML_PARSER,
+    "a0feb6a6a23bced6ef842bcb46dad27dc43738bf9acd5751606f24aa343610d8": _QWEN35_XML_PARSER,
+}
+_XML_TYPES = frozenset({"string", "integer", "number", "boolean", "null", "object", "array"})
+_XML_UNKNOWN = object()
+_XML_ANNOTATIONS = frozenset(
+    {"title", "description", "$comment", "default", "examples", "deprecated", "readOnly", "writeOnly"}
+)
+_XML_RESERVED = (
+    "<tool_call",
+    "</tool_call",
+    "<function",
+    "</function",
+    "<parameter",
+    "</parameter",
+    "<think",
+    "</think",
+)
+# Fixed categories for rejected generated calls, safe to show clients. They
+# never include generated text, tool names, argument names or values.
+_INVALID_CALL_REASONS = {
+    "limit": "generation stopped at the output or context limit",
+    "unfinished": "generation did not end normally",
+    "disabled": "this request does not allow tool calls",
+    "markup": "tool-call markup appeared outside a complete call",
+    "prefix": "text before the call contains a code block, quotation or unclosed reasoning",
+    "format": "the call does not follow the model's tool-call format",
+    "trailing": "text follows the call",
+    "tool": "the call names a tool that this request does not offer or allow",
+    "argument": "the call uses an argument that the tool does not define, or repeats one",
+    "value": "an argument value does not match the tool's schema",
+    "limits": "the call's arguments exceed the size or nesting limits",
+    "count": "the reply has more tool calls than this request allows",
+}
 
 
 def _bad(message: str, code: str = "invalid_request") -> APIError:
@@ -254,9 +308,372 @@ def template_messages(messages: list[dict]) -> list[dict]:
 
 def tool_parser_for(codec: dict | None) -> str | None:
     source = (codec or {}).get("prompt_template")
-    if isinstance(source, str) and hashlib.sha256(source.encode("utf-8")).hexdigest() in _SUPPORTED_TEMPLATE_HASHES:
+    if not isinstance(source, str) or not source or len(source) > MAX_TEMPLATE_BYTES:
+        return None
+    try:
+        encoded = source.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(encoded) > MAX_TEMPLATE_BYTES:
+        return None
+    digest = hashlib.sha256(encoded).hexdigest()
+    if digest in _SUPPORTED_TEMPLATE_HASHES:
         return _PARSER
-    return None
+    if digest == QWEN38_XML_TEMPLATE_SHA256:
+        return _XML_PARSER
+    if digest == QWEN35_XML_TEMPLATE_SHA256:
+        return _QWEN35_XML_PARSER
+    return _SUPPORTED_TEMPLATE_PROGRAMS.get(template_program_sha256(source))
+
+
+def _xml_schema_error(reason="parameter_type"):
+    return _bad(
+        "This XML tool parser requires direct named parameters with declared or literal-constrained types or bounded "
+        "local schema references. Dynamic parameters, root composition, and unresolved or unsupported schemas "
+        "are unsupported. "
+        f"Unsupported schema form: {reason}.",
+        "tool_schema_unsupported",
+    )
+
+
+def _xml_types(schema, root, work, memo, depth=0, references=frozenset()):
+    work[0] -= 1
+    if work[0] < 0 or not isinstance(schema, dict) or depth > MAX_JSON_DEPTH:
+        raise _xml_schema_error("resolution_limit_or_invalid_schema")
+    if "enum" in schema and (not isinstance(schema["enum"], list) or not schema["enum"]):
+        raise _xml_schema_error("literal_constraint")
+    declared = schema.get("type")
+    if "type" in schema:
+        values = [declared] if isinstance(declared, str) else declared
+        if (
+            not isinstance(values, list)
+            or not values
+            or any(not isinstance(v, str) or v not in _XML_TYPES for v in values)
+        ):
+            raise _xml_schema_error("declared_type")
+        return frozenset(values)
+    if "$ref" in schema:
+        reference = schema["$ref"]
+        if not isinstance(reference, str) or not reference.startswith("#/") or reference in references:
+            raise _xml_schema_error("local_reference")
+        identity = (id(root), reference)
+        if identity in memo:
+            return memo[identity]
+        tokens = reference[2:].split("/")
+        if len(tokens) > MAX_JSON_DEPTH or any(re.search(r"~(?![01])", token) for token in tokens):
+            raise _xml_schema_error("local_reference")
+        target = root
+        for token in tokens:
+            if not isinstance(target, dict):
+                raise _xml_schema_error("local_reference")
+            target = target.get(token.replace("~1", "/").replace("~0", "~"))
+        result = _xml_types(target, root, work, memo, depth + 1, references | {reference})
+        memo[identity] = result
+        return result
+    if "enum" in schema or "const" in schema:
+        literals = schema.get("enum", [schema.get("const")])
+        if not isinstance(literals, list) or not literals:
+            raise _xml_schema_error("literal_constraint")
+        # Effect Schema emits enum-only scalar schemas on OpenCode's OpenAI
+        # wire. Literal JSON values conclusively determine their representations;
+        # this never infers a type from generated model text. Full constraint
+        # validation remains the executing client's responsibility.
+        return frozenset(
+            "null"
+            if value is None
+            else "boolean"
+            if type(value) is bool
+            else "integer"
+            if type(value) is int
+            else "number"
+            if type(value) is float
+            else "string"
+            if isinstance(value, str)
+            else "array"
+            if isinstance(value, list)
+            else "object"
+            for value in literals
+        )
+    if set(schema) <= _XML_ANNOTATIONS:
+        if (
+            any(key in schema and not isinstance(schema[key], str) for key in ("title", "description", "$comment"))
+            or any(key in schema and type(schema[key]) is not bool for key in ("deprecated", "readOnly", "writeOnly"))
+            or ("examples" in schema and not isinstance(schema["examples"], list))
+        ):
+            raise _xml_schema_error("invalid_annotation")
+        return _XML_UNKNOWN
+    alternatives = [schema[key] for key in ("anyOf", "oneOf") if key in schema]
+    if len(alternatives) != 1 or not isinstance(alternatives[0], list) or not alternatives[0]:
+        reason = "untyped_all_of" if "allOf" in schema else "untyped_constraint_or_unknown_keyword"
+        raise _xml_schema_error(reason)
+    result = frozenset()
+    unknown = False
+    for candidate in alternatives[0]:
+        resolved = _xml_types(candidate, root, work, memo, depth + 1, references)
+        if resolved is _XML_UNKNOWN:
+            unknown = True
+        else:
+            result |= resolved
+    return _XML_UNKNOWN if unknown else result
+
+
+def _xml_tool_schemas(tools):
+    bounded_json(tools, MAX_SCHEMA_BYTES, label="Tool definitions")
+    result = {}
+    work, memo = [MAX_JSON_NODES], {}
+    for tool in tools:
+        function = tool.get("function", {}) if isinstance(tool, dict) else {}
+        if not isinstance(function, dict):
+            raise _xml_schema_error("function_definition")
+        name = function.get("name")
+        parameters = function.get("parameters", {"type": "object", "properties": {}})
+        if (
+            not isinstance(name, str)
+            or not _NAME.fullmatch(name)
+            or name in result
+            or not isinstance(parameters, dict)
+        ):
+            raise _xml_schema_error("function_or_root_parameters")
+        properties = parameters.get("properties", {})
+        unsupported_root = {
+            "$ref",
+            "$dynamicRef",
+            "$recursiveRef",
+            "allOf",
+            "anyOf",
+            "oneOf",
+            "not",
+            "if",
+            "then",
+            "else",
+            "patternProperties",
+            "dependentSchemas",
+            "dependencies",
+            "unevaluatedProperties",
+        }
+        if parameters.get("type", "object") != "object" or not isinstance(properties, dict):
+            raise _xml_schema_error("root_properties")
+        if unsupported_root.intersection(parameters):
+            raise _xml_schema_error("root_composition_or_dynamic_parameters")
+        if parameters.get("additionalProperties", False) is not False:
+            raise _xml_schema_error("root_additional_properties")
+        if any(not _NAME.fullmatch(key) for key in properties):
+            raise _xml_schema_error("parameter_name")
+        result[name] = {key: _xml_types(schema, parameters, work, memo) for key, schema in properties.items()}
+    return result
+
+
+def validate_parser_tools(tools: list[dict], parser: str | None) -> None:
+    """Reject unsupported XML decoding schemas before queueing/generation.
+
+    This determines parameter representations, not full JSON Schema validity.
+    Mixed string/non-string unions are accepted here; an ambiguous generated
+    value is rejected later rather than guessed into an executable argument.
+    Empty or annotation-only parameters can remain unused in a definition;
+    generating one is rejected because its wire value has no conclusive type.
+    """
+    if parser in _XML_PARSERS:
+        _xml_tool_schemas(tools)
+
+
+def _tool_prefix_safe(prefix):
+    visible = []
+    cursor = 0
+    while cursor < len(prefix):
+        opening = prefix.find("<think>", cursor)
+        closing = prefix.find("</think>", cursor)
+        if opening < 0:
+            visible.append(prefix[cursor:])
+            break
+        if 0 <= closing < opening:
+            return False
+        visible.append(prefix[cursor:opening])
+        closing = prefix.find("</think>", opening + len("<think>"))
+        nested = prefix.find("<think", opening + len("<think>"))
+        if closing < 0 or (nested >= 0 and nested < closing):
+            return False
+        cursor = closing + len("</think>")
+    prefix = "".join(visible)
+    if any(marker in prefix for marker in ("```", "~~~", "<!--", "<think", "</think")):
+        return False
+    if re.search(r"^[ \t]*>|</?(?:pre|code|blockquote|q)(?=[\s/>])", prefix, re.IGNORECASE | re.MULTILINE):
+        # Conservatively reject structural quotation/code contexts even when
+        # closed before the call. Plain comparisons and similarly named tags
+        # are distinct. This bounded check never interprets intent from prose.
+        return False
+    quote = None
+    code_ticks = 0
+    escaped = False
+    index = 0
+    while index < len(prefix):
+        character = prefix[index]
+        if code_ticks or (character == "`" and quote is None):
+            if character == "`":
+                end = index + 1
+                while end < len(prefix) and prefix[end] == "`":
+                    end += 1
+                width = end - index
+                if not code_ticks:
+                    code_ticks = width
+                elif width == code_ticks:
+                    code_ticks = 0
+                index = end
+            else:
+                index += 1
+            # Inline code closes only on a matching run. Quotes and backslash
+            # escapes inside it cannot turn an example into an executable call.
+            continue
+        if escaped:
+            escaped = False
+        elif quote and character == "\\":
+            escaped = True
+        elif quote:
+            apostrophe = (
+                character in {"'", "’"}
+                and index > 0
+                and index + 1 < len(prefix)
+                and prefix[index - 1].isalnum()
+                and prefix[index + 1].isalnum()
+            )
+            if character == quote and not apostrophe:
+                quote = None
+        elif character in {'"', "“"}:
+            quote = "”" if character == "“" else character
+        elif character in {"'", "‘"} and (index == 0 or not prefix[index - 1].isalnum()):
+            quote = "’" if character == "‘" else character
+        index += 1
+    return quote is None and code_ticks == 0
+
+
+def _xml_parameter_value(body, types, invalid, parser):
+    if any(marker in body for marker in _XML_RESERVED):
+        raise invalid("format")
+    # The pinned renderer adds exactly one LF before and after each value.
+    # Inline values are also lossless; a half frame cannot be repaired safely.
+    if body.startswith("\n") or body.endswith("\n"):
+        if len(body) < 2 or not (body.startswith("\n") and body.endswith("\n")):
+            raise invalid("format")
+        body = body[1:-1]
+    if types == {"string"}:
+        return body
+    if parser == _QWEN35_XML_PARSER and body in {"True", "False", "None"}:
+        value = {"True": True, "False": False, "None": None}[body]
+    else:
+        try:
+            value = json.loads(body, object_pairs_hook=_pairs, parse_constant=_constant)
+        except (ValueError, RecursionError):
+            if "string" in types:
+                return body
+            raise invalid("value") from None
+    kind = (
+        "null"
+        if value is None
+        else "boolean"
+        if type(value) is bool
+        else "integer"
+        if type(value) is int
+        else "number"
+        if type(value) is float
+        else "object"
+        if isinstance(value, dict)
+        else "array"
+        if isinstance(value, list)
+        else "string"
+    )
+    matches = kind in types or (kind == "integer" and "number" in types)
+    if "string" in types:
+        if matches and kind != "string":
+            raise invalid("value")  # Both the raw string and JSON value fit: no guessed coercion.
+        return body
+    if not matches:
+        raise invalid("value")
+    bounded_json(value, MAX_ARGUMENT_BYTES, label="Function arguments")
+    return value
+
+
+def _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser):
+    schemas = _xml_tool_schemas(tools)
+    calls = []
+    cursor = start
+
+    def whitespace(position):
+        while position < len(text) and text[position].isspace():
+            position += 1
+        return position
+
+    def named_tag(position, prefix):
+        if not text.startswith(prefix, position):
+            raise invalid("format")
+        end = text.find(">", position + len(prefix), position + len(prefix) + 65)
+        if end < 0:
+            raise invalid("format")
+        name = text[position + len(prefix) : end]
+        if not _NAME.fullmatch(name):
+            raise invalid("format")
+        return name, end + 1
+
+    while cursor < len(text):
+        if len(calls) >= MAX_CALLS:
+            raise invalid("count")
+        if not text.startswith("<tool_call>", cursor):
+            raise invalid("trailing" if calls else "format")
+        cursor = whitespace(cursor + len("<tool_call>"))
+        name, cursor = named_tag(cursor, "<function=")
+        if name not in names:
+            raise invalid("tool")
+        cursor = whitespace(cursor)
+        arguments = {}
+        argument_bytes = 0
+        while text.startswith("<parameter=", cursor):
+            parameter, cursor = named_tag(cursor, "<parameter=")
+            if parameter not in schemas[name] or parameter in arguments:
+                raise invalid("argument")
+            end = text.find("</parameter>", cursor, cursor + MAX_ARGUMENT_BYTES + len("</parameter>") + 1)
+            if end < 0:
+                # A closing tag beyond the bounded window means an oversized value.
+                raise invalid("limits" if text.find("</parameter>", cursor) >= 0 else "format")
+            body = text[cursor:end]
+            argument_bytes += len(parameter.encode("utf-8")) + len(body.encode("utf-8"))
+            if argument_bytes > MAX_ARGUMENT_BYTES:
+                raise invalid("limits")
+            if schemas[name][parameter] is _XML_UNKNOWN:
+                raise APIError(
+                    502,
+                    "The model selected a tool argument whose schema does not determine its XML value type. "
+                    "No tool calls from this completion were released.",
+                    "tool_argument_type_unsupported",
+                )
+            try:
+                arguments[parameter] = _xml_parameter_value(body, schemas[name][parameter], invalid, parser)
+            except APIError as error:
+                if error.code == "invalid_tool_call":
+                    raise
+                raise invalid("limits") from None
+            cursor = whitespace(end + len("</parameter>"))
+        if not text.startswith("</function>", cursor):
+            raise invalid("format")
+        cursor = whitespace(cursor + len("</function>"))
+        if not text.startswith("</tool_call>", cursor):
+            raise invalid("format")
+        try:
+            bounded_json(arguments, MAX_ARGUMENT_BYTES, label="Function arguments")
+        except (APIError, ValueError, RecursionError):
+            raise invalid("limits") from None
+        try:
+            encoded = json.dumps(arguments, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        except (ValueError, RecursionError, OverflowError):
+            raise invalid("value") from None
+        calls.append(
+            {
+                "id": f"call_{call_id_prefix}_{len(calls)}",
+                "type": "function",
+                "function": {"name": name, "arguments": encoded},
+            }
+        )
+        cursor = whitespace(cursor + len("</tool_call>"))
+    if not parallel_tool_calls and len(calls) != 1:
+        raise invalid("count")
+    return {"role": "assistant", "content": text[:start].rstrip() or None, "tool_calls": calls}, "tool_calls"
 
 
 class ToolTextStream:
@@ -352,62 +769,86 @@ def parse_tool_output(
         raise APIError(502, "The model output exceeded the tool parser's limits.", "invalid_tool_call")
     message = {"role": "assistant", "content": text}
     reason = "length" if finish_reason in {"length", "context"} else "stop"
+
+    def invalid(category):
+        # Clients see which rule rejected the call, never what the model wrote.
+        return APIError(
+            502,
+            "The model produced an incomplete, invalid or unavailable tool call: "
+            + _INVALID_CALL_REASONS[category]
+            + ".",
+            "invalid_tool_call",
+        )
+
     start = text.find("<tool_call")
     if start < 0 and "</tool_call" not in text:
+        if parser in _XML_PARSERS and any(
+            marker in text for marker in ("<function", "</function", "<parameter", "</parameter")
+        ):
+            raise invalid("markup")
         if tool_choice == "required" or isinstance(tool_choice, dict):
             raise APIError(502, "The model did not satisfy the requested tool choice.", "tool_choice_not_satisfied")
         return message, reason
 
-    def invalid():
-        return APIError(
-            502, "The model produced an incomplete, invalid or unavailable tool call.", "invalid_tool_call"
-        )
-
-    if parser != _PARSER or tool_choice == "none" or not tools or finish_reason not in {"eos", "stop_token", "stop"}:
-        raise invalid()
+    if parser not in {_PARSER, *_XML_PARSERS} or tool_choice == "none" or not tools:
+        raise invalid("disabled")
+    if finish_reason not in {"eos", "stop_token", "stop"}:
+        raise invalid("limit" if reason == "length" else "unfinished")
     if not isinstance(call_id_prefix, str) or not _CALL_ID.fullmatch(call_id_prefix) or len(call_id_prefix) > 100:
         raise ValueError("Invalid private tool-call ID prefix")
-    if start < 0 or "</tool_call" in text[:start] or "```" in text[:start]:
-        raise invalid()
+    if start < 0 or "</tool_call" in text[:start]:
+        raise invalid("markup")
+    if not _tool_prefix_safe(text[:start]):
+        raise invalid("prefix")
     names = {tool["function"]["name"] for tool in tools}
     if isinstance(tool_choice, dict):
         names &= {tool_choice["function"]["name"]}
+    if parser in _XML_PARSERS:
+        return _parse_xml_calls(text, start, tools, names, call_id_prefix, parallel_tool_calls, invalid, parser)
     calls = []
     cursor = start
     decoder = json.JSONDecoder(object_pairs_hook=_pairs, parse_constant=_constant)
     while cursor < len(text):
         if not text.startswith("<tool_call>", cursor):
-            raise invalid()
+            raise invalid("trailing" if calls else "format")
         body_start = cursor + len("<tool_call>")
         while body_start < len(text) and text[body_start].isspace():
             body_start += 1
         if len(calls) >= MAX_CALLS:
-            raise invalid()
+            raise invalid("count")
         try:
             # Decode one JSON value before checking its closing delimiter. A
             # delimiter inside an argument string is ordinary argument data.
             body = text[body_start : body_start + MAX_ARGUMENT_BYTES + 1024]
             call, body_size = decoder.raw_decode(body)
-            body = body[:body_size]
-            if len(body.encode("utf-8")) > MAX_ARGUMENT_BYTES + 1024:
-                raise invalid()
-            if not isinstance(call, dict) or set(call) != {"name", "arguments"}:
-                raise invalid()
-            if (
-                not isinstance(call["name"], str)
-                or call["name"] not in names
-                or not isinstance(call["arguments"], dict)
-            ):
-                raise invalid()
+            oversized = len(body[:body_size].encode("utf-8")) > MAX_ARGUMENT_BYTES + 1024
+        except (ValueError, RecursionError):
+            # A value cut off by the bounded window is oversized rather than malformed.
+            raise invalid("limits" if len(text) > body_start + len(body) else "format") from None
+        if oversized:
+            raise invalid("limits")
+        if (
+            not isinstance(call, dict)
+            or set(call) != {"name", "arguments"}
+            or not isinstance(call["name"], str)
+            or not isinstance(call["arguments"], dict)
+        ):
+            raise invalid("format")
+        if call["name"] not in names:
+            raise invalid("tool")
+        try:
             bounded_json(call["arguments"], MAX_ARGUMENT_BYTES, label="Function arguments")
+        except (APIError, ValueError, TypeError, RecursionError):
+            raise invalid("limits") from None
+        try:
             arguments = json.dumps(call["arguments"], ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-        except (APIError, ValueError, TypeError, RecursionError, OverflowError):
-            raise invalid() from None
+        except (ValueError, TypeError, RecursionError, OverflowError):
+            raise invalid("value") from None
         end = body_start + body_size
         while end < len(text) and text[end].isspace():
             end += 1
         if not text.startswith("</tool_call>", end):
-            raise invalid()
+            raise invalid("format")
         calls.append(
             {
                 "id": f"call_{call_id_prefix}_{len(calls)}",
@@ -419,7 +860,7 @@ def parse_tool_output(
         while cursor < len(text) and text[cursor].isspace():
             cursor += 1
     if not parallel_tool_calls and len(calls) != 1:
-        raise invalid()
+        raise invalid("count")
     message["content"] = text[:start].rstrip() or None
     message["tool_calls"] = calls
     return message, "tool_calls"

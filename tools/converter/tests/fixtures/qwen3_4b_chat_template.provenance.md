@@ -12,3 +12,12 @@ revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25`.
 This fixture exists to bind parser admission and template-rendering regression
 checks to upstream bytes. It does not assert model competence or generation
 quality. The source template remains under its upstream Apache-2.0 license.
+
+The `stark-jinja-program-v1` fingerprint of these bytes is
+`813d6e292f35cf32a98357c5382ec57ae39ddb658e5b16559c957b119a2859b5`.
+It uses the locked Jinja parser and the renderer's shared environment settings.
+Source locations and comments are excluded; adjacent literal `TemplateData`
+within an `Output` is joined byte-for-byte. Every remaining node class, field,
+typed scalar and ordered list is retained. This enables equivalent formatting
+without broadening the generated-call grammar. The compatibility tests keep
+the original fixture unchanged and compare synthetic rendering across variants.

@@ -147,6 +147,10 @@ impl<B: Backend> Decoder<B> {
         self.transformer.prefill_cache_skips_trailing_layers()
     }
 
+    pub(crate) fn prefix_reuse_supported(&self) -> bool {
+        self.transformer.prefix_reuse_supported()
+    }
+
     pub fn create_empty_state(
         &self,
         max_context_length: Option<u32>,

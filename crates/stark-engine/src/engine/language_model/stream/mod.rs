@@ -16,6 +16,10 @@ pub use crate::{
 
 mod stream;
 
+/// Prompts are prefilled in chunks of this many tokens starting at position
+/// zero. Attention's suffix capacity bounds the chunk length.
+pub const PREFILL_CHUNK_TOKENS: usize = crate::encodable_block::mixer::attention::ATTENTION_SUFFIX_CAPACITY as usize;
+
 pub struct LanguageModelStreamOptions {
     pub sampling_method: SamplingMethod,
     #[cfg(grammar)]

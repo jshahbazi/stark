@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -13,7 +14,26 @@ from unittest.mock import patch
 import psutil
 import pytest
 
-from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric
+from stark_convert.desktop import Desktop, DesktopError, converter_progress, metric, metrics, progress_counts
+
+API_PROGRESS_FIELDS = {
+    "event",
+    "source",
+    "id",
+    "model",
+    "phase",
+    "sampled_tokens",
+    "output_token_budget",
+    "elapsed_seconds",
+    "ttft_seconds",
+    "ttft_lower_seconds",
+    "ttft_upper_seconds",
+    "remaining_lower_seconds",
+    "remaining_upper_seconds",
+    "calibrated",
+    "input_tokens",
+    "reused_input_tokens",
+}
 
 
 @pytest.fixture
@@ -232,20 +252,186 @@ def test_progress_from_a_replaced_model_is_fenced_and_never_trains(desktop, mode
     assert not desktop.generation_estimates.history
 
 
+def lifecycle(desktop):
+    """Status, progress and metrics events in publication order."""
+    return [
+        event["state"] if event["event"] == "status" else event["event"]
+        for event in events(desktop)
+        if event["event"] in {"status", "generation_progress", "metrics"}
+    ]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_requests_publish_content_free_progress_to_the_app(desktop, model, monkeypatch, stream):
+    identifier = running(desktop, model)
+    request = desktop.worker.request
+    generations = []
+
+    def recorded(payload, **options):
+        if payload["operation"] == "generate":
+            generations.append(payload)
+        return request(payload, **options)
+
+    monkeypatch.setattr(desktop.worker, "request", recorded)
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    payload = {"model": identifier, "messages": [{"role": "user", "content": "synthetic API request"}]}
+    for _ in range(2):
+        response = desktop.api_complete({**payload, "stream": stream}, on_delta=(lambda _: None) if stream else None)
+        assert response["choices"][0]["message"]["content"] == "synthetic answer"
+    # Buffered requests stream from the worker so the app still receives progress.
+    assert [generation["stream"] for generation in generations] == [True, True]
+    output = desktop.output.getvalue()
+    assert "synthetic API request" not in output and "synthetic answer" not in output
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [event["sampled_tokens"] for event in progress] == [0, 1, 5] * 2
+    assert all(set(event) <= API_PROGRESS_FIELDS for event in progress)
+    assert all(event["source"] == "api" and event["model"] == identifier for event in progress)
+    assert all(event["input_tokens"] == 20 and "reused_input_tokens" not in event for event in progress)
+    first, second = progress[0]["id"], progress[3]["id"]
+    assert re.fullmatch(r"[0-9a-f]{32}", first) and re.fullmatch(r"[0-9a-f]{32}", second) and first != second
+    assert {event["id"] for event in progress[:3]} == {first} and {event["id"] for event in progress[3:]} == {second}
+    assert progress[1]["ttft_seconds"] == 0.2
+    assert not progress[0]["calibrated"] and progress[3]["calibrated"]
+    assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+
+
+def test_serialized_api_requests_never_interleave_progress(desktop, model, monkeypatch):
+    import threading
+
+    running(desktop, model)
+    request = desktop.worker.request
+    decoding, release = threading.Event(), threading.Event()
+
+    def gated(payload, **options):
+        if payload["operation"] != "generate" or decoding.is_set():
+            return request(payload, **options)
+        forward = options["on_progress"]
+
+        def on_progress(frame):
+            forward(frame)
+            if frame["sampled_tokens"] == 1:
+                decoding.set()
+                assert release.wait(5)
+
+        return request(payload, **{**options, "on_progress": on_progress})
+
+    monkeypatch.setattr(desktop.worker, "request", gated)
+    desktop.output.seek(0)
+    desktop.output.truncate()
+    payload = {"messages": [{"role": "user", "content": "synthetic serialized request"}]}
+    first = threading.Thread(target=desktop.api_complete, args=(payload,))
+    second = threading.Thread(target=desktop.api_complete, args=(payload,))
+    first.start()
+    assert decoding.wait(5)
+    second.start()
+    deadline = time.monotonic() + 2
+    while len(desktop.api_queue) != 1 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert len(desktop.api_queue) == 1
+    assert lifecycle(desktop) == ["generating", "generation_progress", "generation_progress"]
+    release.set()
+    first.join(timeout=5)
+    second.join(timeout=5)
+    assert not first.is_alive() and not second.is_alive()
+    assert lifecycle(desktop) == ["generating", *["generation_progress"] * 3, "metrics", "ready"] * 2
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert len({event["id"] for event in progress[:3]}) == len({event["id"] for event in progress[3:]}) == 1
+    assert progress[0]["id"] != progress[3]["id"]
+
+
+def test_api_progress_and_metrics_report_worker_prefix_reuse(desktop, model, monkeypatch):
+    running(desktop, model)
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return {"token_count": 2048, "token_ids": [2] * 2048}
+        frame = {
+            "event": "progress",
+            "input_tokens": 2048,
+            "reused_input_tokens": 1024,
+            "sampled_tokens": 0,
+            "output_token_budget": payload["max_new_tokens"],
+            "elapsed_seconds": 0.0,
+            "prefill_seconds": None,
+        }
+        options["on_progress"](frame)
+        options["on_progress"]({**frame, "sampled_tokens": 1, "elapsed_seconds": 0.1, "prefill_seconds": 0.1})
+        return {
+            "text": "synthetic answer",
+            "input_tokens": 2048,
+            "reused_input_tokens": 1024,
+            "output_tokens": 1,
+            "sampled_tokens": 1,
+            "finish_reason": "eos",
+            "prefill_seconds": 0.1,
+        }
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    desktop.api_complete({"messages": [{"role": "user", "content": "synthetic reuse request"}], "max_tokens": 16})
+    progress = [event for event in events(desktop) if event["event"] == "generation_progress"]
+    assert [(event["input_tokens"], event["reused_input_tokens"]) for event in progress] == [(2048, 1024)] * 2
+    assert [event for event in events(desktop) if event["event"] == "metrics"][-1]["reused_input_tokens"] == 1024
+
+
+@pytest.mark.parametrize("reused", [2048, 4096, -1, True, 1024.0, "1024", None])
+def test_invalid_or_absent_reused_prompt_counts_are_omitted(reused):
+    frame = {"input_tokens": 2048, **({"reused_input_tokens": reused} if reused is not None else {})}
+    assert progress_counts(frame) == {"input_tokens": 2048}
+    assert "reused_input_tokens" not in metrics(frame)
+
+
+def test_api_progress_from_a_replaced_model_is_fenced(desktop, model, monkeypatch):
+    from stark_convert.chat import ChatCancelled
+    from stark_convert.local_api import APIError
+
+    running(desktop, model)
+    previous = desktop.worker.request
+
+    def request(payload, **options):
+        if payload["operation"] == "tokenize":
+            return previous(payload, **options)
+        desktop.epoch += 1
+        with pytest.raises(OSError, match="no longer belongs"):
+            options["on_progress"](
+                {
+                    "event": "progress",
+                    "input_tokens": 20,
+                    "sampled_tokens": 0,
+                    "output_token_budget": 512,
+                    "elapsed_seconds": 0.0,
+                    "prefill_seconds": None,
+                }
+            )
+        raise ChatCancelled("Request cancelled.")
+
+    monkeypatch.setattr(desktop.worker, "request", request)
+    with pytest.raises(APIError) as failed:
+        desktop.api_complete({"messages": [{"role": "user", "content": "replacement fixture"}]})
+    assert failed.value.code == "model_changed"
+    assert not any(event["event"] in {"generation_progress", "metrics"} for event in events(desktop))
+    assert not desktop.generation_estimates.history
+
+
 @pytest.mark.parametrize("request_id", [None, "", "bad id", 3])
 def test_playground_rejects_invalid_request_identifiers(desktop, request_id):
     with pytest.raises(DesktopError, match="Invalid app command"):
         desktop.dispatch({"command": "generate", "text": "timing fixture", "request_id": request_id})
 
 
-@pytest.fixture
-def tool_desktop(desktop, model, monkeypatch):
+@pytest.fixture(params=["qwen3-hermes-v1", "qwen38-xml-v1", "qwen35-xml-v1"])
+def tool_desktop(desktop, model, monkeypatch, request):
     from jinja2.sandbox import ImmutableSandboxedEnvironment
 
     running(desktop, model)
     seen = []
+    parser = request.param
     reply = {
-        "text": '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>',
+        "text": (
+            '<tool_call>{"name":"lookup","arguments":{"value":3}}</tool_call>'
+            if parser == "qwen3-hermes-v1"
+            else "<tool_call>\n<function=lookup>\n<parameter=value>\n3\n</parameter>\n</function>\n</tool_call>"
+        ),
         "input_tokens": 24,
         "output_tokens": 17,
         "finish_reason": "eos",
@@ -266,7 +452,7 @@ def tool_desktop(desktop, model, monkeypatch):
 
     monkeypatch.setattr(desktop.worker, "request", request)
     desktop.worker.streaming = True
-    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: "qwen3-hermes-v1")
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: parser)
     desktop.template = ImmutableSandboxedEnvironment().from_string("{{ tools | tojson }};{{ messages | tojson }}")
     payload = {
         "messages": [{"role": "user", "content": "synthetic fixture"}],
@@ -300,6 +486,69 @@ def test_tool_calls_render_and_replay_complete_history(tool_desktop):
     assert rendered[-2]["tool_calls"][0]["function"]["arguments"] == {"value": 3}
     assert rendered[-1]["tool_call_id"] == call["id"] and rendered[-1]["content"] == "6"
     assert desktop.job is None and desktop.api_queue == []
+
+
+def test_xml_schema_rejection_precedes_queue_and_worker_dispatch(tool_desktop):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, seen, _ = tool_desktop
+    if desktop.settings_summary()["tool_parser"] == "qwen3-hermes-v1":
+        pytest.skip("Hermes arguments carry their JSON types directly")
+    payload["tools"][0]["function"]["parameters"]["properties"]["value"] = {"type": None}
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload)
+    assert error.value.code == "tool_schema_unsupported"
+    assert not seen and desktop.job is None and desktop.api_queue == []
+
+
+def test_unused_untyped_hint_preserves_normal_tool_requests(tool_desktop):
+    desktop, payload, seen, _ = tool_desktop
+    payload["tools"][0]["function"]["parameters"]["properties"]["unused"] = {
+        "description": "Synthetic unconstrained optional value"
+    }
+    result = desktop.api_complete(payload)
+    assert result["choices"][0]["finish_reason"] == "tool_calls"
+    assert json.loads(seen[0]["text"].split(";", 1)[0]) == payload["tools"]
+    assert desktop.job is None and desktop.api_queue == []
+
+
+def test_unused_schemas_do_not_block_none_or_named_tool_choice(tool_desktop):
+    desktop, payload, seen, reply = tool_desktop
+    payload["tools"].append(
+        {"type": "function", "function": {"name": "unused", "parameters": {"properties": {"x": {}}}}}
+    )
+    payload["tool_choice"] = {"type": "function", "function": {"name": "lookup"}}
+    assert desktop.api_complete(payload)["choices"][0]["finish_reason"] == "tool_calls"
+    assert [tool["function"]["name"] for tool in json.loads(seen[0]["text"].split(";", 1)[0])] == ["lookup"]
+    reply["text"] = "Synthetic text without tool calls."
+    payload["tool_choice"] = "none"
+    assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == reply["text"]
+    assert json.loads(seen[2]["text"].split(";", 1)[0]) is None
+    assert desktop.job is None and desktop.api_queue == []
+
+
+def test_tool_capabilities_follow_parser_and_chat_mode(tool_desktop, monkeypatch):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, seen, reply = tool_desktop
+    parser = desktop.settings_summary()["tool_parser"]
+    assert desktop.api_models()[0]["tool_calling"] is True
+    assert desktop.api_status()["capabilities"]["tool_parser"] == parser
+    desktop.active_mode = "decision"
+    assert desktop.api_models() == []
+    assert desktop.settings_summary()["tools"] is False
+    assert desktop.api_status()["capabilities"]["tool_parser"] is None
+    desktop.active_mode = "chat"
+    monkeypatch.setattr("stark_convert.desktop.tool_parser_for", lambda codec: None)
+    assert desktop.api_models()[0]["tool_calling"] is False
+    assert desktop.api_status()["capabilities"]["tool_choices"] == []
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload)
+    assert error.value.code == "tools_unsupported"
+    assert not seen and desktop.job is None and desktop.api_queue == []
+    reply["text"] = "Ordinary chat remains available."
+    payload.pop("tools")
+    assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == reply["text"]
 
 
 @pytest.mark.parametrize(
@@ -347,6 +596,74 @@ def test_tool_failure_releases_request_and_never_delivers_partial_calls(tool_des
             assert desktop.api_complete(payload)["choices"][0]["message"]["content"] == "synthetic retry"
     if failure == "worker":
         assert desktop.worker is None
+
+
+@pytest.mark.parametrize("terminal", ["worker_fault", "cancelled", "reply"])
+def test_active_model_replacement_is_classified_without_closing_new_worker(tool_desktop, monkeypatch, terminal):
+    from unittest.mock import Mock
+
+    from stark_convert.chat import ChatCancelled
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    old_worker, old_model = desktop.worker, desktop.active_model
+    replacement = Mock(spec=["close"])
+
+    def infer(*args, **kwargs):
+        with desktop.lock:
+            desktop.epoch += 1
+            desktop.worker = replacement
+            desktop.active_model = "synthetic-replacement"
+        if terminal == "worker_fault":
+            raise ValueError("Synthetic old-worker failure")
+        if terminal == "cancelled":
+            raise ChatCancelled("Synthetic old-worker cancellation")
+        return dict(reply)
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    delivered = []
+    try:
+        with pytest.raises(APIError) as error:
+            desktop.api_complete(payload, on_delta=delivered.append)
+        assert error.value.status == 503 and error.value.code == "model_changed"
+        assert desktop.worker is replacement and desktop.active_model == "synthetic-replacement"
+        replacement.close.assert_not_called()
+        assert desktop.job is None and desktop.api_queue == [] and delivered == []
+    finally:
+        # The synthetic replacement owns no process. Restore the fixture's real
+        # private worker so its normal teardown can reap that process.
+        desktop.worker, desktop.active_model = old_worker, old_model
+
+
+@pytest.mark.parametrize(
+    "reason,expected_status,expected_code",
+    [
+        (None, 499, "request_cancelled"),
+        ("deadline", 504, "request_timeout"),
+    ],
+)
+def test_same_model_worker_fault_after_cancellation_keeps_cancellation_category(
+    tool_desktop, monkeypatch, reason, expected_status, expected_code
+):
+    import threading
+
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, _ = tool_desktop
+    control = threading.Event()
+    control.reason = reason
+    process = desktop.worker.process
+
+    def infer(*args, **kwargs):
+        control.set()
+        raise ValueError("Synthetic interrupted worker failure")
+
+    monkeypatch.setattr(desktop, "infer", infer)
+    with pytest.raises(APIError) as error:
+        desktop.api_complete(payload, cancelled=control)
+    assert error.value.status == expected_status and error.value.code == expected_code
+    assert desktop.worker is None and process.poll() is not None
+    assert desktop.job is None and desktop.api_queue == []
 
 
 def test_tool_http_stream_matches_buffered_calls_and_never_duplicates(tool_desktop):
@@ -472,6 +789,22 @@ def test_tool_stream_failure_after_provisional_text_recovers(tool_desktop, failu
     delivered.clear()
     result = desktop.api_complete(payload, on_delta=delivered.append)
     assert "".join(delivered) == result["choices"][0]["message"]["content"] == "Fresh response."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_api_metrics_publish_when_tool_parsing_fails(tool_desktop, stream):
+    from stark_convert.local_api import APIError
+
+    desktop, payload, _, reply = tool_desktop
+    reply.update(text="<tool_call>{", sampled_tokens=17, prefill_seconds=0.2, decode_seconds=0.3)
+    with pytest.raises(APIError) as error:
+        desktop.api_complete({**payload, "stream": stream}, on_delta=(lambda _: None) if stream else None)
+    assert error.value.code == "invalid_tool_call"
+    published = [event for event in events(desktop) if event["event"] == "metrics"]
+    assert [(event["input_tokens"], event["output_tokens"]) for event in published] == [(24, 17)]
+    assert "<tool_call>" not in desktop.output.getvalue()
+    # A response the client could not use does not train completion estimates.
+    assert not desktop.generation_estimates.history
 
 
 def test_private_api_configuration_preserves_listener_on_port_conflict(desktop):
@@ -681,7 +1014,7 @@ def test_api_worker_failure_clears_job_and_can_restart(desktop, model):
     identifier = running(desktop, model)
     with pytest.raises(APIError) as failed:
         desktop.api_complete({"model": identifier, "messages": [{"role": "user", "content": "failure fixture"}]})
-    assert failed.value.status == 503
+    assert failed.value.status == 503 and failed.value.code == "generation_failed"
     assert desktop.job is None
     assert desktop.worker is None
     assert not any(e["event"] == "metrics" for e in events(desktop))
@@ -724,7 +1057,7 @@ def test_api_stream_disconnect_fences_worker_and_clears_job(desktop, model):
             {"model": identifier, "messages": [{"role": "user", "content": "hello"}], "stream": True},
             on_delta=disconnected,
         )
-    assert failed.value.status == 503
+    assert failed.value.status == 499 and failed.value.code == "request_cancelled"
     assert desktop.worker is None
     assert desktop.job is None
     assert process.poll() is not None

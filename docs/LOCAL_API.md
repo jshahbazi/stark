@@ -77,6 +77,8 @@ The service accepts images up to 4 MiB compressed, with PNG or JPEG signatures. 
 
 **Streaming.** With `stream: true` the response is Server-Sent Events of `chat.completion.chunk` objects followed by `data: [DONE]`. The first chunk carries the assistant role. `stream_options: {"include_usage": true}` adds a final usage-only chunk. Validation errors keep their HTTP status because they occur before streaming starts; a failure during streaming emits an error object in the stream and closes without `[DONE]`.
 
+**Usage.** `usage` reports `prompt_tokens`, `completion_tokens` and `total_tokens`. When the running worker supports [prefix reuse](#prefix-reuse), it also reports `prompt_tokens_details.cached_tokens`: the prompt tokens served from the retained prefix of the previous request instead of being processed again. `prompt_tokens` always counts the whole prompt.
+
 ## MTP capabilities and per-model preferences
 
 The live worker supplies `capabilities.mtp` in `/v1/capabilities` and each
@@ -132,18 +134,46 @@ HTTP completions continue using the public IDs described above.
 
 ## Function tools
 
-`/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. The parser is `qwen3-hermes-v1`, admitted only for the exact official Qwen3-0.6B template SHA-256 `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` or the official `mlx-community/Qwen3-4B-4bit` template SHA-256 `87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5` from revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25`. The 4B template is preserved as an upstream fixture with source and license provenance under `tools/converter/tests/fixtures/`. Other templates keep ordinary chat and reject tool definitions/history with `tools_unsupported`. A model name alone does not qualify a template.
+`/v1/capabilities` reports `tool_calling`, `tool_parser` and `tool_choices` for the running model. Tool support means that the loaded chat template has an implemented, tested wire-format parser. Stark recognizes the reviewed originals below by source SHA-256 and also accepts syntax-equivalent Jinja programs, independently of the model name or saved installation metadata:
+
+| Parser | Supported template sources | Template SHA-256 |
+| --- | --- | --- |
+| `qwen3-hermes-v1` | Official Qwen3-0.6B | `a55ee1b1660128b7098723e0abcd92caa0788061051c62d51cbe87d9cf1974d8` |
+| `qwen3-hermes-v1` | `mlx-community/Qwen3-4B-4bit`, revision `4dcb3d101c2a062e5c1d4bb173588c54ea6c4d25` | `87a2728cb8dc9fe424d624542f6060ec05a1d285ebbec578bb078900e33396b5` |
+| `qwen38-xml-v1` | `fabiogreter/Qwen3.8-Flash-Next-lily-q4-xl`, revision `0f94842e3682b49acace4daeb4cf2e65a6f94f83`; identical template in installed `pipenetwork/Qwen3.8-Flash-Next-MLX-mixed-4_8bit` | `c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041` |
+| `qwen35-xml-v1` | `alibiserikbay/JevK5`, revision `c4f7fdb3aeab5582336406e78d3bef11bf98833d` | `a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715` |
+
+The compatibility check parses templates using the same locked Jinja version, immutable sandbox and whitespace settings as chat rendering. A versioned program fingerprint ignores source locations, comments, equivalent string quoting/escapes, redundant parentheses and expression spacing. Adjacent literal text split by a comment is joined without changing its contents. Newline/indentation changes are accepted only when Jinja produces the same program. Literal output, tool instructions/markers, emitted whitespace, values, lookup style, filters, calls, branches, loops and their ordering remain part of the fingerprint. Changed instructions or a new tool format still require review and an updated registration or parser; model names and marker presence never establish support. Matching does not compile or execute the candidate. Sources are limited to 256 KiB of UTF-8, with bounded traversal work/depth and an eight-entry in-memory template cache; malformed or over-limit candidates remain unsupported.
+
+The 4B template is preserved as an upstream fixture with source and license provenance under `tools/converter/tests/fixtures/`. XML paths use synthetic parser fixtures and separately recorded rendering checks against the installed templates. Separate model-loading and vision-artifact integrity/evidence checks still apply: recognizing a compatible tool program does not authorize a changed vision artifact to load. Other templates keep ordinary chat and reject tool definitions/history with `tools_unsupported`. A matching program establishes protocol support; reliable tool selection, argument quality and task completion require separate model-bound evidence. Models sharing a supported program are not automatically qualified for agent tasks. See the [template compatibility validation record](archive/runs/2026-11-01-tool-template-compatibility.md).
 
 - `tools` accepts up to 64 function definitions with unique ASCII names, optional descriptions, and object parameter schemas. Schemas are model hints; schema-constrained generation is unavailable and `strict: true` is rejected. The client must validate execution arguments against its schema.
 - `tool_choice` accepts `auto`, `none`, `required`, or `{"type":"function","function":{"name":"supplied_name"}}`. Named choice renders only that definition. Required/named output is checked after generation; failure returns `tool_choice_not_satisfied`, without synthesizing a call. `none` omits definitions from rendering and rejects generated tool markers.
 - `parallel_tool_calls` is a boolean, default true. False permits at most one generated call; a violation fails the completion. At most 16 calls are returned, in generation order, with distinct stable IDs within the response and JSON-object argument strings.
-- Assistant history may contain null or omitted text alongside `tool_calls`. Each call requires `id`, `type: function`, and a function name/argument string. Tool-result messages require string/text-part content and the matching `tool_call_id`. All outstanding results must be returned before another assistant/user turn. Duplicate, orphaned and incomplete transactions are rejected. The pinned template receives complete history, argument objects, definitions, and results ordered by their call IDs.
-- Only complete `<tool_call>` JSON objects from a normally terminated generation become executable requests. Duplicate JSON keys, nonfinite numbers, unknown names, invalid argument JSON, truncated markers, extra trailing text and limit violations fail. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
+- Assistant history may contain null or omitted text alongside `tool_calls`. Each call requires `id`, `type: function`, and a function name/argument string. Tool-result messages require string/text-part content and the matching `tool_call_id`. All outstanding results must be returned before another assistant/user turn. Duplicate, orphaned and incomplete transactions are rejected. The loaded template receives complete history, argument objects, definitions, and results ordered by their call IDs.
+- Hermes calls contain JSON objects inside `<tool_call>`. XML calls contain `<function=NAME>` and named `<parameter=NAME>` blocks. Only complete calls from a normally terminated generation become executable requests. Duplicate keys/parameters, nonfinite numbers, unknown names, invalid argument representations, truncated markers, quoted examples, extra trailing text and limit violations fail. Code fences, blockquotes, HTML comments and HTML code/quotation containers in the visible prefix are rejected conservatively, including completed blocks. Balanced inline-code mentions and completed thinking before an actual call remain supported. No guessed repairs occur. Malformed output does not unload an otherwise aligned worker.
+- XML schemas require directly named root properties. Parameters can declare types, constrain types through JSON `enum`/`const` literals, or use typed `anyOf`/`oneOf` alternatives or bounded local JSON Pointer references. Parameter names use the same bounded ASCII identifier syntax as function names. Root references/composition, dynamic parameter names, malformed schemas, remote/cyclic/unresolved references and resolution-budget exhaustion return `tool_schema_unsupported` before generation, with a fixed unsupported-form category.
+- Empty or annotation-only parameter schemas are forwarded unchanged as model hints, so an unused unconstrained parameter does not block ordinary chat or other tool calls. XML cannot determine the representation of a generated unconstrained value: using such a parameter fails the entire completion with `tool_argument_type_unsupported`, without returning any calls. Types are never guessed from generated text.
+- XML strings retain their original contents; structured values use JSON. The Qwen3.5 template's top-level boolean/null scalars use its canonical `True`/`False`/`None` representation. Ambiguous string/non-string union values and strings containing reserved wire delimiters are rejected rather than coerced. These checks decode types; clients still validate the complete schema before executing anything.
 - Definitions together are limited to 256 KiB; each argument object to 64 KiB; each tool result to 256 KiB; parsed tool output to 512 KiB. JSON depth is limited to 32 and item count to 16,384. The ordinary 1 MiB body/worker-line limits and model context limits also apply. Tool use and image input cannot be combined.
 
 Buffered completions return `message.tool_calls`, optional text (null when absent), and `finish_reason: "tool_calls"`. Tool-enabled streaming delivers ordinary text as it is generated. Possible tool markers and their arguments stay private through the terminal worker frame and strict parsing, then indexed `delta.tool_calls` are emitted exactly once, followed by the terminal reason, optional usage and `[DONE]`. Trailing whitespace is held until it can be distinguished from the separator before a call. Invalid or truncated calls produce a stream error after any provisional text; they never produce executable tool deltas. Usage includes all generated framing/argument tokens and tokens completing a stop sequence. Cancellation/deadline checks remain active throughout generation.
 
-An agent client can still take longer to produce its first token than a short Playground chat. Its system instructions, tool schemas and conversation history are part of the model input and must be processed before decoding begins. Live text streaming removes the additional wait for the entire answer; it does not remove model prefill work or shorten the client's instructions. The [OpenWork first-text latency record](archive/runs/2026-10-31-openwork-first-text-latency.md) separates native first-token work from the rest of a measured client request.
+An `invalid_tool_call` message ends with one fixed reason naming the rule that rejected the reply, for example "the call names a tool that this request does not offer or allow" or "text before the call contains a code block, quotation or unclosed reasoning". The reasons cover:
+
+- generation stopping at the output or context limit, or ending abnormally
+- tool calls not allowed for the request
+- call markup outside a complete call
+- a code block, quotation or unclosed reasoning before the call
+- a call that breaks the model's format, or text after it
+- a tool the request does not offer or allow
+- an undefined or repeated argument, or a value that does not match its schema
+- arguments over the size or nesting limits
+- more calls than the request allows
+
+Reasons never include generated text, tool or argument names, or values. Clients should act on `code` rather than the message text.
+
+An agent client can still take longer to produce its first token than a short Playground chat. Its system instructions, tool schemas and conversation history are part of the model input and must be processed before decoding begins. Live text streaming removes the additional wait for the entire answer; it does not shorten the client's instructions. [Prefix reuse](#prefix-reuse) removes most of the repeated work on later steps of the same conversation, but the first request of a conversation is still processed in full. The [OpenWork first-text latency record](archive/runs/2026-10-31-openwork-first-text-latency.md) separates native first-token work from the rest of a measured client request.
 
 Qwen/Qwen3-0.6B with unquantized BF16 weights completed a narrowly prompted two-tool result-use task locally. Looser variants failed through an unwanted parallel call or premature stopping; this checkpoint is not a general-purpose agent recommendation. Protocol fixtures and task-competence evidence are recorded separately.
 
@@ -161,7 +191,37 @@ The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read tas
 - The image service starts the worker with an empty, owner-private 0700 staging directory and stages each accepted image as a 0600 regular file with an opaque identifier. The worker validates the reference, owner, type, private permissions, size, link count, stable metadata and image signature, then immediately unlinks the name. It retains the opened-file lease through completion. Host cleanup removes remaining staged names when the transaction exits; worker teardown removes only opaque, owner-private, single-link regular files in its pinned directory. Media references and image bytes are not logged.
 - Image preparation, generation, streaming reads, frame writes and discard share one worker transaction deadline, with a 300-second default. The timeout does not reset for each operation. Recoverable cancellation drains native work and clears prepared state before reuse; a protocol or cleanup failure closes and reaps the worker before another request can run.
 
-Each request is tokenized and prefilled from scratch by the worker; there is no prompt or prefix cache between requests.
+### Prefix reuse
+
+Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
+
+- Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
+- The native Qwen3.8 backend resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. A later step waits for its new messages plus at most about 4,096 tokens, provided nothing before that point changed; an earlier change processes the whole prompt. MTP must be on or off for both requests.
+
+Reuse follows the worker's prefill grid, so outputs are identical to processing the whole prompt. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md) and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) the measurements.
+
+The cache holds one entry, in worker memory only. It is never written to disk, logged or returned. Each principal has its own random, in-memory scope:
+
+- each Playground conversation
+- the master API key within one API session
+- each managed client grant within one API session
+
+A request never reuses another principal's entry, so first-token timing cannot reveal what another principal sent. Clients that share the master key share its scope. The entry is released:
+
+- when the next request uses a different scope or context size
+- on any worker error, cancellation, client disconnect or deadline
+- on any image request
+- on Disconnect/revocation, a key change or an API restart
+- after 600 seconds without requests
+- when the model stops or changes
+
+It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
+
+## Progress in Stark
+
+While a completion runs, the Stark menu shows that an app is generating, and the readout box in the menu and Playground follows the request: input and output rates as soon as they can be measured, the first-token time, the prompt token count and elapsed time. When the worker reports reused prompt-prefix tokens, the prompt line also shows how many were reused; workers without prefix reuse omit it. Once timing is calibrated for the model and request settings, elapsed time appears against an estimated total with a progress bar. Buffered requests are streamed from the worker internally for this purpose; the HTTP response is unchanged. When generation finishes, the box keeps the request's final rates, first-token time, prompt count and total time, including for requests whose tool calls then fail strict parsing.
+
+These app events carry counts and timings, a random per-request identifier and the loaded model's library identifier only. They never contain prompts, responses, tool arguments, client identifiers, capability scopes or keys, and they are not written to disk. The worker serves one request at a time, so a request's progress ends before the next request starts, and progress from a stopped or replaced model is discarded. Completion estimates use the same bounded, in-memory calibration as Playground chats, with separate profiles per model load and request settings; see the [generation contract](GENERATION.md#generate).
 
 ## Error codes
 
@@ -195,7 +255,9 @@ Error responses are `{"error":{"message":...,"type":...,"code":...}}`. `type` is
 
 ## Managed OpenWork connection
 
-On macOS, Stark's **Connection Details** includes **Connect to OpenWork**. Open OpenWork with a local workspace, then choose that button. Stark installs its bundled OpenCode V2 connector into the native global `opencode.jsonc` selected by the verified OpenWork engine's `OPENCODE_CONFIG_DIR`. It adds only the connector's local package URL, private Unix-socket path, public expected API URL and Stark ownership marker; the installer preserves unrelated configuration and rejects a conflicting Stark connector. If configuration changes, reopen OpenWork and select **Stark** in its model picker. No copied API key, manual JSON, terminal command or credential helper is required.
+On macOS, Stark's **Connection Details** includes **Connect to OpenWork**. Open OpenWork with a local workspace, then choose that button. Stark installs its bundled OpenCode V2 connector into the native global `opencode.jsonc` selected by the verified OpenWork engine's `OPENCODE_CONFIG_DIR`. It adds only the connector's local package URL, private Unix-socket path, public expected API URL and Stark ownership marker. Connect repairs a recognized Stark-owned entry after its app location or credential namespace changes, including a switch between signed installed and ad-hoc development builds. It updates only those public fields; credentials and unrelated settings are preserved. Unknown formats, conflicting ownership and duplicate Stark entries are rejected.
+
+If configuration changes, **quit OpenWork completely and reopen it**, then select **Stark** and the running model in its model picker. Closing the OpenWork window does not restart its engine. No copied API key, manual JSON, terminal command or credential helper is required. OpenWork lists the model running in Stark's Chat mode; the Model ID menu in Connection Details only inspects saved models and does not run them. After a normal model switch, the connector refreshes the running model within a few seconds. A previously saved selection can show unavailable until the new running model is selected.
 
 If OpenWork settings already define a manual provider with ID `stark`, remove only that provider entry before connecting and keep your other provider entries. The managed connection does not migrate existing client credentials.
 
@@ -205,7 +267,11 @@ The accepted app identity is the regular macOS application with bundle ID `com.d
 
 Choose **Disconnect** in Connection Details to disable the approval and revoke OpenWork's capabilities for the current API session, including admitted requests. Every OpenWork grant uses the client ID prefix `openwork.`, and the backend revokes only that prefix, so a connected OpenCode Desktop keeps working. A later **Connect to OpenWork** action enables it again. Stark restarts and API-session changes invalidate prior capabilities; the connector refreshes status and can obtain a new capability for its next request. If Stark's saved port changes, choose **Reconnect** to update the public expected URL, then reopen OpenWork. A failed or occupied port does not silently change the URL; use the Base URL shown in Connection Details and connect again after the listener is available.
 
-The stock helperless connection has narrow validation with official OpenWork 0.18.63 / OpenCode 2.0.26 and the pinned Qwen3-4B artifact, including chat, follow-up, client-side tool-result exchange, restart/reconnect and signed test-package upgrades. Model task evidence includes successful bounded result use, formatting misses and a failed final numeric check. Use explicit tool budgets and client approvals. See the [managed-connection validation record](archive/runs/2026-10-31-openwork-managed-connection.md).
+The stock helperless connection has narrow validation with official OpenWork 0.18.63 / OpenCode 2.0.26 and the pinned Qwen3-4B artifact, including chat, follow-up, client-side tool-result exchange, restart/reconnect and signed test-package upgrades. Model task evidence includes successful bounded result use, formatting misses and a failed final numeric check. See the [managed-connection validation record](archive/runs/2026-10-31-openwork-managed-connection.md).
+
+The pinned Lily q4-xl artifact also completed streaming chat/follow-up, two sequential client-side reads with result use, cancellation/recovery and reconnect after a signed Stark relaunch. Direct GUI chat/follow-up were checked with the local model selected. This qualifies a bounded read workflow, not broad agent reliability. OpenWork can retain a different model for an existing session; choose Stark and the running model in that session's model menu before sending. When Stark switches models, the previous saved selection may become unavailable while the new model appears under Stark. If OpenWork retains an unavailable-model state after recovery, choose its Retry or Refresh action, then select the running Stark model.
+
+Agent clients send substantial system instructions and tool definitions, so Stark may process a much longer input than a Playground chat before producing its first token. The Lily validation observed roughly 19,000 input tokens and about 8–20 seconds to the first OpenWork text event for short chat across runs; these observations do not isolate setup, input processing and host contention, or promise a response time. Use explicit tool budgets and client approvals. See the [Lily acceptance record](archive/runs/2026-11-01-openwork-lily-acceptance.md) for the exact build, model, timings and limitations.
 
 The earlier [helper-based desktop run](archive/runs/OPENWORK_KEYCHAIN_E2E_2026_10_31.md) remains historical evidence for its separate credential path; it is not the basis for the managed-connection result above.
 
@@ -253,4 +319,4 @@ Goose's native CLI independently completed chat and a client-side read-only tool
 
 ## Compatibility boundary
 
-The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported. Tool requests require the pinned supported template/parser; clients own execution, schema validation and approvals.
+The surface follows the `/v1/models` and `/v1/chat/completions` shape used by local engines such as [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md) and [LM Studio](https://lmstudio.ai/docs/developer/openai-compat), restricted to supported chat templates, one model and a bounded worker. Image input is conditional on the live host evidence gate; other multimodal content, JSON-schema output, embeddings, the Responses API, batching and vendor-specific sampling fields are unsupported. Tool requests require a supported template program and parser; clients own execution, schema validation and approvals.

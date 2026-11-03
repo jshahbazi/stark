@@ -935,6 +935,9 @@ struct GenerationTimingProgress {
     let firstTokenRange: ClosedRange<Double>?
     let remainingRange: ClosedRange<Double>?
     let calibrated: Bool
+    // Prompt counts are optional; reuse appears only from workers that retain a prefix.
+    let inputTokens: Int?
+    let reusedInputTokens: Int?
     let receivedAt: Date
 
     init?(_ event: [String: Any], receivedAt: Date = Date()) {
@@ -950,29 +953,47 @@ struct GenerationTimingProgress {
             guard event[key] == nil || event[key] is NSNull || Self.seconds(event[key]) != nil else { return nil }
         }
         let first = Self.seconds(event["ttft_seconds"])
+        let input = Self.count(event["input_tokens"]), reused = Self.count(event["reused_input_tokens"])
         guard (sampled == 0 && first == nil) || (sampled > 0 && first != nil && first! <= elapsed),
+              event["input_tokens"] == nil || input != nil,
+              event["reused_input_tokens"] == nil || (reused != nil && input != nil && reused! < input!),
               Self.validRange(event["ttft_lower_seconds"], event["ttft_upper_seconds"]),
               Self.validRange(event["remaining_lower_seconds"], event["remaining_upper_seconds"]) else { return nil }
         sampledTokens = sampled; outputTokenBudget = budget; elapsedSeconds = elapsed
         firstTokenSeconds = first
         firstTokenRange = Self.range(event["ttft_lower_seconds"], event["ttft_upper_seconds"])
         remainingRange = Self.range(event["remaining_lower_seconds"], event["remaining_upper_seconds"])
-        calibrated = calibration.boolValue; self.receivedAt = receivedAt
+        calibrated = calibration.boolValue; inputTokens = input; reusedInputTokens = reused
+        self.receivedAt = receivedAt
     }
 
-    func firstTokenDetail(at now: Date) -> String {
-        if let actual = firstTokenSeconds { return Self.duration(actual) }
-        guard let estimate = firstTokenRange else { return "Measuring…" }
-        if elapsedSeconds + age(at: now) > estimate.upperBound { return "Taking longer than estimated…" }
-        return "About " + Self.durationRange(estimate)
+    var promptDetail: String? { inputTokens.map { Self.promptDetail($0, reused: reusedInputTokens) } }
+
+    // Live rates follow the worker's metrics: input over the time to the first
+    // token, output over the tokens sampled after it.
+    var inputSpeed: Double? {
+        guard let input = inputTokens, let first = firstTokenSeconds, first > 0 else { return nil }
+        return Double(input - (reusedInputTokens ?? 0)) / first
     }
 
-    func completionDetail(at now: Date) -> String {
-        guard let remaining = remainingRange else { return "Learning timing…" }
-        let age = age(at: now)
-        guard remaining.upperBound > age else { return "Updating estimate…" }
-        let range = max(0, remaining.lowerBound - age)...max(0, remaining.upperBound - age)
-        return "About " + Self.durationRange(range) + " remaining"
+    var outputSpeed: Double? {
+        guard let first = firstTokenSeconds, sampledTokens > 1, elapsedSeconds > first else { return nil }
+        return Double(sampledTokens - 1) / (elapsedSeconds - first)
+    }
+
+    // Elapsed time against the middle of a calibrated completion estimate. The
+    // bar is omitted while uncalibrated or once elapsed time passes the estimate.
+    func time(at now: Date) -> (detail: String, fraction: Double?) {
+        let elapsed = elapsedSeconds + age(at: now)
+        guard calibrated, let remaining = remainingRange else { return (Self.duration(elapsed), nil) }
+        let total = elapsedSeconds + (remaining.lowerBound + remaining.upperBound) / 2
+        guard total > 0, elapsed <= total else { return (Self.duration(elapsed), nil) }
+        return (Self.duration(elapsed) + " of ~" + Self.duration(total), elapsed / total)
+    }
+
+    static func promptDetail(_ input: Int, reused: Int?) -> String {
+        guard let reused else { return input.formatted() }
+        return input.formatted() + " (" + reused.formatted() + " reused)"
     }
 
     static func duration(_ seconds: Double) -> String {
@@ -983,18 +1004,13 @@ struct GenerationTimingProgress {
 
     private func age(at now: Date) -> Double { max(0, now.timeIntervalSince(receivedAt)) }
 
-    private static func durationRange(_ range: ClosedRange<Double>) -> String {
-        let lower = duration(range.lowerBound), upper = duration(range.upperBound)
-        return lower == upper ? lower : lower + "–" + upper
-    }
-
     static func seconds(_ value: Any?) -> Double? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
               number.doubleValue.isFinite, number.doubleValue >= 0 else { return nil }
         return number.doubleValue
     }
 
-    private static func count(_ value: Any?) -> Int? {
+    static func count(_ value: Any?) -> Int? {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
               number.int64Value >= 0, number.compare(NSNumber(value: number.int64Value)) == .orderedSame,
               let result = Int(exactly: number.int64Value) else { return nil }
@@ -1020,7 +1036,11 @@ final class EngineController: ObservableObject {
         didSet {
             if ["idle", "error", "stopping"].contains(state) { gpuMemoryBytes = nil }
             if ["idle", "error", "stopping", "loading"].contains(state) { supportsTools = false; toolParser = "" }
-            if state != "generating" { generationProgress = nil }
+            if state != "generating" {
+                generationProgress = nil
+                if let id = apiProgressID { retiredAPIProgressID = id }
+                apiProgressID = nil
+            }
         }
     }
     @Published var message = "Starting Stark…"
@@ -1054,6 +1074,8 @@ final class EngineController: ObservableObject {
     @Published var inputSpeed: Double?
     @Published var outputSpeed: Double?
     @Published private(set) var firstTokenSeconds: Double?
+    @Published private(set) var generationSeconds: Double?
+    @Published private(set) var reusedInputTokens: Int?
     @Published private(set) var generationProgress: GenerationTimingProgress?
     @Published private(set) var gpuMemoryBytes: Int64?
     @Published var inputTokens = 0
@@ -1083,6 +1105,9 @@ final class EngineController: ObservableObject {
     private let reader = DispatchQueue(label: "stark.desktop.reader")
     private var shuttingDown = false
     private var pendingMessageID: UUID?
+    // Random backend identifiers for connected-application requests; never client identities.
+    private var apiProgressID: String?
+    private var retiredAPIProgressID: String?
     private var pendingOptions: ChatOptions?
     private var pendingDecisionAnswers: [String]?
     private var attachmentStaging: AttachmentStaging?
@@ -1128,6 +1153,23 @@ final class EngineController: ObservableObject {
     }
     var hasPlaygroundGeneration: Bool {
         mode == .chat && loadedMode == .chat && state == "generating" && pendingMessageID != nil
+    }
+    // The serialized worker runs either a Playground message or a connected-application request.
+    var hasAPIGeneration: Bool {
+        loadedMode == .chat && !loadedID.isEmpty && state == "generating" && pendingMessageID == nil
+    }
+    // The readout follows the running request, then keeps the last finished one.
+    var readoutIsLive: Bool { hasPlaygroundGeneration || hasAPIGeneration }
+    var readoutInputSpeed: Double? { readoutIsLive ? generationProgress?.inputSpeed : inputSpeed }
+    var readoutOutputSpeed: Double? { readoutIsLive ? generationProgress?.outputSpeed : outputSpeed }
+    var readoutFirstToken: Double? { readoutIsLive ? generationProgress?.firstTokenSeconds : firstTokenSeconds }
+    var readoutPrompt: String? {
+        if readoutIsLive { return generationProgress?.promptDetail }
+        return inputTokens > 0 ? GenerationTimingProgress.promptDetail(inputTokens, reused: reusedInputTokens) : nil
+    }
+    func readoutTime(at now: Date) -> (detail: String, fraction: Double?)? {
+        if readoutIsLive { return generationProgress?.time(at: now) }
+        return generationSeconds.map { (GenerationTimingProgress.duration($0), nil) }
     }
     var modelReady: Bool { state == "ready" && !busy && !loadedID.isEmpty && loadedID == selectedID && loadedMode == mode }
     var modelControlID: String {
@@ -1403,15 +1445,22 @@ final class EngineController: ObservableObject {
         case "metrics":
             applyMetrics(event)
         case "generation_progress":
-            guard mode == .chat, loadedMode == .chat, state == "generating",
-                  let expected = pendingMessageID, event["id"] as? String != nil,
-                  UUID(uuidString: event["id"] as? String ?? "") == expected,
+            guard loadedMode == .chat, state == "generating", let id = event["id"] as? String,
                   !loadedID.isEmpty, event["model"] as? String == loadedID,
                   let progress = GenerationTimingProgress(event) else { return }
+            if event["source"] as? String == "api" {
+                guard hasAPIGeneration, Self.apiProgressIdentifier(id), id != retiredAPIProgressID else { return }
+                if id != apiProgressID { apiProgressID = id; generationProgress = nil }
+            } else {
+                guard event["source"] == nil, mode == .chat, let expected = pendingMessageID,
+                      UUID(uuidString: id) == expected else { return }
+            }
             if let previous = generationProgress {
                 guard progress.elapsedSeconds >= previous.elapsedSeconds,
                       progress.sampledTokens >= previous.sampledTokens,
                       progress.outputTokenBudget == previous.outputTokenBudget,
+                      progress.inputTokens == previous.inputTokens,
+                      progress.reusedInputTokens == previous.reusedInputTokens,
                       previous.firstTokenSeconds == nil || progress.firstTokenSeconds == previous.firstTokenSeconds else { return }
             }
             generationProgress = progress
@@ -1447,6 +1496,13 @@ final class EngineController: ObservableObject {
                 removalError = event["message"] as? String ?? "Could not remove this model. Try again."
                 removalRequestID = nil; removingModelID = nil; removalAction = nil
                 if state == "removing" { state = loadedID.isEmpty ? "idle" : "ready"; message = loadedID.isEmpty ? "Stopped" : "Ready" }
+                return
+            }
+            if let requestID = requestID, let pending = pendingMessageID, UUID(uuidString: requestID) == pending {
+                // The backend settles the worker state with a following status event
+                // or, for a rejected send, with the running operation's own status.
+                errorMessage = event["message"] as? String ?? "Unable to complete the operation."
+                discardPendingMessage()
                 return
             }
             if let requestID = requestID, requestID != activeInstallRequestID { return }
@@ -1489,6 +1545,12 @@ final class EngineController: ObservableObject {
         inputSpeed = rate(event["input_tokens_per_second"])
         outputSpeed = rate(event["output_tokens_per_second"])
         firstTokenSeconds = GenerationTimingProgress.seconds(event["prefill_seconds"])
+        generationSeconds = GenerationTimingProgress.seconds(event["generation_seconds"])
+        reusedInputTokens = GenerationTimingProgress.count(event["reused_input_tokens"]).flatMap { $0 < inputTokens ? $0 : nil }
+    }
+
+    private static func apiProgressIdentifier(_ value: String) -> Bool {
+        value.utf8.count == 32 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
     }
 
     private func rate(_ value: Any?) -> Double? {
@@ -1962,7 +2024,7 @@ final class EngineController: ObservableObject {
     private func clearConversation() {
         messages.removeAll(); pendingMessageID = nil
         finishReason = ""; inputSpeed = nil; outputSpeed = nil
-        generationProgress = nil; firstTokenSeconds = nil
+        generationProgress = nil; firstTokenSeconds = nil; generationSeconds = nil; reusedInputTokens = nil
         inputTokens = 0; outputTokens = 0
         draftImage = nil; conversationImage = nil; imageProgress = ""
         attachmentLoading = false
@@ -2013,18 +2075,32 @@ struct SpeedView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 12) {
-                metric("Input", engine.inputSpeed)
+                metric("Input", engine.readoutInputSpeed)
                 Divider().frame(height: 40)
-                metric("Output", engine.outputSpeed)
+                metric("Output", engine.readoutOutputSpeed)
             }
-            if let firstToken = engine.firstTokenSeconds {
-                Text("First token: " + GenerationTimingProgress.duration(firstToken))
-                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            }
+            // Every row is always present, so the panel keeps its size as requests start and finish.
+            VStack(alignment: .leading, spacing: 4) {
+                detail("First token", engine.readoutFirstToken.map(GenerationTimingProgress.duration))
+                detail("Prompt tokens", engine.readoutPrompt)
+                TimelineView(.animation(minimumInterval: 0.5, paused: !engine.readoutIsLive)) { timeline in
+                    let time = engine.readoutTime(at: timeline.date)
+                    // An overlay keeps the bar from changing the row's height.
+                    detail("Time", time?.detail).frame(maxWidth: .infinity, alignment: .leading)
+                        .overlay(alignment: .trailing) {
+                            if let fraction = time?.fraction {
+                                ProgressView(value: fraction).progressViewStyle(.linear).frame(width: 90)
+                            }
+                        }
+                }
+            }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
         .padding(12)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-        .help("Last request. Input uses time to first token, including setup. Output measures subsequent sampled tokens. A dash means no measurement is available.")
+        .help("The running request, or else the last one, from the Playground or a connected application. Input uses time to first token, including setup. Output measures subsequent sampled tokens. While a request runs, Time compares elapsed time with an estimate that adjusts as tokens arrive. A dash means no measurement is available.")
+    }
+    private func detail(_ title: String, _ value: String?) -> some View {
+        Text(title + ": " + (value ?? "—"))
     }
     private func metric(_ title: String, _ value: Double?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -2034,27 +2110,6 @@ struct SpeedView: View {
                 Text("tok/s").font(.caption).foregroundStyle(.secondary)
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-struct GenerationTimingView: View {
-    @ObservedObject var engine: EngineController
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { timeline in
-            VStack(alignment: .leading, spacing: 5) {
-                detail("Time to first token", engine.generationProgress?.firstTokenDetail(at: timeline.date) ?? "Waiting for generation…")
-                detail("Estimated completion", engine.generationProgress?.completionDetail(at: timeline.date) ?? "Learning timing…")
-            }.font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-        }
-        .help("Timing starts when generation begins, after waiting and prompt preparation. Completion is an estimate that adjusts as tokens arrive; response length and other GPU activity can change it.")
-        .accessibilityElement(children: .combine)
-    }
-
-    private func detail(_ title: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title + ":")
-            Text(value).fixedSize(horizontal: false, vertical: true)
-        }
     }
 }
 
@@ -2096,11 +2151,7 @@ struct MenuView: View {
             }
             if let error = engine.errorMessage { Text(error).font(.caption).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
             Button("Manage Models", action: manage).buttonStyle(.borderedProminent)
-            if engine.mode == .chat {
-                SpeedView(engine: engine)
-                Text("Last request").font(.caption2).foregroundStyle(.secondary)
-                    .padding(.top, -10)
-            }
+            if engine.mode == .chat { SpeedView(engine: engine) }
             if engine.busy || !engine.loadedID.isEmpty {
                 HStack {
                     Spacer()
@@ -2887,18 +2938,15 @@ struct ChatContentView: View {
                         }
                         ForEach(engine.messages) { ChatBubble(message: $0) }
                         if engine.state == "generating" {
-                            VStack(alignment: .leading, spacing: 8) {
-                                HStack(spacing: 8) {
-                                    ProgressView().controlSize(.small)
-                                    Text(engine.hasPlaygroundGeneration
-                                         ? (engine.imageProgress.isEmpty
-                                            ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
-                                            : engine.imageProgress)
-                                         : engine.message)
-                                        .font(.callout).foregroundStyle(.secondary)
-                                    Button("Cancel", action: engine.stop)
-                                }
-                                if engine.hasPlaygroundGeneration { GenerationTimingView(engine: engine) }
+                            HStack(spacing: 8) {
+                                ProgressView().controlSize(.small)
+                                Text(engine.hasPlaygroundGeneration
+                                     ? (engine.imageProgress.isEmpty
+                                        ? (engine.generationProgress == nil ? "Preparing request…" : "Generating reply…")
+                                        : engine.imageProgress)
+                                     : engine.message)
+                                    .font(.callout).foregroundStyle(.secondary)
+                                Button("Cancel", action: engine.stop)
                             }.padding(.horizontal, 4)
                         }
                         Color.clear.frame(height: 1).id("latest")

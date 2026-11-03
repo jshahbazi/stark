@@ -35,6 +35,11 @@ SCENARIOS = (
     "invalid-socket",
     "port-reconnect",
     "shared-client-entry",
+    "namespace-reconnect",
+    "app-location-migration",
+    "combined-migration",
+    "migration-conflicts",
+    "remove-stale",
     "invalid-base-url",
 )
 

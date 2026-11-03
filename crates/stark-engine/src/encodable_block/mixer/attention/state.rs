@@ -129,6 +129,31 @@ impl KVCacheState {
         }
     }
 
+    /// Full caches append each batch at `length` and attention reads only
+    /// `[0, length + suffix)`, so shortening `length` discards newer rows.
+    /// Rings overwrite their oldest rows and cannot be rewound.
+    fn can_rewind(
+        &self,
+        context_length: u32,
+    ) -> bool {
+        matches!(self, Self::Full { length } if context_length <= *length)
+    }
+
+    fn rewind(
+        &mut self,
+        context_length: u32,
+    ) -> bool {
+        match self {
+            Self::Full {
+                length,
+            } if context_length <= *length => {
+                *length = context_length;
+                true
+            },
+            _ => false,
+        }
+    }
+
     fn accept(
         &mut self,
         accepted_indices: &[u32],
@@ -305,6 +330,20 @@ impl<B: Backend> MixerState<B> for AttentionState<B> {
         }
 
         Ok(())
+    }
+
+    fn can_rewind(
+        &self,
+        context_length: u32,
+    ) -> bool {
+        self.cache.can_rewind(context_length)
+    }
+
+    fn rewind(
+        &mut self,
+        context_length: u32,
+    ) -> bool {
+        self.cache.rewind(context_length)
     }
 }
 
