@@ -127,6 +127,11 @@ receipt to identify that source. Models without a known repository omit the link
 In **Model Catalog**, model cards group size and
 quantization choices into compact rows. Choose a family, filter its model cards,
 then choose a row and **Download**.
+**GLM-5.3 Flash** offers the pinned `UD-Q2_K_XL` GGUF checkpoint (108.72 GB of
+weights). Its download uses native preparation, preserves quantization and checks
+the prepared source before adding it to **Installed**. It supports text chat;
+image input and Decision mode are unavailable. Download progress remains
+indeterminate until the stored weight total is verified.
 Inside a family, the tabs at the top switch between **All models** and each
 available quantization or precision, such as **4-bit**, **8-bit** and **BF16**.
 Search narrows the selected tab and sorting applies to its matching rows.

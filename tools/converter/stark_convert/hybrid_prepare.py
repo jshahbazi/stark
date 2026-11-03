@@ -18,6 +18,7 @@ from pathlib import Path
 from huggingface_hub import snapshot_download
 
 from .cli import _publish
+from .progress import FDProgressSink, ProgressCallback, ProgressReporter, reporter
 
 SOURCES = {
     "flint-int4": {
@@ -335,7 +336,14 @@ def prepared_identity(directory: Path) -> dict | None:
         return None
 
 
-def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
+def prepare(
+    choice: str,
+    output: Path,
+    *,
+    offline: bool = False,
+    progress: ProgressCallback | ProgressReporter | None = None,
+) -> dict:
+    progress = reporter(progress)
     source = SOURCES[choice]
     output = output.absolute()
     if output.exists() or output.is_symlink():
@@ -379,6 +387,12 @@ def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
             if shard.is_symlink() or not shard.is_file() or target.exists():
                 raise ValueError("conflicting GGUF resume state")
             shard.rename(target)
+    if progress is not None:
+        # snapshot_download's aggregate progress counts files. Incomplete files
+        # can be preallocated, so their sizes do not establish received bytes.
+        # Keep this phase indeterminate until the pinned weight total is checked.
+        progress.emit("download", "running", force=True)
+        progress.emit("conversion", "waiting", force=True)
     if not gguf_complete:
         snapshot_download(
             source["weights_repo"],
@@ -411,11 +425,16 @@ def prepare(choice: str, output: Path, *, offline: bool = False) -> dict:
     weight_bytes = sum(path.stat().st_size for path in weights)
     if weight_bytes != source["weight_bytes"]:
         raise ValueError("pinned weight size mismatch")
+    if progress is not None:
+        progress.emit("download", "complete", weight_bytes, weight_bytes, force=True)
+        progress.emit("conversion", "running", force=True)
     receipt = finish_metadata(stage, choice)
     # Publish only the completed, metadata-bound directory. The download remains
     # resumable on all preceding failures and is never treated as a ready model.
     _publish(stage, output)
     (output / marker.name).unlink()
+    if progress is not None:
+        progress.emit("conversion", "complete", force=True)
     return {**receipt, "weight_bytes": weight_bytes, "status": "prepared"}
 
 
@@ -424,14 +443,21 @@ def main(argv=None):
     parser.add_argument("model", choices=tuple(SOURCES))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--offline", action="store_true")
+    parser.add_argument("--progress-fd", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    progress_sink = None
     try:
-        receipt = prepare(args.model, args.output, offline=args.offline)
+        if args.progress_fd is not None:
+            progress_sink = FDProgressSink(args.progress_fd)
+        receipt = prepare(args.model, args.output, offline=args.offline, progress=progress_sink)
     except (Exception, KeyboardInterrupt):
         print(
             "Native model preparation did not complete; its owned download directory can be retried.", file=sys.stderr
         )
         return 1
+    finally:
+        if progress_sink is not None:
+            progress_sink.close()
     print(json.dumps(receipt, sort_keys=True))
     return 0
 

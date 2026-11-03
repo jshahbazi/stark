@@ -4,6 +4,7 @@ Only model metadata is persisted. Conversation content stays in memory and pipes
 """
 
 import argparse
+import fcntl
 import hashlib
 import json
 import math
@@ -18,6 +19,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -45,6 +47,7 @@ from .chat import (
 from .decision import DecisionInputError, ScoreWorker, decide, validate_inputs
 from .desktop_media import DesktopAttachments
 from .generation_eta import GenerationEstimates
+from .hybrid_prepare import SOURCES as NATIVE_SOURCES
 from .hybrid_prepare import prepared_identity
 from .local_api import APIError, LocalAPI
 from .media import MAX_IMAGE_BYTES, MediaError
@@ -52,6 +55,10 @@ from .model_inventory import model_display
 from .model_removal import RemovalError, prepare_removal, removal_info, remove_model
 from .model_support import support_matrix
 from .mtp import mtp_capabilities, resolve_mtp
+from .native_catalog import CHOICE as NATIVE_CHOICE
+from .native_catalog import FAMILY_ID as NATIVE_FAMILY_ID
+from .native_catalog import catalog_item as native_catalog_item
+from .native_catalog import source_choice as native_source_choice
 from .registry import get_model
 from .sources import huggingface_repository
 from .vision_runtime import supported_image_family
@@ -66,6 +73,29 @@ MODEL_FILES = ("config.json", "tokenizer.json", "model.safetensors")
 
 class DesktopError(Exception):
     """A fixed, content-free user-facing failure."""
+
+
+@contextmanager
+def native_download_stage(data_dir):
+    """Keep pinned native downloads reusable and owned by one installer."""
+    root = data_dir / "native-downloads"
+    if root.is_symlink():
+        raise DesktopError("The native download folder is unavailable.")
+    root.mkdir(mode=0o700, exist_ok=True)
+    identity = hashlib.sha256(json.dumps(NATIVE_SOURCES[NATIVE_CHOICE], sort_keys=True).encode()).hexdigest()[:16]
+    directory = root / (NATIVE_CHOICE + "-" + identity)
+    if directory.is_symlink():
+        raise DesktopError("The native download folder is unavailable.")
+    directory.mkdir(mode=0o700, exist_ok=True)
+    descriptor = os.open(directory / ".lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise DesktopError("This native model is already being downloaded. Wait for that installation.") from None
+        yield directory
+    finally:
+        os.close(descriptor)
 
 
 def cancellation_error(cancelled):
@@ -567,6 +597,9 @@ class Desktop:
             mode = payload.get("artifact_mode", item["default_artifact_mode"])
             if mode not in item["artifact_modes"]:
                 raise DesktopError("Choose an available model version.")
+            native_choice = native_source_choice(self.catalog_family_id, item)
+            if self.catalog_family_id == NATIVE_FAMILY_ID and native_choice is None:
+                raise DesktopError("Refresh this family before downloading a model.")
             installed = self.catalog_installed_ids(item, mode)
             previous = next((model for model in self.models if model["id"] in installed), None)
             if previous is not None and model_valid(Path(previous["path"])):
@@ -582,8 +615,8 @@ class Desktop:
                 self.install,
                 "installing",
                 "Checking model support…",
-                "huggingface",
-                item["repo"],
+                "native" if native_choice else "huggingface",
+                native_choice or item["repo"],
                 mode,
                 mode,
                 request_id,
@@ -699,7 +732,7 @@ class Desktop:
                 return
             self.install_epoch = epoch
             self.install_progress = {}
-            self.progress(epoch, "download", "waiting" if kind == "huggingface" else "skipped")
+            self.progress(epoch, "download", "waiting" if kind in {"huggingface", "native"} else "skipped")
             self.progress(epoch, "conversion", "waiting")
 
     def finish_install_progress(self, epoch, skipped=False):
@@ -1003,7 +1036,7 @@ class Desktop:
         expected_revision=None,
     ):
         if expected_revision is not None and (
-            kind != "huggingface"
+            kind not in {"huggingface", "native"}
             or not isinstance(expected_revision, str)
             or re.fullmatch(r"[0-9a-f]{40}", expected_revision) is None
         ):
@@ -1045,6 +1078,18 @@ class Desktop:
             except ValueError:
                 raise DesktopError("Enter a model name or a https://huggingface.co/owner/model URL.") from None
             source_key, name, converted = "huggingface:" + source, source.split("/")[-1], False
+        elif kind == "native":
+            # Only the server-held, pinned catalogue choice can enter this path.
+            # Generic HF preflight/conversion does not implement GLM GGUF.
+            native_item = native_catalog_item()
+            if (
+                source != NATIVE_CHOICE
+                or expected_revision != native_item["revision"]
+                or selected_mode != "text"
+                or support_mode not in (None, "text")
+            ):
+                raise DesktopError("Choose the pinned GLM text model from the catalogue.")
+            source_key, name, converted = "huggingface:" + native_item["repo"], native_item["name"], False
         else:
             raise DesktopError("Choose a local folder or Hugging Face repository.")
         purpose = support_mode or selected_mode
@@ -1093,46 +1138,58 @@ class Desktop:
                 return
         identifier = uuid.uuid4().hex
         staging = self.model_dir / (".install-" + identifier)
+        resources = ExitStack()
         managed = None
         source_revision = None
         try:
             if not converted:
-                source_revision = self.check_install_support(
-                    epoch,
-                    kind,
-                    str(path) if kind == "local" else source,
-                    selected_mode,
-                    purpose,
-                    support_request_id,
-                    **({"expected_revision": expected_revision} if expected_revision is not None else {}),
-                )
+                if kind == "native":
+                    source_revision = expected_revision
+                    staging = resources.enter_context(native_download_stage(self.data_dir))
+                else:
+                    source_revision = self.check_install_support(
+                        epoch,
+                        kind,
+                        str(path) if kind == "local" else source,
+                        selected_mode,
+                        purpose,
+                        support_request_id,
+                        **({"expected_revision": expected_revision} if expected_revision is not None else {}),
+                    )
                 with self.lock:
                     if epoch != self.epoch:
                         return
-                staging.mkdir(mode=0o700)
+                if kind != "native":
+                    staging.mkdir(mode=0o700)
                 output = staging / "model"
-                command = [
-                    sys.executable,
-                    "-I",
-                    "-B",
-                    "-m",
-                    "stark_convert.cli",
-                    str(path) if kind == "local" else source,
-                    "--output",
-                    str(output),
-                    "--support-mode",
-                    purpose,
-                ]
-                if kind == "local" or get_model(source) is None:
-                    command.extend(["--metadata-profile", "hf-generic"])
-                if kind == "local":
-                    command.append("--offline")
-                if selected_mode == "vision-language":
-                    command.extend(["--artifact-mode", "vision-language"])
-                if source_revision is not None:
-                    command.extend(["--revision", source_revision])
+                command = [sys.executable, "-I", "-B", "-m"]
+                if kind == "native":
+                    command.extend(["stark_convert.hybrid_prepare", source, "--output", str(output)])
+                else:
+                    command.extend(
+                        [
+                            "stark_convert.cli",
+                            str(path) if kind == "local" else source,
+                            "--output",
+                            str(output),
+                            "--support-mode",
+                            purpose,
+                        ]
+                    )
+                    if kind == "local" or get_model(source) is None:
+                        command.extend(["--metadata-profile", "hf-generic"])
+                    if kind == "local":
+                        command.append("--offline")
+                    if selected_mode == "vision-language":
+                        command.extend(["--artifact-mode", "vision-language"])
+                    if source_revision is not None:
+                        command.extend(["--revision", source_revision])
                 environment = dict(os.environ, HF_HUB_DISABLE_PROGRESS_BARS="1", HF_HUB_DISABLE_TELEMETRY="1")
-                result = self.run_converter(command, environment, epoch)
+                if kind == "native" and output.is_symlink():
+                    raise DesktopError("The native download folder is unavailable.")
+                # A completed download may remain after cancellation or a
+                # registry failure. Validate and reuse it before any new child.
+                result = 0 if kind == "native" and output.exists() else self.run_converter(command, environment, epoch)
                 with self.lock:
                     if epoch != self.epoch:
                         return
@@ -1140,6 +1197,16 @@ class Desktop:
                     raise DesktopError(
                         "Model installation failed. Check model support, free disk space and Hugging Face access."
                     )
+                if kind == "native":
+                    pinned = NATIVE_SOURCES[NATIVE_CHOICE]
+                    if prepared_identity(output) != {
+                        "repo": pinned["weights_repo"],
+                        "revision": pinned["weights_revision"],
+                        "architecture": pinned["architecture"],
+                        "weight_bytes": pinned["weight_bytes"],
+                        "quantization": pinned["quantization"],
+                    }:
+                        raise DesktopError("The prepared model does not match the pinned GLM catalogue source.")
                 with self.lock:
                     if epoch != self.epoch:
                         return
@@ -1172,9 +1239,16 @@ class Desktop:
                 )
                 self.status("ready" if self.worker else "idle", "Model installed", epoch)
         finally:
-            shutil.rmtree(staging, ignore_errors=True)
-            if managed is not None:
-                shutil.rmtree(managed, ignore_errors=True)
+            try:
+                if kind != "native":
+                    shutil.rmtree(staging, ignore_errors=True)
+                if managed is not None:
+                    if kind == "native":
+                        managed.replace(staging / "model")
+                    else:
+                        shutil.rmtree(managed, ignore_errors=True)
+            finally:
+                resources.close()
 
     def check_family_install(self, epoch, path):
         """Check a family artifact before publishing it, with one loaded worker."""

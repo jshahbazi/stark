@@ -76,8 +76,15 @@ it is not a weight-content qualification receipt.
 
 The prepared folder can be imported through **Manage Models → Add from Source →
 Local Folder** in an app build containing the new workers. Chat uses the existing
-generation worker. These native-source downloads use the preparation commands
-above. The family registry also includes the typed Uzu Qwen3.8 text converter.
+generation worker. **Manage Models → Model Catalog → GLM-5.3 Flash** also offers
+`glm53-q2` directly, using the same pinned preparation helper. Its one text-only
+entry retains `UD-Q2_K_XL` storage and the four-shard byte total above. The app
+validates the prepared source identity before registering the managed folder;
+loading and execution remain separate checks. Download progress is indeterminate
+until all stored weight bytes are verified. Stop terminates preparation;
+private download staging is retained for retry without registering the model.
+Other native-source downloads use the
+preparation commands above. The family registry also includes the typed Uzu Qwen3.8 text converter.
 An incomplete prepared folder is rejected before registration. The native
 loader remains responsible for tensor admission.
 
