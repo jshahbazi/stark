@@ -626,12 +626,15 @@ extension EngineController {
             guard let payload = try? JSONSerialization.jsonObject(with: Data(backendError.utf8)) as? [String: Any],
                   let registry = payload["registry"] as? [String: Any], let report = payload["report"] as? [String: Any] else { return false }
             engine.apply(["event": "model_families", "report": registry])
-            guard let families = engine.modelFamilies?.families, families.count == 14,
+            guard let families = engine.modelFamilies?.families, families.count == 15,
                   let classifier = families.first(where: { $0.modelKind == "classifier" }),
                   classifier.modes.values.allSatisfy({ $0.status == .unsupported }),
                   let qwen3 = families.first(where: { $0.id == "qwen3" }),
                   qwen3.sourceFormats == ["safetensors-float", "mlx-affine-4bit", "mlx-affine-8bit"],
                   qwen3.outputDtypes == ["bfloat16", "float16", "float32"],
+                  let glm = families.first(where: { $0.id == "glm5_next" }),
+                  glm.containers == [".gguf"], glm.sourceFormats == ["UD-Q2_K_XL"],
+                  glm.hasAppMode(.text), !glm.hasAppMode(.visionLanguage), !glm.hasAppMode(.decision),
                   families.first(where: { $0.id == "qwen3_5" })?.modes[.visionLanguage]?.status == .conditional else { return false }
             engine.install(source: "fixture/source", kind: "huggingface", artifactMode: "vision-language")
             let requested = command()
@@ -682,7 +685,7 @@ extension EngineController {
             raw["families"] = Array(families.reversed())
             guard let registry = ModelFamilyRegistry(raw),
                   let rows = ModelsInventory(models: [], loadedID: "", registry: registry).families else { return false }
-            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "Granite", "LFM2", "Llama", "LLaMBA",
+            return rows.map(\.name) == ["Gemma 2", "Gemma 3", "GLM-5.3 Flash", "Granite", "LFM2", "Llama", "LLaMBA",
                 "Mistral", "Phi-3", "Qwen2", "Qwen3", "Qwen3.5", "Qwen3.8 Flash Next", "SmolLM3"] &&
                 !rows.contains(where: { $0.id == "modernbert" })
         case "models-display-event":

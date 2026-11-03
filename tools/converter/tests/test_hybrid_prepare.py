@@ -1,4 +1,8 @@
+import io
 import json
+import os
+import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -63,8 +67,12 @@ def test_pinned_download_publishes_only_complete_original_format(tmp_path, monke
     source = {**hybrid.SOURCES["glm53-q2"], "weight_bytes": 4}
     monkeypatch.setitem(hybrid.SOURCES, "glm53-q2", source)
     calls = []
+    progress = []
 
     def download(repo, **options):
+        assert progress[0]["state"] == "running"
+        assert progress[0]["total_bytes"] is None
+        assert not any(event["state"] == "complete" for event in progress)
         calls.append((repo, options))
         root = Path(options["local_dir"])
         if repo == source["weights_repo"]:
@@ -77,8 +85,12 @@ def test_pinned_download_publishes_only_complete_original_format(tmp_path, monke
 
     monkeypatch.setattr(hybrid, "snapshot_download", download)
     output = tmp_path / "model"
-    result = hybrid.prepare("glm53-q2", output)
+    result = hybrid.prepare("glm53-q2", output, progress=progress.append)
     assert result["status"] == "prepared"
+    assert progress[-3] == {"phase": "download", "state": "complete", "completed_bytes": 4, "total_bytes": 4}
+    assert progress[-2]["phase"] == "conversion" and progress[-2]["state"] == "running"
+    assert progress[-1]["phase"] == "conversion" and progress[-1]["state"] == "complete"
+    assert all(set(event) == {"phase", "state", "completed_bytes", "total_bytes"} for event in progress)
     assert len(list(output.glob("*.gguf"))) == 4
     assert not (output / "stark-download.json").exists()
     assert calls[0][1]["revision"] == source["weights_revision"]
@@ -292,3 +304,140 @@ def test_preparation_cli_never_prints_exception_payload(tmp_path, monkeypatch, c
     assert captured.out == ""
     assert "private upstream exception" not in captured.err
     assert "did not complete" in captured.err
+
+
+def test_incomplete_weight_download_cannot_report_completion(tmp_path, monkeypatch):
+    source = {**hybrid.SOURCES["glm53-q2"], "weight_bytes": 5}
+    monkeypatch.setitem(hybrid.SOURCES, "glm53-q2", source)
+
+    def download(repo, **options):
+        root = Path(options["local_dir"])
+        if repo == source["weights_repo"]:
+            nested = root / "UD-Q2_K_XL"
+            nested.mkdir()
+            for index in range(4):
+                (nested / f"model-{index}.gguf").write_bytes(b"x")
+        else:
+            metadata(root)
+
+    monkeypatch.setattr(hybrid, "snapshot_download", download)
+    events = []
+    output = tmp_path / "model"
+    with pytest.raises(ValueError, match="weight size mismatch"):
+        hybrid.prepare("glm53-q2", output, progress=events.append)
+    assert not output.exists()
+    assert not any(event["state"] == "complete" for event in events)
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_preparation_cli_uses_and_closes_private_progress_pipe(tmp_path, monkeypatch, capsys, failure):
+    read_descriptor, write_descriptor = os.pipe()
+    sinks = []
+    sink_type = hybrid.FDProgressSink
+
+    def sink_factory(descriptor):
+        sink = sink_type(descriptor)
+        sinks.append(sink)
+        return sink
+
+    def prepare(choice, output, *, offline, progress):
+        assert choice == "glm53-q2" and output == tmp_path / "model" and offline
+        progress({"phase": "download", "state": "running", "completed_bytes": 0, "total_bytes": None})
+        if failure:
+            raise RuntimeError("private upstream exception")
+        return {"status": "prepared"}
+
+    monkeypatch.setattr(hybrid, "FDProgressSink", sink_factory)
+    monkeypatch.setattr(hybrid, "prepare", prepare)
+    try:
+        result = hybrid.main(
+            [
+                "glm53-q2",
+                "--output",
+                str(tmp_path / "model"),
+                "--offline",
+                "--progress-fd",
+                str(write_descriptor),
+            ]
+        )
+        assert result == (1 if failure else 0)
+        assert len(sinks) == 1 and sinks[0].descriptor is None
+        os.close(write_descriptor)
+        write_descriptor = None
+        event = json.loads(os.read(read_descriptor, 65536))
+        assert event == {"phase": "download", "state": "running", "completed_bytes": 0, "total_bytes": None}
+        captured = capsys.readouterr()
+        assert captured.out == ("" if failure else '{"status": "prepared"}\n')
+        assert "private upstream exception" not in captured.err
+    finally:
+        os.close(read_descriptor)
+        if write_descriptor is not None:
+            os.close(write_descriptor)
+
+
+@pytest.mark.parametrize("weight_bytes", [4, 5])
+def test_real_native_preparation_child_reports_progress_and_rejects_incomplete_weights(tmp_path, weight_bytes):
+    from stark_convert.desktop import Desktop
+
+    # The child runs the actual CLI and preparation code. Only the network
+    # boundary and pinned byte total are replaced with a four-byte checkpoint.
+    bootstrap = textwrap.dedent("""\
+        import json
+        import sys
+        from pathlib import Path
+        from stark_convert import hybrid_prepare as hybrid
+
+        source = {**hybrid.SOURCES["glm53-q2"], "weight_bytes": int(sys.argv[2])}
+        hybrid.SOURCES["glm53-q2"] = source
+
+        def snapshot(repo, **options):
+            assert options["local_files_only"] is True
+            root = Path(options["local_dir"])
+            if repo == source["weights_repo"]:
+                assert options["revision"] == source["weights_revision"]
+                nested = root / "UD-Q2_K_XL"
+                nested.mkdir()
+                for index in range(4):
+                    (nested / f"model-{index}.gguf").write_bytes(b"x")
+            else:
+                assert repo == source["metadata_repo"]
+                assert options["revision"] == source["metadata_revision"]
+                config = {"model_type": "glm5_next", "text_config": {"vocab_size": 8, "eos_token_id": 1}}
+                (root / "config.json").write_text(json.dumps(config))
+                (root / "tokenizer_config.json").write_text(json.dumps({"chat_template": "{{ messages[0].content }}"}))
+                (root / "tokenizer.json").write_text("{}")
+
+        hybrid.snapshot_download = snapshot
+        raise SystemExit(hybrid.main(["glm53-q2", "--output", sys.argv[1], "--offline", *sys.argv[3:]]))
+    """)
+    controller = Desktop(tmp_path / "unused-worker", tmp_path / "library", io.StringIO(), timeout=2)
+    output = tmp_path / "prepared"
+    try:
+        controller.begin_install_progress(controller.epoch, "native")
+        result = controller.run_converter(
+            [sys.executable, "-I", "-B", "-c", bootstrap, str(output), str(weight_bytes)],
+            dict(os.environ, HF_HUB_OFFLINE="1"),
+            controller.epoch,
+        )
+        assert controller.converter is None
+        assert controller.models == [] and controller.worker is None
+        events = [json.loads(line) for line in controller.output.getvalue().splitlines()]
+        assert all(event["event"] == "progress" for event in events)
+        assert str(output) not in controller.output.getvalue()
+        if weight_bytes == 4:
+            assert result == 0 and output.is_dir()
+            assert len(list(output.glob("*.gguf"))) == 4
+            assert json.loads((output / "native-source.json").read_bytes())["weight_bytes"] == 4
+            assert controller.install_progress["download"] == {
+                "state": "complete",
+                "completed_bytes": 4,
+                "total_bytes": 4,
+            }
+            # Desktop reserves completion until its own publication checks pass.
+            assert controller.install_progress["conversion"]["state"] == "running"
+        else:
+            assert result == 1 and not output.exists()
+            assert output.with_name(output.name + ".native-download").is_dir()
+            assert all(event["state"] != "complete" for event in events)
+    finally:
+        controller.stop(quiet=True)

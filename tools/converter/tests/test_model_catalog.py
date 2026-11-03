@@ -474,6 +474,58 @@ def test_offline_or_invalid_family_never_uses_the_hub():
     assert catalog.family_catalog("qwen3", limit=31, hub=object())["status"] == "error"
 
 
+def test_native_glm_catalog_is_one_fixed_pinned_item_without_hub_access():
+    from stark_convert import hybrid_prepare, native_catalog
+
+    class NoHub:
+        def __getattr__(self, name):
+            pytest.fail(f"native GLM catalog unexpectedly accessed hub.{name}")
+
+    item = native_catalog.catalog_item()
+    source = hybrid_prepare.SOURCES[native_catalog.CHOICE]
+    assert item["repo"] == source["weights_repo"]
+    assert item["revision"] == source["weights_revision"]
+    assert item["quantization"] == source["quantization"]
+    assert item["weight_bytes"] == source["weight_bytes"]
+    assert item["artifact_modes"] == ["text"]
+    assert item["size_label"] is None and item["parameter_count"] is None
+    assert native_catalog.source_choice(native_catalog.FAMILY_ID, item) == native_catalog.CHOICE
+
+    report = catalog.family_catalog(native_catalog.FAMILY_ID, hub=NoHub())
+    assert report["status"] == "ready"
+    assert report["items"] == [item]
+    assert report["items"][0]["artifact_modes"] == ["text"]
+
+    mutated = native_catalog.family_definition()
+    mutated["modes"]["text"]["status"] = "qualified"
+    assert native_catalog.family_definition()["modes"]["text"]["status"] == "conditional"
+    returned = native_catalog.catalog_item()
+    returned["repo"] = "attacker/other"
+    assert native_catalog.catalog_item()["repo"] == source["weights_repo"]
+
+
+def test_native_glm_catalog_obeys_offline_and_limit_without_hub_access():
+    from stark_convert.native_catalog import FAMILY_ID
+
+    class NoHub:
+        def __getattr__(self, name):
+            pytest.fail(f"native GLM catalog unexpectedly accessed hub.{name}")
+
+    assert catalog.family_catalog(FAMILY_ID, offline=True, hub=NoHub())["status"] == "offline"
+    assert catalog.family_catalog(FAMILY_ID, limit=0, hub=NoHub())["status"] == "error"
+    assert catalog.family_catalog(FAMILY_ID, limit=catalog.MAX_ITEMS + 1, hub=NoHub())["status"] == "error"
+
+
+def test_native_glm_source_choice_rejects_modified_entry():
+    from stark_convert.native_catalog import CHOICE, FAMILY_ID, catalog_item, source_choice
+
+    item = catalog_item()
+    assert source_choice("qwen3", item) is None
+    assert source_choice(FAMILY_ID, {**item, "revision": "0" * 40}) is None
+    assert source_choice(FAMILY_ID, {**item, "artifact_modes": ["text", "vision-language"]}) is None
+    assert source_choice(FAMILY_ID, item) == CHOICE
+
+
 def test_network_errors_have_fixed_content_without_exception_details(monkeypatch):
     class Broken:
         def HfApi(self):
