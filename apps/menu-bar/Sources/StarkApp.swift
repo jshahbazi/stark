@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Darwin
 import ImageIO
 import Metal
@@ -1227,7 +1228,7 @@ final class EngineController: ObservableObject {
     var statusColor: Color {
         if state == "error" { return .red }
         if state == "ready" { return .green }
-        return busy ? .orange : .secondary
+        return busy ? .orange : .red
     }
 
     func start(resourceURL: URL? = Bundle.main.resourceURL, dataDirectory: URL? = nil) {
@@ -3015,6 +3016,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let modelManagement = ModelManagementState()
     private let updater = AppUpdateController()
     private var status: NSStatusItem!
+    private var modelStatusObserver: AnyCancellable?
     private let menuPanel = MenuPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     private var localMenuMonitor: Any?
     private var globalMenuMonitor: Any?
@@ -3059,9 +3061,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let ratio = icon.size.height / icon.size.width
             icon.size = NSSize(width: 24, height: 24 * ratio); icon.isTemplate = true
             status.button?.image = icon
+            if let button = status.button {
+                let eyes = MenuBarStatusEyes(template: icon)
+                eyes.translatesAutoresizingMaskIntoConstraints = false
+                button.addSubview(eyes)
+                NSLayoutConstraint.activate([
+                    eyes.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+                    eyes.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+                    eyes.widthAnchor.constraint(equalToConstant: icon.size.width),
+                    eyes.heightAnchor.constraint(equalToConstant: icon.size.height),
+                ])
+                modelStatusObserver = engine.$loadedID.combineLatest(engine.$state)
+                    .map { id, state in
+                        !id.isEmpty && !["idle", "error", "loading", "stopping"].contains(state)
+                    }
+                    .removeDuplicates()
+                    .sink { [weak eyes, weak button] running in
+                        eyes?.modelRunning = running
+                        let description = running ? "Stark — model running" : "Stark — no model running"
+                        button?.toolTip = description
+                        button?.setAccessibilityLabel(description)
+                    }
+            }
         } else { status.button?.title = "Stark" }
-        status.button?.toolTip = "Stark"
-        status.button?.setAccessibilityLabel("Stark menu bar")
+        if modelStatusObserver == nil {
+            status.button?.toolTip = "Stark"
+            status.button?.setAccessibilityLabel("Stark menu bar")
+        }
         status.button?.target = self; status.button?.action = #selector(toggle)
         status.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         menuPanel.level = .popUpMenu

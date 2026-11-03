@@ -4,6 +4,8 @@
 
 `Resources/Stark.jpg` is the owner-supplied original cat artwork; the app icon is a padded, resized conversion of it. `Resources/MenuBarTemplate.png` was edited from the original in Pixlr Express on 2026-10-21: the gray background, gold eyes and white highlight were removed, pupils retained, and the remaining cat flattened to black so macOS can render it as a template image in light and dark menu bars. No generative changes were used.
 
+`Sources/MenuBarStatusEyes.swift` adds a runtime color layer in the template's existing transparent eye openings. The original PNG and its pupils are preserved; AppKit continues to render the monochrome cat for the menu bar's appearance.
+
 | Source asset | SHA-256 |
 | --- | --- |
 | Original JPG | `bfaecfd420af69ef3bcf6b5c92ae672a54e169eee59c8fe9ad4c8d9b119383f1` |
