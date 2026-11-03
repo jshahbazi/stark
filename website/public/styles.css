@@ -616,6 +616,11 @@ code {
   border-top:1px solid var(--line)
 }
 
+.benchmark-section ::selection {
+  background:#efcc76;
+  color:var(--ink)
+}
+
 .benchmark-heading {
   display:grid;
   grid-template-columns:1fr 1fr;
