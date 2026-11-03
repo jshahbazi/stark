@@ -344,6 +344,55 @@ def test_inherited_model_templates_match_jinja_output(profile, generation_prompt
     assert IsolatedTemplate(source).render(**arguments) == expected
 
 
+@pytest.mark.parametrize("followup", [False, True])
+@pytest.mark.parametrize("parallel_results", [False, True])
+def test_qwen35_tool_history_matches_jinja_output(followup, parallel_results):
+    fixture = json.loads((Path(__file__).parent / "fixtures/rendering_templates.json").read_text())
+    source = fixture["templates"]["qwen3.5"]
+    calls = [{"function": {"name": "lookup", "arguments": {"key": "synthetic"}}}]
+    if parallel_results:
+        calls.append({"function": {"name": "lookup", "arguments": {"key": "second"}}})
+    messages = [
+        {"role": "system", "content": "Synthetic system."},
+        {"role": "user", "content": "Synthetic question."},
+        {"role": "assistant", "content": "", "tool_calls": calls},
+        {"role": "tool", "content": "Synthetic result."},
+    ]
+    if parallel_results:
+        messages.append({"role": "tool", "content": "Synthetic second result."})
+    if followup:
+        messages.extend(
+            [
+                {"role": "assistant", "content": "Synthetic answer."},
+                {"role": "user", "content": "Synthetic follow-up."},
+            ]
+        )
+    arguments = {
+        "messages": messages,
+        "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
+        "add_generation_prompt": True,
+        "enable_thinking": False,
+    }
+    expected = chat_template_environment().from_string(source).render(**arguments)
+    rendered = IsolatedTemplate(source).render(**arguments)
+    assert rendered == expected
+    assert rendered.count("<|im_start|>user\n<tool_response>") == 1
+    assert rendered.count("<tool_response>\nSynthetic") == len(calls)
+    assert "</tool_response><|im_end|>" in rendered
+
+
+@pytest.mark.parametrize("messages", [[], ["first"], ["first", "second", "third"]])
+def test_adjacent_loop_items_match_jinja_output(messages):
+    source = (
+        "{% for item in messages %}"
+        "{{ loop.previtem is defined }}:{{ loop.previtem }}|{{ item }}|"
+        "{{ loop.nextitem is defined }}:{{ loop.nextitem }};"
+        "{% endfor %}"
+    )
+    expected = chat_template_environment().from_string(source).render(messages=messages)
+    assert IsolatedTemplate(source).render(messages=messages) == expected
+
+
 def test_supported_methods_filters_loopcontrols_and_concat():
     source = (
         "{% set ns=namespace(content='') %}"
