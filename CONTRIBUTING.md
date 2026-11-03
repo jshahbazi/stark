@@ -104,6 +104,13 @@ printf '%s\n' '{"operation":"score","input_token_ids":[151644,872,198],"candidat
 
 ## Documentation and validation records
 
+New model families, backends, conversion routes and state-affecting inference
+paths must follow the [model onboarding workflow](docs/MODEL_ONBOARDING.md).
+Generation prefix reuse is part of that work: implement it when exact state
+restoration is possible, qualify the actual artifact, or record a concrete
+blocker with the capability disabled for that path. A new quantization or format
+does not inherit another artifact's numerical validation.
+
 - Reference pages under `docs/` describe current behaviour. When a change alters a protocol, a limit, an option or a default, update the page in the same pull request.
 - Write Markdown without emojis and without shell heredocs in examples.
 - Put the evidence for a change (test counts, manual checks, measurements) in the pull request description. A record that must outlive the pull request goes under `docs/archive/runs/` with its date and the commit it describes; a benchmark goes under `docs/benchmarks/` and is added to the [benchmarks index](docs/benchmarks/README.md) with a note on what it supersedes.

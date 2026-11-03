@@ -200,9 +200,10 @@ The pinned MLX Qwen3-4B 4-bit/group-64 artifact completed a bounded two-read tas
 Each request is tokenized in full. For eligible text models, the worker can then reuse the state of the prompt prefix that the request shares with the immediately preceding request, and process only the remainder:
 
 - Full-attention models such as Qwen3 dense rewind their attention cache on a 1,024-token grid. A later step of an agent conversation waits only for its new messages plus at most about 1,024 tokens.
-- The native Qwen3.8 backend resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. A later step waits for its new messages plus at most about 4,096 tokens, provided nothing before that point changed; an earlier change processes the whole prompt. MTP must be on or off for both requests.
+- Native GLM-5.3 resumes from a snapshot at the start of the previous prompt's final 1,024-token reuse chunk. It restores recurrent/convolution state and the incomplete MLA/indexer pool while keeping completed attention rows in the loaded model.
+- Native mixed-precision Qwen3.8 resumes from a recurrent-state snapshot at the start of the previous prompt's final 4,096-token prefill pass. Lily-format and admitted external mixed-affine models, including `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit`, use this route. MTP must be on or off for both requests.
 
-Reuse follows the worker's prefill grid, so outputs are identical to processing the whole prompt. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md) and the [Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) the measurements.
+For either native snapshot route, a follow-up processes its new messages plus the previous prompt's final chunk when the entire snapshot prefix is unchanged. An earlier change processes the whole prompt. Reuse follows the worker's prefill grid and must preserve fresh-state outputs. The [generation contract](GENERATION.md#prefix-reuse) describes the rules; the [Qwen3-4B record](archive/runs/2026-11-01-generation-prefix-reuse.md), [Lily-format Qwen3.8 record](archive/runs/2026-11-02-hybrid-prefix-reuse.md) and [GLM/external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md) retain their own artifact and build scope.
 
 The cache holds one entry, in worker memory only. It is never written to disk, logged or returned. Each principal has its own random, in-memory scope:
 
@@ -219,7 +220,7 @@ A request never reuses another principal's entry, so first-token timing cannot r
 - after 600 seconds without requests
 - when the model stops or changes
 
-It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. On Qwen3.8 it adds a snapshot of about 110 MiB to the caches the loaded model already keeps. No more than one request's state is held at a time.
+It costs the KV memory of the previous request (about 2.7 GiB after an 18,500-token step on Qwen3-4B) while idle. Native GLM-5.3 and Qwen3.8 add a snapshot to the completed attention caches the loaded model already keeps; the pinned Lily-format Qwen3.8 snapshot is about 110 MiB. Snapshot size depends on the admitted graph. No more than one request's state is held at a time.
 
 ## Progress in Stark
 

@@ -41,13 +41,35 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Recurrent state at a prompt prefix boundary (see [`Model::restore_prefix`]).
-#[cfg(all(feature = "metal", target_os = "macos"))]
-pub use lily::PrefixSnapshot;
+/// Backend-owned recurrent state at a prompt prefix boundary. It remains
+/// private to one loaded model instance (see [`Model::restore_prefix`]).
+pub struct PrefixSnapshot {
+    inner: PrefixState,
+}
 
-/// Only the macOS mixed-precision backend captures prefix snapshots.
-#[cfg(not(all(feature = "metal", target_os = "macos")))]
-pub enum PrefixSnapshot {}
+enum PrefixState {
+    Glm(glm::PrefixSnapshot),
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    Lily(lily::PrefixSnapshot),
+}
+
+impl PrefixSnapshot {
+    pub fn position(&self) -> usize {
+        match &self.inner {
+            PrefixState::Glm(snapshot) => snapshot.position(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            PrefixState::Lily(snapshot) => snapshot.position(),
+        }
+    }
+
+    pub fn mtp_enabled(&self) -> bool {
+        match &self.inner {
+            PrefixState::Glm(_) => false,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            PrefixState::Lily(snapshot) => snapshot.mtp_enabled(),
+        }
+    }
+}
 
 /// Loaded-model MTP policy. Recommendations select the depth when a caller
 /// enables MTP without choosing an explicit draft count; MTP remains opt-in.
@@ -570,6 +592,9 @@ impl Model {
     /// The prefill chunk length when this backend can snapshot and resume a
     /// prompt prefix, which then happens only at multiples of it.
     pub fn prefix_chunk_tokens(&self) -> Option<usize> {
+        if let Forward::Glm(model) = &self.forward {
+            return Some(model.prefill_chunk_tokens());
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return Some(model.prefill_chunk_tokens());
@@ -584,6 +609,7 @@ impl Model {
         position: usize,
     ) -> Result<()> {
         match &mut self.forward {
+            Forward::Glm(model) => model.capture_prefix_at(position),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.capture_prefix_at(position),
             _ => {
@@ -596,9 +622,16 @@ impl Model {
     /// The snapshot captured by this request's prefill. Take it before the
     /// next `reset`.
     pub fn take_prefix_snapshot(&mut self) -> Option<PrefixSnapshot> {
+        if let Forward::Glm(model) = &mut self.forward {
+            return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
+                inner: PrefixState::Glm(snapshot),
+            });
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &mut self.forward {
-            return model.take_prefix_snapshot();
+            return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
+                inner: PrefixState::Lily(snapshot),
+            });
         }
         None
     }
@@ -611,14 +644,16 @@ impl Model {
         &mut self,
         snapshot: &PrefixSnapshot,
     ) -> Result<()> {
-        match &mut self.forward {
+        let result = match (&mut self.forward, &snapshot.inner) {
+            (Forward::Glm(model), PrefixState::Glm(snapshot)) => model.restore_prefix(snapshot),
             #[cfg(all(feature = "metal", target_os = "macos"))]
-            Forward::Lily(model) => model.restore_prefix(snapshot),
-            #[cfg(not(all(feature = "metal", target_os = "macos")))]
-            _ => match *snapshot {},
-            #[cfg(all(feature = "metal", target_os = "macos"))]
+            (Forward::Lily(model), PrefixState::Lily(snapshot)) => model.restore_prefix(snapshot),
             _ => Err(Error::Unsupported("prefix snapshots unavailable")),
+        };
+        if result.is_err() {
+            self.reset();
         }
+        result
     }
 
     /// Includes failures found while draining an early-dropped greedy stream.

@@ -170,12 +170,17 @@ and measured performance. Existing F32 results remain source-bound reference
 evidence; a new precision path is checked against a matching reference and gets
 its own validation record. F32 execution is not required for production.
 
-The Lily-format Qwen checkpoint selects an in-process native Metal 4 backend
+The mixed-precision Qwen paths select an in-process native Metal 4 backend
 extracted from Lily revision `e22d58fa7cc488493fb1b5d810a198bd29730aeb`.
-Native-source selection requires both `model_type=qwen4_exp` and
-`lily.format=qwen4_exp-affine-v1`. The typed `Qwen38LanguageModelConfig` route
-uses the same specialized runtime through its Uzu storage adapter. Other Qwen
-exports retain the F32 graph below.
+Native-source selection requires `model_type=qwen4_exp` and either
+`lily.format=qwen4_exp-affine-v1` or the implemented external affine contract:
+4-bit, group-64 affine quantization plus `ngram_table.bin` with 4-bit,
+group-32 storage. The latter admits
+`ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` at revision
+`788c07a8725642bccf13a0a3b8a21954ab84b4f2`. Native tensor admission still
+validates the complete stored layout. The typed `Qwen38LanguageModelConfig`
+route uses the same specialized runtime through its Uzu storage adapter. Other
+Qwen exports retain the F32 graph below.
 Converted group-major affine parameters are restored once at load time with
 an integer NEON transpose on AArch64 and byte-copy fallbacks. The operation
 preserves every BF16 encoding and does not change decode arithmetic.
@@ -455,10 +460,18 @@ context is not a Stark memory qualification. A weight set fitting within 128 GiB
 available memory for every context or concurrent application.
 
 Generation uses fresh state for every request unless the worker is started
-with `--prefix-cache`. Then the mixed-precision Qwen3.8 backend can resume a
-request from a recurrent-state snapshot of the previous request's shared
-prompt prefix ([prefix reuse](GENERATION.md#prefix-reuse)); GLM, Flint and the
-F32 Qwen graph keep fresh state. Scoring serializes the complete
+with `--prefix-cache`. Native GLM-5.3 then captures recurrence and convolution
+history plus the incomplete MLA/indexer pool on a 1,024-token reuse grid.
+The mixed-precision Qwen3.8 backend captures its GDN, convolution, n-gram and
+draft-head state on a 4,096-token grid; Lily-format, external affine and typed
+Uzu artifacts share this snapshot path. Completed attention/indexer prefix
+rows remain in the loaded model. Both backends resume only when the next
+request matches the entire retained prefix, scope, model instance, context and
+state-affecting options, and has at least two remaining prompt tokens.
+See the [generation contract](GENERATION.md#prefix-reuse) and the
+[GLM/external mixed-affine record](archive/runs/2026-11-03-glm-qwen-prefix-reuse.md)
+for artifact-specific qualification. Flint and the F32 Qwen graph keep fresh
+state. Scoring serializes the complete
 token sequence, clears recurrent state after success or failure, and retains
 only the existing optional cache of identical immediately consecutive inputs
 with the same context size. No cache persists across worker restarts. Generic
@@ -476,6 +489,12 @@ configuration, tokenizer and complete shards. The native loader honors EOS IDs
 from both source and generation metadata, plus a declared tokenizer EOS token.
 The prepared chat template is needed for the terminal client and desktop import.
 Native admission errors use fixed worker error codes without source payloads.
+
+New native model, format and state-affecting execution paths follow the
+[model onboarding workflow](MODEL_ONBOARDING.md). That workflow requires a
+prefix-reuse state inventory, implementation where exact restoration is possible,
+artifact-bound qualification and measured retention cost, or a concrete blocker
+with runtime support disabled for the affected path.
 
 ## Validation
 

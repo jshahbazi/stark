@@ -23,6 +23,10 @@ mod greedy;
 #[path = "glm_prefill_batch.rs"]
 mod prefill_batch;
 
+#[path = "glm_prefix.rs"]
+mod prefix;
+pub(super) use prefix::PrefixSnapshot;
+
 #[derive(Clone)]
 struct Config {
     hidden: usize,
@@ -262,7 +266,7 @@ impl KdaState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct AttentionState {
     latents: Vec<Vec<f32>>,
     // Only the incomplete pool retains uncompressed indexer rows. Completed
@@ -293,6 +297,9 @@ pub struct GlmModel {
     #[cfg(feature = "metal")]
     decode_graph_enabled: bool,
     position: usize,
+    prefix_instance: u64,
+    capture_at: Option<usize>,
+    captured: Option<PrefixSnapshot>,
     #[cfg(feature = "metal")]
     last_greedy: Option<(u32, usize)>,
     #[cfg(feature = "metal")]
@@ -367,6 +374,9 @@ impl GlmModel {
             #[cfg(feature = "metal")]
             decode_graph_enabled,
             position: 0,
+            prefix_instance: prefix::next_instance(),
+            capture_at: None,
+            captured: None,
             #[cfg(feature = "metal")]
             last_greedy: None,
             #[cfg(feature = "metal")]
@@ -389,6 +399,8 @@ impl GlmModel {
     }
 
     pub fn reset(&mut self) {
+        self.capture_at = None;
+        self.captured = None;
         for state in &mut self.states {
             match state {
                 LayerState::Kda(s) => s.reset(),
@@ -453,7 +465,10 @@ impl GlmModel {
                 return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
             }
         }
-        let result = self.step_inner(token, readout);
+        let result = self.step_inner(token, readout).and_then(|logits| {
+            self.capture_prefix_if_ready()?;
+            Ok(logits)
+        });
         if result.is_err() {
             self.reset();
         }

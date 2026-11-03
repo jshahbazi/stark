@@ -23,6 +23,12 @@ load qualifications, reference comparisons and local image-check receipts retain
 their existing artifact/build/runtime identities. The loaded worker remains the
 authority for live API and image capabilities.
 
+New model and inference paths follow the [model onboarding workflow](MODEL_ONBOARDING.md),
+including generation prefix-reuse implementation where exact restoration is
+possible and a recorded blocker where it is unavailable. The family registry
+does not grant this runtime capability or transfer qualification between
+checkpoints and quantizations.
+
 ## Browsing and removing models
 
 The app's **Manage Models** window has **Installed**, **Model Catalog** and

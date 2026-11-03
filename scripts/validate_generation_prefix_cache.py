@@ -123,8 +123,12 @@ def file_sha256(path):
 
 
 def weights_sha256(model):
-    """One file's digest, or a digest of every shard's name and digest."""
-    shards = sorted(model.glob("*.safetensors"))
+    """Bind actual native or converted weights, including external n-gram data."""
+    shards = sorted([*model.glob("*.safetensors"), *model.glob("*.gguf")])
+    if (model / "ngram_table.bin").is_file():
+        shards.append(model / "ngram_table.bin")
+    if not shards:
+        raise SystemExit("no supported weight files found")
     if [shard.name for shard in shards] == ["model.safetensors"]:
         return file_sha256(shards[0])
     manifest = "".join(f"{shard.name}\t{file_sha256(shard)}\n" for shard in shards)
@@ -140,26 +144,49 @@ class Worker:
         command = [binary, "--model-path", model] + (
             ["--prefix-cache"] if prefix_cache else []
         )
-        self.process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            pass_fds=(self.cancel_read,),
-            env=dict(os.environ, STARK_CANCEL_FD=str(self.cancel_read)),
-        )
+        try:
+            self.process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                pass_fds=(self.cancel_read,),
+                env=dict(os.environ, STARK_CANCEL_FD=str(self.cancel_read)),
+            )
+        except BaseException:
+            os.close(self.cancel_read)
+            os.close(self.cancel_write)
+            raise
         os.close(self.cancel_read)
         self.request_id = 0
-        self.ready = self.read()
-        if self.ready.get("ready") is not True:
-            raise SystemExit("worker failed to start: " + str(self.ready.get("error")))
+        self.buffer = bytearray()
+        try:
+            self.ready = self.read()
+            if self.ready.get("ready") is not True:
+                raise SystemExit(
+                    "worker failed to start: " + str(self.ready.get("error"))
+                )
+        except BaseException:
+            self.close()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()
 
     def read(self):
-        if not select.select([self.process.stdout], [], [], self.timeout)[0]:
-            raise SystemExit("worker timed out")
-        line = self.process.stdout.readline()
-        if not line:
-            raise SystemExit("worker exited")
+        deadline = time.monotonic() + self.timeout
+        while b"\n" not in self.buffer:
+            remaining = max(0, deadline - time.monotonic())
+            if not select.select([self.process.stdout], [], [], remaining)[0]:
+                raise SystemExit("worker timed out")
+            block = os.read(self.process.stdout.fileno(), 65536)
+            if not block:
+                raise SystemExit("worker exited")
+            self.buffer.extend(block)
+        line, _, self.buffer = self.buffer.partition(b"\n")
         return json.loads(line)
 
     def send(self, payload):
@@ -188,9 +215,19 @@ class Worker:
         return self.request({"operation": "tokenize", "text": text})["token_ids"]
 
     def close(self):
-        self.process.stdin.close()
-        self.process.wait(timeout=120)
-        os.close(self.cancel_write)
+        try:
+            self.process.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        try:
+            self.process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        self.process.stdout.close()
+        if self.cancel_write is not None:
+            os.close(self.cancel_write)
+            self.cancel_write = None
 
 
 def tool_definition(rng, index):
@@ -285,16 +322,26 @@ class Session:
         )
 
 
-def build_turns(worker, template, codec, seed, first_tokens):
+def build_turns(
+    worker,
+    template,
+    codec,
+    seed,
+    first_tokens,
+    *,
+    tools=24,
+    instruction_paragraphs=40,
+    follow_up_sentences=(40, 25, 80),
+):
     """Return token IDs for a first turn of about `first_tokens` and three follow-ups."""
-    session = Session(seed)
+    session = Session(seed, tools=tools, instruction_paragraphs=instruction_paragraphs)
     while len(worker.tokenize(session.render(template, codec))) < first_tokens - 400:
         session.add_tool_step(result_sentences=12)
     turns = [worker.tokenize(session.render(template, codec))]
     for grow in (
-        lambda: session.add_tool_step(40),
-        lambda: session.add_tool_step(25),
-        lambda: session.add_user_turn(80),
+        lambda: session.add_tool_step(follow_up_sentences[0]),
+        lambda: session.add_tool_step(follow_up_sentences[1]),
+        lambda: session.add_user_turn(follow_up_sentences[2]),
     ):
         grow()
         turns.append(worker.tokenize(session.render(template, codec)))
@@ -373,6 +420,7 @@ def outcome(reply, tools, parser):
         "generated_sha256": digest_ids(reply["generated_token_ids"]),
         "text_sha256": digest_text(reply["text"]),
         "finish_reason": reply.get("finish_reason"),
+        "output_tokens": len(reply["generated_token_ids"]),
     }
     if parser is not None:
         try:
@@ -407,15 +455,17 @@ def plan(turns, chunk, context, mtp_drafts):
     case("follow_up_repeat_stochastic", turns[-1], sampling=stochastic, seed=17)
     case("shrink", turns[1])
     case("regrow", turns[-1])
-    early = list(turns[-1])
-    early[3 * chunk + 100] = early[3 * chunk + 101]
+    early = diverge(turns[-1], min(chunk // 2, len(turns[-1]) - 2))
     case("diverge_early", early)
     case("restore_after_divergence", turns[-1])
-    late = list(turns[-1])
-    late[-50] = late[-49]
+    late = diverge(turns[-1], len(turns[-1]) - 2)
     case("diverge_in_final_chunk", late)
     case("restore_final_chunk", turns[-1])
-    case("context_change", turns[-1], context=context - 8192)
+    boundary = (len(turns[-1]) - 1) // chunk * chunk
+    case("snapshot_plus_one", turns[-1][:boundary] + turns[-1][-1:])
+    case("snapshot_plus_two", turns[-1][:boundary] + turns[-1][-2:])
+    case("restore_after_boundary_edges", turns[-1])
+    case("context_change", turns[-1], context=context - 1)
     case("context_restored", turns[-1])
     case("scope_change", turns[-1], scope="other")
     case("scope_restored", turns[-1])
@@ -430,6 +480,15 @@ def plan(turns, chunk, context, mtp_drafts):
         steps.append(("act", label, turns[-1], None))
         case(f"after_{label}", turns[-1])
     return steps
+
+
+def diverge(ids, position):
+    changed = list(ids)
+    replacement = next((token for token in ids if token != ids[position]), None)
+    if replacement is None:
+        raise SystemExit("synthetic prompt needs distinct tokens for divergence checks")
+    changed[position] = replacement
+    return changed
 
 
 def act(worker, label, ids, context, scope):
@@ -469,6 +528,11 @@ def comparison_key(ids, options):
     )
 
 
+def report(args, **counts):
+    if args.progress:
+        print(json.dumps(counts), file=sys.stderr, flush=True)
+
+
 def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=None):
     """Run every case once per distinct request (all steps on a cached worker)."""
     outcomes, observed = {}, {}
@@ -495,6 +559,7 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
         if scopes is None:
             if key not in outcomes:
                 outcomes[key] = outcome(generate(worker, ids, **request), tools, parser)
+                report(args, case=label, successful="error" not in outcomes[key])
             continue
         cache_key = (
             scopes[options["scope"]],
@@ -516,39 +581,64 @@ def run_cases(worker, steps, args, tools, parser, *, scopes=None, expectation=No
             <= {reused},
             "outcome": outcome(reply, tools, parser),
         }
+        report(
+            args,
+            case=label,
+            reused_input_tokens=reused,
+            successful="error" not in reply,
+        )
     return outcomes, observed
 
 
+def session_options(args):
+    return {
+        "tools": args.tools,
+        "instruction_paragraphs": args.instruction_paragraphs,
+        "follow_up_sentences": args.follow_up_sentences,
+    }
+
+
 def run_exactness(args, template, codec, parser):
-    cached = Worker(args.candidate, args.model, prefix_cache=True)
-    settings = cached.ready.get("prefix_cache") or {}
-    if settings.get("enabled") is not True:
-        raise SystemExit("candidate did not enable prefix reuse for this model")
-    chunk = settings["chunk_tokens"]
-    mtp = cached.ready.get("mtp") or {}
-    mtp_drafts = mtp.get("recommended_drafts") if mtp.get("supported") else None
-    session, turns = build_turns(cached, template, codec, args.seed, args.first_tokens)
-    steps = plan(turns, chunk, args.context, mtp_drafts)
-    expectation = Expectation(chunk, args.reuse == "boundary")
-    scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
     started = time.monotonic()
-    _, observed = run_cases(
-        cached,
-        steps,
-        args,
-        session.tools,
-        parser,
-        scopes=scopes,
-        expectation=expectation,
-    )
-    cached.close()
+    report(args, phase="cached")
+    with Worker(args.candidate, args.model, prefix_cache=True) as cached:
+        settings = cached.ready.get("prefix_cache") or {}
+        if settings.get("enabled") is not True:
+            raise SystemExit("candidate did not enable prefix reuse for this model")
+        chunk = settings["chunk_tokens"]
+        mtp = cached.ready.get("mtp") or {}
+        mtp_drafts = mtp.get("recommended_drafts") if mtp.get("supported") else None
+        session, turns = build_turns(
+            cached,
+            template,
+            codec,
+            args.seed,
+            args.first_tokens,
+            **session_options(args),
+        )
+        if len(turns[-1]) + args.max_new >= args.context:
+            raise SystemExit("synthetic session exceeds the requested context")
+        if (len(turns[0]) - 1) // chunk == 0:
+            raise SystemExit("first prompt must exceed one backend reuse chunk")
+        steps = plan(turns, chunk, args.context, mtp_drafts)
+        expectation = Expectation(chunk, args.reuse == "boundary")
+        scopes = {"main": secrets.token_hex(16), "other": secrets.token_hex(16)}
+        _, observed = run_cases(
+            cached,
+            steps,
+            args,
+            session.tools,
+            parser,
+            scopes=scopes,
+            expectation=expectation,
+        )
     phase_seconds = {"cached": round(time.monotonic() - started, 1)}
     references = {}
     for name, binary in (("fresh", args.candidate), ("baseline", args.baseline)):
+        report(args, phase=name)
         started = time.monotonic()
-        worker = Worker(binary, args.model)
-        references[name], _ = run_cases(worker, steps, args, session.tools, parser)
-        worker.close()
+        with Worker(binary, args.model) as worker:
+            references[name], _ = run_cases(worker, steps, args, session.tools, parser)
         phase_seconds[name] = round(time.monotonic() - started, 1)
     checks, invalidations = [], []
     for kind, label, _, _ in steps:
@@ -569,6 +659,35 @@ def run_exactness(args, template, codec, parser):
                 "output_sha256": row["outcome"].get("generated_sha256"),
                 "tool_calls": row["outcome"].get("tool_calls"),
                 "finish_reason": row["outcome"].get("finish_reason"),
+                "output_tokens": row["outcome"].get("output_tokens"),
+                "successful": "error" not in row["outcome"],
+            }
+        )
+    # Reuse must not survive a worker restart, even with the same host scope.
+    report(args, phase="restart")
+    with Worker(args.candidate, args.model, prefix_cache=True) as restarted:
+        reply = generate(
+            restarted,
+            turns[-1],
+            context=args.context,
+            max_new=args.max_new,
+            scope=scopes["main"],
+        )
+        result = outcome(reply, session.tools, parser)
+        key = comparison_key(turns[-1], {"context": args.context, "scope": "main"})
+        checks.append(
+            {
+                "case": "worker_restart",
+                "input_tokens": len(turns[-1]),
+                "reused_input_tokens": reply.get("reused_input_tokens"),
+                "reuse_matches_rule": reply.get("reused_input_tokens") == 0,
+                "identical_to_fresh": result == references["fresh"][key],
+                "identical_to_baseline_worker": result == references["baseline"][key],
+                "output_sha256": result.get("generated_sha256"),
+                "tool_calls": result.get("tool_calls"),
+                "finish_reason": result.get("finish_reason"),
+                "output_tokens": result.get("output_tokens"),
+                "successful": "error" not in result,
             }
         )
     for label in (*INVALIDATIONS, "tokenize_decode"):
@@ -580,7 +699,10 @@ def run_exactness(args, template, codec, parser):
                 "reused_before": before["reused_input_tokens"],
                 "reused_after": after["reused_input_tokens"],
                 "as_documented": before["reused_input_tokens"] > 0
-                and (after["reused_input_tokens"] > 0) == (label == "tokenize_decode"),
+                and (after["reused_input_tokens"] > 0) == (label == "tokenize_decode")
+                and (
+                    label != "cancellation" or observed[label] == "generation_cancelled"
+                ),
             }
         )
     follow_ups = [
@@ -612,34 +734,43 @@ def run_timing(args, template, codec):
             ("prefix_cache", args.candidate, True),
         ]
         for name, binary, cache in order if block % 2 == 0 else order[::-1]:
-            worker = Worker(binary, args.model, prefix_cache=cache)
-            if turns is None:
-                _, turns = build_turns(
-                    worker, template, codec, args.seed + 1, args.first_tokens
-                )
-            generate(worker, turns[0][:2048], context=args.context, max_new=1)
-            for _ in range(args.rounds_per_block):
-                scope = secrets.token_hex(16) if cache else None
-                row = []
-                for ids in turns:
-                    reply = generate(
+            report(args, phase="timing", worker=name, block=block + 1)
+            with Worker(binary, args.model, prefix_cache=cache) as worker:
+                if turns is None:
+                    _, turns = build_turns(
                         worker,
-                        ids,
-                        context=args.context,
-                        max_new=args.timing_new,
-                        scope=scope,
+                        template,
+                        codec,
+                        args.seed + 1,
+                        args.first_tokens,
+                        **session_options(args),
                     )
-                    if "error" in reply:
-                        raise SystemExit("timing request failed: " + reply["error"])
-                    row.append(
-                        {
-                            "prefill_seconds": reply["prefill_seconds"],
-                            "reused_input_tokens": reply.get("reused_input_tokens", 0),
-                            "output_sha256": digest_ids(reply["generated_token_ids"]),
-                        }
-                    )
-                samples[name].append(row)
-            worker.close()
+                generate(worker, turns[0][:2048], context=args.context, max_new=1)
+                for _ in range(args.rounds_per_block):
+                    scope = secrets.token_hex(16) if cache else None
+                    row = []
+                    for ids in turns:
+                        reply = generate(
+                            worker,
+                            ids,
+                            context=args.context,
+                            max_new=args.timing_new,
+                            scope=scope,
+                        )
+                        if "error" in reply:
+                            raise SystemExit("timing request failed: " + reply["error"])
+                        row.append(
+                            {
+                                "prefill_seconds": reply["prefill_seconds"],
+                                "reused_input_tokens": reply.get(
+                                    "reused_input_tokens", 0
+                                ),
+                                "output_sha256": digest_ids(
+                                    reply["generated_token_ids"]
+                                ),
+                            }
+                        )
+                    samples[name].append(row)
     summary = []
     for index, ids in enumerate(turns):
         entry = {"turn": index + 1, "input_tokens": len(ids)}
@@ -666,6 +797,35 @@ def run_timing(args, template, codec):
     }
 
 
+def exactness_passed(exactness):
+    return (
+        bool(exactness["checks"])
+        and all(
+            check["successful"]
+            and check["identical_to_fresh"]
+            and check["identical_to_baseline_worker"]
+            and check["reuse_matches_rule"]
+            for check in exactness["checks"]
+        )
+        and all(item["as_documented"] for item in exactness["invalidations"])
+        and exactness["follow_ups_reuse"]
+    )
+
+
+def timing_passed(timing):
+    turns = timing["turns"]
+    return bool(turns) and all(
+        turn["outputs_identical"]
+        and turn["baseline"]["reused_input_tokens"] == [0]
+        and (
+            turn["prefix_cache"]["reused_input_tokens"] == [0]
+            if index == 0
+            else min(turn["prefix_cache"]["reused_input_tokens"], default=0) > 0
+        )
+        for index, turn in enumerate(turns)
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--model", required=True, type=Path)
@@ -679,30 +839,71 @@ def main():
     parser.add_argument("--reuse", choices=("rewind", "boundary"), default="rewind")
     parser.add_argument("--context", type=int, default=40960)
     parser.add_argument("--first-tokens", type=int, default=18560)
+    parser.add_argument("--tools", type=int, default=24)
+    parser.add_argument("--instruction-paragraphs", type=int, default=40)
+    parser.add_argument(
+        "--follow-up-sentences", type=int, nargs=3, default=(40, 25, 80)
+    )
     parser.add_argument("--max-new", type=int, default=128)
     parser.add_argument("--timing-new", type=int, default=8)
     parser.add_argument("--timing-blocks", type=int, default=2)
     parser.add_argument("--rounds-per-block", type=int, default=2)
     parser.add_argument("--seed", type=int, default=11)
     parser.add_argument("--mode", choices=("all", "exactness", "timing"), default="all")
+    parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Print only phase names and aggregate case counters",
+    )
     args = parser.parse_args()
+    if (
+        min(
+            args.context,
+            args.first_tokens,
+            args.max_new,
+            args.timing_new,
+            args.timing_blocks,
+            args.rounds_per_block,
+            args.tools,
+            args.instruction_paragraphs,
+            *args.follow_up_sentences,
+        )
+        <= 0
+    ):
+        parser.error("session sizes and run counts must be positive")
 
     codec, template = load_template(args.model)
     tool_parser = tool_parser_for(codec)
     started = time.time()
     record = {
-        "schema": "stark-prefix-cache-validation-v2",
+        "schema": "stark-prefix-cache-validation-v3",
+        "harness_sha256": file_sha256(Path(__file__)),
         "host": {"machine": platform.machine(), "macos": platform.mac_ver()[0]},
         "model": {
             "weights_sha256": weights_sha256(args.model),
             "config_sha256": file_sha256(args.model / "config.json"),
             "tokenizer_sha256": file_sha256(args.model / "tokenizer.json"),
+            "metadata_sha256": {
+                name: file_sha256(args.model / name)
+                for name in (
+                    "tokenizer_config.json",
+                    "chat_template.jinja",
+                    "native-source.json",
+                    "conversion.json",
+                )
+                if (args.model / name).is_file()
+            },
         },
         "workers": {
             "baseline_sha256": file_sha256(args.baseline),
             "candidate_sha256": file_sha256(args.candidate),
         },
         "context_tokens": args.context,
+        "session": {
+            "seed": args.seed,
+            "first_tokens_target": args.first_tokens,
+            **session_options(args),
+        },
         "tool_parser": tool_parser,
     }
     if args.mode in ("all", "exactness"):
@@ -712,15 +913,10 @@ def main():
     record["elapsed_seconds"] = round(time.time() - started, 1)
     exactness = record.get("exactness")
     if exactness is not None:
-        record["passed"] = (
-            all(
-                c["identical_to_fresh"]
-                and c["identical_to_baseline_worker"]
-                and c["reuse_matches_rule"]
-                for c in exactness["checks"]
-            )
-            and all(item["as_documented"] for item in exactness["invalidations"])
-            and exactness["follow_ups_reuse"]
+        record["passed"] = exactness_passed(exactness)
+    if "timing" in record:
+        record["passed"] = record.get("passed", True) and timing_passed(
+            record["timing"]
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(

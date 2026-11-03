@@ -51,6 +51,28 @@ impl GlmModel {
         tokens: &[u32],
         before_token: &mut dyn FnMut() -> Result<()>,
     ) -> Result<()> {
+        // All modes fence every writer before returning. Split on the reuse
+        // grid (divisible by both admitted 4/8-token batch widths) so capture
+        // never changes the token grouping, kernels or arithmetic.
+        let split = self.capture_at.and_then(|position| position.checked_sub(self.position));
+        if let Some(split) = split.filter(|&split| split > 0 && split <= tokens.len()) {
+            let result = self.ingest_prefix_uncaptured(&tokens[..split], before_token).and_then(|_| {
+                self.capture_prefix_if_ready()?;
+                self.ingest_prefix_uncaptured(&tokens[split..], before_token)
+            });
+            if result.is_err() {
+                self.reset();
+            }
+            return result;
+        }
+        self.ingest_prefix_uncaptured(tokens, before_token)
+    }
+
+    fn ingest_prefix_uncaptured(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
         // Capture once per bulk request; scalar ingest remains synchronous.
         if std::env::var_os("STARK_GLM53_PREFILL_MMA").is_some_and(|value| value == "1") {
             let limit = match prefill_batch::chunk_limit(std::env::var_os("STARK_GLM53_PREFILL_CHUNK").as_deref()) {
