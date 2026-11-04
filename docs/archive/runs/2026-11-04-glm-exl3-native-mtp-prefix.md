@@ -152,3 +152,25 @@ native reset/end or callback failure, force an actual model EOS at a selected
 position, qualify immediate reload, or establish model quality or throughput.
 Native production capabilities remain disabled pending the separately recorded
 quality and performance work.
+
+## Objective quality follow-up
+
+The corrected, separately versioned smoke run completed all 24 arms and passed
+22. It retained all six original input/task/expected-answer hashes, both
+sampling policies, both native modes and the original 1,024-output limit. The
+verified GLM template opens a reasoning channel; this harness graded only its
+strictly delimited final channel with the unchanged exact JSON/task grader.
+Missing, repeated, malformed or truncated framing failed closed.
+
+Both modes exhausted the output budget on the same greedy interval-merging
+case. Every other paired task passed in both modes. No task was replaced,
+selectively retried or given a larger budget. This bounded outcome does not
+demonstrate an MTP-specific task regression, and the predeclared all-pass quality
+gate remains unmet. Native production capability bits remain disabled. The
+worker was reaped and all identity and cleanup guards passed.
+
+The corrected result SHA-256 is
+`b336fd1e1b97dcda1d9527a1cbf93ce3aac93e4c127245da93fdfcebe4942cd6`.
+The earlier harness incorrectly graded the complete reasoning-plus-final
+response as JSON. Its interrupted result is preserved separately and supplies
+no model-quality verdict; discarded responses cannot be retroactively graded.

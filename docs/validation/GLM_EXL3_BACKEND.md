@@ -24,9 +24,11 @@ The bridge exposes serial steps and full readouts, and the private candidate
 adds a native chosen-token MTP round interface with committed-round semantics
 and draft-head state in prefix snapshots. The greedy 128-output and sampled
 1,024-output checks match the native policy; the candidate's prefix mechanism
-and invalidations pass. Full Rust-worker
-integration and quality validation remain pending, so production MTP remains
-unqualified. See the [native mechanism validation](../archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md)
+and invalidations pass. The actual Rust worker passes a 41-case contract matrix.
+A separate objective smoke run passed 22 of 24 arms; both modes exhausted the
+same greedy task's original output budget. Its all-pass gate remains unmet,
+and production quality and throughput remain unqualified. See the
+[native mechanism validation](../archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md)
 and [GLM mlx-stream comparison](../benchmarks/2026-11-04-glm-mlx-stream-comparison.md)
 for source-bound evidence; this reference does not duplicate their artifact
 details or hashes.

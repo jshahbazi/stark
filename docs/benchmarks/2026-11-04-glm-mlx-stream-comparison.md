@@ -24,19 +24,20 @@ earlier rejected run.
 | Weights | Verified HF revision `50237d5c26ceb98bfd85f779990b0f5e6d7af144`; EXL3 K3 experts, FP8 residents | Same advertised pack format | Exact historical payload identity remains unproven |
 | Engine source | Public host `dc92a3e8`, plugin `7d29eaa7`, pinned MLX/MLX-C | Historical host `a8f6c6b8`, plugin `88d2aad` | A screened current-public-source host control measured 835.678 prefill / 16.632 decode at 131/159 rows with MTP off |
 | MTP | Disabled in qualified baseline; native commit interface and head-inclusive prefix snapshot implemented in a private candidate | Depth 3, gate 0.5, exact acceptance, BF16 draft head | Same-policy greedy128 output hashes and round counts match the normal host. Observed native-host decode 23.523 / 23.668 tok/s failed the external CPU screen; production throughput remains unqualified |
-| Expert rows, prompt/decode | 142 / 169 | 190 / 217 | Lower rows increase misses; local penalty unmeasured. The upstream nearby 217-to-225 ladder gained about 3% decode, with flat prefill; extrapolation to 169 is unsupported |
-| Allocation admission | 112 GiB ceiling, 2 GiB margin, native census and automatic fill | Same ceiling/margin; standard row pin needs a much smaller baseline | Current admission baselines around 35–41 GB and non-file readings around 27–28 GB constrain rows; historical baseline was about 12.6 GB. The unexplained difference is not established reclaimable capacity |
+| Expert rows, prompt/decode | 142 / 169 in the qualified headless baseline; latest head-loaded host control 104 / 130 | 190 / 217 | At fixed 104 prompt rows, 104-to-130 decode rows cut settled decode payload by 26.2%; faster screened observations support the residency hypothesis, but the complete ABBA failed its CPU screen. Extrapolation to 217 is unsupported |
+| Allocation admission | 112 GiB ceiling, 2 GiB margin, native census and automatic fill | Same ceiling/margin; 190/217 requires a baseline at most 12.69 GB | Baselines vary by run: about 35–41 GB in earlier controls and 46–47 GB in the latest host cells. The upstream 12.69 GB is an admission threshold, not a measured baseline for the 33.15 tok/s run; the current excess is not established reclaimable capacity |
 | Residency capacity | About 81 GB, bounded by the model bill and remaining budget | Current public host defaults to Metal's recommended maximum; historical policy not independently established | Fixed-row ABBA diagnostic observed under 1% effect and exact readout fingerprints; its external CPU screen failed, so no throughput gain qualifies |
 | Prompt-combine prerequisite | Unset wiring environment selects `inplace`, despite bill-bound capacity | Unset/`max` selects `inplace`; `fit`/`off` selects `fused` | The plugin couples this route to residency policy. The capacity experiment keeps the route unchanged in both arms |
 | KDA | Baseline did not record installation; new fixed-row control confirms per-core on 40 cores, 80 groups, 104 rows, 2 groups/core | Same expected plan | Stock fallback is ruled out for the new control |
 | DSA / EXL3 / fusions | NAX, 2,048-row waves, route cut, sampled ordering, direct reads and launch fusions configured; normal-host startup confirms NAX | Tuned defaults present | Source configuration aligns; full invocation counters remain unchecked |
-| Prefill tail | Eager completion inside prefill | Deferred phase/growth and MTP catch-up | With MTP off, deferred/forget did not improve total latency over off/keep. MTP-on catch-up has a different cost and is being measured separately |
+| Prefill tail | Eager completion inside prefill | Deferred phase/growth and MTP catch-up | The MTP-on chat pair produced identical outputs and observed about 77 seconds total in both cells; both failed the CPU screen. No qualified speedup or decode-gap explanation |
 | Prompt residents and startup | Current `keep` default; excluded warmup then repeated reset requests | Historical `forget`; one request per fresh server, no eager warmup | First requests after load reached about 918–936 prefill tok/s in screened serial controls; later requests slowed. These are fresh-server observations with existing OS file cache, not cold-storage measurements |
-| Readout and sampler | Baseline uses complete 154,880-value F32 readout and CPU greedy argmax; private candidate uses native chosen-token rounds | Native chosen-token/card path | Matching serial host control and matching MTP host/control observations provide no evidence of a twofold adapter tax; sampled-policy and worker qualification are separate gates |
+| Readout and sampler | Baseline uses complete 154,880-value F32 readout and CPU greedy argmax; private candidate uses native chosen-token rounds | Native chosen-token/card path | Actual sampled host/control and 41-case worker checks match native references. A screened first-request sampled host cell measured 884 prefill / 16.6 decode; the adapter is not supported as the dominant decode-gap explanation |
 | Input | 16,384 raw-source tokens | 16,381 templated tokens | Contents affect expert routes and MTP acceptance; the three-token difference is not the substantive issue |
 | Decode length and sampling | 128 greedy steps | 1,024 sampled steps, temperature 1, top-p 0.95, seed 1 | Different trajectories and fixed-cost sensitivity |
 | Context and prefix reuse | 32,768; reuse off for throughput | Same context; reuse off | Aligned. The serial stage has no snapshot cost; prefix validation is separate evidence |
-| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; current AC power and low-power mode off; CPU/paging/thermal screen | Same advertised hardware, maximum fans and clock-matched pairs | GPU frequency/fan telemetry remains unavailable: the read-only power sampler requires administrator authentication. Thermal readings do not prove matched GPU frequency |
+| Hardware conditions | M5 Max, 40 GPU cores, 128 GiB; macOS 26.7.1 (25G241), AC `powermode 0`; CPU/paging/thermal screen | Same advertised hardware, maximum fans and clock-matched pairs; historical OS build not established | GPU frequency/fan telemetry remains unavailable: the read-only power sampler requires administrator authentication. Thermal readings do not prove matched GPU frequency |
+| Global GPU wiring setting | Read-only `iogpu.wired_limit_mb` query returns `0`; unchanged | Published serve recipe explicitly sets `114688` | The raw zero does not establish the kernel's default capacity. This is separate from MLX's measured per-process residency capacity; no causal effect measured |
 
 The public pack sets MTP lane construction, depth and gate. The qualified bridge overrides
 the lane off and the prompt tail to eager completion. Most advertised kernel
@@ -121,7 +122,10 @@ Private ops-control result SHA-256:
 Its native source SHA-256:
 `2f0bd427d38ff480d116007268e035eb5b788f8d8a18d84d79a084f6bab717c3`.
 
-## Experiment order
+## Initial experiment order
+
+This was the initial sequence. Results and remaining gates are recorded below;
+the list is retained to make the investigation's controls reviewable.
 
 1. Record the actual KDA installation, effective NAX route, admission terms,
    allocator active/cache/peak bytes and process footprint. Observation must read
@@ -145,7 +149,10 @@ Each experiment changes one relevant variable, checks outputs/state as
 appropriate, and records actual installed settings. A new kernel project or a
 large settings sweep is premature while runtime engagement is unknown.
 
-## Diagnostic progress
+## Initial MTP diagnostic progress
+
+These paragraphs record the earlier failed pilots. The later native-policy,
+worker and quality sections contain their follow-up results.
 
 The first native MTP pilot failed before measured arms, without identifying the
 cause. A separately built diagnostic retained the same inference settings and
@@ -194,7 +201,7 @@ diagnostic; the earlier baseline did not retain route telemetry.
 | Median decode, bill-bound / maximum | 16.474 / 16.579 tok/s |
 
 This attempt is **unqualified for throughput**: maximum external CPU reached
-208.314 percent, above the existing 200-percent screen limit. It had no compiler
+208.314 percent, failing the control's existing CPU screen. It had no compiler
 or download candidates, pageouts, swapouts, sampling gaps or sampling failures;
 maximum thermal reading was 1. The observed capacity effect was under one
 percent, so the attempt does not support capacity as the main performance cause
@@ -300,11 +307,11 @@ less than the roughly 8.8 GB needed even for 22 more expert rows. File residency
 alone also does not prove immediate reclaimability. No eviction, purge, budget
 increase or security/management-process changes were made.
 
-Still open: MTP-on tail/total-latency measurements, 1,024-output acceptance and
-throughput, aggregate expert I/O at the admitted cache frontier, source-bound
-worker lifecycle and quality checks, admission-term reconciliation, and matched
-hardware clocks. These checks are needed before attributing the remaining gap
-to a new kernel or declaring the historical target reproduced.
+The later sections record MTP-on tail/total latency, 1,024-output acceptance,
+aggregate expert I/O, the worker matrix and bounded quality results. Still open
+are a qualified production MTP throughput result, the unmet quality gate,
+admission-term reconciliation and matched hardware clocks. The historical
+target has not been reproduced.
 
 ## Longer sampled diagnostic
 
@@ -344,8 +351,9 @@ Separate post-identity preparation SHA-256:
 The MTP-on tail control's first 131/158-row attempt failed its startup admission
 screen: its recorded 39.619 GB baseline and 81.910 GB model bound exceeded the
 118.112 GB target by 3.418 GB. It performed no inference and restored the original
-private settings. A separately frozen 119/146-row pair is the next control; no
-over-budget pin is forced.
+private settings. A separately frozen 119/146-row pair was prepared; the later
+properly templated 104/130-row control below was executed instead. No
+over-budget pin was forced.
 
 ## Trunk expert I/O diagnostic
 
@@ -373,9 +381,10 @@ an interval crossing a snapshot boundary is charged to the later phase.
 This makes cache residency an actionable hypothesis. It does not establish
 34 seconds of removable latency: busy reads overlap computation, and GPU event
 waits need not enter the small host `waitReads` counter. A separately prepared
-same-source cache-row comparison will hold prefill rows at 104 and compare
+same-source cache-row comparison held prefill rows at 104 and compared
 104 versus 130 decode rows, retaining identical greedy128 output hashes and
-counts. Claims about 217 rows or 33 tok/s still require an actual admitted run.
+counts; its results follow below. Claims about 217 rows or 33 tok/s still
+require an actual admitted run.
 
 Private result SHA-256:
 `0dea588dbb24301573dd2aef20d86d0b22cfd7de213c09fcdf0412d33643f320`.
@@ -399,13 +408,159 @@ and failed that framing rule; the run was then interrupted with complete
 cleanup and matching postguards. That result cannot establish a model defect
 or be retroactively regraded, because response content was discarded.
 
-A separately versioned correction preserves all six original task, expected
+A separately versioned correction preserved all six original task, expected
 answer, rendered input and token-input hashes, all 24 arms, maximum reasoning
-and the 1,024-output limit. It will grade the template-defined final channel
-with the unchanged strict JSON grader, fail closed on malformed framing or
-truncation, and retain every failed arm. No question replacement or selected
-retry is allowed. Until that run completes, semantic quality remains
-unqualified and ordinary native MTP capability bits remain off.
+and the 1,024-output limit. It graded the template-defined final channel
+with the unchanged strict JSON grader, failed closed on malformed framing or
+truncation, and retained every failed arm. No question replacement or selected
+retry was used.
+
+That corrected run completed all 24 requests: 22 passed. Both modes reached
+the 1,024-token limit on the same greedy interval-merging case and failed the
+framing/truncation gate. Every other paired task passed in both modes. This
+does not establish an MTP-specific task regression, and it does not satisfy the
+predeclared all-pass gate. The budget was not increased and no failed question
+was replaced or selectively retried. Semantic quality qualification remains
+false; ordinary native MTP capability bits remain disabled. Cleanup and all
+identity guards passed.
 
 Interrupted quality result SHA-256:
 `d4f693c0745d16bed7e436b72d2ed82b1ba16bc8a0cf73a777e591e15eb76b29`.
+Corrected quality result SHA-256:
+`b336fd1e1b97dcda1d9527a1cbf93ce3aac93e4c127245da93fdfcebe4942cd6`.
+
+## Cache capacity sensitivity
+
+A new C client retained the I/O stage, native inference and input, and pinned
+104 prefill rows with either 104 or 130 decode rows. Each fresh child ran one
+excluded identical warmup and one measured greedy128 request. The frozen order
+was 130/104/104/130. Every request matched fingerprint `882d4378e2910a4d`,
+45 rounds, 99 verified drafts and 83 accepted drafts. Load, warmup, source
+hashing and a guarded quiet wait were excluded from measurement. All four
+children passed numerical, counter, cleanup, source and model identity checks.
+
+| Order / decode rows | Prefill tok/s | Decode tok/s | Decode payload / misses | Host screen |
+| --- | ---: | ---: | --- | --- |
+| 1 / 130 | 884.012 | 19.286 | 61.401 GB / 6,481 | Passed |
+| 2 / 104 | 848.526 | 15.726 | 83.154 GB / 8,777 | Passed |
+| 3 / 104 | 712.981 | 15.604 | 83.154 GB / 8,777 | Passed |
+| 4 / 130 | 693.786 | 18.823 | 61.401 GB / 6,481 | CPU-only rejection |
+
+The additional 26 decode rows reduced settled decode payload by 26.2%, exactly
+repeating in both arms. Closed read-busy intervals were about 4.1 seconds at
+130 rows and 5.6 seconds at 104. The timing observations support investigating
+residency, but the complete ABBA experiment remains **unqualified for
+performance**. The fourth arm reached 370.887% foreign CPU during macOS
+background maintenance. This GLM screen retains its original 150% measured
+external-CPU limit; no threshold was relaxed. All arms had zero new pageouts or
+swapouts, no compiler/download candidates, no monitor failures or sampling gaps,
+and thermal readings at most 1. Hardware clocks were not measured.
+
+The second controller version continues only after CPU-only rejection when
+every other guard and child cleanup/postcheck succeeds. This permits complete
+numerical/counter diagnostics while permanently vetoing performance
+qualification. The first version stopped after its first arm's CPU rejection;
+that source and failed receipt remain intact. These observations do not justify
+extrapolating 130 rows to 217 rows or claiming 33 tok/s.
+
+Private complete diagnostic result SHA-256:
+`7c8efb3299ddf19df8e274bd38d3ff9cf62837d0285662038811a2cabe830a77`.
+Controller SHA-256:
+`7cde17c5deec693bfed57447a312cd2086847640e6226c677be75a5c6abbe9cd`.
+
+## First-request sampled and templated host controls
+
+Three cells were frozen before execution: raw/card1024/eager, one natural
+engineering-chat/card1024/eager, and the identical chat/card1024/deferred.
+Each used a fresh normal server, no warmup or prefix reuse, fixed 104/130 rows,
+`forget` residents, maximum process residency capacity, a BF16 depth-three
+head, gate 0.5, exact acceptance, temperature 1, top-p 0.95 and seed 1. The
+native executable and inference source were unchanged from the earlier
+normal-host fingerprint oracle. These are instrumented host observations;
+they are not Stark-worker production benchmarks.
+
+The raw fidelity gate matched the native C and worker reference exactly:
+1,024 choices, fingerprint `89c3e863f47bad76`, 367 rounds and 657 accepted
+drafts. Its measured request passed the existing host screen, with external
+CPU at most 149.584%, thermal reading zero, no paging, compiler/download
+candidates, sampling failures or gaps. It observed 883.957 prefill and 16.618
+decode tokens/s. Different row counts, startup and resident policies prevent
+calling this a rate reproduction of the earlier C control. It does show that
+the actual server's sampled path reproduces the native policy without
+recovering the historical decode rate on this footprint.
+
+The chat workload was constructed once from a fixed natural engineering
+question and one prefix of the frozen public-source corpus. The real pack
+template used maximum reasoning and its assistant thinking opener. It rendered
+to exactly 16,381 tokens, input U32LE SHA-256
+`55e027d0663b27edfa24e5b2d91aaa1fdbf0a13d9326e3478fd649451ff631f4`.
+Construction was frozen without observing output or rate; no prompt cycling,
+padding or search for favorable output was used. Full text and tokens remained
+in RAM. The legacy completion endpoint consumed the rendered tokens, so this
+is a templated-token completion, not a chat-endpoint benchmark. EOS remained
+enabled; both requests naturally reached the 1,024-output limit.
+
+| Cell | Prefill tok/s | Decode tok/s | Prefill / decode / total seconds | Host screen |
+| --- | ---: | ---: | --- | --- |
+| Raw eager | 883.957 | 16.618 | 18.535 / 61.620 / 80.155 | Passed |
+| Chat eager | 885.191 | 17.363 | 18.506 / 58.976 / 77.482 | CPU-only rejection |
+| Chat deferred | 915.165 | 17.317 | 17.900 / 59.134 / 77.033 | CPU-only rejection |
+
+The chat cells matched each other exactly: fingerprint `89f856128b48cd6e`,
+1,024 choices, 478 rounds and 546 accepted drafts. Their external CPU peaks
+were 173.650% and 178.969%, primarily the Codex renderer. All other guards,
+identity postchecks, process-group cleanup and byte-identical private-settings
+restoration passed. The comparison therefore admits output agreement and
+rejects timing comparability. The observed 0.45-second total difference is not
+a qualified gain. No raw-to-chat speedup ratio is meaningful because their
+inputs, routes and outputs differ. Neither chat formatting nor tail deferral
+has supplied evidence of the missing decode recovery.
+
+Private chat eager / deferred result SHA-256:
+`5520a296a7a8827768d07c7adad825ce628a6a1d0077f1bf3fe576480814993e` /
+`d70ec07e3d4e53bfdb803ea608ac63a4173239f26af883ad234efb4851f1ae50`.
+Controller SHA-256:
+`7ff1711a0d2689bb6589a44de8854d1dea2b131e221900be2a49a7e2304da69d`.
+Private raw fidelity result SHA-256:
+`54b7b666fbc45c107763ee2e6471d3e0366a9fd5c587bdaa67ccc70199e975e6`.
+
+The remaining performance lead is expert residency. Its payload effect has
+been measured directly; the latest 46–47 GB admission baseline permits far
+fewer rows than the historical cell. A bounded source audit must reconcile
+that baseline and establish a safely admissible frontier before a higher-row
+control. No additional cache eviction, global wiring change, application quit,
+budget increase or forced historical pin is implied by these results.
+
+## Admission source reconciliation
+
+The source audit found no current-model double count. Both host and bridge
+sample admission before loading resident weights and allocating expert slots.
+The plugin uses `max(host_floor, physical_used - pack_cached)`, then adds the
+model bill once. Resident and expert readers already use checked `F_NOCACHE`,
+aligned reads and disabled OS read-ahead. Pack-owned file-cache invalidation is
+already enabled. Another no-cache switch or MLX free-cache clear is therefore
+not an evidenced capacity recovery.
+
+| Latest raw host admission term | Bytes |
+| --- | ---: |
+| Baseline | 46,766,309,376 |
+| Process bound at 104/130 rows | 70,955,800,308 |
+| Combined bound | 117,722,109,684 |
+| Target after margin | 118,111,600,640 |
+| Remaining headroom | 389,490,956 |
+
+The [upstream rows ladder](https://github.com/davidtai/mlx-stream/blob/ac3b772b61bce66450862bca697dbb742c35453f/docs/benchmarks/glm53-flash/README.md#rows-ladders)
+explicitly defines 12.69 GB as the maximum admitted baseline for 190/217, not
+the baseline measured in that throughput cell. The current baseline exceeds
+that bar by about 34.08 GB. The separately sampled pre-load non-file floor was
+29.62 GB; it is a different metric and sample, not proof that the remaining
+17.15 GB is reclaimable. Even hypothetically crediting that entire difference
+would not establish 217-row capacity. No pressure allocation or broader
+foreign-cache credit is proposed.
+
+The existing startup log emits exact admission components, but the frozen
+controller retained only the final baseline. A future bounded parser may
+whitelist that four-integer line without a native rebuild or another mutating
+census. This would attribute the final branch; it would not itself free memory
+or justify a larger pin. At the present footprint, useful engineering work
+must reduce misses or exposed read latency within the same admitted budget.
