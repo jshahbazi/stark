@@ -1,0 +1,1842 @@
+{
+  "lock_version": 1,
+  "abi_version": 1,
+  "host_revision": "dc92a3e88ad193a82c70f24ef96918b8dc1d4af6",
+  "plugin_revision": "7d29eaa7217ea8d0e1b50000eb23ad37b06f5d80",
+  "mlx_revision": "64ea011cb65f14d9ce2737e60db9a4ae91ed7441",
+  "mlxc_revision": "56b2d39fc831f2c0eb5bb94d82ef7191f7b31fa6",
+  "mlxc_patch_sha256": "8a70a62a48108ecad67e1ff0e2212979b46373f5611ad5b2142abfadde2860a0",
+  "sushi_revision": "0bc61aa690cadfed63637997f86b5de641d6645c",
+  "zig_version": "0.17.0",
+  "zig_sha256": "1c5f706db0ed6d55451940f31dc05a6177d05696bc1fa5d853696d04c718b523",
+  "plugin_patch_sha256": "0efb38bc247d6e7626eadb2c2d7732043394ac694fc7715ef4a567824986219b",
+  "bridge_source_sha256": "20197d24593ffff2046e9394a47f7737abfc2440fb0f4f5d6988eb71695382dd",
+  "dependency_artifacts": {
+    "mlx": "39f48c76c001212fe4afed2c3152f7863e3f25e433ad49450fd0d81186865fb6",
+    "mlxc": "2ea0b00f39a3e9b69f2b651678565be095c41c1f49268bc5edc94ad19ad5864d",
+    "jaccl": "bda733bfd3ff3560306bb8bbd2be6cbf7027025ee6502edb3247f952f771e715",
+    "metallib": "178186a29eb67d159b6c6d2f2d4a59003298a4dec957edc78762e5376adb7c4c"
+  },
+  "owned_sources": [
+    {
+      "path": "LICENSE",
+      "sha256": "7621d17e34842470f59e711e3087cc4428d1dd41117fc6d3ddeb1e0fa6f56b20"
+    },
+    {
+      "path": "build.zig",
+      "sha256": "9a215ff0080f824999860ceca53735e9e49c461520e6d1ffbd437efe08d1351f"
+    },
+    {
+      "path": "build.zig.zon",
+      "sha256": "7306b681e1fa1a38c959d40913fe33735a7bf9a35aa915d29df586bdfad4769f"
+    },
+    {
+      "path": "include/stark_glm.h",
+      "sha256": "fbb2b2d7049b31afe964734ef10cfb7c04ed8309e40e2b09c7cbb9ea6577cde2"
+    },
+    {
+      "path": "licenses/mlx-serve-LICENSE",
+      "sha256": "dfe22e0f100fe7f2c2808f1af6f488e7339cf8deb7504153602b4169ed7d90b4"
+    },
+    {
+      "path": "licenses/mlx-serve-LICENSE-APACHE-2.0",
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "licenses/mlx-serve-NOTICE",
+      "sha256": "6fd20bee131484d9018a0f32dafa7f67c84885bbdeccf8c9c044977ce96eb22e"
+    },
+    {
+      "path": "licenses/mlx-stream-LICENSE",
+      "sha256": "97ee01e6f31cb9dfda5b3c2135973d5c4d0ce89742c09fb7ae453e2da3f20edf"
+    },
+    {
+      "path": "licenses/mlx-stream-NOTICE",
+      "sha256": "09f2ab4c2cc372a2980e954d12af7f1834ae863c0bbf4870a40aef7034e87ce0"
+    },
+    {
+      "path": "patches/mlx-stream-prefix.patch",
+      "sha256": "0efb38bc247d6e7626eadb2c2d7732043394ac694fc7715ef4a567824986219b"
+    },
+    {
+      "path": "src/bridge.zig",
+      "sha256": "d830d80c3584acfcb85b72798d073fd11de6edea591c79f7ca96c26996385eb2"
+    },
+    {
+      "path": "src/host/crt.zig",
+      "sha256": "8ebce778e6fdb7b7dca27e942c3f11f0fb369361af92683746d8694e3d313141"
+    },
+    {
+      "path": "src/host/dsa_nax.zig",
+      "sha256": "10e8561d8980a2f4d5c293a5adfce4ba6bf76aaee506fb339bbd1cbb727d5dd1"
+    },
+    {
+      "path": "src/host/io_util.zig",
+      "sha256": "2c32df6fe7d0b5e641ea0bc5ad3be7cdb8b3ba2ba15067fa3d1a9b3b489dcdc2"
+    },
+    {
+      "path": "src/host/log.zig",
+      "sha256": "6a9a870ea7c3a55164d8f1c86707ff49062cc571b1ace35128bee8e6052c7277"
+    },
+    {
+      "path": "src/host/mlx.zig",
+      "sha256": "5237cecce162fa8389e05a87ce6eab169aefd90e22745a4e448b80b890824105"
+    },
+    {
+      "path": "src/host/mtp_acceptance.zig",
+      "sha256": "43d6b39cb304d0f2bb379ecac9ac8bacc133d53bb40ff950139cbd3da8e66ef3"
+    },
+    {
+      "path": "src/host/os_mutex.zig",
+      "sha256": "d8a2d5a094db5fddd9a522c0e374bb8074d68691f502620ee00f6c11b95bbcae"
+    },
+    {
+      "path": "src/host/root.zig",
+      "sha256": "aea2d54973faad5ba4bd0e25bf6860285048b2ca5fcd585ec1cfe6ade0f07a8d"
+    },
+    {
+      "path": "tests/abi_smoke.c",
+      "sha256": "b753f01bf2fd0d2eb69671fca75a1195cb3b990ffec0fbc59acf639fd9e9e168"
+    },
+    {
+      "path": "tools/bench.c",
+      "sha256": "871ebbb9164fc7318112fc1bc94402b9d3154bb14fa7189e1d010bfec21813ee"
+    },
+    {
+      "path": "tools/prepare_stage.py",
+      "sha256": "a70ec2312e1448b40c7d9a2cecc86ae22aa2c9ecc880827c39fd8cd9f84b5f4a"
+    }
+  ],
+  "dependency_headers": [
+    {
+      "path": "mlx-stage/include/jaccl/group.h",
+      "sha256": "2f30dfe0acbfde764a4547c62a06a8da6b54837ca7662ac1e14a17994e8b0129"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/jaccl.h",
+      "sha256": "e2b8b9db023cae81113096ef464ada93e95a1423c183d0a249b05bcd3fd0a511"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/mesh.h",
+      "sha256": "3fb05066dd1c3b076cb0e0c328a29f680c5d588603dec4e129b1138baad1ee26"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/mesh_impl.h",
+      "sha256": "330d399b2af0b2614b87221a400a2e45abac1293804b36ef5a622e22a89adc7b"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/rdma.h",
+      "sha256": "dbe318131a2d1daa3614b5a48c5be6a31fd8405ebfa394138172d9bb1b7d9f94"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/reduction_ops.h",
+      "sha256": "2cc0bfe9f15ef380ebbc195809b639e0d5aee300f8d372bfd702d81b85ee6752"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/ring.h",
+      "sha256": "e60b76398bac1961b5013e74598aef3ac7066f151a97074ffbc8c7a9b963e9fc"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/ring_impl.h",
+      "sha256": "fb308047cd5e6efda671b3da23913b859a15383ca1b448a63091c657337fe8b4"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/tcp.h",
+      "sha256": "9450af7593270876dc1eed59e2a4111b70f81e3c01505ecbbdd003dfa13734a8"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/threadpool.h",
+      "sha256": "35c59282d7b7b778f38b4070c53eb37a353c04fa3d2f352d4f7b484495430a24"
+    },
+    {
+      "path": "mlx-stage/include/jaccl/types.h",
+      "sha256": "3c3ac5455b3e44ebdbc4ce174de17062204272a0951b186cb8a50a6faf8245f2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/Foundation.hpp",
+      "sha256": "ec1d753dfaf58e4248aaf9dde3a54471356ef4283cab247509606c4b7b719d97"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSArray.hpp",
+      "sha256": "25eb26d690825d4aabc72a4b6e1d209b632247ebbfeab95a37ad2ea1726c06ea"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSAutoreleasePool.hpp",
+      "sha256": "72d1fa22f1a3a0dbc83d887123a491e6c05c18313648151530a33449d1d33337"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSBundle.hpp",
+      "sha256": "af70ff47e145e6c7a1cbf45039cecb9b8f23e7045545286e5112259df3902b8d"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSData.hpp",
+      "sha256": "95a8a9697bed80390db8204e8bdd8b09bb09385675ff7a4e7a1eab3fec653fee"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSDate.hpp",
+      "sha256": "77f861daab4145cae94a8fb7071b5f43b56aa909bda36b01f357da4b22f0b5c9"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSDefines.hpp",
+      "sha256": "9939db894bd737c3bb9a979bc7269e125fde6d6dbad248d38ab7019a9d42aa35"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSDictionary.hpp",
+      "sha256": "008415fff23f8011018ada7afba56dbbb4e6a1d2f2d7e753bdca94f86d457feb"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSEnumerator.hpp",
+      "sha256": "89952f6564ab13a0ca3a8abef24c3547291cf1d7e6b2c46f83257118593c8ab5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSError.hpp",
+      "sha256": "d62669f4eb89c5003cb51b8b740dd9b34ff542fa97e854a1cfb0348a70eb5bfa"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSLock.hpp",
+      "sha256": "639be538d8d8d2e4bf8c61446f3f988db7250a3ef7d8c09ff6773a7b86bbb3c7"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSNotification.hpp",
+      "sha256": "df2b60a482a4884b63fa8e63e5d74974cc8f7e7c2c90ce7dc337987dbb3917d2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSNumber.hpp",
+      "sha256": "21c7714596e4ea47451640b228ef6eccd7499ffc314ffa4cdf521a4ef69fbc85"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSObjCRuntime.hpp",
+      "sha256": "430704881295374181345a1bf415f2c5bb39438ec22ac0a6cf38a0bb98573bc8"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSObject.hpp",
+      "sha256": "0e517a51d40679f476aec9b63079550138f0711c38f05a9c197ee8880bf538fb"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSPrivate.hpp",
+      "sha256": "d961736b4fa673a9657dd4c301b7cf8826574c29bd6b9ebee568145972eb68a6"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSProcessInfo.hpp",
+      "sha256": "de67e06a7043b78e4362e7cf2889e34d92312fa4d6df0cddcd123f76e418b250"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSRange.hpp",
+      "sha256": "dc8f1a32bd948f100884fbd14d7436b50b566494e70ecd346e6f4fac632d5ead"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSSet.hpp",
+      "sha256": "eaa27914936c1c81509d186bd6935882fa49f329e6e822f6668dbc3c66ba9702"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSSharedPtr.hpp",
+      "sha256": "0dea8b2ec04c9fbabfc4a105a372ec2750789ad83ff4b878b78814a81bc2c6fa"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSString.hpp",
+      "sha256": "ae8fef6fdafaabafbc41cd09ddfe45db21f2e79be444c17c7235678114d66d22"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSTypes.hpp",
+      "sha256": "79258aaf92c78a98e83854e5562440b61e5cee9481afbbc35b6746a54a97eec9"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Foundation/NSURL.hpp",
+      "sha256": "c0759aa18814aa17153c682c2502a1af507266941cd4f9458550c3ca30bee4bd"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4AccelerationStructure.hpp",
+      "sha256": "432c3703d0dca855b0594f0c69fbc14f2388dfa82ab96bc77914512e72400039"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4Archive.hpp",
+      "sha256": "237a474f89280f01fe9e43e0e02a3ad5ee40b88501a3cbdfd1ebdedabc17c4c3"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4ArgumentTable.hpp",
+      "sha256": "cc4a1e470e4bb0ad7f80f2786065243426753a7cc198a653d9af1478ce144736"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4BinaryFunction.hpp",
+      "sha256": "05b212760277260448882baaa00724fb62b8789354c3bba9c7365c9bf60d765b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4BinaryFunctionDescriptor.hpp",
+      "sha256": "5681f85656bd137f171d13af46f81301523d6e8adc3080e6e7b204a513c5ec52"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CommandAllocator.hpp",
+      "sha256": "bfbb35f7e7d3a4df6ddf4af4f9e20670ffb0c34326c8021bb4cdbe490dae1b4c"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CommandBuffer.hpp",
+      "sha256": "3e9f1fa8abfa9de7165b0f5b3895ada6f2e9a304c1c6f4a34947804028328871"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CommandEncoder.hpp",
+      "sha256": "a087e9df744da4bcf01d7cf5acec364abd8d8cfe29dbd6d05b9229e2e41d592b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CommandQueue.hpp",
+      "sha256": "0baed858768d09c9a53167351013fb208491f99931a051f84326ef350e609d77"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CommitFeedback.hpp",
+      "sha256": "496525f9a057f9f6de01dd8918a4198402281612de6c7059137651b0c4382fdc"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4Compiler.hpp",
+      "sha256": "d98975f1d90c7707a725f23fc5534f51cabac94888fc13aa603c1b7b072f87b8"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4CompilerTask.hpp",
+      "sha256": "83ca143218609c9c93a5a8907d0817ce0a2cb1740efc602bcc620090bcf61c66"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4ComputeCommandEncoder.hpp",
+      "sha256": "698165e80990fdb6ed97c0fdab9d61b9c161d451199cbfdbdb8b9234596244ac"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4ComputePipeline.hpp",
+      "sha256": "911ad00516a2dbee147196af5ac6c64459953cb192df092c029e9f40cd0ae230"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4Counters.hpp",
+      "sha256": "27ef10c9638492543e2c3f4636f125884e426c456edfaafa18b66577816e86e4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4FunctionDescriptor.hpp",
+      "sha256": "d96fc1710ea3d9e49741c6aae2a71871ab2fa46ba19cc552f40a1239cd1a75f2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4LibraryDescriptor.hpp",
+      "sha256": "8d41f9404d87dd7251d6e93908b1e70b9294092875c3d3f8d919741a0b1f6c57"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4LibraryFunctionDescriptor.hpp",
+      "sha256": "0ddabe9d2d9417c7217b2c64575171ac180a47cef173164a1763539f6f2cdb73"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4LinkingDescriptor.hpp",
+      "sha256": "64ae68f9526333e3fd7a5d785b74145d8f4210d15fccaccc4cb3d66f85986529"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4MachineLearningCommandEncoder.hpp",
+      "sha256": "59a09f1b8d323b0cf937a7ef5740e20b8a0774d92922c62fc6fc55247a5834fe"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4MachineLearningPipeline.hpp",
+      "sha256": "8b6015f9c5c3e2cfa0a60d73a41e44a3d72caedeb3b9a63897930330ed62c926"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4MeshRenderPipeline.hpp",
+      "sha256": "3cb93620709e8797191932a4fd295edb43ee2ecab40767b1c23f8b319ca16dd7"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4PipelineDataSetSerializer.hpp",
+      "sha256": "3243c002a4842b43147f0c7afd8b12df53545505d14c5f2af418bee01b6a8249"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4PipelineState.hpp",
+      "sha256": "d2083f2abd227be1c555569f459cc00f5f31ab9dfbd12d6e66d2c03976f67b84"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4RenderCommandEncoder.hpp",
+      "sha256": "ed389a35b934de65e24002ca7b810684174333d326ce39de7df02d76695a316b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4RenderPass.hpp",
+      "sha256": "fb07940350b3df49a180a6b6a84537a99ecc7746eb658e0714a551f1263d2813"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4RenderPipeline.hpp",
+      "sha256": "4453a3f3e49b5bc8f87645f86680a34b07de8df4971281ecd7ee33a736005237"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4SpecializedFunctionDescriptor.hpp",
+      "sha256": "be3b04a87c1af9e5fea455a1c7c61c7236444191a454bdd880b9bdc91d7fc1f6"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4StitchedFunctionDescriptor.hpp",
+      "sha256": "e21bc69181a5d3d28c805e4216335e874cf374d6864697feae434447b05518e5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTL4TileRenderPipeline.hpp",
+      "sha256": "86c887455a228fc5a30907ad7c982f1c63965e8a43ec4ac10c098f9a6dd9d854"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLAccelerationStructure.hpp",
+      "sha256": "45cf7128fefbf7079b8c69b17ac500a1cb5197fd543d235166233ae8b0c33b66"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLAccelerationStructureCommandEncoder.hpp",
+      "sha256": "0fb13e04d26eacb951287c01e9b5fa0ce5ea628015c8a1285ad26b897c2553d9"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLAccelerationStructureTypes.hpp",
+      "sha256": "1c3d9cd0e2e84589fb8017e6eebf78dd0fb78a9d2e9d707bf877d8234d524879"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLAllocation.hpp",
+      "sha256": "4083450bbfe4f76f92b47bd9650aed00785dde128d0d3234b37ef2c7da6a0bd4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLArgument.hpp",
+      "sha256": "862ecf5c34b7206f4305ebc7358b66a9e9e9d723a4ab2dc14fd72690d9f3bdf4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLArgumentEncoder.hpp",
+      "sha256": "ae11dfb17605fd120dfe3c702a1c5b4af5117e9bb06f56095f85828e2988476f"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLBinaryArchive.hpp",
+      "sha256": "fd5a827c107aee7b752322fc34361b0f33b7149bcc1b8c72d1ec3f41c7ad98a4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLBlitCommandEncoder.hpp",
+      "sha256": "b4a74aea9d5ca3d936f623543f237a4e2e4b7a5338e16e9b2096dc477b09463e"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLBlitPass.hpp",
+      "sha256": "9592786e4d93fed66b92bbd375499bc7d5f7b7fe5f2042a919fba100e9b609fe"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLBuffer.hpp",
+      "sha256": "3eee7d7359d018f12be988a603c4ad7135cd5d5a2dee97704d03babf7cc95e14"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCaptureManager.hpp",
+      "sha256": "6d0e946094caed3989121296746775cfc96cf075d41c531f851e82c42275fdb6"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCaptureScope.hpp",
+      "sha256": "2d425c654e36de6b2ea6f64c5f815ae6f7fd233ea8b3f8e55367d30cb22a19cd"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCommandBuffer.hpp",
+      "sha256": "d019ae3947b57f64e59aeaa312f776d80c8a028a8f08997f463e6bc90ba9dd38"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCommandEncoder.hpp",
+      "sha256": "9515e979dc056b81b57578fd77efd6ac8598ffa936494a7b5529a7aebf038211"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCommandQueue.hpp",
+      "sha256": "938bd6131792975723c3a44458e6fd40b6dfe816dfe65c7cec869bfb40997e44"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLComputeCommandEncoder.hpp",
+      "sha256": "da5278517fbe987551f08e8e941b1ab200bfc36535b263e5ef805b46cd4f82a1"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLComputePass.hpp",
+      "sha256": "86801d66c64f77782e12b5eae51005bee68f69520db38f03c6fe62338999a5d3"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLComputePipeline.hpp",
+      "sha256": "07e1903f91380ca6ba32835fe7656992dee6b96c11474029801607e40c9eaf29"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLCounters.hpp",
+      "sha256": "a0edb4af79155ad05102fe968d9f3a3a3b7b86bf341c33671d5e908c59279a09"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDataType.hpp",
+      "sha256": "2d8d2c77a568c797d1dad15831a8f92f7896b8aeee4069247669406798e76da3"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDefines.hpp",
+      "sha256": "fa8890775325ef4a2f83d419c012467124dd63bd732e0cfb8fce75af11fb7ed4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDepthStencil.hpp",
+      "sha256": "ee4db0dcb4ee9121816b291e2801e95d925108a2f2bd2744563d618d49d2e4ea"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDevice.hpp",
+      "sha256": "47cfd1da0eb3a096192c2a7decade418ca6dd9e881d797d2564da94343bf0b5a"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDrawable.hpp",
+      "sha256": "f30836f5103149cdf6664859a7325e6d57ffb77e1196b04f41499c17181a9b2d"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLDynamicLibrary.hpp",
+      "sha256": "a88b092ef7c0ee0cb423f5041b52c30214e295ac9462c9c0ccd6594dc2205cb2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLEvent.hpp",
+      "sha256": "f0c675e47a21289f7eb33bbd37dac0f3f13caafa03bfbe64b9d58ec84f391729"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFence.hpp",
+      "sha256": "be05f6be5b558d77764f8c8940922c2a8077332efa244610880e9f0249c1324b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFunctionConstantValues.hpp",
+      "sha256": "895adb1ea95140fc71ac1f8005d1bb6da6649f856c85cf12dfce721510f09739"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFunctionDescriptor.hpp",
+      "sha256": "cf94121392bbf337e1aa6b3834fbc33ec51ac45639c38b7b8632c0f0899d40da"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFunctionHandle.hpp",
+      "sha256": "8e051de6a482fe63b4d0ccd302719cf6ce6bc050d83f1dffbbfa9fc6c472731e"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFunctionLog.hpp",
+      "sha256": "93855c66fb216fc2e9f1a92ee2bf2b50b9ad5a3321f3b125438b365fd9831d3f"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLFunctionStitching.hpp",
+      "sha256": "cbc47ee5f659c6aff05c38acf859a2d0df0af2042a01d3a0198ac07b016bef44"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLGPUAddress.hpp",
+      "sha256": "3fd54bab34210465d6b518e8354a6ef458b6446720a376edd10252fe3e6c4510"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLHeaderBridge.hpp",
+      "sha256": "b39e42649ec9e5f687f76fd837465573b7f7f673732311e7cb8734e58065a813"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLHeap.hpp",
+      "sha256": "b92bdb5e2eb345f16a67b58e49f1c486f7891598ae4271e54cadccd4b0556728"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIOCommandBuffer.hpp",
+      "sha256": "bd3ee8ab3eb3940c1085a5db99399c7c77e7345378fe48127f5129dc2c3248f8"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIOCommandQueue.hpp",
+      "sha256": "c6bd9373325cdf55fa40d66b5a7ab6995f4fd72666c4729f28e15769126a0e40"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIOCompressor.hpp",
+      "sha256": "c5ca68b3d0c254f70b65c2984571814c7ab225e264d879b560745240065c7264"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIndirectCommandBuffer.hpp",
+      "sha256": "b48970b2477aa8f7f1776732e6576b9c9b258de7b294e416b64ac569203a1239"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIndirectCommandEncoder.hpp",
+      "sha256": "a8fdb8d393444bb1dd161493bbd964ab270ce9f10109caae9ea88894496c2723"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLIntersectionFunctionTable.hpp",
+      "sha256": "e4b5906d828f0fca12300aec34ea65f9db0c76f59d445459da3aa7bd52859287"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLLibrary.hpp",
+      "sha256": "78ba446354af69f65dd57ffb03564cc90ce4e2f88358e497db8cd1ed7c192638"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLLinkedFunctions.hpp",
+      "sha256": "41d05ea1afa80e47ed7fdf639f8a86e61605d4279ec0ccdf62bfced2bf223213"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLLogState.hpp",
+      "sha256": "c5dd1f4fef883539609de9f720d6637cce08778f9b2386753418967e288e92fc"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLParallelRenderCommandEncoder.hpp",
+      "sha256": "3e9e0dec18ed5683dd726b1615ac5ee0768527f3ced2779b9455529dc9543e32"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLPipeline.hpp",
+      "sha256": "351b12718bd0b882b6f74c84cbcca6248adcd04d1d3021c4122f06ffa5b600b2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLPixelFormat.hpp",
+      "sha256": "206d5c1d1c6771b43f9fd4987c491af6ae456bb195343cdf4743d50cf657a929"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLPrivate.hpp",
+      "sha256": "351cf6ad5a9effa1bd31e95df03ad373446e3c8b2b8d11582485ae9950bd24df"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLRasterizationRate.hpp",
+      "sha256": "575966d4ac3953f6c1d8b82c6d3792ae1a44334401a5dec64a00b006b81e9d89"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLRenderCommandEncoder.hpp",
+      "sha256": "5897c9c5c78b7ccbd1d471467ae6173beefddb0c9fd03655911a9905ac3814c5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLRenderPass.hpp",
+      "sha256": "3355cac7506da24a50d4960ac9bd387fe0d254da935e326400e13a89c74d3c2e"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLRenderPipeline.hpp",
+      "sha256": "2fb8c3cede2747600a9b950b2a64111809e35f11981534cea350b7bb881b1740"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLResidencySet.hpp",
+      "sha256": "0e4039b9ff3c99fa65e54f8e300c2838e8a0b900acfabafb995c00792d612403"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLResource.hpp",
+      "sha256": "a4a77dec0cd9410f1fd880fa7f145a9c92662d46702cc878630516bede6b07d3"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLResourceStateCommandEncoder.hpp",
+      "sha256": "b4e6310b208e82e487aa105b3116505c6224c21dbeb295fab9b9b032c2d0e441"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLResourceStatePass.hpp",
+      "sha256": "d337d01d64f57bed4dda144297cbf7e16264af78b47931cb7681777cccd65df5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLResourceViewPool.hpp",
+      "sha256": "88685e1d1ac1cfe6b46e775b975772a66fc0b53566908141c45f8e6030a5cb07"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLSampler.hpp",
+      "sha256": "3b6c8600eb2a4fb7847aa643605ebc1034aaf1ebc17db3c52331bd68bacc6480"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLStageInputOutputDescriptor.hpp",
+      "sha256": "10809f2656b58ddeae70feafce5e584e98bc3f9d6f92eced3dfde5d9db892d5f"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLTensor.hpp",
+      "sha256": "e1e53dff5de4c44f4583fe274ab61a65492b09f808954a9c4a54c435d7b7781c"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLTexture.hpp",
+      "sha256": "c51f6b6fc1af18d0e6e84ee84b6ab5027e7c9c66a2fa9ef64876e69cb53c39fe"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLTextureViewPool.hpp",
+      "sha256": "910a10744f5a57823bc28ce7b6329288336902fcdca249ba6146b0a65424239d"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLTypes.hpp",
+      "sha256": "4b58e60df4848ce15af3fabecd9fdd3b0adb705db08f7937aa4267aee0d5d55f"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLVersion.hpp",
+      "sha256": "af122cd49711e22c210b1f923afb364cd311028de122ea5b8876e15613a849a5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLVertexDescriptor.hpp",
+      "sha256": "5d12ca9a79eb073ee588313b76659e12b8984c3329feca43155cf8c787b0f921"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/MTLVisibleFunctionTable.hpp",
+      "sha256": "dc4cd28c5bdcb92443869b28c265a1efdf8992206fbd9c7b78e1cb69045d11e4"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/Metal/Metal.hpp",
+      "sha256": "50ccc245b51aeb038b3639e5ee9f3f1dec0f7a2aa348f30e1fde24ae3500994b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTL4FXFrameInterpolator.hpp",
+      "sha256": "aa44585cf77fbafd1a0ade86517c1f5fcf578b134dfdebd836a7d5e40cdba2ee"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTL4FXSpatialScaler.hpp",
+      "sha256": "b8361c751c0eb809f8330d40571d12392f7376d11cfedaa1afaf693a0666d67b"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTL4FXTemporalDenoisedScaler.hpp",
+      "sha256": "8d7a9649bfcd2fa8da91f2c65b1ec8bff5a876076e3d40da9fbe06104559b5b5"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTL4FXTemporalScaler.hpp",
+      "sha256": "a9ae20bc1b9e236bde41d3f447af17255c7bb89bf05e7bf37610bfccc6af94aa"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXDefines.hpp",
+      "sha256": "f20218f90e571bcc3204baee3dcf5cdffa1f60ee208ca092bd3bbbad08fd9ee9"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXFrameInterpolator.hpp",
+      "sha256": "cab36b388a90c3cd418d70e8bb061ca50e645439ca3b3ced2d2891b0f07a798e"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXPrivate.hpp",
+      "sha256": "1b065d00cd455f8e0d172f111425846e9e13cff410d5385f35c614905e2ba060"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXSpatialScaler.hpp",
+      "sha256": "cd0245baf31325c187b8d25682396f190217f46b45045c87ad1bc9f9d7786507"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXTemporalDenoisedScaler.hpp",
+      "sha256": "c561fee35a3981eaee473306833eab92ab00cbff4ada63930145f25e3ca91c65"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MTLFXTemporalScaler.hpp",
+      "sha256": "105154b387ae7d31d04210a37fa249252991df6db177b62e1ca29f66aba327e0"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/MetalFX/MetalFX.hpp",
+      "sha256": "3948e4e3f50d092b6dc9c70dd6b11e2efd32ff0fe6be3e365a83f41884627151"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/QuartzCore/CADefines.hpp",
+      "sha256": "cad006ef1e67ee4a7759daf9c84b7a48d056e4820957d1feb8fae35858f4a854"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/QuartzCore/CAMetalDrawable.hpp",
+      "sha256": "9a117b71c120b3c19eaf7f30dd5170fd4a7c42b19b6191e5f0412d156852b8a2"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/QuartzCore/CAMetalLayer.hpp",
+      "sha256": "4a229ce6c4b505fb1a791de58b1856e08c75c711d2d969c5478309c2b92dd6a0"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/QuartzCore/CAPrivate.hpp",
+      "sha256": "90d09439df7793de6dda8911d0f03726d65cf59c730ca24dd1f443cd81072101"
+    },
+    {
+      "path": "mlx-stage/include/metal_cpp/QuartzCore/QuartzCore.hpp",
+      "sha256": "6f04260a5cac3b042adee63cd26b4a8f5e1f6f8e6c0a2e165714272f52afc2d8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/3rdparty/pocketfft.h",
+      "sha256": "0eaea21304bf324639ff11022ee63faf48a8fab64afe5c3c2d1efefbe1d7dfa6"
+    },
+    {
+      "path": "mlx-stage/include/mlx/allocator.h",
+      "sha256": "7ef6044508b4e71520c8aa20474356c435c5aa06734bb1d09ee598b6bc3065f0"
+    },
+    {
+      "path": "mlx-stage/include/mlx/api.h",
+      "sha256": "ac310e1af49988056d043e1f5b2f52fe1717f746698c416ee07bcbe6affb83f9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/array.h",
+      "sha256": "543d9096f3ea52870087059db5f793925dfb5e00097638776bc52b01e6189c3b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/binary.h",
+      "sha256": "ee3e8dafc49d87dabe0edded9f617ca09682a3f5ef49310b71ca2fcbb65dc83c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/broadcasting.h",
+      "sha256": "2e62b9f188f0012defcf19f8932daeea199ea93f81cb03ac1fb2b9a468d9f002"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/buffer_cache.h",
+      "sha256": "a4b4ea74476ad681a9a5db2063ae3939108a60b0df2014b590338bd1cccf0205"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/compiled.h",
+      "sha256": "6f317af041ece7ef35b2c84ac9a3ae2a219721727981fb0ac3d1f32d0ee0c4c7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/copy.h",
+      "sha256": "2caa44885b43327747e53460f317e3107b9a0c012759a3c8f3d44095d1819ef0"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/hadamard.h",
+      "sha256": "9fe5c5c7a386cc74266ed031dc95a106f330d8b6e2f76dc20137c546c01ddfb7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/matmul.h",
+      "sha256": "64acb020ff379311275f69ab2157cb914dd818df30ff87e4b76b9c63d11e8137"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/metal_kernel.h",
+      "sha256": "b64ca4cebcba530d8ec1e0a0f23b57313507a37d05e3615ded3796b563cc83fc"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/quantized.h",
+      "sha256": "e5bfbb9a3d2459b3dab6e50c90c1d7a22b55ac84e372e1dc22ef9429f872d4a7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/reduce.h",
+      "sha256": "6ab5363bc9e692b3461a37347e4973217f14cec0f23d0ab4234eed78689a6c33"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/slicing.h",
+      "sha256": "10b4f290e0254805c9b0467a274b68b186fe015b1ae3f880dce0ecef8cb3c53c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/ternary.h",
+      "sha256": "c753ffba55de68df99f671cd4c7a8e38e0d43799fff0dd3674db773495aec7ea"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/unary.h",
+      "sha256": "c732ffd23460198800006c6d5dac4487569000fc7d5e809c9fb3a8f21d964af6"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/common/utils.h",
+      "sha256": "5b2a8ce595ffbcc2f2f6e8f95a59cb944805d18bda67723dcd0244e904424661"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/arange.h",
+      "sha256": "3cb34b71aaee160c6f09e2af823f7f1e618bf15934a6ca613cb2d3cc5dc0dacd"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/binary.h",
+      "sha256": "2dcab282964904f2112bbfb92f4b1a4c38663eeafeb60b4a8391a40272a5a3f5"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/binary_ops.h",
+      "sha256": "d6ad5307af6b1aca700b3a7924190192a1296d3a6130efcc042189b28e79fd4f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/binary_two.h",
+      "sha256": "5bcffdec3392025c4fc69cfffd7738496986600979b5251abe413cbd9755b213"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/compiled_preamble.h",
+      "sha256": "791426dbb4547f5088ab7fea6f8862cb176d024143582cd43c5c23f348d6a5a6"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/copy.h",
+      "sha256": "d782288e4cace26e86b40241b0b85c33ca107eda19855e5819b3b941e65329db"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/device_info.h",
+      "sha256": "f9d4a8d81f4d45f0a030b4c4676fa0550dd937410a3a3dc6e7b0f2263575ab1b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/encoder.h",
+      "sha256": "d1a822b4293fbfe884cdd71df0dbdecf3501636b9e24b02e6d2810d53cd4e0ef"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/eval.h",
+      "sha256": "e48643f9df49502f13ec5b74db6385b50cf320113e298beb82224ea3b94ebbba"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/gemm.h",
+      "sha256": "74a2ec082561142fc383c3324b85b78f2cc32d73fd876b5e8e6a79b9dab08d53"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/gemms/simd_gemm.h",
+      "sha256": "fa2e8df60e3c13be436675f9f37b88ac1672ea5edeaf4105b4764c399cff1a22"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/jit_compiler.h",
+      "sha256": "af82cdadf25959ddff728abd63acc0ca6b9a3853ae2f333f73769605c9ea5fde"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/lapack.h",
+      "sha256": "dd51d42638da3dd64ef91562f5a670c5fad913c3989c4de81273004a065ada61"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/accelerate_fp16_simd.h",
+      "sha256": "813b3c0779a3f6da27e2a2d3cf3d9803705397442016d5e281a95cee33dd744f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/accelerate_simd.h",
+      "sha256": "bbff4b319924a4fbc3ba2ee4982a7ac9c78db6b9c92d5ba95ef148df17afb301"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/base_simd.h",
+      "sha256": "0261fa364aec02e35599f86bf6d4c0b53bcd408dce15272a0b6165c7ae40a737"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/math.h",
+      "sha256": "5dbe79caa33a228d1354b2621876dc0fb3629dd6733c8ee4ebd0471790b0a94a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/neon_fp16_simd.h",
+      "sha256": "9b6720d461823f7815444b1f9b723f19ff2acc0ac4051af41863e21e91c2dbb4"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/simd.h",
+      "sha256": "ec4622a304f806c250ae1514f4b601e5262446b79e3ea4e3a778ca088c9fae44"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/simd/type.h",
+      "sha256": "f15fe949578c2f0638ba183f2084955367964fad7d4160121fc423f36e353e2c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/slicing.h",
+      "sha256": "5a3c07a3ca4af4419a28632b7a2c3234b039cd157e1572219527e297d661e94a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/ternary.h",
+      "sha256": "67f8e7d68b7007a0a580bf3d410222c2b596092a9c39561f57023f95687fec35"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/threefry.h",
+      "sha256": "b174dd5054408045dfefcf6eec8856223ee7f86b73c28e078905c303a0701725"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/unary.h",
+      "sha256": "a2d759d85fda2e9a0d9707fb6f6c13b5a8934b640f17d1940f0fbb26d4740b6a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cpu/unary_ops.h",
+      "sha256": "6988ff5fab977e45b4f7ebcbcd3da67633c2c19398eaed3ea21c0fa1324561a3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/allocator.h",
+      "sha256": "d9b052f5528d3bb667020d61cc49af13a19379e03536036e56a41bd864e21107"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/conv/conv.h",
+      "sha256": "3d9301821fc5127a6e55714341aa9b9e50238818336df8f0280c9fdd581f32aa"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/cublas_utils.h",
+      "sha256": "64fa5ab1f7bc4b9cc66e357a6303a1f52fd0ff878e10aff5e90557c9c03f7e65"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/cuda.h",
+      "sha256": "d37adcd45d525e58f7a22037f9b0f04b13053f4308107099d4765c446fe217e9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/cuda_utils.h",
+      "sha256": "46e67dd486ccc6f2ff352950eb6a964a0ebb4546ae91760ba50086e65fae3c2a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/cudnn_utils.h",
+      "sha256": "134dc7e73d3be6f85083048fa3c22940691d2adb7b01145ca71a1fb1cb4409ea"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/cusolver_utils.h",
+      "sha256": "a504a08536234c20e2edb5723320c44f22064475d771e83b8694f108f59c449f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/device.h",
+      "sha256": "e915a7856a776979adbfe670b541f24d46090d54ef45dbfa1833b725d021bc1b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/device/config.h",
+      "sha256": "53b984f67faeb81fe51dc2156b27947e64bd79142200d6887b84247042b0b0c2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/event.h",
+      "sha256": "8f89414d84ca057da7cba6b2d017c4b7605e2597dc5763f0ad3b496543c50353"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/gemms/block_mask.h",
+      "sha256": "9bd78a341618ac24d3880535ba94e8e18a4e4f5e2ea820fcf8ee7fa64cb18bd3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/gemms/cublas_gemm.h",
+      "sha256": "2ae2ab855aa2ec96261fa0c0bf567b99e3ffc671c5286c3cf11158f01a0fcd6d"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/gemms/gather_gemm.h",
+      "sha256": "65cd8ff5c836944cdfad742c337ce4d3f767db7de43514c1832d9cd31bb6cd61"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/gemms/gemv.h",
+      "sha256": "e33ea8260d1d2f7287a11933cfe42a0f5603df3f851d285897974173172ef9eb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/gemms/grouped_gemm.h",
+      "sha256": "aad27ad3bdfb771bdfd2b9cac8529b4cc42dba4964eeaf19cce61481d5ba9c69"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/jit_module.h",
+      "sha256": "73832e1cf5af1f03905c23a130132fcc18aa0e86388ff2afe4d95667b20e7ff4"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/lru_cache.h",
+      "sha256": "8d858c456da68768648e5a014403bc62c8b4c8c92337233a1be1fb441993ddeb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/cublas_qqmm.h",
+      "sha256": "3a680e3693cd4cea4a8a4330d5a3213f4a493c29b589e6510a493a91f4197147"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/qmm/qmm.h",
+      "sha256": "14b1c73027dff4d4b870a301bd5a68428d75acb1a5b04442915ef22fe972ad32"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/qmm/qmm_utils.h",
+      "sha256": "1db30c1cd4e83719c29aa40edb805ca41cab17abc40be455a69c548cb3878691"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/qqmm_impl.h",
+      "sha256": "01f239e61fa106dccc493e67ca55863808192363229d2d6a83d0ecd509e46a43"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/qqmm_utils.h",
+      "sha256": "db852080c9687208b7baf708ae2a4e366ba776791f1f90d2d392ff8e3e6a2ec1"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/quantized.h",
+      "sha256": "623e4b309325949fd57b223348d138266798745df3248514a4d9b11074007f0f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/quantized/quantized_utils.h",
+      "sha256": "41d725d97498f7ceca039354dcca7f02a3b13dc1a9e7dc0b491df18e40ade2fd"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/utils.h",
+      "sha256": "803ca8b824e976ba08ddcc87e12653d9c25c0de2282b7b2bb99d1287ba635efc"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/wddm.h",
+      "sha256": "2bae656572ee228d6505b70fc906b6ca87ae0dc1670137f408e03ccfe78f92b3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/cuda/worker.h",
+      "sha256": "9dc4107113c697184241d7023d3eaf4237c3a7447ba59f3390d231fe150b0a22"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/gpu/copy.h",
+      "sha256": "ec5de8e2acaaa509aa4b1e42a6c6e478a189d8aae44a02f04b7d757ce8a2bc51"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/gpu/device_info.h",
+      "sha256": "fbcd6fcc3df6a4ba0d8f9c1a3ad7a7fb3a1048ddba1b62eb1ec9415cea300a44"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/gpu/eval.h",
+      "sha256": "8c18ac14ca85348cda4ccf6fb87badf30fbc5723b2f35254145871c2444bdbe3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/gpu/scan.h",
+      "sha256": "e2f1044e850dd17222b93149e194b2f443da3761396534c11d080e66e2ce7058"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/gpu/slicing.h",
+      "sha256": "6a2dceaf7ab89fe1c019875fc6f8ccb27508da4d11c79c159c49d028a114fb45"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/allocator.h",
+      "sha256": "5ca3b085cc210f23c719175960921b51c39aed823a10736f95edd5b9bfbb0fff"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/binary.h",
+      "sha256": "b32b7e290ffac891e5831a0efdc3c520fce67fc94728f7bd2f5c15450392dd5c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/device.h",
+      "sha256": "ab1e07495b916a86eb762cddc68c6f1ae5e4c61020baacdea3c0dadd59150603"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/event.h",
+      "sha256": "451574670929f8ea29f7dbc0ea1242b0684e5b084462c336abc77d97e5a491e2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/jit/includes.h",
+      "sha256": "c3898e2564dd6258f8b60ed7152618bcc44e8f85d41937436dd0ce4a7ac7ac0c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/jit/indexing.h",
+      "sha256": "1b38dbdf3120eca3e5266ffd6d69691591c9432c0b5acece4c5ab2de7a9e802f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/arange.h",
+      "sha256": "f0dfe5df2e06e9028a4a9beebdb6b7fa639df43dcddc6291ad1c25ef44a1e61c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/atomic.h",
+      "sha256": "4c35ea2798a2335502865247aee878149fc9ada0d7e84c05d771baef0c7fcc60"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/bf16.h",
+      "sha256": "abd87446a310b77ac530ef52a324feae5cb285d03ec9613e3a88ebb71410fdcb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/bf16_math.h",
+      "sha256": "1f374f8380f756eb89acf6a847741cb8fecbe642945e159fb6208d804cc06496"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/binary.h",
+      "sha256": "9a367967a48907ac6792be685bab4cc062f3ad916cccacb441c627d87a4b7898"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/binary_ops.h",
+      "sha256": "6dbe789faafbf7259f411c7fab7c0fcdd192df47a78f8f0bd408228f7a30e5c7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/binary_two.h",
+      "sha256": "af26413a6161c1b37667fc5c3a802510d8b425074ee2ca0a8fd7e31646f52cd8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/cexpf.h",
+      "sha256": "88b6e15a52a5800d98d9bc6da840ca5cf70bf572fda136409580c1f17b1e0aab"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/complex.h",
+      "sha256": "16e8a815b2cbdb6070e0824e64fe33fccb6e918f1b84ea5c792bd89d33e57bf1"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/copy.h",
+      "sha256": "a9fad1b262ffc25f4ccda4e09d0c76821cd580f12871acd2a0daa98151e1587c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/cross_entropy.h",
+      "sha256": "1e53903b9a713faafd55932f0c039552f18f6108e223dadba0a3ec2245ecab39"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/defines.h",
+      "sha256": "a6c2c824e855078cd092fd9592457616f995755f0e865475c3f006a3f5d6bf1d"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/dot.h",
+      "sha256": "24ca982ca5558e43100be7d6dc08722b512b06461c8460d14134eb78f52431ba"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/erf.h",
+      "sha256": "31d88004390bbe08636c5f64a3cb3180ebc8d79a89267347de9f6c33aba0e9f9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/expm1f.h",
+      "sha256": "dbdf551f45723639da54d72e327008bde6ef01a2f1ed561bb065e251ab6c9f1a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fft.h",
+      "sha256": "fba2fbfd998e437cbe6db4842fcd75ae995ca1eda891057db76caba376367cda"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fft/radix.h",
+      "sha256": "e6d2aaa314822f546d9c5f5230185577642da5b8a18b4ebb094e8e7ce06fb206"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fft/readwrite.h",
+      "sha256": "0f38957ced3346cf67d7c28207b0bbc629ac7f490ade67b3d193aa8c1938a559"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fp4.h",
+      "sha256": "e3159945d7e5ae24f7a1ca9c4875b2a5d15cfb6952405df24a0df1bb2622a93a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fp8.h",
+      "sha256": "9a9d77a6295f66b4ada4311c3b855b6ecb7a2b38f28623109e3c61d2e17e81ae"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fp_quantized.h",
+      "sha256": "359a1ea9008f74cc15c61e9d39c6300dcffb9cfb9cc0ebd59ec7c00b789d719f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/fp_quantized_nax.h",
+      "sha256": "8a712870dc17493ddf05daa706481d52867b29e9141d2ecb76dccf47f04c8b42"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/gated_delta_update.h",
+      "sha256": "346495818646dd1ee8ec75a5e4439671eb950144a65f6ac30a13e170bb5ec031"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/gated_delta_update_nax.h",
+      "sha256": "3909b4d2074aabb9c6bb9bc9966ba1a42f4c47b9ddd3f38051d62790d027159e"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/gemv.h",
+      "sha256": "296ef622ea3c67d7485aa7cdf102bbfcb582e07bd3207793179a9d1e65ee5a65"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/gemv_masked.h",
+      "sha256": "af153cb6241e02c6d9d61c3b25718fb54108450311ad5c1f4ecca53c89cca717"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/hadamard.h",
+      "sha256": "9c4b749b4d2985203416c2da42dbdf7d59070c6c49c81f6112907b6ce407edc5"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/gather.h",
+      "sha256": "3b2f5b21cd2e71427c9641368a457840f5cb131e202095cd1352f983ce7541ce"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/gather_axis.h",
+      "sha256": "e1a745391ff4990f3f1ad75c5687c3b102dcdc4833d8fbbac38e10f54af29af4"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/gather_front.h",
+      "sha256": "64aacebf6576dfcd389383564fa1214bc87f2a091dd33cc64c598c5367ecab96"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/indexing.h",
+      "sha256": "e820b8ee2b5132a97122780c12433ebb5100d8078d31e211d0429400a11415bb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/masked_scatter.h",
+      "sha256": "acaa012bda0350686565a34bd487e5b9452881dd61a94dda6b601be754436d15"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/scatter.h",
+      "sha256": "fa799c286378c59fbb3aeb973e74bf471861e3356ce2817968fe5d6872c3d9ad"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/indexing/scatter_axis.h",
+      "sha256": "43eabd0216101f8e32f5cdd19ce40b7f954564be27fad98a5e0fe345e7b94ce5"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/logging.h",
+      "sha256": "197d9d81944146bea274ebcbc17b2b97b39c7478c0316a3166a08b3fb2467e4b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/logsumexp.h",
+      "sha256": "233f9a7072bed21f2b71f522c41aa5e86208e3bcfd18fafc87cf28a7d7f13154"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/quantized.h",
+      "sha256": "8e2ca65d8d8dafe67b97120d1127d54ce57032f621bdba161e54a0bc4a948b8c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/quantized_nax.h",
+      "sha256": "1a9197c4afaec8dddc869165a4328f712c7b69d3a3a946e9cafe6ddebc456027"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/quantized_utils.h",
+      "sha256": "a12841b57d505f6cca81631901b845dbf76bc90dfc099e7f40c763b2cc838c51"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduce.h",
+      "sha256": "2b4ca93fd1f43ee91129440359b18c0fa49bc70098bd4ca3033c6550b2c07d94"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduce_utils.h",
+      "sha256": "2cb64d9796e9eac8bced8f35337de9c7fea4db3840a3e398eca21e7fbdd9758c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduction/ops.h",
+      "sha256": "78d06730fc9564a73944e7f1fe3897d25c8789b28a939bf418e1968db311da41"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduction/reduce_all.h",
+      "sha256": "44ea27207c4d976524960ae615de4889c8e5998bf5e88b88850398cc293b1abb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduction/reduce_col.h",
+      "sha256": "800868c1eafbf2b85980731a6303942d2d1061023f6d465f2b996642126cdc62"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduction/reduce_init.h",
+      "sha256": "c5ef9c65886f9aba64a5df03607cf175950fd99237ca068bd6fcaec72d63d519"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/reduction/reduce_row.h",
+      "sha256": "8045c77cb0dde4f97a77ddcdcfad825ccf855928d31369a1dc1832629a63da50"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/scan.h",
+      "sha256": "735e545d1296f48d0bddffaff289c4e4ef77c5f76cb2bace861a706c43fc24a0"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/sdpa_vector.h",
+      "sha256": "f52c8da21f2c31f3f77168d326a49815fc29bde4b573883896a8eb3298f11508"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/searchsorted.h",
+      "sha256": "4e80cde60cf0d79cee2e630a86e517b8d77589ba93eca3312d8e2c607963d093"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/softmax.h",
+      "sha256": "cb233fe42a7358f5f658c9a1ef52cd2ee9dd3786ddfad01793a976d58f4d4051"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/sort.h",
+      "sha256": "3171f47dabf2cf501dffc2e388e3d66446d6f71712e8d070028258a084b63574"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/attn.h",
+      "sha256": "67722214ff487ec95df675e2f135ccd7fbe639b6eb6ab98b14bcefa58d66ba95"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention.h",
+      "sha256": "cd942bb29528863705ae141cfb0b6904e19eb2d4cfcc167b987a7239c16a48fc"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/kernels/steel_attention_nax.h",
+      "sha256": "e576cbbe13a8fe5fda7b630422f6083faac6114fbf2aad3970323932b1e6cc44"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/loader.h",
+      "sha256": "e435f413d71d44ca4ad72a59d192046be77388f63936179c58882286f4cc5dab"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/mma.h",
+      "sha256": "6f22866c76a1f15cf27681d3a8700f3419412a954d00e0810c87f7dac82ddeab"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/nax.h",
+      "sha256": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/params.h",
+      "sha256": "f03c6ed73d7298fa69b75a49e7eec54954b6fafd59530a1f175934215412ed80"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/attn/transforms.h",
+      "sha256": "6479114663c5923a7ee2f9fc1cf9d5e99e680d47d793251749989056a8a63141"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/conv.h",
+      "sha256": "e469f51289eff2f632335c634bb5d346667a61f81e515f42159a1ebffd3dd4df"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/kernels/steel_conv.h",
+      "sha256": "a34ae933e291169538ef9415323833f568d649b8ed6a5342c0eff40ced085d8c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/kernels/steel_conv_3d.h",
+      "sha256": "d785d7032d460d8ac1277b1a0707b43bfc6fd3e4e3aeb87d33771d920bf920c5"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/kernels/steel_conv_general.h",
+      "sha256": "0128838502501415acf766e8b977711bcb3bdae7439eb014bdd693119d547a1d"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/loader.h",
+      "sha256": "a82850d760638c71a9ae8c3e426082bf6e2091822abae82583576aa129d1150f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_l.h",
+      "sha256": "4377845f9553eed23ff1707cddfaabcf0056578c829f67616a1e68efcab94703"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/loaders/loader_channel_n.h",
+      "sha256": "6e6efd6b2b1af0686030f703fb25f3e022edf9079f81f3501d09548447f48294"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/loaders/loader_general.h",
+      "sha256": "9aabb2491e4f91029e3ae73c4201bb0937652152f7771428ae01ff4c75653a47"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/conv/params.h",
+      "sha256": "354a832c5bf37791f4ad42ddc3ca9456a9c1ebbf3216650bb4a10c18110e03a8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/defines.h",
+      "sha256": "b03cea6a7d5cfe814e6838d8536e2aacdcafd2744cb408e954fda336ce21759a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/gemm.h",
+      "sha256": "c84af31e2c57154f2a8a24fa7f9fe2449765cce9a66f3f035846ed3c03b6a8b0"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/gemm_nax.h",
+      "sha256": "8f8d11f3c29e30dbfcaa6799963edd5fb71b81f912c4f3494e294d3002e3d337"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_fused.h",
+      "sha256": "ed49c8b9c73957f0cbc9dea30f484cf84fb821aece68233d6d1967856200d5c7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_fused_nax.h",
+      "sha256": "149ffe9006edd26daf8c1379ced976f39d929c2cf7cdb57d075be24fc1779765"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_gather.h",
+      "sha256": "317e226d116fd64752fc44527c8a846c9947e5d89ade2abf2a3bdb70e1de7907"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_gather_nax.h",
+      "sha256": "8b4a3d1c3f2e897668e02ffdaabd0be4850d753e1e8e1e31ad0e4674e6f53385"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_masked.h",
+      "sha256": "f6fffe176321a9c4691825e7ddd5f4df09fab06bb1730699fca09a4bb2ebea2f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_segmented.h",
+      "sha256": "e1256eb925f97cd594ffd0382ecd22f5540637a7bbb902da357a80ece284a9ad"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_segmented_nax.h",
+      "sha256": "5367b8e3c95726ff1b46cd2d65d34a873bd31cebf44c96ea650f449f8a953d82"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_splitk.h",
+      "sha256": "2ada2a7ea548f6c4b0e7962b4a2f163e8a212620ecc46e078a06647df12b0635"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/kernels/steel_gemm_splitk_nax.h",
+      "sha256": "9486b177261f657bceae6437a18d412a0e361c3e6b418c78b4c067b463c84597"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/loader.h",
+      "sha256": "c1b82153670b1e18371a6e88fdbcf440af692957775c2f837700315ab8a5112e"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/mma.h",
+      "sha256": "9b37709de40c3acaa5411875e52c8d26e6de093261741f671fbdab9c39a852b7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/nax.h",
+      "sha256": "fb10bcae44095e9fed5c81213d03527dd5fe5ac11be11ec7784bd357c6f317ec"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/params.h",
+      "sha256": "6711e72e32310eafb088895d5a6d20fcfca814158f5b38eb72b6e69d9d773e43"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/gemm/transforms.h",
+      "sha256": "73487e29beab5af9478bc931c49b5e8d66937c2fa2651499867f47ac5529afc2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/utils.h",
+      "sha256": "d4c36298145d1c5617a94f07dbfabf6ac932afe2fd7ea0c9291f1fb385c5404a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/utils/integral_constant.h",
+      "sha256": "886eccaac4f8f00eab5a10551fdb5315df7ab7462aba13d69bb95765c1a4735e"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/steel/utils/type_traits.h",
+      "sha256": "4766c5a3809d3cf7740e63acc5703ef76b6b4e85d8baf16602c9d517a2fd426c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/ternary.h",
+      "sha256": "1ad7ebbd7c6bb028b7d9a883ac72c549d218e1696cafa6a97c442f4e91af7e43"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/ternary_ops.h",
+      "sha256": "afef5c3048963f9d3d4301ff40e8d5322dc07a3b3ec307c175262566091e5c11"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/unary.h",
+      "sha256": "fb952a2c30a6d0cd01f6c61e852cc15e426b286475de8ff139bb65b8d9001c8c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/unary_ops.h",
+      "sha256": "af710925f066b029f67289a0bbe4edd0ba6c5e7f51c9df609abb111216fa963f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/kernels/utils.h",
+      "sha256": "e40473c36e2f2e7ba250b29e8dbbe3c150ce207379e57a2818e916b343e9f2cf"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/matmul.h",
+      "sha256": "944de954ed2628617eb7c473a5b84b2e9585f5df2eb9697c1ff5a3df9ca01c29"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/metal.h",
+      "sha256": "80762515d31b24b29f8af5dbca766d0e7713447b9a7af588ad8e08820856d40c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/reduce.h",
+      "sha256": "9030eb8a03d28ba733465cc7f5a57b08bed82b4f763e596042e1465c6a33a8b9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/resident.h",
+      "sha256": "434ac8937033f94f16257b203760dcf10e7e402fcec282db4f2d7bcd46641962"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/ternary.h",
+      "sha256": "8979425a845a425d1bd2b2a5a9a6e4a3a2bce2ab04fa50138ee71bf4c222fbc2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/unary.h",
+      "sha256": "8a923a12fdeaf7ee25ba908493bae036efb8994d0e2e005fa314684ac631ce0c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/metal/utils.h",
+      "sha256": "2b57319453758b5f7c776de946375701f97f84deabca02a1ef024f0153599c70"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/no_gpu/apple_memory.h",
+      "sha256": "517b609eeafe15e44dd8524a26c32bb62e088b0fb4ff61f9178ce3b0e356b348"
+    },
+    {
+      "path": "mlx-stage/include/mlx/backend/no_gpu/linux_memory.h",
+      "sha256": "3ff89f53d639d03ef660266a6bff675a6ab46a17bceec8d9f65ccbb28ca2d024"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/array.h",
+      "sha256": "d2205ba0ce146ff722f2ca97c170facb19b28784e7ffa47a07cdad69651c9801"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/closure.h",
+      "sha256": "b43a6d7c0e943a8df0f67377d49d92f4fa76eea79eed049adaff80e05ed854f7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/compile.h",
+      "sha256": "400bfe89179ceec68e750d7215372f8b9577fe1eb09acee0a50f85d21903f858"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/cuda.h",
+      "sha256": "ee99d74dc4131dca3ec7ab7d9015ff109481ee6fbcf3c015de7ebfdcc7df2644"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/device.h",
+      "sha256": "3e7556aab2f97fddf943b8f6e30b62064ee589705ad1643716bdd7ea37d6fe2f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/distributed.h",
+      "sha256": "68b1dcbdc8dc8c1b4d58220caa7aec2396776282691e99999ff6547b52f7e28e"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/distributed_group.h",
+      "sha256": "af45861a8f71dae21cf88ed581f64cd3008e3c1c4045487b2dbe56934f7df470"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/error.h",
+      "sha256": "80090e79eb9add61961885e7aa491b9f47d1b838d188303734490e528b0db2c2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/export.h",
+      "sha256": "723346c34761fb87c9a03a133ecff8f9fd8f83a3d80e680d63557c58739e11c1"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/fast.h",
+      "sha256": "e8d7fe631a70aba0329d7ae0fbf6ddfba9c148e9d344266643c67317022b0d5a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/fft.h",
+      "sha256": "38c87a460e1338e8f5f1d9ee1159bfb274c8bc08ade66ffa6ebbe1c9d5fccad2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/graph_utils.h",
+      "sha256": "5896da889e0c85f70594395498ed46ec401798d6bd3c9bdb53c0b3e937fcfeb3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/half.h",
+      "sha256": "90d57285c4b8436fbea18758661e84bf962c13179d545bbaac52b176de899ed8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/io.h",
+      "sha256": "4b69ffcfea5a96b635228e2384bf6ac0bedb6e1fbd6df4f4a3371cacdcae22eb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/io_types.h",
+      "sha256": "fbbed4ddae3de912799cd9158d39593492ad03ac470ae4efc998607e9cc1a712"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/linalg.h",
+      "sha256": "10512f19bfcf3f1f6ed9e3de07d43f84dd3492833e7b0ab6e0288ba552f73266"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/map.h",
+      "sha256": "4d5df4eef2757ca76b83dea06935568611d439ad3a8687c3b0df739902377a4d"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/memory.h",
+      "sha256": "850ae0be9ac300cfae23ee259441dca2a1e2055606427ac26f3d967b5c03a6e8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/metal.h",
+      "sha256": "58ebd8b50add425f046d5fb5ef1bc747eff347b79db8a2b01f6af3967435b8be"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/mlx.h",
+      "sha256": "ab688925d76cff3805235c2dd3f5985d1d41a8a23b5ecdef0bde0ac8d9b52582"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/ops.h",
+      "sha256": "52b6be191a84372b44d0e81c199900f4e52e821793768f9802f6890077f3994b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/optional.h",
+      "sha256": "b0f20e24bd02cba4c2f624cd83f68a096a9d4ae6b2e4c4eb30d13719660ecf36"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/random.h",
+      "sha256": "7b21eea9c4b0b19636365b114f36d54ed1e534d9b353446b37aae8f9c3ef4df3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/stream.h",
+      "sha256": "560e537e50cdc313c6651ab55e9a116721c591efff778de7b293440ee39cabaf"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/string.h",
+      "sha256": "29b3cfafb60b536a27c2ad96f9868c892e9242754868e1b770f55b7cf34ef598"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/transforms.h",
+      "sha256": "2cf31bbda041fdf60a83243cff2f9d000cff148b153f406158f8e77ff2072ceb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/transforms_impl.h",
+      "sha256": "2700a13d26aa07339a815b4762b74d9bd6ffa0a9a21298be828ca367b5817701"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/vector.h",
+      "sha256": "b75108edace10f99f01da0dcb08a146d1449dcfcaaa24aa7b66e48e9f227e2c7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/c/version.h",
+      "sha256": "d1c9aecddd98ad6c16b7c56c056f5b1040a633c4548fe97297481fd625450810"
+    },
+    {
+      "path": "mlx-stage/include/mlx/compile.h",
+      "sha256": "d6405672fe2470b9c304a9816644b94b1bd79981f430799dbd2ac2dc2cdbf739"
+    },
+    {
+      "path": "mlx-stage/include/mlx/compile_impl.h",
+      "sha256": "8eb09a9112f3d4d432acf2fd71664a292d06ca98a808889ac648c800dad9b0fb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/device.h",
+      "sha256": "cd273c84524887d9563ced874d0f1546bd40dfbc91754e68286a90d47f181e5a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/distributed.h",
+      "sha256": "6e501505a96c4f534fe54dccc63653c7f22b0453b21e98c0ecdc7cbf2644e309"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/distributed_impl.h",
+      "sha256": "292a9af7a1faee6d59b34fc9d210fddae40f042af82c1b78c1a62437e8995a0b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/jaccl.h",
+      "sha256": "76976b8c7c54711c14e64f56ad50a5b358e66c85b0ad796f73bacf876e1a9887"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/group.h",
+      "sha256": "2f30dfe0acbfde764a4547c62a06a8da6b54837ca7662ac1e14a17994e8b0129"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/jaccl.h",
+      "sha256": "e2b8b9db023cae81113096ef464ada93e95a1423c183d0a249b05bcd3fd0a511"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/mesh.h",
+      "sha256": "3fb05066dd1c3b076cb0e0c328a29f680c5d588603dec4e129b1138baad1ee26"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/mesh_impl.h",
+      "sha256": "330d399b2af0b2614b87221a400a2e45abac1293804b36ef5a622e22a89adc7b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/rdma.h",
+      "sha256": "dbe318131a2d1daa3614b5a48c5be6a31fd8405ebfa394138172d9bb1b7d9f94"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/reduction_ops.h",
+      "sha256": "2cc0bfe9f15ef380ebbc195809b639e0d5aee300f8d372bfd702d81b85ee6752"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/ring.h",
+      "sha256": "e60b76398bac1961b5013e74598aef3ac7066f151a97074ffbc8c7a9b963e9fc"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/ring_impl.h",
+      "sha256": "fb308047cd5e6efda671b3da23913b859a15383ca1b448a63091c657337fe8b4"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/tcp.h",
+      "sha256": "9450af7593270876dc1eed59e2a4111b70f81e3c01505ecbbdd003dfa13734a8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/threadpool.h",
+      "sha256": "35c59282d7b7b778f38b4070c53eb37a353c04fa3d2f352d4f7b484495430a24"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/jaccl/lib/jaccl/types.h",
+      "sha256": "3c3ac5455b3e44ebdbc4ce174de17062204272a0951b186cb8a50a6faf8245f2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/mpi/mpi.h",
+      "sha256": "428bd6dd484af7a5ddebbad409a12d0506f21362b3d81b43eb18102fa20fdf94"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/mpi/mpi_declarations.h",
+      "sha256": "67d3260f085a24686521a85dab45256c6f7c64c8ef8fb82998b4b8695972e0f8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/nccl/nccl.h",
+      "sha256": "469d658e2195b37aef652dbc8c200abd44b2d012a80fd0fddc0390d301d5acc8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/ops.h",
+      "sha256": "9e1c8d57f8cdeb189c32dcbd9a3ba8f7b03626ede8d902679fe2849b431196a9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/primitives.h",
+      "sha256": "161235f2134ef59e936ce24cf9b2d79319b5552da09fde031cfa891929ef1ba3"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/reduction_ops.h",
+      "sha256": "9051d0606bdaa02935037a6f37b9c0fecc4608d0a8a297fa974fc7fd8e07f03a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/ring/ring.h",
+      "sha256": "479128ad5372e19caf560965dd6f81b1584b8780d310a72ff810d718eb806fc2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/distributed/utils.h",
+      "sha256": "0087545e63f90df75ec270e0c121759c54a0e2345a1f5e4f0c48369d24c34bf5"
+    },
+    {
+      "path": "mlx-stage/include/mlx/dtype.h",
+      "sha256": "a9b6c8719deae53015cfcf0452b570b2620c8c24b409b93e80ffd8ecb4537748"
+    },
+    {
+      "path": "mlx-stage/include/mlx/dtype_utils.h",
+      "sha256": "72667384d30d7ca44645b66553cbe2b74256ccaa20a4d7c283de65ee04683b0c"
+    },
+    {
+      "path": "mlx-stage/include/mlx/einsum.h",
+      "sha256": "92a0cfa2a87a9f5b1678df89924865f3fa4687f8f6880ad0395f878417af88ff"
+    },
+    {
+      "path": "mlx-stage/include/mlx/error.h",
+      "sha256": "bd82ce0966cfefcb43f79f9910004af77427aff9f3fed260a652d6bc6f536689"
+    },
+    {
+      "path": "mlx-stage/include/mlx/event.h",
+      "sha256": "56d49e3c5d71ffa94e484ef55762b25e627b4a9114ad1c138534b7a83826c8fb"
+    },
+    {
+      "path": "mlx-stage/include/mlx/export.h",
+      "sha256": "8ba254c1f790b7c16064da5b91a68c872f2a5a6f2a1e3cf00e2c1109ca352173"
+    },
+    {
+      "path": "mlx-stage/include/mlx/export_impl.h",
+      "sha256": "c1bb2baf17c51489ffbe6dc886d7c578b3d2f6c9407e82c5578cffb905fb7521"
+    },
+    {
+      "path": "mlx-stage/include/mlx/fast.h",
+      "sha256": "083a318115d86865417befc6ce24d5ef89bd0ae45d63d583977ab4e217bc2dd8"
+    },
+    {
+      "path": "mlx-stage/include/mlx/fast_primitives.h",
+      "sha256": "8ce8bd4933452246e81702f16798d9d816f162e9f75e905e562acedc7c95f112"
+    },
+    {
+      "path": "mlx-stage/include/mlx/fence.h",
+      "sha256": "bac79a564aca1a3b07f83d892f054fb0d28bcd5b4b70bb70c80570ea814e014a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/fft.h",
+      "sha256": "43b2158a1d1363011d4a5e5f3c32e51d6605f4da844ecaa3d9ff56b38845bf97"
+    },
+    {
+      "path": "mlx-stage/include/mlx/graph_utils.h",
+      "sha256": "4a67fb3ebdceb1608a5e2d89298d7742eb22afc97d2df353db51f60604f2aeb9"
+    },
+    {
+      "path": "mlx-stage/include/mlx/io.h",
+      "sha256": "66638ade7531b8c34fc7abf9c156c2987372ee467ae93d5eefd125fbad3f9217"
+    },
+    {
+      "path": "mlx-stage/include/mlx/io/gguf.h",
+      "sha256": "77263f0baee1424c70e57825c09b520f4bfa5a5a4fe6e6e58842ebc7b1265678"
+    },
+    {
+      "path": "mlx-stage/include/mlx/io/load.h",
+      "sha256": "65fd4f1c215515d42ce98266ad31d6505e437b5391b96899af0c298ab0943548"
+    },
+    {
+      "path": "mlx-stage/include/mlx/linalg.h",
+      "sha256": "a2dc3b198403e1f61a3765306db0f84a2322c1f03436a697e7302d1e16400872"
+    },
+    {
+      "path": "mlx-stage/include/mlx/memory.h",
+      "sha256": "dfe012ac8f2dff5d3d9a677b1f124556bb91614119979d8f290b0d41293f9636"
+    },
+    {
+      "path": "mlx-stage/include/mlx/mlx.h",
+      "sha256": "aa56f7087ad501c5575081752b0da4b7494df0cdc485c5a28bcf57dd870184a2"
+    },
+    {
+      "path": "mlx-stage/include/mlx/ops.h",
+      "sha256": "0274ecdd782dd7a2052f37c2d863deb99ad948d87bbdaa251499246acb38bf51"
+    },
+    {
+      "path": "mlx-stage/include/mlx/primitives.h",
+      "sha256": "53f9d2354a417b87a185c45ecb4e277cf545f2d962788dfa663939f393347725"
+    },
+    {
+      "path": "mlx-stage/include/mlx/random.h",
+      "sha256": "50c2c46491837ea152d16774cbdc9f3b4d191ee920b008febd45881c53bc5caa"
+    },
+    {
+      "path": "mlx-stage/include/mlx/scheduler.h",
+      "sha256": "9b44de7e593a8612b63522c5fc17220b03f3550f2ad3d6efe9425448c207ee1a"
+    },
+    {
+      "path": "mlx-stage/include/mlx/small_vector.h",
+      "sha256": "2fd7d2a423a74b7857ae886ddae0b6c4183f5b9f1d6b8f8d3ba8db38a5ad4677"
+    },
+    {
+      "path": "mlx-stage/include/mlx/stream.h",
+      "sha256": "f9ce8fe170e788e379729f2daf7345f5c97b4fb57bd7ec63e83fb4d4a358b8fd"
+    },
+    {
+      "path": "mlx-stage/include/mlx/threadpool.h",
+      "sha256": "e22e3eb7a2ee0b06b0ea69e8a49375761de9b799dd96b06e7ae9e778d9820667"
+    },
+    {
+      "path": "mlx-stage/include/mlx/transforms.h",
+      "sha256": "ea33fdb876367c6d33f261e9e01f1b0990c96decfa6ff825e3806c98e79550fa"
+    },
+    {
+      "path": "mlx-stage/include/mlx/transforms_impl.h",
+      "sha256": "c72434abe8c94c916bd09aa66c77abd88f9fadc6f425eee300a39063659416de"
+    },
+    {
+      "path": "mlx-stage/include/mlx/types/bf16.h",
+      "sha256": "a279b39030b406eda06a42069abd660ad24fced7b1cfe33378b236b2ce1e786f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/types/complex.h",
+      "sha256": "c3d49387074f30684485cc18d0583779a9477b19fe4add7fda4aacec5621cd2f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/types/fp16.h",
+      "sha256": "b63e769ec5794e19d338081727b212405355c3f47328b0e0817e61d2500ea6f7"
+    },
+    {
+      "path": "mlx-stage/include/mlx/types/half_types.h",
+      "sha256": "670ed6dd08d1211ff4f9c4f7b6152fc6e70cef8a3c0f1513b19cbcc8691f784b"
+    },
+    {
+      "path": "mlx-stage/include/mlx/types/limits.h",
+      "sha256": "5cd57c680e25df6ca4a9f0944f67ae0e4ebd7e2a9044e5ed30d8311285f5ceae"
+    },
+    {
+      "path": "mlx-stage/include/mlx/utils.h",
+      "sha256": "f09f97894bf9479410082e59850289a03e852e0215a9ddefd5c4855e2d99458f"
+    },
+    {
+      "path": "mlx-stage/include/mlx/version.h",
+      "sha256": "e3bfbe3cd557feae4c4752aed26dd3dd5f27463d8e640aff6b9446ebddd12625"
+    },
+    {
+      "path": "mlxc/mlx/c/private/array.h",
+      "sha256": "d3bab0904e1f6ba1477a439ef8268b8156b36b02fc924cf13fc5938246fea7f0"
+    },
+    {
+      "path": "mlxc/mlx/c/private/closure.h",
+      "sha256": "ab2ee9e6d0a967a43b4f444feca7e64bfd287cd4af276ca7f4986c9cb1adeefb"
+    },
+    {
+      "path": "mlxc/mlx/c/private/device.h",
+      "sha256": "1b8ecf5be16fc24b917efb7740de01916a019d49832be29e6bd82fce38b8431e"
+    },
+    {
+      "path": "mlxc/mlx/c/private/distributed_group.h",
+      "sha256": "47c19fbb0233d8cee1c639dd5f30ea523946e94bed84d45093855f01d2b6ba8f"
+    },
+    {
+      "path": "mlxc/mlx/c/private/enums.h",
+      "sha256": "2069089f0df471cec17bfb73f4164def8bd85f8740e74c91867a6820aa6684eb"
+    },
+    {
+      "path": "mlxc/mlx/c/private/export.h",
+      "sha256": "5258d5e29c44b708740b1ba3160af920ab9df5b62911ed1f98244a1cbda0eb52"
+    },
+    {
+      "path": "mlxc/mlx/c/private/gguf.h",
+      "sha256": "3f3002308d1b2026ee14a60a472dcacc114da02bfd28481a639f836571e4e3fe"
+    },
+    {
+      "path": "mlxc/mlx/c/private/graph_utils.h",
+      "sha256": "4a48dba5df182f54583648bc52730e4634dbf3e73bdd895ec5048fd0d322ab2a"
+    },
+    {
+      "path": "mlxc/mlx/c/private/io.h",
+      "sha256": "32c1a804501b7e988dd1c570876e8471b35165c31be0a1f9f33b9dea745324ff"
+    },
+    {
+      "path": "mlxc/mlx/c/private/map.h",
+      "sha256": "8782d1247fc9bf4689bbcf95a6893c4d003b0d5c6108b80965111a99f8a86e06"
+    },
+    {
+      "path": "mlxc/mlx/c/private/mlx.h",
+      "sha256": "0f4527be856dfa5b1ee69d69020c81c8c245ee5aff85889d76387d6ce2444d8f"
+    },
+    {
+      "path": "mlxc/mlx/c/private/stream.h",
+      "sha256": "b6cd5beacf483b1369f5d421f302239b8f0e7306e26383b9656facccf0557a06"
+    },
+    {
+      "path": "mlxc/mlx/c/private/string.h",
+      "sha256": "014b60d9ec025e4ebc1415be392fa450bbca315c7cebc4bd8d517d887b014aad"
+    },
+    {
+      "path": "mlxc/mlx/c/private/vector.h",
+      "sha256": "ea41b02364fbb5c1bb3f1e2b238846bdf76602a055d6464fe5e720be07319536"
+    }
+  ],
+  "dependency_headers_sha256": "33ed5bdd62d68132902739ba838c02841c392c05c9f2574da07563acf750d36b",
+  "mlxc_worktree_diff_sha256": "e87c9bb59e365ee8a19ee4b98c605a516f44ff5106cf099f2787f58ec9f48723"
+}

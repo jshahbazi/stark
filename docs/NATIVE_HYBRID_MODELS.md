@@ -9,6 +9,10 @@ There is no Sushi, llama.cpp, MLX, Python or Transformers inference process in
 this execution path. Python is used to prepare download metadata and by the
 optional reference validators.
 
+The optional [GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) links a
+pinned MLX core into the generation worker. Its separate pack, native build,
+admission limits and prefix-state qualification are documented there.
+
 ## Checkpoints and preparation
 
 The preparation command pins these sources:

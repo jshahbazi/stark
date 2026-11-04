@@ -1,0 +1,2 @@
+# Unified-diff context markers on blank lines are part of the patch format.
+patches/*.patch whitespace=-blank-at-eol

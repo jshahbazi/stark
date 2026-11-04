@@ -33,10 +33,10 @@ pub(super) fn encode_mla_prefill(
         c.kv_rank,
         c.index_dim,
         c.index_heads,
-        c.heads.checked_mul(c.qk_dim).unwrap_or(usize::MAX),
-        c.heads.checked_mul(c.kv_rank).unwrap_or(usize::MAX),
-        c.heads.checked_mul(c.value_dim).unwrap_or(usize::MAX),
-        c.index_heads.checked_mul(c.index_dim).unwrap_or(usize::MAX),
+        c.heads.saturating_mul(c.qk_dim),
+        c.heads.saturating_mul(c.kv_rank),
+        c.heads.saturating_mul(c.value_dim),
+        c.index_heads.saturating_mul(c.index_dim),
     ]
     .iter()
     .any(|&width| width.checked_mul(tokens).is_none_or(|n| n > 8_000_000))

@@ -9,6 +9,7 @@ license.workspace = true
 [features]
 default = ["metal"]
 metal = ["dep:stark-engine", "stark-engine/metal"]
+glm-exl3 = ["metal", "stark-engine/glm-exl3"]
 
 [dependencies]
 stark-engine = { path = "../stark-engine", default-features = false, optional = true }

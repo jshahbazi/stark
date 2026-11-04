@@ -1,0 +1,32 @@
+[
+  {
+    "source": "mlx-serve/src/mlx.zig",
+    "destination": "src/host/mlx.zig",
+    "sha256": "777d3b34e26d88713f9d845fe35d4cd205501baa178d7ccd2a19f0b031fa32a5"
+  },
+  {
+    "source": "mlx-serve/src/dsa_nax.zig",
+    "destination": "src/host/dsa_nax.zig",
+    "sha256": "b42ff9c0432ab769d4d62dd0d3baa03a22f94a3a90277e9b33032cc0a2ad160a"
+  },
+  {
+    "source": "mlx-serve/src/crt.zig",
+    "destination": "src/host/crt.zig",
+    "sha256": "8ebce778e6fdb7b7dca27e942c3f11f0fb369361af92683746d8694e3d313141"
+  },
+  {
+    "source": "mlx-serve/src/os_mutex.zig",
+    "destination": "src/host/os_mutex.zig",
+    "sha256": "d8a2d5a094db5fddd9a522c0e374bb8074d68691f502620ee00f6c11b95bbcae"
+  },
+  {
+    "source": "mlx-serve/src/io_util.zig",
+    "destination": "src/host/io_util.zig",
+    "sha256": "2c32df6fe7d0b5e641ea0bc5ad3be7cdb8b3ba2ba15067fa3d1a9b3b489dcdc2"
+  },
+  {
+    "source": "mlx-serve/src/mtp_acceptance.zig",
+    "destination": "src/host/mtp_acceptance.zig",
+    "sha256": "43d6b39cb304d0f2bb379ecac9ac8bacc133d53bb40ff950139cbd3da8e66ef3"
+  }
+]

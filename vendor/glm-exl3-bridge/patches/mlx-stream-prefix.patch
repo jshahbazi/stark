@@ -1,0 +1,358 @@
+diff --git a/src/arch/glm5_next/module.zig b/src/arch/glm5_next/module.zig
+index 9d2eaa17..a56aad52 100644
+--- a/src/arch/glm5_next/module.zig
++++ b/src/arch/glm5_next/module.zig
+@@ -49,11 +49,19 @@ const expert_usage = @import("../../sdk_ext.zig").expert.usage;
+ const builtin = @import("builtin");
+ 
+ const T = mlx.mlx_array;
++const stark_prefix = @import("stark_prefix.zig");
++pub const PrefixSnapshot = stark_prefix.Snapshot;
+ 
+ /// The expert source by family (construction's route; `Passes(fam)` reads its own field).
+ pub const Src = union(experts.Family) { nvfp4: *experts.Source, exl3: *experts.Exl3Source };
+ 
+ pub const Module = struct {
++    // Stark: experimental model-local, CPU-owned checkpoint. No MTP support.
++    prefix_owner: u64 = 0,
++    prefix_epoch: u64 = 0,
++    prefix_capture_at: ?u32 = null,
++    prefix_captured: ?*PrefixSnapshot = null,
++    prefix_source: []const u32 = &.{},
+     gpa: std.mem.Allocator,
+     io: std.Io,
+     g: graph.G,
+@@ -139,6 +147,7 @@ pub const Module = struct {
+         errdefer gpa.destroy(self);
+         self.* = .{ .gpa = gpa, .io = io, .g = try graph.G.init(gpa, s), .c = cfg.*, .w = undefined, .gates = &.{}, .src = undefined, .cache = undefined, .routes = routes, .reserve = plan.reserve, .rows = plan.rows, .prompt_pass = Passes(.nvfp4).promptServed, .step_pass = stepPassOf(.served, .ops, .nvfp4), .round_pass = roundPassOf(.ops, .nvfp4), .sampler = undefined };
+         errdefer self.g.deinit();
++        self.prefix_owner = stark_prefix.nextOwner();
+         self.sampler = try Sampler.init(gpa, s);
+         errdefer self.sampler.deinit();
+         var diag: sdk.Diag = .{};
+@@ -580,6 +589,7 @@ pub const Module = struct {
+     }
+ 
+     pub fn deinit(self: *Module) void {
++        self.invalidatePrefix();
+         _ = mlx.mlx_synchronize(self.g.s);
+         if (comptime gprof.enabled) switch (self.src) {
+             inline else => |x| gprof.disarm(x),
+@@ -644,6 +654,8 @@ pub const Module = struct {
+     /// The prompt pass of a new request (every position from 0: the module keeps no prefix): the last row's logits f32
+     /// [1, vocab], a handle the caller owns.
+     pub fn prefill(self: *Module, ids: []const u32, req: sdk.RequestShape) !T {
++        self.prefix_source = ids;
++        defer self.prefix_source = &.{};
+         self.requestEnd();
+         if (ids.len == 0) return error.Glm5NextEmptyPrompt;
+         if (req.prompt_tokens != ids.len) return error.Glm5NextPrefixNotKept;
+@@ -655,6 +667,68 @@ pub const Module = struct {
+         return self.prompt_pass(self, ids);
+     }
+ 
++    pub fn clearPrefixCapture(self: *Module) void {
++        self.prefix_capture_at = null;
++        if (self.prefix_captured) |s| s.deinit();
++        self.prefix_captured = null;
++    }
++
++    pub fn invalidatePrefix(self: *Module) void {
++        self.prefix_epoch +%= 1;
++        if (self.prefix_captured) |s| s.deinit();
++        self.prefix_captured = null;
++    }
++
++    pub fn capturePrefixAt(self: *Module, checkpoint: u32) !void {
++        if (self.mtp != null or self.cache.len != 0 or checkpoint == 0 or checkpoint % graph.prompt_call_rows != 0 or checkpoint >= self.reserve)
++            return error.StarkPrefixBoundary;
++        self.clearPrefixCapture();
++        self.prefix_capture_at = checkpoint;
++    }
++
++    pub fn takePrefixSnapshot(self: *Module) ?*PrefixSnapshot {
++        const s = self.prefix_captured;
++        self.prefix_captured = null;
++        return s;
++    }
++
++    fn capturePrefixIfReady(self: *Module, logits: T) !void {
++        const checkpoint = self.prefix_capture_at orelse return;
++        if (self.cache.len != checkpoint) return;
++        self.prefix_captured = try stark_prefix.capture(self, self.prefix_source, logits);
++        self.prefix_capture_at = null;
++    }
++
++    pub fn canResumePrefix(self: *const Module, snapshot: *const PrefixSnapshot, ids: []const u32) bool {
++        return stark_prefix.admits(self, snapshot, ids);
++    }
++
++    pub fn validationStateFingerprint(self: *Module, out: *[32]u8) !void {
++        try stark_prefix.liveFingerprint(self, out);
++    }
++
++    pub fn resumePrefix(self: *Module, snapshot: *const PrefixSnapshot, ids: []const u32, req: sdk.RequestShape) !T {
++        if (req.prompt_tokens != ids.len or !stark_prefix.admits(self, snapshot, ids)) return error.StarkPrefixAdmission;
++        try self.checkTokens(ids);
++        self.requestEnd();
++        self.prefix_source = ids;
++        defer self.prefix_source = &.{};
++        // No fresh-prompt restart: the owner epoch and KV prefix stay intact.
++        return switch (self.src) {
++            inline else => |src, family| blk: {
++                if (self.fp8_route) |r| r.open();
++                try src.beginPrefill();
++                _ = try src.chooseReadSchedule(ids.len);
++                try stark_prefix.restore(self, snapshot, ids);
++                const logits = try Passes(family).promptCalls(self, ids[snapshot.position..], .last, {});
++                errdefer self.g.release(logits);
++                self.tail = .{ .prompt_tokens = ids.len };
++                try Passes(family).enterDecode(self, ids.len);
++                break :blk logits;
++            },
++        };
++    }
++
+     /// A serial step (or a short extend) after the committed positions: the last row's logits f32 [1, vocab].
+     pub fn step(self: *Module, ids: []const u32) !T {
+         return self.step_pass(self, ids);
+@@ -862,6 +936,7 @@ pub fn Passes(comptime fam: experts.Family) type {
+         }
+ 
+         pub fn beginPrompt(self: *Module, ids: []const u32) !void {
++            self.invalidatePrefix();
+             if (self.fp8_route) |r| r.open();
+             try src(self).beginPrefill();
+             _ = try src(self).chooseReadSchedule(ids.len);
+@@ -928,6 +1003,7 @@ pub fn Passes(comptime fam: experts.Family) type {
+                 if (logits) |x| self.g.release(x);
+                 logits = null;
+                 logits = try graph.forward(&self.g, self.gpa, &self.c.model, &self.w, ids[at..end], self.cache.len, &self.cache, src(self), self.routes, head, .ops, sink);
++                try self.capturePrefixIfReady(logits.?);
+                 at = end;
+             }
+             try self.g.evalAll(&.{logits.?});
+diff --git a/src/arch/glm5_next/root.zig b/src/arch/glm5_next/root.zig
+index e0659e2c..2202cb3e 100644
+--- a/src/arch/glm5_next/root.zig
++++ b/src/arch/glm5_next/root.zig
+@@ -31,6 +31,7 @@ pub const caps: sdk.Caps = .{
+ 
+ pub const Config = settings.Config;
+ pub const Module = if (host_caps.dsa_nax) module.Module else struct {};
++pub const PrefixSnapshot = module.PrefixSnapshot;
+ 
+ /// G6: the process's one expert reader, claimed at the load claim, released when the loaded model goes.
+ pub const claimProcess = sdk_ext.expert.takeReader;
+diff --git a/src/arch/glm5_next/stark_prefix.zig b/src/arch/glm5_next/stark_prefix.zig
+new file mode 100644
+index 00000000..042df596
+--- /dev/null
++++ b/src/arch/glm5_next/stark_prefix.zig
+@@ -0,0 +1,206 @@
++// SPDX-License-Identifier: MIT
++// Stark-owned experimental extension of the pinned module. No persistence/logs.
++const std = @import("std");
++const sdk = @import("sdk");
++const mlx = sdk.mlx;
++const graph = @import("graph.zig");
++const T = mlx.mlx_array;
++var owners = std.atomic.Value(u64).init(1);
++pub fn nextOwner() u64 { return owners.fetchAdd(1, .monotonic); }
++
++const Tensor = struct {
++    bytes: []u8 = &.{},
++    shape: [8]c_int = @splat(0),
++    rank: usize = 0,
++    dtype: mlx.mlx_dtype = .float32,
++
++    fn free(t: *Tensor, a: std.mem.Allocator) void { a.free(t.bytes); t.* = .{}; }
++    fn capture(a: std.mem.Allocator, g: *graph.G, x: T) !Tensor {
++        // A contiguous evaluated copy is necessary: conv/tail can be slices.
++        var c = mlx.mlx_array_new();
++        defer _ = mlx.mlx_array_free(c);
++        try mlx.check(mlx.mlx_contiguous(&c, x, false, g.s));
++        try mlx.check(mlx.mlx_array_eval(c));
++        try mlx.checkError();
++        const dtype = mlx.mlx_array_dtype(c);
++        const bytes_per_word: usize = switch (dtype) { .float32 => 4, .bfloat16 => 2, else => return error.StarkPrefixDtype };
++        const raw: [*]const u8 = switch (dtype) {
++            .float32 => @ptrCast(mlx.mlx_array_data_float32(c) orelse return error.StarkPrefixData),
++            .bfloat16 => @ptrCast(mlx.mlx_array_data_bfloat16(c) orelse return error.StarkPrefixData),
++            else => unreachable,
++        };
++        const sh = mlx.getShape(c);
++        if (sh.len > 8) return error.StarkPrefixShape;
++        var out: Tensor = .{ .rank = sh.len, .dtype = dtype,
++            .bytes = try a.dupe(u8, raw[0 .. mlx.mlx_array_size(c) * bytes_per_word]) };
++        @memcpy(out.shape[0..sh.len], sh);
++        return out;
++    }
++    fn array(t: *const Tensor, g: *graph.G) !T {
++        return g.hostArray(t.bytes, t.shape[0..t.rank], t.dtype);
++    }
++};
++const Kda = struct { conv: Tensor = .{}, rec: Tensor = .{} };
++const Tail = struct { rows: Tensor = .{}, end: u32 = 0 };
++
++pub const Snapshot = struct {
++    allocator: std.mem.Allocator,
++    owner: u64,
++    epoch: u64,
++    position: u32,
++    context: u64,
++    tokens: []u32,
++    kda: []Kda,
++    tails: []Tail,
++
++    pub fn deinit(s: *Snapshot) void {
++        const a = s.allocator;
++        for (s.kda) |*k| { k.conv.free(a); k.rec.free(a); }
++        for (s.tails) |*t| t.rows.free(a);
++        a.free(s.kda);
++        a.free(s.tails);
++        @memset(s.tokens, 0);
++        a.free(s.tokens);
++        a.destroy(s);
++    }
++};
++
++pub fn capture(m: anytype, full_prompt: []const u32, logits: T) !*Snapshot {
++    const a = m.gpa;
++    if (m.mtp != null or m.cache.len == 0 or m.cache.len % graph.prompt_call_rows != 0 or m.cache.len > full_prompt.len)
++        return error.StarkPrefixBoundary;
++    // Keep exactly the arithmetic/call shapes upstream used. This hook only
++    // evaluates/copies existing state after the whole call has finished.
++    var evals: std.ArrayList(T) = .empty;
++    defer evals.deinit(a);
++    try evals.append(a, logits);
++    try m.cache.stateArrays(&evals, a);
++    for (m.cache.tails) |t| if (t.rows) |r| try evals.append(a, r);
++    try m.g.evalAll(evals.items);
++    switch (m.src) { inline else => |src| try src.flush() }
++    try mlx.check(mlx.mlx_synchronize(m.g.s));
++    const s = try a.create(Snapshot);
++    errdefer a.destroy(s);
++    const ks = try a.alloc(Kda, m.cache.kda.len);
++    errdefer a.free(ks);
++    for (ks) |*k| k.* = .{};
++    const ts = try a.alloc(Tail, m.cache.tails.len);
++    errdefer a.free(ts);
++    for (ts) |*t| t.* = .{};
++    const tokens = try a.dupe(u32, full_prompt[0..m.cache.len]);
++    errdefer a.free(tokens);
++    errdefer {
++        for (ks) |*k| { k.conv.free(a); k.rec.free(a); }
++        for (ts) |*t| t.rows.free(a);
++    }
++    for (ks, m.cache.kda) |*dst, st| {
++        dst.conv = try Tensor.capture(a, &m.g, st.conv orelse return error.StarkPrefixEmptyState);
++        dst.rec = try Tensor.capture(a, &m.g, st.rec orelse return error.StarkPrefixEmptyState);
++    }
++    for (ts, m.cache.tails) |*dst, tail| {
++        dst.rows = try Tensor.capture(a, &m.g, tail.rows orelse return error.StarkPrefixEmptyState);
++        dst.end = tail.end;
++    }
++    s.* = .{ .allocator = a, .owner = m.prefix_owner, .epoch = m.prefix_epoch,
++        .position = m.cache.len, .context = m.reserve, .tokens = tokens, .kda = ks, .tails = ts };
++    return s;
++}
++
++pub fn admits(m: anytype, s: *const Snapshot, full_prompt: []const u32) bool {
++    return m.mtp == null and s.owner == m.prefix_owner and s.epoch == m.prefix_epoch and
++        s.context == m.reserve and s.position > 0 and s.position % graph.prompt_call_rows == 0 and
++        s.position < full_prompt.len and full_prompt.len <= m.reserve and m.cache.len == 0 and
++        s.kda.len == m.cache.kda.len and s.tails.len == m.cache.tails.len and
++        std.mem.eql(u32, s.tokens, full_prompt[0..s.position]);
++}
++
++pub fn restore(m: anytype, s: *const Snapshot, full_prompt: []const u32) !void {
++    if (!admits(m, s, full_prompt)) return error.StarkPrefixAdmission;
++    var evals: std.ArrayList(T) = .empty;
++    defer evals.deinit(m.gpa);
++    const mark = m.g.mark();
++    defer m.g.resetTo(mark);
++    for (m.cache.kda, s.kda) |*st, *copy| {
++        const conv = try copy.conv.array(&m.g);
++        const rec = try copy.rec.array(&m.g);
++        st.set(&m.g, conv, rec);
++        try evals.appendSlice(m.gpa, &.{ st.conv.?, st.rec.? });
++    }
++    for (m.cache.tails, s.tails) |*tail, *copy| {
++        const rows = try copy.rows.array(&m.g);
++        tail.reset(&m.g);
++        tail.rows = m.g.keep(rows);
++        tail.end = copy.end;
++        try evals.append(m.gpa, tail.rows.?);
++    }
++    try m.g.evalAll(evals.items);
++    try mlx.check(mlx.mlx_synchronize(m.g.s));
++    // These buffers are never retained by snapshots. The owner epoch is bumped
++    // before every fresh prompt that could overwrite a position below p.
++    for (m.cache.latent, m.cache.index) |*lat, *idx| {
++        if (lat.buf == null or idx.buf == null or lat.cap < s.position or idx.cap < s.position)
++            return error.StarkPrefixMissingKv;
++        lat.len = s.position;
++        idx.len = s.position;
++    }
++    for (m.cache.capture) |*c| c.release(&m.g);
++    m.cache.len = s.position;
++}
++
++fn hashCount(h: *std.crypto.hash.sha2.Sha256, n: u64) void {
++    var bytes: [8]u8 = undefined;
++    std.mem.writeInt(u64, &bytes, n, .little);
++    h.update(&bytes);
++}
++
++fn hashTensor(m: anytype, h: *std.crypto.hash.sha2.Sha256, value: ?T) !void {
++    hashCount(h, @intFromBool(value != null));
++    if (value) |x| {
++        var copied = try Tensor.capture(m.gpa, &m.g, x);
++        defer copied.free(m.gpa);
++        hashCount(h, @intCast(@intFromEnum(copied.dtype)));
++        hashCount(h, copied.rank);
++        for (copied.shape[0..copied.rank]) |d| hashCount(h, @intCast(d));
++        hashCount(h, copied.bytes.len);
++        h.update(copied.bytes);
++    }
++}
++
++/// Validation-only aggregate hash. Includes all numerical state and absolute
++/// logical positions; excludes tokens, source identity/epoch and request counters.
++pub fn liveFingerprint(m: anytype, out: *[32]u8) !void {
++    if (m.mtp != null) return error.StarkPrefixMtpUnsupported;
++    const mark = m.g.mark();
++    defer m.g.resetTo(mark);
++    var evals: std.ArrayList(T) = .empty;
++    defer evals.deinit(m.gpa);
++    try m.cache.stateArrays(&evals, m.gpa);
++    for (m.cache.latent, m.cache.index, m.cache.tails) |lat, idx, tail| {
++        if (lat.buf) |b| try evals.append(m.gpa, b);
++        if (idx.buf) |b| try evals.append(m.gpa, b);
++        if (tail.rows) |r| try evals.append(m.gpa, r);
++    }
++    if (evals.items.len > 0) try m.g.evalAll(evals.items);
++    switch (m.src) { inline else => |src| try src.flush() }
++    try mlx.check(mlx.mlx_synchronize(m.g.s));
++    var h = std.crypto.hash.sha2.Sha256.init(.{});
++    h.update("stark-glm-live-state-v1");
++    hashCount(&h, m.reserve);
++    hashCount(&h, m.cache.len);
++    hashCount(&h, m.cache.kda.len);
++    for (m.cache.kda) |st| {
++        try hashTensor(m, &h, st.conv);
++        try hashTensor(m, &h, st.rec);
++    }
++    hashCount(&h, m.cache.latent.len);
++    for (m.cache.latent, m.cache.index, m.cache.tails) |*lat, *idx, tail| {
++        hashCount(&h, lat.len);
++        try hashTensor(m, &h, try lat.view(&m.g));
++        hashCount(&h, idx.len);
++        try hashTensor(m, &h, try idx.view(&m.g));
++        hashCount(&h, tail.end);
++        try hashTensor(m, &h, tail.rows);
++    }
++    try mlx.checkError();
++    h.final(out);
++}

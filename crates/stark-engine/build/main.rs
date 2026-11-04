@@ -7,11 +7,15 @@ use common::{compiler::Compiler, enum_paths::EnumPaths, envs, gpu_types::GpuType
 
 mod cpu;
 
+#[cfg(feature = "glm-exl3")]
+mod glm_exl3;
+
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod metal;
 
 fn main() -> anyhow::Result<ExitCode> {
     println!("cargo::rerun-if-changed=build");
+    println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_prefix_validation)");
 
     if envs::build_always() {
         println!("cargo::rerun-if-changed=/var/empty/hack_nonexistent_file_to_always_rerun");
@@ -19,6 +23,9 @@ fn main() -> anyhow::Result<ExitCode> {
 
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH")?;
     let target_os = env::var("CARGO_CFG_TARGET_OS")?;
+
+    #[cfg(feature = "glm-exl3")]
+    glm_exl3::link(&target_arch, &target_os)?;
 
     println!("cargo::rustc-check-cfg=cfg(backend, values(\"cpu\", \"metal\"))");
 

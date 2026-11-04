@@ -120,7 +120,7 @@ failure/reset/cancellation and prefix capture/restore behavior, and measure
 whole-request prefill on a screened quiet host. Preserve private prompt and
 response data; publish only aggregate findings and hashes.
 
-See [experimental GLM batched matrices](../../../validation/GLM_BATCHED_MATRICES.md)
+See [experimental GLM batched matrices](../../validation/GLM_BATCHED_MATRICES.md)
 for implementation details, admission boundaries and qualification gates, and
-[experimental GLM wide prefill](../../../validation/GLM_WIDE_PREFILL.md) for
+[experimental GLM wide prefill](../../validation/GLM_WIDE_PREFILL.md) for
 the wider scheduling and KDA controls.

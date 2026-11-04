@@ -13,6 +13,7 @@ Reference pages are listed first. Records of past runs, milestones and experimen
 | [Native hybrid models](NATIVE_HYBRID_MODELS.md) | GLM-5.3-Flash GGUF, Qwen3.8-Flash-Next native-source preparation and typed Uzu text artifacts, execution and validation |
 | [Experimental GLM wide prefill](validation/GLM_WIDE_PREFILL.md) | Wider token scheduling, batched controls, register KDA, memory admission and qualification requirements |
 | [Experimental GLM batched matrices](validation/GLM_BATCHED_MATRICES.md) | Dense-wide, grouped expert and MLA matrix batching selectors and qualification requirements |
+| [Optional GLM EXL3/FP8 backend](validation/GLM_EXL3_BACKEND.md) | Pinned MLX core, explicit native staging, serial worker integration and prefix-state qualification |
 | [Native hybrid sampling](NUMERICAL_SAMPLING.md) | Exact nucleus-prefix proof, reference-order fallbacks, precision and scratch lifetime |
 | [Recursive Flint](FLINT.md) | Official INT4 preparation, native text execution, limits and reference checks |
 | [Trained Qwen checkpoints](QWEN_TRAINED_CHECKPOINTS.md) | Converting and testing fine-tuned Qwen3 4B and Qwen3.8 4B checkpoints |
@@ -77,6 +78,8 @@ Qwen3.8 backend.
 The [GLM batched-matrix research record](archive/runs/2026-11-03-glm-batched-matrix-research.md)
 records bounded readout and expert-batching results, and the qualification
 gaps that prevent selector promotion.
+The [GLM EXL3 backend record](archive/runs/2026-11-03-glm-exl3-backend.md)
+records the optional native bridge and its separate artifact qualification.
 The [live OpenWork Qwen3.8 run](archive/runs/2026-11-02-openwork-qwen38-live-prefix-reuse.md)
 records reuse and first-text timing for one real agent session.
 The [OpenCode Desktop managed-client record](archive/runs/2026-11-01-opencode-managed-client.md)

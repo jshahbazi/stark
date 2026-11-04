@@ -7,6 +7,10 @@ pub mod activity;
 pub mod finite_guard;
 pub mod flint;
 pub mod glm;
+#[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+mod glm_exl3;
+#[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+mod glm_exl3_ffi;
 #[cfg(feature = "metal")]
 mod glm_metal;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -49,6 +53,8 @@ pub struct PrefixSnapshot {
 
 enum PrefixState {
     Glm(glm::PrefixSnapshot),
+    #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+    GlmExl3(glm_exl3::PrefixSnapshot),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Lily(lily::PrefixSnapshot),
 }
@@ -57,6 +63,8 @@ impl PrefixSnapshot {
     pub fn position(&self) -> usize {
         match &self.inner {
             PrefixState::Glm(snapshot) => snapshot.position(),
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            PrefixState::GlmExl3(snapshot) => snapshot.position(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             PrefixState::Lily(snapshot) => snapshot.position(),
         }
@@ -65,6 +73,8 @@ impl PrefixSnapshot {
     pub fn mtp_enabled(&self) -> bool {
         match &self.inner {
             PrefixState::Glm(_) => false,
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            PrefixState::GlmExl3(_) => false,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             PrefixState::Lily(snapshot) => snapshot.mtp_enabled(),
         }
@@ -157,9 +167,20 @@ pub fn recognizes(path: &Path) -> Result<bool> {
 enum Forward {
     Flint(flint::FlintModel),
     Glm(glm::GlmModel),
+    #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+    GlmExl3(Box<glm_exl3::GlmExl3Model>),
     Qwen(qwen::QwenModel),
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Lily(Box<lily::LilyModel>),
+}
+
+fn glm_exl3_checkpoint(config: &Value) -> bool {
+    config.get("model_type").and_then(Value::as_str) == Some("glm5_next")
+        && config.pointer("/expert_streaming/family").and_then(Value::as_str) == Some("mlx-stream")
+        && config.pointer("/expert_streaming/format").and_then(Value::as_str) == Some("mtplx-expert-manifest-v2")
+        && config.pointer("/expert_streaming/manifest").and_then(Value::as_str) == Some("expert-manifest-v2.json")
+        && config.pointer("/expert_streaming/runtime_manifest").and_then(Value::as_str) == Some("expert-manifest.json")
+        && config.pointer("/expert_streaming/quant").and_then(Value::as_str) == Some("exl3-k3-mul1")
 }
 
 fn mixed_precision_checkpoint(config: &Value) -> bool {
@@ -245,7 +266,30 @@ impl Model {
         if eos.is_empty() {
             return Err(Error::Invalid("EOS IDs"));
         }
-        let (forward, max_context) = if mixed_precision_checkpoint(&outer) {
+        let (forward, max_context) = if outer.get("expert_streaming").is_some() {
+            if !glm_exl3_checkpoint(&outer) {
+                return Err(Error::Unsupported("GLM streaming pack format"));
+            }
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            {
+                let context = max_context.min(32_768);
+                let canonical = path.canonicalize()?;
+                let mut options = glm_exl3::LoadOptions::new(context as usize);
+                options.experimental_prefix_reuse = cfg!(stark_glm_exl3_prefix_validation);
+                let model = glm_exl3::GlmExl3Model::load(&canonical, vocab_size, options)?;
+                if model.vocab_size() != vocab_size
+                    || model.max_context_length() != context as usize
+                    || model.position() != 0
+                {
+                    return Err(Error::Invalid("GLM EXL3 loaded model metadata"));
+                }
+                (Forward::GlmExl3(Box::new(model)), context)
+            }
+            #[cfg(not(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64")))]
+            {
+                return Err(Error::Unsupported("GLM EXL3 requires the optional macOS arm64 backend"));
+            }
+        } else if mixed_precision_checkpoint(&outer) {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             {
                 let model = lily::LilyModel::load_with_mtp(path, with_mtp)?;
@@ -350,9 +394,32 @@ impl Model {
         match &mut self.forward {
             Forward::Flint(model) => model.reset(),
             Forward::Glm(model) => model.reset(),
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.reset(),
             Forward::Qwen(model) => model.reset(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.reset(),
+        }
+    }
+
+    fn reset_after_error(&mut self) {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &mut self.forward {
+            // Admission can fail before dispatch reaches the backend. Clear
+            // snapshot ownership as well as draining/resetting native state.
+            let _ = model.cancel();
+            return;
+        }
+        self.reset();
+    }
+
+    /// Expensive aggregate-only native-state digest for explicit artifact
+    /// qualification. This API is absent from ordinary engine builds.
+    #[cfg(all(feature = "glm-exl3", stark_glm_exl3_prefix_validation, target_os = "macos", target_arch = "aarch64"))]
+    pub fn validation_state_sha256(&mut self) -> Result<[u8; 32]> {
+        match &mut self.forward {
+            Forward::GlmExl3(model) => model.validation_state_sha256(),
+            _ => Err(Error::Unsupported("GLM EXL3 state validation unavailable")),
         }
     }
 
@@ -366,6 +433,8 @@ impl Model {
             match &mut self.forward {
                 Forward::Flint(model) => model.step(token),
                 Forward::Glm(model) => model.step(token),
+                #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+                Forward::GlmExl3(model) => model.step(token),
                 Forward::Qwen(model) => model.step(token),
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 Forward::Lily(model) => model.step(token),
@@ -379,7 +448,7 @@ impl Model {
             })
         };
         if result.is_err() {
-            self.reset();
+            self.reset_after_error();
         }
         result
     }
@@ -396,13 +465,15 @@ impl Model {
             match &mut self.forward {
                 Forward::Flint(model) => model.ingest(token),
                 Forward::Glm(model) => model.ingest(token),
+                #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+                Forward::GlmExl3(model) => model.ingest(token),
                 Forward::Qwen(model) => model.ingest(token),
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 Forward::Lily(model) => model.ingest(token),
             }
         };
         if result.is_err() {
-            self.reset();
+            self.reset_after_error();
         }
         result
     }
@@ -416,17 +487,25 @@ impl Model {
         tokens: &[u32],
         mut before_token: impl FnMut() -> Result<()>,
     ) -> Result<()> {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &mut self.forward {
+            let result = model.ingest_prefix(tokens, &mut before_token);
+            if result.is_err() {
+                self.reset_after_error();
+            }
+            return result;
+        }
         #[cfg(feature = "metal")]
         if let Forward::Glm(model) = &mut self.forward {
             let result = model.ingest_prefix(tokens, &mut before_token);
             if result.is_err() {
-                self.reset();
+                self.reset_after_error();
             }
             return result;
         }
         for &token in tokens {
             if let Err(error) = before_token().and_then(|_| self.ingest(token)) {
-                self.reset();
+                self.reset_after_error();
                 return Err(error);
             }
         }
@@ -566,7 +645,7 @@ impl Model {
             }
         };
         if result.is_err() {
-            self.reset();
+            self.reset_after_error();
         }
         result
     }
@@ -592,6 +671,10 @@ impl Model {
     /// The prefill chunk length when this backend can snapshot and resume a
     /// prompt prefix, which then happens only at multiples of it.
     pub fn prefix_chunk_tokens(&self) -> Option<usize> {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.prefix_chunk_tokens();
+        }
         if let Forward::Glm(model) = &self.forward {
             return Some(model.prefill_chunk_tokens());
         }
@@ -610,6 +693,8 @@ impl Model {
     ) -> Result<()> {
         match &mut self.forward {
             Forward::Glm(model) => model.capture_prefix_at(position),
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.capture_prefix_at(position),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.capture_prefix_at(position),
             _ => {
@@ -622,6 +707,12 @@ impl Model {
     /// The snapshot captured by this request's prefill. Take it before the
     /// next `reset`.
     pub fn take_prefix_snapshot(&mut self) -> Option<PrefixSnapshot> {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &mut self.forward {
+            return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
+                inner: PrefixState::GlmExl3(snapshot),
+            });
+        }
         if let Forward::Glm(model) = &mut self.forward {
             return model.take_prefix_snapshot().map(|snapshot| PrefixSnapshot {
                 inner: PrefixState::Glm(snapshot),
@@ -646,18 +737,24 @@ impl Model {
     ) -> Result<()> {
         let result = match (&mut self.forward, &snapshot.inner) {
             (Forward::Glm(model), PrefixState::Glm(snapshot)) => model.restore_prefix(snapshot),
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            (Forward::GlmExl3(model), PrefixState::GlmExl3(snapshot)) => model.restore_prefix(snapshot),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             (Forward::Lily(model), PrefixState::Lily(snapshot)) => model.restore_prefix(snapshot),
             _ => Err(Error::Unsupported("prefix snapshots unavailable")),
         };
         if result.is_err() {
-            self.reset();
+            self.reset_after_error();
         }
         result
     }
 
     /// Includes failures found while draining an early-dropped greedy stream.
     pub fn is_fenced(&self) -> bool {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.is_fenced();
+        }
         #[cfg(feature = "metal")]
         if let Forward::Glm(model) = &self.forward {
             return model.is_fenced();
@@ -675,6 +772,32 @@ mod tests {
     use stark_engine_macros::stark_test;
 
     use super::*;
+
+    #[stark_test]
+    fn glm_exl3_selection_requires_the_explicit_streaming_pack_contract() {
+        let config = serde_json::json!({
+            "model_type": "glm5_next",
+            "expert_streaming": {
+                "family": "mlx-stream", "format": "mtplx-expert-manifest-v2",
+                "manifest": "expert-manifest-v2.json", "runtime_manifest": "expert-manifest.json",
+                "quant": "exl3-k3-mul1"
+            }
+        });
+        assert!(glm_exl3_checkpoint(&config));
+        assert!(!glm_exl3_checkpoint(&serde_json::json!({"model_type": "glm5_next"})));
+        for (pointer, replacement) in [
+            ("/model_type", "qwen4_exp"),
+            ("/expert_streaming/family", "other"),
+            ("/expert_streaming/format", "other"),
+            ("/expert_streaming/manifest", "../expert-manifest-v2.json"),
+            ("/expert_streaming/runtime_manifest", "../expert-manifest.json"),
+            ("/expert_streaming/quant", "other"),
+        ] {
+            let mut invalid = config.clone();
+            *invalid.pointer_mut(pointer).unwrap() = Value::from(replacement);
+            assert!(!glm_exl3_checkpoint(&invalid), "{pointer}");
+        }
+    }
 
     #[stark_test]
     fn mixed_precision_selection_requires_explicit_architecture_and_format() {

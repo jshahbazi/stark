@@ -352,7 +352,8 @@ Agent clients resend the same instructions, tool definitions and history on ever
 Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
-- Native GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
+- Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
+- The optional [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) keeps reuse disabled in ordinary builds. Its explicit qualification build advertises a separate 16,384-token boundary.
 - The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
 - Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native Flint and F32 Qwen graphs.
 - A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On the Qwen3.8 backend, whether MTP is enabled must also match (`key` reports this).
@@ -364,7 +365,7 @@ Exactness, converted models:
 
 Exactness, native hybrid snapshots:
 
-- GLM captures at the start of the final 1,024-token reuse chunk. That boundary is divisible by its admitted 4/8-token prefill group widths, so splitting for capture preserves their grouping and arithmetic. After all GPU writers finish, capture copies the exact stored KDA state and convolution histories, and the MLA/indexer cursor and incomplete pooling tail. Restore resets the model, restores those values and exposes only the completed prefix rows retained below the boundary.
+- GGUF GLM captures at the start of the final 1,024-token reuse chunk. That boundary is divisible by its admitted 4/8-token prefill group widths, so splitting for capture preserves their grouping and arithmetic. After all GPU writers finish, capture copies the exact stored KDA state and convolution histories, and the MLA/indexer cursor and incomplete pooling tail. Restore resets the model, restores those values and exposes only the completed prefix rows retained below the boundary.
 - Qwen3.8 prefill runs in 4,096-token passes counted from the position it starts at. A scoped request splits its prefill at the start of its final pass and copies the recurrent state there: GDN states and convolution windows, the n-gram history and window, and, when present, the draft head's last hidden. Both parts run the same passes as one prefill.
 - A snapshot cannot be rewound. The next request reuses it only when its prompt begins with the whole snapshotted prefix and leaves at least two tokens to prefill; otherwise it reuses nothing. The remaining prompt uses the backend's original prefill grouping, final-token route and draw.
 
