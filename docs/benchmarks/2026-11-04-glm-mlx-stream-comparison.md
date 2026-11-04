@@ -22,11 +22,11 @@ earlier rejected run.
 | --- | --- | --- | --- |
 | Throughput | 723.751 prefill / 17.070 decode | 1,093.5 / 33.15 | Observed gaps of about 34% and 49%; causal split unknown |
 | Weights | Verified HF revision `50237d5c26ceb98bfd85f779990b0f5e6d7af144`; EXL3 K3 experts, FP8 residents | Same advertised pack format | Exact historical payload identity remains unproven |
-| Engine source | Public host `dc92a3e8`, plugin `7d29eaa7`, pinned MLX/MLX-C | Historical host `a8f6c6b8`, plugin `88d2aad` | Same-public-source normal-host control is being prepared |
+| Engine source | Public host `dc92a3e8`, plugin `7d29eaa7`, pinned MLX/MLX-C | Historical host `a8f6c6b8`, plugin `88d2aad` | A screened current-public-source host control measured 835.678 prefill / 16.632 decode at 131/159 rows with MTP off |
 | MTP | Disabled in production bridge | Depth 3, gate 0.5, exact acceptance, BF16 draft head | Missing integration; no valid local speedup measurement yet |
 | Expert rows, prompt/decode | 142 / 169 | 190 / 217 | Lower rows increase misses; local penalty unmeasured. The upstream nearby 217-to-225 ladder gained about 3% decode, with flat prefill; extrapolation to 169 is unsupported |
 | Allocation admission | 112 GiB ceiling, 2 GiB margin, native census and automatic fill | Same ceiling/margin; standard row pin needs a much smaller baseline | Actual local baseline and bill terms need telemetry; disk recovery does not prove resident-memory recovery |
-| Residency capacity | About 81 GB, bounded by the model bill and remaining budget | Current public host defaults to Metal's recommended maximum; historical policy not independently established | Candidate integration gap. Capacity and allocated memory are separate quantities; fixed-row comparison pending |
+| Residency capacity | About 81 GB, bounded by the model bill and remaining budget | Current public host defaults to Metal's recommended maximum; historical policy not independently established | Fixed-row ABBA diagnostic observed under 1% effect and exact readout fingerprints; its external CPU screen failed, so no throughput gain qualifies |
 | Prompt-combine prerequisite | Unset wiring environment selects `inplace`, despite bill-bound capacity | Unset/`max` selects `inplace`; `fit`/`off` selects `fused` | The plugin couples this route to residency policy. The capacity experiment keeps the route unchanged in both arms |
 | KDA | Baseline did not record installation; new fixed-row control confirms per-core on 40 cores, 80 groups, 104 rows, 2 groups/core | Same expected plan | Stock fallback is ruled out for the new control |
 | DSA / EXL3 / fusions | NAX, 2,048-row waves, route cut, sampled ordering, direct reads and launch fusions configured; normal-host startup confirms NAX | Tuned defaults present | Source configuration aligns; full invocation counters remain unchecked |
@@ -42,6 +42,84 @@ The public pack sets MTP lane construction, depth and gate. The bridge overrides
 the lane off and the prompt tail to eager completion. Most advertised kernel
 switches are already inherited from the pinned plugin. Enabling their names
 again is not an evidenced optimization.
+
+## Same-source normal-host control
+
+The current public server was built from the same host/plugin/dependency source
+as the bridge, with private settings paths and no changes to inference. A fresh
+server used 131 prompt / 159 decode expert rows, MTP lane construction disabled,
+eager tail completion, `keep` prompt residents, maximum recommended residency
+capacity, a 32,768-token context, the identical raw 16,384-token input and 128
+greedy outputs. One warmup was excluded, followed by two measured requests.
+
+| Measurement | Request 1 | Request 2 | Median |
+| --- | ---: | ---: | ---: |
+| Prefill tokens/s | 849.813 | 821.543 | 835.678 |
+| Decode tokens/s | 16.670 | 16.593 | 16.632 |
+
+Native histogram deltas established exactly one successful request and the
+expected input/output counts per measurement. Host screening passed: maximum
+external CPU 134.585 percent, thermal state zero, no paging or swapout increases,
+compiler/download candidates, monitor failures or sampling gaps. Startup
+confirmed the per-core KDA plan and NAX route. The process group was reaped and
+the original private configuration restored. The verified model pack and user
+global settings were unchanged.
+
+The HTTP endpoint does not expose full readouts, so this result does not
+establish readout/token parity. Its serial decode rate is close to the bridge's
+fixed-row diagnostic. It provides no evidence of a twofold adapter overhead.
+The cold excluded warmup's prompt phase took 17.376 seconds (about 943 tokens/s);
+that is a diagnostic observation, not a qualified cold-request speed result.
+Tail, resident policy and fresh-server timing remain a separate experiment.
+
+Private result SHA-256:
+`053af3675a498f41c4afaba2415a124f60b1dbd390173768d6d918f451240666`.
+Controller SHA-256:
+`fe4cd9851f56300f200d9ad27d0f450dea9fa9d9b8873181c2343e6924f6917a`.
+Server SHA-256:
+`c14fa2ecba008b3a59c5a1f6ee4bdd5b16731a081cd3368a5e31d33c05027456`.
+
+## MTP numerical policy investigation
+
+A common-prefix diagnostic found the first greedy disagreement at output 64,
+in zero-based verification row 2 of a three-row round. The entire offending round was
+accepted, so a rollback in that round cannot explain it. Initial prefill
+readouts and logical state matched. At the disagreement, corresponding target
+readouts had no non-finite values, maximum absolute difference 0.8125 and RMS
+difference 0.141910; their argmax differed. Logical state had already diverged
+before that round. These observations locate numerical drift without proving
+its cause or its acceptability.
+
+The pinned source explicitly describes fused serial KDA as rounding-class
+relative to the operation chain: convolution rounding, normalization epsilon
+placement and gate summation differ. Fused verification promises agreement
+with the captured operation chain. A separate matched `decode_kda=ops` control,
+with fused verification retained, still disagreed after 128 greedy outputs
+(44 rounds, 96 verified drafts, 84 accepted). Therefore changing serial KDA
+alone does not establish whole-model agreement.
+
+A direct source comparison found no changes to KDA, its fused decode and verify
+implementations, FP8 projection or the native sampler between historical plugin
+`88d2aad` and current `7d29eaa`. The historical defaults already used fused serial
+KDA and fused verification. A later KDA change therefore does not explain this
+disagreement. The historical exact-stack fixture result remains evidence for
+its recorded configuration and workload; it does not qualify the current one.
+
+MTP remains unqualified in the production bridge. Further evidence must
+separate adapter correctness against the identical native policy, verification
+and rollback correctness at matching execution shapes, and the quality of any
+new rounding-class policy. Different generated text cannot itself establish
+either a correctness defect or acceptable quality. The original serial F32
+readout evidence remains an unchanged reference.
+
+Private common-prefix diagnostic result SHA-256:
+`f34e024eba6bb55a01e51ad8332a4a2b681add8da44466774c5f2251b87eacfb`.
+Its native source SHA-256:
+`114cf826c1734626c69cbfa2eedebbe4f5d810538536d1be985cfd6b8e6d41c2`.
+Private ops-control result SHA-256:
+`497e17b74a9f9b6491299fa574f780070a2db565e4a3f428bc5c6104d243cea5`.
+Its native source SHA-256:
+`2f0bd427d38ff480d116007268e035eb5b788f8d8a18d84d79a084f6bab717c3`.
 
 ## Experiment order
 
