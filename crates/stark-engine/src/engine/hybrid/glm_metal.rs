@@ -20,6 +20,11 @@ use super::{
 
 type Buffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+#[path = "glm_control_prefill.rs"]
+mod control_prefill;
+#[path = "glm_kda_prefill.rs"]
+mod kda_prefill;
+
 #[cfg(test)]
 #[path = "glm_prefix_metal_tests.rs"]
 mod prefix_tests;
@@ -48,6 +53,7 @@ fn executor() -> Result<&'static Executor> {
                 include_str!("glm_metal.metal"),
                 include_str!("glm_control_split.metal"),
                 include_str!("glm_control_fused_parallel.metal"),
+                include_str!("glm_control_prefill.metal"),
             ]
             .concat();
             let library = device
@@ -110,6 +116,13 @@ fn executor() -> Result<&'static Executor> {
                 "glm_control_mix_split32_simd",
                 "glm_control_input",
                 "glm_control_post",
+                "glm_control_prefill_project",
+                "glm_control_prefill_project_parts",
+                "glm_control_prefill_rms_project_split32",
+                "glm_control_prefill_mix",
+                "glm_control_prefill_mix_simd",
+                "glm_control_prefill_input",
+                "glm_control_prefill_post",
                 "glm_index_pool",
                 "glm_index_scores",
                 "glm_index_sort",
@@ -131,8 +144,15 @@ fn executor() -> Result<&'static Executor> {
                 if pipeline.max_total_threads_per_threadgroup() < 256 {
                     return Err("Metal GLM graph execution width is unsupported");
                 }
-                if matches!(name, "glm_control_project" | "glm_router_parallel")
-                    && pipeline.thread_execution_width() != 32
+                if matches!(
+                    name,
+                    "glm_control_project"
+                        | "glm_router_parallel"
+                        | "glm_control_prefill_project"
+                        | "glm_control_prefill_project_parts"
+                        | "glm_control_prefill_rms_project_split32"
+                        | "glm_control_prefill_mix_simd"
+                ) && pipeline.thread_execution_width() != 32
                 {
                     return Err("Metal GLM control SIMD width is unsupported");
                 }
@@ -146,6 +166,13 @@ fn executor() -> Result<&'static Executor> {
                 && candidate.max_total_threads_per_threadgroup() >= 768
             {
                 graph_pipelines.insert("glm_control_fused_parallel", candidate);
+            }
+            if let Some(function) = library.new_function_with_name("glm_control_prefill_fused_parallel")
+                && let Ok(candidate) = device.new_compute_pipeline_state_with_function(&function)
+                && candidate.thread_execution_width() == 32
+                && candidate.max_total_threads_per_threadgroup() >= 768
+            {
+                graph_pipelines.insert("glm_control_prefill_fused_parallel", candidate);
             }
             Ok(Executor {
                 device,

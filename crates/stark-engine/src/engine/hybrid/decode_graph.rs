@@ -117,6 +117,7 @@ pub(crate) struct DecodeGraph {
     encode_scope: Option<profile::Scope>,
     scratch: Vec<(Retained<ProtocolObject<dyn MTLBuffer>>, usize)>,
     scratch_bytes: usize,
+    scratch_limit: usize,
     single_encoder: bool,
     serial_projection_levels: bool,
     byte_loads: bool,
@@ -265,6 +266,7 @@ impl DecodeGraph {
                 encode_scope: Some(profile::Scope::new("native.metal.encode")),
                 scratch: vec![(scratch, 256)],
                 scratch_bytes: 1024 * 1024,
+                scratch_limit: 512 * 1024 * 1024,
                 single_encoder,
                 serial_projection_levels: std::env::var_os("STARK_QWEN38_SERIAL_LEVELS")
                     .is_some_and(|value| value == "1"),
@@ -401,8 +403,8 @@ impl DecodeGraph {
             let total = self
                 .scratch_bytes
                 .checked_add(size)
-                .filter(|&n| n <= 512 * 1024 * 1024)
-                .ok_or(Error::Invalid("decode command workspace exceeds 512 MiB"))?;
+                .filter(|&n| n <= self.scratch_limit)
+                .ok_or(Error::Invalid("decode command workspace exceeds admitted limit"))?;
             let buffer = if let Some(heap) = &self.scratch_heap {
                 heap.allocate(size)?
             } else {
@@ -424,6 +426,23 @@ impl DecodeGraph {
         };
         *used += aligned;
         Ok(output)
+    }
+
+    /// Narrow an unsubmitted graph's workspace allowance. The ordinary graph
+    /// cap remains 512 MiB; bounded prefill uses smaller concurrent owners.
+    pub fn set_scratch_limit(
+        &mut self,
+        bytes: usize,
+    ) -> Result<()> {
+        if bytes < self.scratch_bytes || bytes > 512 * 1024 * 1024 {
+            return Err(Error::Invalid("decode scratch limit exceeds admitted bounds"));
+        }
+        self.scratch_limit = bytes;
+        Ok(())
+    }
+
+    pub fn scratch_backing_bytes(&self) -> usize {
+        self.scratch_bytes
     }
     pub fn failure(&self) -> &DeviceVector {
         &self.failure
@@ -2454,6 +2473,14 @@ mod tests {
         let mut bounded = DecodeGraph::new().unwrap();
         bounded.scratch_bytes = 512 * 1024 * 1024;
         assert!(bounded.scratch(262_144).is_err());
+        let mut narrowed = DecodeGraph::new().unwrap();
+        assert_eq!(narrowed.scratch_backing_bytes(), 1024 * 1024);
+        assert!(narrowed.set_scratch_limit(1024 * 1024 - 1).is_err());
+        assert!(narrowed.set_scratch_limit(512 * 1024 * 1024 + 1).is_err());
+        narrowed.set_scratch_limit(2 * 1024 * 1024).unwrap();
+        narrowed.scratch(262_144).unwrap();
+        assert_eq!(narrowed.scratch_backing_bytes(), 2 * 1024 * 1024);
+        assert!(narrowed.scratch(262_144).is_err());
     }
 
     #[stark_test]

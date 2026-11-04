@@ -1,15 +1,178 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Experimental layer-major chunks of four or eight known prompt tokens. Only dense
-//! projection scheduling changes: recurrent and MLA cache writers retain token
-//! order, and each chunk is fenced before another graph is constructed.
+//! Experimental layer-major prompt prefill. The qualified T4/T8 projection
+//! groups remain intact inside wider, memory-admitted token tiles. Recurrent
+//! and MLA writers retain causal order across bounded command owners.
+
+use metal::MTLBuffer;
 
 use super::{
     super::{
-        weight_metal::{DecodeGraph, DeviceVector},
+        weight_metal::{DecodeGraph, DeviceVector, PendingDecodeGraph},
         weights::BoundedBankGroup,
     },
     *,
 };
+
+const MIB: usize = 1024 * 1024;
+// The required greedy-overlap admission reserves two 512 MiB graph owners.
+// Each wide owner uses at most 448 MiB plus one <=32 MiB source arena, leaving
+// headroom without increasing the existing resident-bank allowance.
+const WIDE_OWNER_BYTES: usize = 448 * MIB;
+const WIDE_CARRY_BYTES: usize = 32 * MIB;
+const PREFIX_GRID: usize = 1024;
+
+fn wide_limit(value: Option<&std::ffi::OsStr>) -> Result<Option<usize>> {
+    match value.and_then(std::ffi::OsStr::to_str) {
+        None if value.is_none() => Ok(None),
+        Some("16") => Ok(Some(16)),
+        Some("32") => Ok(Some(32)),
+        Some("64") => Ok(Some(64)),
+        Some("128") => Ok(Some(128)),
+        _ => Err(Error::Invalid("GLM wide prefill tile must be 16, 32, 64 or 128")),
+    }
+}
+
+fn next_tile(
+    position: usize,
+    remaining: usize,
+    maximum: usize,
+) -> usize {
+    let available = remaining.min(PREFIX_GRID - position % PREFIX_GRID).min(maximum);
+    if available < 4 {
+        available
+    } else {
+        1usize << available.ilog2()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct WideGroup {
+    start: usize,
+    end: usize,
+    scratch: usize,
+    external: usize,
+}
+
+/// Conservative upper bounds, independent of environment-selected operator
+/// schedules. Every allocation is charged 256 bytes of padding; arena backing
+/// is bounded by twice the charged payload plus its initial one-MiB slab.
+/// External MLA scores/masks and immutable per-row norm uploads are charged
+/// separately. Cache growth is already in encoder_state_allowance's two-copy
+/// context inventory, including intermediate doubling allocations.
+fn layer_workspace(
+    c: &Config,
+    layer: usize,
+    tokens: usize,
+    end: usize,
+) -> Result<(usize, usize)> {
+    let (h, s, t) = (c.hidden as u128, c.hc as u128, tokens as u128);
+    let inner = c.kda_heads as u128 * c.kda_dim as u128;
+    // Two controls, both fallback row scratch and the fully batched controls.
+    let controls = 4 * h * s + 6 * h + 80 * s * (s + 2);
+    let attention = if c.layer_types[layer] {
+        // Projection concatenation and its T8 temporary results, optional
+        // register-prefill prep/finish and the recurrent output projection.
+        18 * inner + 4 * h + 8 * c.kda_dim as u128 + 8 * c.kda_heads as u128
+    } else {
+        4 * c.q_rank as u128
+            + 4 * c.kv_rank as u128
+            + 8 * c.index_dim as u128
+            + 4 * c.heads as u128 * (c.qk_dim + c.kv_rank + c.value_dim) as u128
+            + 4 * c.index_heads as u128 * c.index_dim as u128
+            + 4 * c.index_heads as u128
+            + 2 * h
+            + c.heads as u128 * end as u128
+            + 4 * end.div_ceil(c.index_pool).next_power_of_two() as u128
+    };
+    let ffn = if layer < c.dense_layers {
+        5 * c.intermediate as u128 + 2 * h
+    } else {
+        5 * c.shared_experts as u128 * c.expert_intermediate as u128
+            + c.active_experts as u128 * (3 * c.expert_intermediate as u128 + h)
+            + 4 * h
+            + 5 * c.experts as u128
+            + 4 * c.active_experts as u128
+    };
+    // Fewer than 128 graph scratch allocations per token in every schedule,
+    // including T8 projection concatenation and legacy one-row controls.
+    let payload = t * (controls + attention + ffn) * 4 + t * 128 * 256;
+    let scratch = 2 * payload + MIB as u128;
+    let external = if c.layer_types[layer] {
+        0
+    } else {
+        // Scores are charged here even when they fit in graph scratch. This
+        // bounds the >8M-element separately allocated attention score path.
+        t * 4
+            * (c.heads as u128 * end as u128
+                + end.div_ceil(c.index_pool) as u128
+                + c.q_rank as u128
+                + c.kv_rank as u128
+                + 2 * c.index_dim as u128)
+    };
+    Ok((
+        usize::try_from(scratch).map_err(|_| Error::Invalid("GLM wide workspace overflow"))?,
+        usize::try_from(external).map_err(|_| Error::Invalid("GLM wide workspace overflow"))?,
+    ))
+}
+
+fn wide_groups(
+    c: &Config,
+    tokens: usize,
+    end: usize,
+    maximum_layers: usize,
+) -> Result<Vec<WideGroup>> {
+    let largest_batch_row = [
+        c.hidden as u128 * c.hc as u128,
+        c.kda_heads as u128 * c.kda_dim as u128,
+        c.intermediate as u128,
+        c.shared_experts as u128 * c.expert_intermediate as u128,
+        c.experts as u128,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    if tokens == 0
+        || tokens > 128
+        || maximum_layers == 0
+        || largest_batch_row * tokens as u128 > 8_000_000
+        || end < tokens
+        || end > c.max_context
+        || tokens
+            .checked_mul(c.hidden)
+            .and_then(|n| n.checked_mul(c.hc))
+            .is_none_or(|n| n > 8_000_000 || n * 4 > WIDE_CARRY_BYTES)
+    {
+        return Err(Error::Invalid("GLM wide tile geometry exceeds its carry allowance"));
+    }
+    let mut groups: Vec<WideGroup> = Vec::new();
+    for layer in 0..c.layer_types.len() {
+        let (scratch, external) = layer_workspace(c, layer, tokens, end)?;
+        if scratch.checked_add(external).is_none_or(|n| n > WIDE_OWNER_BYTES) {
+            return Err(Error::Unsupported("GLM wide layer exceeds its workspace allowance"));
+        }
+        if let Some(group) = groups.last_mut()
+            && group.end - group.start < maximum_layers
+            && group
+                .scratch
+                .checked_add(group.external)
+                .and_then(|n| n.checked_add(scratch))
+                .and_then(|n| n.checked_add(external))
+                .is_some_and(|n| n <= WIDE_OWNER_BYTES)
+        {
+            group.end = layer + 1;
+            group.scratch += scratch;
+            group.external += external;
+        } else {
+            groups.push(WideGroup {
+                start: layer,
+                end: layer + 1,
+                scratch,
+                external,
+            });
+        }
+    }
+    Ok(groups)
+}
 
 pub(super) fn chunk_limit(value: Option<&std::ffi::OsStr>) -> Result<usize> {
     match value.and_then(std::ffi::OsStr::to_str) {
@@ -39,11 +202,26 @@ impl GlmModel {
         use_mma: bool,
         maximum_chunk: usize,
     ) -> Result<()> {
+        self.ingest_prefix_chunked_grouped(tokens, before_token, use_mma, maximum_chunk, usize::MAX)
+    }
+
+    /// Production always uses the unrestricted layer count above. Private
+    /// fixture tests can force ownership boundaries without a runtime flag or
+    /// reducing the production workspace allowance.
+    fn ingest_prefix_chunked_grouped(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+        use_mma: bool,
+        maximum_chunk: usize,
+        maximum_group_layers: usize,
+    ) -> Result<()> {
         let result = (|| {
             if self.cleanup_failed {
                 return Err(Error::Invalid("GLM context requires reload after cleanup failure"));
             }
             let eight_prefix = eight_token_prefix(tokens.len(), maximum_chunk)?;
+            let wide = wide_limit(std::env::var_os("STARK_GLM53_PREFILL_WIDE").as_deref())?;
             if tokens.is_empty() {
                 return Ok(());
             }
@@ -68,6 +246,9 @@ impl GlmModel {
                 {
                     self.hyper_connections = None;
                 }
+            }
+            if let Some(maximum) = wide {
+                return self.ingest_prefix_wide(tokens, before_token, use_mma, maximum, maximum_group_layers);
             }
             let decode = self.decode.as_mut().ok_or(Error::Invalid("GLM chunk decode state"))?;
             let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("GLM chunk bank plan"))?;
@@ -140,6 +321,146 @@ impl GlmModel {
         }
         result
     }
+
+    fn ingest_prefix_wide(
+        &mut self,
+        tokens: &[u32],
+        before_token: &mut dyn FnMut() -> Result<()>,
+        use_mma: bool,
+        maximum: usize,
+        maximum_group_layers: usize,
+    ) -> Result<()> {
+        // Keep the submitted owner outside the fallible encoding scope. On an
+        // error, the future graph drops first, then every live writer drains.
+        let mut pending: Option<PendingDecodeGraph> = None;
+        let mut execution_failed = false;
+        let result = (|| {
+            let c = &self.config;
+            let decode = self.decode.as_mut().ok_or(Error::Invalid("GLM wide decode state"))?;
+            let plan = decode.bounded_plan.clone().ok_or(Error::Invalid("GLM wide bank plan"))?;
+            if !decode.encoder_banks || plan.groups.len() != 1 || decode.parallel_projections {
+                return Err(Error::Unsupported("GLM wide prefill requires one admitted serial encoder group"));
+            }
+            let bank_group = &plan.groups[0];
+            let mut consumed = 0;
+            while consumed < tokens.len() {
+                let mut count = next_tile(self.position, tokens.len() - consumed, maximum);
+                // Admission happens before embeddings, recurrent writers or
+                // attention reservations. Smaller powers of two keep the
+                // same absolute 1024-token prefix-capture grid.
+                let groups = loop {
+                    match wide_groups(c, count, self.position + count, maximum_group_layers) {
+                        Ok(groups) => break groups,
+                        Err(_) if count > 1 => {
+                            count = if count > 4 {
+                                count / 2
+                            } else {
+                                count - 1
+                            }
+                        },
+                        Err(error) => return Err(error),
+                    }
+                };
+                let mut values = Vec::with_capacity(count * c.hidden * c.hc);
+                for &token in &tokens[consumed..consumed + count] {
+                    before_token()?;
+                    let embedding = self.weights.row("token_embd.weight", token as usize)?;
+                    if embedding.len() != c.hidden || embedding.iter().any(|value| !value.is_finite()) {
+                        return Err(Error::Invalid("GLM wide embedding values"));
+                    }
+                    for _ in 0..c.hc {
+                        values.extend_from_slice(&embedding);
+                    }
+                }
+                let mut streams = DecodeGraph::upload(&values)?;
+                drop(values);
+                for group in groups {
+                    let (graph, next) = objc2::rc::autoreleasepool(|_| -> Result<_> {
+                        let _scope = super::super::profile::Scope::new("native.glm.prefill.wide_encode_cpu");
+                        before_token()?;
+                        let mut graph = new_encoder_graph(decode)?;
+                        graph.set_scratch_limit(group.scratch)?;
+                        let banks = self.weights.encoder_indexed_group(&bank_group.names, plan.budget)?;
+                        if banks.registered_bytes() > bank_group.bytes {
+                            return Err(Error::Invalid("GLM wide encoder inventory changed"));
+                        }
+                        let mut next = streams.clone();
+                        for layer in group.start..group.end {
+                            next = encode_layer(
+                                &self.weights,
+                                c,
+                                decode,
+                                layer,
+                                &mut self.states[layer],
+                                &mut graph,
+                                &next,
+                                &banks,
+                                count,
+                                use_mma,
+                            )?;
+                        }
+                        graph.check_finite(&next)?;
+                        // Graph resources retain mapped buffers and the source
+                        // arena; bank wrappers may leave this CPU scope safely.
+                        // scratch() allocates max(request,1 MiB) slabs, with
+                        // each request capped at 8M F32 elements. A stream view
+                        // therefore retains <=32 MiB, not its whole graph.
+                        if graph
+                            .scratch_backing_bytes()
+                            .checked_add(group.external)
+                            .is_none_or(|n| n > WIDE_OWNER_BYTES)
+                            || next.buffer.length() > WIDE_CARRY_BYTES
+                        {
+                            return Err(Error::Invalid("GLM wide workspace inventory changed"));
+                        }
+                        before_token()?;
+                        Ok((graph, next))
+                    })?;
+                    // While this graph was encoded, the preceding group could
+                    // execute. Completion releases its unused arenas before
+                    // submission, leaving at most two admitted graph owners.
+                    if let Some(previous) = pending.take() {
+                        previous.wait().inspect_err(|_| execution_failed = true)?;
+                    }
+                    // Completion may block past cancellation or a deadline.
+                    // Recheck after the wait before submitting another writer.
+                    before_token()?;
+                    pending = Some(graph.submit(&[])?);
+                    streams = next;
+                    super::super::profile::record("native.glm.prefill.wide_groups", 0.0, group.end - group.start);
+                }
+                if let Some(previous) = pending.take() {
+                    previous.wait().inspect_err(|_| execution_failed = true)?;
+                }
+                for state in &self.states {
+                    if let LayerState::Kda(state) = state
+                        && let Some(metal) = &state.metal
+                    {
+                        metal.check_completed()?;
+                    }
+                }
+                self.position += count;
+                consumed += count;
+                super::super::profile::record("native.glm.prefill.wide_tokens", 0.0, count);
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let mut failed = execution_failed;
+            failed |= pending.take().is_some_and(|previous| previous.wait().is_err());
+            for state in &self.states {
+                if let LayerState::Kda(state) = state
+                    && let Some(metal) = &state.metal
+                {
+                    failed |= metal.check_completed().is_err();
+                }
+            }
+            if failed {
+                self.cleanup_failed = true;
+            }
+        }
+        result
+    }
 }
 
 fn project(
@@ -154,6 +475,11 @@ fn project(
     banks.encode_same_weight_batch(graph, &format!("{prefix}.{name}"), input, tokens, use_mma)
 }
 
+enum ControlMix {
+    Rows(Vec<DeviceVector>),
+    Batched(DeviceVector, usize),
+}
+
 fn controls_pre(
     control: &super::super::glm_metal::Control,
     graph: &mut DecodeGraph,
@@ -161,8 +487,12 @@ fn controls_pre(
     hidden: usize,
     streams: usize,
     tokens: usize,
-) -> Result<(DeviceVector, Vec<DeviceVector>)> {
+) -> Result<(DeviceVector, ControlMix)> {
     let normalized = graph.scratch(tokens * hidden)?;
+    if std::env::var_os("STARK_GLM53_CONTROL_PREFILL_BATCH").is_some_and(|value| value == "1") {
+        let mix = control.pre_batch(graph, residual, &normalized, tokens)?;
+        return Ok((normalized, ControlMix::Batched(mix, tokens)));
+    }
     let mut mixes = Vec::with_capacity(tokens);
     for token in 0..tokens {
         mixes.push(control.pre_batch_row(
@@ -171,7 +501,7 @@ fn controls_pre(
             &normalized.slice(token * hidden, hidden)?,
         )?);
     }
-    Ok((normalized, mixes))
+    Ok((normalized, ControlMix::Rows(mixes)))
 }
 
 fn controls_post(
@@ -179,11 +509,18 @@ fn controls_post(
     graph: &mut DecodeGraph,
     residual: &DeviceVector,
     output: &DeviceVector,
-    mixes: &[DeviceVector],
+    mixes: &ControlMix,
     hidden: usize,
     streams: usize,
 ) -> Result<DeviceVector> {
     let next = graph.scratch(residual.len)?;
+    let mixes = match mixes {
+        ControlMix::Batched(mix, tokens) => {
+            control.post_batch(graph, residual, output, mix, &next, *tokens)?;
+            return Ok(next);
+        },
+        ControlMix::Rows(mixes) => mixes,
+    };
     for (token, mix) in mixes.iter().enumerate() {
         control.post_batch_row(
             graph,
@@ -305,6 +642,21 @@ fn encode_kda_batch(
         len: inner,
     };
     let recurrent = graph.scratch(tokens * inner)?;
+    if std::env::var_os("STARK_GLM53_KDA_REGISTER_PREFILL").is_some_and(|value| value == "1")
+        && metal.encode_prefill_register(
+            graph,
+            &projections[0],
+            &projections[1],
+            &projections[2],
+            &forget,
+            &gate,
+            &projections[3],
+            &recurrent,
+            tokens,
+        )?
+    {
+        return project(banks, graph, p, "attn_output.weight", &recurrent, tokens, use_mma);
+    }
     for token in 0..tokens {
         for (source, offset, width) in [
             (&projections[0], 0, inner),

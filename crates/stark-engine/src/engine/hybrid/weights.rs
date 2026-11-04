@@ -670,25 +670,46 @@ impl BoundedBankGroup<'_> {
         }
         let tensor = self.weights.tensor(name)?;
         if tensor.shape.len() != 2
-            || !(1..=8).contains(&tokens)
+            || !(1..=128).contains(&tokens)
             || tensor.shape[1].checked_mul(tokens) != Some(input.len)
             || tensor.shape.iter().any(|&n| n == 0 || n > MAX_VECTOR)
         {
             return Err(Error::Invalid("same-weight batch requires a dense rank-two matrix"));
         }
-        graph.mapped_same_weight(
-            &super::weight_metal::MappedOperation {
-                matrices: vec![self.weights.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
-                inputs: &[],
-                rows: tensor.shape[0],
-                columns: tensor.shape[1],
-                rows_per_batch: 0,
-                format: self.weights.matrix_format(tensor)?,
-            },
-            input,
-            tokens,
-            use_mma,
-        )
+        let operation = super::weight_metal::MappedOperation {
+            matrices: vec![self.weights.mapped_matrix(tensor, 0, tensor.shape[0], tensor.shape[1], true)?],
+            inputs: &[],
+            rows: tensor.shape[0],
+            columns: tensor.shape[1],
+            rows_per_batch: 0,
+            format: self.weights.matrix_format(tensor)?,
+        };
+        if tokens <= 8 {
+            return graph.mapped_same_weight(&operation, input, tokens, use_mma);
+        }
+        // Preserve the separately qualified T8/T4 packed arithmetic. Wider
+        // scheduling only concatenates disjoint results from those kernels.
+        let output = graph.scratch(tensor.shape[0] * tokens)?;
+        let mut start = 0;
+        while start < tokens {
+            let remaining = tokens - start;
+            let count = if remaining >= 8 {
+                8
+            } else if remaining >= 4 {
+                4
+            } else {
+                remaining
+            };
+            graph.mapped_same_weight_into(
+                &operation,
+                &input.slice(start * tensor.shape[1], count * tensor.shape[1])?,
+                &output.slice(start * tensor.shape[0], count * tensor.shape[0])?,
+                count,
+                use_mma,
+            )?;
+            start += count;
+        }
+        Ok(output)
     }
 
     pub(super) fn encode_indexed_matvec(
