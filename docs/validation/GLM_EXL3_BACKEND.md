@@ -11,15 +11,25 @@ The loader requires the explicit `glm5_next` architecture and streaming
 manifest contract. It selects this backend before the GGUF loader. Builds
 without the feature report the pack as unsupported. Current admission reserves a
 maximum 32,768-token context, caps the GPU budget at 112 GiB with a 2 GiB margin, and
-chooses expert rows from the native phase bills. MTP and vision are unavailable.
-The generator's optional native-head preload hint does not enable MTP.
+chooses expert rows from the native phase bills. Vision is unavailable. The
+ordinary loader keeps the MTP head unloaded and reports MTP unavailable. A separate private
+native MTP and head-prefix candidate uses native decode extension API version 1.
+It requires a source-bound stage prepared with `--private-native-caps` and
+explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1` during the Cargo build. Prefix support
+also requires `--experimental-prefix`. Ordinary stages keep native capability
+bits disabled and retain headless loading. This
+candidate is not a production capability.
 
-The bridge currently exposes serial steps and full readouts. Upstream's MTP
-entry point owns draft generation, verification and token commitment together.
-Connecting it requires an explicit sampling/commit contract and additional
-draft-head state in prefix checkpoints. Those interfaces and their numerical
-qualification remain implementation work; MTP cannot be enabled by changing a
-request setting on this backend.
+The bridge exposes serial steps and full readouts, and the private candidate
+adds a native chosen-token MTP round interface with committed-round semantics
+and draft-head state in prefix snapshots. The greedy 128-output and sampled
+1,024-output checks match the native policy; the candidate's prefix mechanism
+and invalidations pass. Full Rust-worker
+integration and quality validation remain pending, so production MTP remains
+unqualified. See the [native mechanism validation](../archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md)
+and [GLM mlx-stream comparison](../benchmarks/2026-11-04-glm-mlx-stream-comparison.md)
+for source-bound evidence; this reference does not duplicate their artifact
+details or hashes.
 
 Admission uses the upstream host's memory census and pack file-cache eviction.
 Remaining foreign file cache stays charged to the baseline. After loading, the
@@ -99,8 +109,10 @@ must identify their source tuple and workload rather than claim an identical
 reproduction.
 
 The [2026-11-04 qualification record](../archive/runs/2026-11-04-glm-exl3-qualification.md)
-binds the residency integration and prefix checks to their source and artifact.
-The current bridge uses serial greedy decoding for its throughput benchmark.
+binds the residency integration and ordinary prefix checks to their source and
+artifact. The private native MTP and head-prefix candidate's current status is
+recorded in the [GLM mlx-stream comparison](../benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
+The qualified bridge throughput benchmark uses serial greedy decoding.
 The historical upstream recipe enables MTP with three draft tokens per round
 and uses different sampling, output length and expert-row settings. Its decode
 rate needs a separate matched control before attributing a speed difference.

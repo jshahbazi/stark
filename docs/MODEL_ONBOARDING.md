@@ -37,7 +37,7 @@ method at the chosen boundary:
 | --- | --- |
 | Attention KV and indexer caches | Which rows remain valid? Are caches full, ring, sliding or shared between layers? Which logical lengths, positions and storage aliases must be restored? |
 | Recurrent state | Which recurrence accumulators, convolution windows and rolling histories need a snapshot? What copy/synchronization and memory costs does it add? |
-| Draft heads and auxiliary graphs | Which hidden states, caches and committed positions are read when MTP or another option changes? Which options must enter the reuse key? |
+| Draft heads and auxiliary graphs | Which hidden states, caches and committed positions are read when MTP or another option changes? What sampler, verification and token-commit policy does a native MTP round use? Which options must enter the reuse key? |
 | Position and token history | Which absolute positions, n-gram windows and history lengths affect the next prefill operation? |
 | Sampler and temporary buffers | Which values must be reseeded or overwritten for each request? Which scratch buffers require a GPU completion fence before reuse or destruction? |
 

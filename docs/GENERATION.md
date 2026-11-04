@@ -353,10 +353,10 @@ Eligibility and key:
 
 - Converted text models whose owned layers are all full, non-ring attention caches (for example Qwen3 dense models) rewind their attention cache.
 - Native GGUF GLM-5.3 resumes from a snapshot on a 1,024-token grid. The snapshot includes KDA recurrence and convolution history, plus the MLA/indexer position and incomplete pooling tail. Completed attention and indexer prefix rows remain in the loaded model's own state.
-- The optional [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md), linked to a prefix-capable native stage, resumes on a 16,384-token grid with MTP off. Ordinary feature-enabled workers expose this boundary; the state-hash diagnostic build setting is separate.
+- The ordinary [EXL3/FP8 GLM backend](validation/GLM_EXL3_BACKEND.md) resumes on a 16,384-token grid with MTP off and its head unloaded. A private native MTP candidate, enabled through a separately prepared capability stage and explicit `STARK_GLM_EXL3_VALIDATE_NATIVE=1`, snapshots the draft-head state with the native prefix state. Its native greedy, sampled and prefix mechanism/invalidation checks pass; full Rust-worker and quality validation remain pending, so production MTP is unqualified. The state-hash diagnostic build setting is separate. See the [native mechanism record](archive/runs/2026-11-04-glm-exl3-native-mtp-prefix.md) and [comparison record](benchmarks/2026-11-04-glm-mlx-stream-comparison.md).
 - The native mixed-precision Qwen3.8 backend (Lily-format, external mixed-affine and Uzu-converted Qwen3.8 artifacts) resumes from a recurrent-state snapshot on a 4,096-token grid. This includes the admitted `ddalcu/Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit` layout. Its attention, indexer and draft-head caches below the snapshot stay in the loaded model's own state.
 - Readiness reports `prefix_cache.supported: false` and keeps `fresh-per-request` for other recurrent, sliding-window, speculator and image models, and for the native Flint and F32 Qwen graphs.
-- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On the Qwen3.8 backend, whether MTP is enabled must also match (`key` reports this).
+- A request reuses state only when it carries a `cache_scope`, the scope and `context_tokens` equal those of the retained entry, and the loaded model instance is the same. On Qwen3.8 and the private native EXL3 candidate, whether MTP is enabled must also match (`key` reports this).
 
 Exactness, converted models:
 

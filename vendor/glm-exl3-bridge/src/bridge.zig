@@ -6,7 +6,9 @@ const sdk = @import("sdk");
 const mlx = @import("mlx_host").mlx;
 const Arch = plugin.glm5_next.arch;
 const experimental_prefix = @import("bridge_options").experimental_prefix;
+const private_native_caps = @import("bridge_options").private_native_caps;
 const allocator = std.heap.c_allocator;
+const native_protocol = @import("native_protocol.zig");
 const abi_version: u32 = 1;
 const max_ceiling: u64 = 112 << 30;
 const default_margin: u64 = 2 << 30;
@@ -29,8 +31,13 @@ const Info = extern struct {
     struct_size: u32, abi_version: u32, vocab_size: u32, prefill_chunk_tokens: u32,
     context_tokens: u64, position: u64, capabilities: u64, fenced: u32, reserved: u32,
 };
+const NativeSampling = native_protocol.Sampling;
+const NativeRound = native_protocol.Round;
 comptime {
     if (@sizeOf(Options) != 40 or @sizeOf(Info) != 48) @compileError("C ABI layout changed");
+    if (@sizeOf(NativeSampling) != 32 or @sizeOf(NativeRound) != 48 or
+        @alignOf(NativeSampling) != 8 or @alignOf(NativeRound) != 8)
+        @compileError("native decode C ABI layout changed");
 }
 
 const Model = struct {
@@ -47,6 +54,13 @@ const Model = struct {
     fresh: bool = true,
     wired_capacity: usize = 0,
     previous_wired_capacity: ?usize = null,
+    native_loader: bool = false,
+    native_head_loaded: bool = false,
+    native_mtp_enabled: bool = false,
+    native_started: bool = false,
+    native_ended: bool = false,
+    native_sampling: ?sdk.SamplingParams = null,
+    native_pending: ?u32 = null,
 };
 // The plugin reader and MLX error callback are process-owned, so admit one model.
 var process_claimed = std.atomic.Value(bool).init(false);
@@ -109,6 +123,12 @@ fn flush(m: *Model) !void {
     mlx.checkError() catch |e| { if (first == null) first = e; };
     if (first) |e| return e;
 }
+fn requestDrain(m: *Model) !void {
+    var first: ?anyerror = null;
+    if (m.native_loader) m.module.starkDrainRoutes() catch |e| { first = e; };
+    flush(m) catch |e| { if (first == null) first = e; };
+    if (first) |e| return e;
+}
 fn fail(m: *Model, e: anyerror) u32 {
     const status = statusOf(e);
     m.module.clearPrefixCapture();
@@ -164,6 +184,13 @@ pub export fn stark_glm_status_name(status: u32) [*:0]const u8 {
 }
 
 pub export fn stark_glm_load(path_ptr: ?[*]const u8, path_len: usize, options_ptr: ?*const Options, result_ptr: ?*?*Model) u32 {
+    return loadEntry(path_ptr, path_len, options_ptr, result_ptr, false, false);
+}
+pub export fn stark_glm_load_native(path_ptr: ?[*]const u8, path_len: usize, options_ptr: ?*const Options, load_mtp_head: u32, result_ptr: ?*?*Model) u32 {
+    if (load_mtp_head > 1) return code(.invalid_argument);
+    return loadEntry(path_ptr, path_len, options_ptr, result_ptr, true, load_mtp_head == 1);
+}
+fn loadEntry(path_ptr: ?[*]const u8, path_len: usize, options_ptr: ?*const Options, result_ptr: ?*?*Model, native_loader: bool, load_head: bool) u32 {
     const options = options_ptr orelse return code(.invalid_argument);
     const result = result_ptr orelse return code(.invalid_argument);
     if (options.struct_size != @sizeOf(Options) or options.abi_version != abi_version) return code(.abi_mismatch);
@@ -177,7 +204,7 @@ pub export fn stark_glm_load(path_ptr: ?[*]const u8, path_len: usize, options_pt
         options.gpu_ceiling_bytes > max_ceiling or margin >= options.gpu_ceiling_bytes or
         options.expert_rows > 288 or options.expert_prefill_rows > 288) return code(.invalid_argument);
     if (process_claimed.cmpxchgStrong(false, true, .acq_rel, .acquire) != null) return code(.busy);
-    const m = load(path, options.*, margin) catch |e| {
+    const m = load(path, options.*, margin, native_loader, load_head) catch |e| {
         process_claimed.store(false, .release);
         return code(statusOf(e));
     };
@@ -185,7 +212,7 @@ pub export fn stark_glm_load(path_ptr: ?[*]const u8, path_len: usize, options_pt
     return code(.ok);
 }
 
-fn load(path: []const u8, options: Options, margin: u64) !*Model {
+fn load(path: []const u8, options: Options, margin: u64, native_loader: bool, load_head: bool) !*Model {
     // This is the first entry allowed to touch MLX. Pure ABI checks return above.
     mlx.installErrorHandler();
     var discarded: [512]u8 = undefined;
@@ -198,7 +225,8 @@ fn load(path: []const u8, options: Options, margin: u64) !*Model {
     const m = try allocator.create(Model);
     errdefer allocator.destroy(m);
     m.* = .{ .io_runtime = std.Io.Threaded.init(allocator, .{}), .owner = std.Thread.getCurrentId(),
-        .module = undefined, .config = undefined, .weights = undefined, .stream = .{} };
+        .module = undefined, .config = undefined, .weights = undefined, .stream = .{},
+        .native_loader = native_loader, .native_head_loaded = load_head };
     errdefer m.io_runtime.deinit();
     loadInto(m, path, options, margin) catch |e| {
         // loadInto's errdefers release every model buffer before restoring the
@@ -222,10 +250,16 @@ fn loadInto(m: *Model, path: []const u8, options: Options, margin: u64) !void {
     errdefer Arch.freeConfig(allocator, m.config);
     const cfg = m.config;
     if (cfg.expert_family != .exl3) return error.UnsupportedPack;
-    // Explicit prototype policy: serial only, no payload dumps or durable request data.
-    cfg.mtp_lane = false;
+    // The original entry remains headless. Preload is charged by the upstream
+    // bill even when the staged native loader parks the head for an off request.
+    cfg.mtp_lane = m.native_head_loaded;
+    if (m.native_head_loaded) {
+        cfg.draft_depth = 3;
+        cfg.draft_gate = 0.5;
+        cfg.draft_head = .bf16;
+    }
     cfg.kda_verify_named = false;
-    cfg.draft_head_named = false;
+    cfg.draft_head_named = m.native_head_loaded;
     cfg.mtp_typical_delta_set = false;
     cfg.mtp_acceptance = .exact;
     cfg.dump_dir_len = 0;
@@ -239,9 +273,13 @@ fn loadInto(m: *Model, path: []const u8, options: Options, margin: u64) !void {
     const nonfile = sdk.memory.boxUsedBytes() orelse return error.MemoryReadingUnavailable;
     // Budget CPU checkpoint + independent restore/copy peak explicitly. No
     // snapshot payload is included in the upstream inference-only bill.
-    const snapshot_reserve: u64 = if (experimental_prefix)
-        2 * cfg.model.kdaStateBytes() + 2 * @as(u64, cfg.model.nDsa()) * 16 * (2 * cfg.model.index_head_dim) * 2 + options.context_tokens * 4
+    const head_snapshot_reserve: u64 = if (experimental_prefix and m.native_head_loaded)
+        2 * @as(u64, cfg.model.hidden_size) * 2 +
+        2 * 16 * (2 * @as(u64, cfg.model.index_head_dim)) * 2
     else 0;
+    const snapshot_reserve: u64 = (if (experimental_prefix)
+        2 * cfg.model.kdaStateBytes() + 2 * @as(u64, cfg.model.nDsa()) * 16 * (2 * cfg.model.index_head_dim) * 2 + options.context_tokens * 4
+    else 0) + head_snapshot_reserve;
     const stop = std.math.add(u64, margin, snapshot_reserve) catch return error.OverBudget;
     if (stop >= options.gpu_ceiling_bytes) return error.OverBudget;
     cfg.wired_margin_bytes = stop;
@@ -282,10 +320,13 @@ fn loadInto(m: *Model, path: []const u8, options: Options, margin: u64) !void {
     m.module = try Arch.Module.init(allocator, io, cfg, &m.weights, m.stream, options.gpu_ceiling_bytes, stop);
     errdefer m.module.deinit();
     try flush(m);
-    // Residency changes only this process's MLX allocator. Never exceed the
-    // admitted model's own bill, the remaining budget, or Metal's local limit.
+    if (m.native_loader) try m.module.starkSetMtpEnabled(false);
+    // Residency changes only this process's MLX allocator. The original loader
+    // preserves its bill-fit reference policy; native decode follows upstream's
+    // recommended-maximum residency premise. Allocation admission is unchanged.
     const process_budget = options.gpu_ceiling_bytes -| stop -| baseline;
-    const wired_capacity = @min(bill.processBound(m.module.rows), process_budget, mlx.maxRecommendedWorkingSet());
+    const wired_capacity = if (m.native_loader) mlx.maxRecommendedWorkingSet()
+        else @min(bill.processBound(m.module.rows), process_budget, mlx.maxRecommendedWorkingSet());
     try installWired(m, @intCast(wired_capacity));
 }
 
@@ -298,6 +339,8 @@ pub export fn stark_glm_prefill(model: ?*Model, ids_ptr: ?[*]const u32, count: u
     if (count > m.module.maxContext()) return reject(m, .context_limit);
     const ids = ids_ptr.?[0..count];
     for (ids) |id| if (id >= m.config.model.vocab_size) return reject(m, .invalid_argument);
+    if (m.module.mtp != null) if (m.module.prefix_capture_at) |checkpoint|
+        if (checkpoint >= count) return reject(m, .invalid_argument);
     const row = m.module.prefill(ids, .{ .prompt_tokens = count, .max_tokens = 0, .host_context = m.module.maxContext() }) catch |e| return fail(m, e);
     checkResult(m, row) catch |e| return fail(m, e);
     m.fresh = false;
@@ -307,6 +350,7 @@ pub export fn stark_glm_step(model: ?*Model, token: u32) u32 {
     const m = model orelse return code(.invalid_argument);
     const state = ready(m);
     if (state != .ok) return code(state);
+    if (m.native_loader and m.native_started) return reject(m, .invalid_state);
     if (m.fresh or m.readout == null) return reject(m, .invalid_state);
     if (token >= m.config.model.vocab_size) return reject(m, .invalid_argument);
     if (m.module.position() >= m.module.maxContext()) return reject(m, .context_limit);
@@ -329,6 +373,147 @@ pub export fn stark_glm_readout_f32(model: ?*Model, dst_ptr: ?[*]f32, count: usi
     @memcpy(dst_ptr.?[0..count], values);
     return code(.ok);
 }
+
+pub export fn stark_glm_set_mtp_enabled(model: ?*Model, enabled: u32) u32 {
+    const m = model orelse return code(.invalid_argument);
+    const state = ready(m);
+    if (state != .ok) return code(state);
+    if (!m.native_loader) return reject(m, .unsupported);
+    if (enabled > 1 or !m.fresh or m.native_started) return reject(m, .invalid_argument);
+    if (enabled == 1 and !m.native_head_loaded) return reject(m, .unsupported);
+    const on = enabled == 1;
+    if (on != m.native_mtp_enabled) {
+        // A checkpoint's state-affecting request mode must match its next use.
+        m.module.invalidatePrefix();
+        m.module.starkSetMtpEnabled(on) catch |e| return fail(m, e);
+        m.native_mtp_enabled = on;
+    }
+    return code(.ok);
+}
+
+fn nativeSampling(s: *const NativeSampling) ?sdk.SamplingParams {
+    const policy = native_protocol.sampling(s) orelse return null;
+    return .{ .temperature = policy.temperature, .top_p = policy.top_p, .seed = policy.seed };
+}
+
+fn nativeChoice(m: *Model) !u32 {
+    const row = m.readout orelse return error.InvalidReadout;
+    // Copy the MLX handle, not the tensor. The sampler may free its input when
+    // replacing a sampled row by a one-hot; the raw F32 readout stays owned here.
+    var alias = mlx.mlx_array_new();
+    mlx.check(mlx.mlx_array_set(&alias, row)) catch |e| {
+        _ = mlx.mlx_array_free(alias);
+        return e;
+    };
+    const chosen = m.module.sampler.chosen(alias, m.module.position()) catch |e| {
+        _ = mlx.mlx_array_free(alias);
+        return e;
+    };
+    defer _ = mlx.mlx_array_free(chosen);
+    const g = &m.module.g;
+    const mark = g.mark();
+    defer g.resetTo(mark);
+    const selected = try g.astype(try g.argmax(chosen, -1), .uint32);
+    var token: [1]u32 = undefined;
+    _ = try g.hostU32(selected, &token);
+    try mlx.checkError();
+    if (token[0] >= m.config.model.vocab_size) return error.InvalidReadout;
+    return token[0];
+}
+
+pub export fn stark_glm_native_initial(model: ?*Model, sampling_ptr: ?*const NativeSampling, out_ptr: ?*u32) u32 {
+    const m = model orelse return code(.invalid_argument);
+    const state = ready(m);
+    if (state != .ok) return code(state);
+    if (!m.native_loader) return reject(m, .unsupported);
+    const sampling = sampling_ptr orelse return reject(m, .invalid_argument);
+    const out = out_ptr orelse return reject(m, .invalid_argument);
+    if (sampling.struct_size != @sizeOf(NativeSampling) or sampling.abi_version != abi_version)
+        return reject(m, .abi_mismatch);
+    if (m.fresh or m.readout == null or m.native_started or m.native_ended) return reject(m, .invalid_state);
+    const policy = nativeSampling(sampling) orelse return reject(m, .invalid_argument);
+    m.module.sampler.arm(.{ .greedy = policy.greedy(), .clean = true, .sampling = policy });
+    m.module.sampler.begin(Arch.draft_lane.laneName(m.module));
+    const pending = nativeChoice(m) catch |e| return fail(m, e);
+    m.native_sampling = policy;
+    m.native_pending = pending;
+    m.native_started = true;
+    out.* = pending;
+    return code(.ok);
+}
+
+pub export fn stark_glm_native_round(model: ?*Model, pending: u32, accepted_cap: u32, out_ptr: ?*NativeRound) u32 {
+    const m = model orelse return code(.invalid_argument);
+    const state = ready(m);
+    if (state != .ok) return code(state);
+    if (!m.native_loader) return reject(m, .unsupported);
+    const out = out_ptr orelse return reject(m, .invalid_argument);
+    if (out.struct_size != @sizeOf(NativeRound) or out.abi_version != abi_version) return reject(m, .abi_mismatch);
+    if (!m.native_started or m.native_ended or m.native_sampling == null or m.native_pending == null)
+        return reject(m, .invalid_state);
+    if (pending != m.native_pending.? or pending >= m.config.model.vocab_size or accepted_cap > 3 or
+        (!m.native_mtp_enabled and accepted_cap != 0)) return reject(m, .invalid_argument);
+    const before = m.module.position();
+    if (before >= m.module.maxContext()) return reject(m, .context_limit);
+    out.* = .{ .struct_size = @sizeOf(NativeRound), .abi_version = abi_version, .count = 0,
+        .accepted = 0, .verified_drafts = 0, .next_pending = 0, .tokens = @splat(0), .position = before };
+    clearReadout(m);
+    if (m.native_mtp_enabled) {
+        const stats0 = Arch.draft_lane.stats(m.module);
+        var round = m.module.mtpRound(allocator, pending, accepted_cap, m.native_sampling.?) catch |e| return fail(m, e);
+        defer round.deinit(allocator);
+        const stats1 = Arch.draft_lane.stats(m.module);
+        if (round.tokens.len == 0 or round.tokens.len > 4 or round.tokens[0] != pending or
+            round.accepted + 1 != round.tokens.len or stats1.drafted < stats0.drafted or
+            stats1.drafted - stats0.drafted > accepted_cap or round.accepted > stats1.drafted - stats0.drafted or
+            round.next_token >= m.config.model.vocab_size or m.module.position() != before + round.tokens.len)
+            return fail(m, error.InvalidReadout);
+        for (round.tokens) |token| if (token >= m.config.model.vocab_size) return fail(m, error.InvalidReadout);
+        out.count = @intCast(round.tokens.len);
+        out.accepted = round.accepted;
+        out.verified_drafts = @intCast(stats1.drafted - stats0.drafted);
+        out.next_pending = round.next_token;
+        @memcpy(out.tokens[0..round.tokens.len], round.tokens);
+    } else {
+        // Truly headless execution, including when a preloaded head is parked.
+        const row = m.module.step(&.{pending}) catch |e| return fail(m, e);
+        checkResult(m, row) catch |e| return fail(m, e);
+        out.count = 1;
+        out.tokens[0] = pending;
+        out.next_pending = nativeChoice(m) catch |e| return fail(m, e);
+        if (m.module.position() != before + 1) return fail(m, error.InvalidReadout);
+    }
+    // The module has already evaluated/read its decision and flushed consumed
+    // routes. Avoid the private benchmark's additional whole-stream fence.
+    mlx.checkError() catch |e| return fail(m, e);
+    out.position = m.module.position();
+    if (!native_protocol.validRound(out, pending, accepted_cap, before, m.config.model.vocab_size))
+        return fail(m, error.InvalidReadout);
+    m.native_pending = out.next_pending;
+    return code(.ok);
+}
+
+pub export fn stark_glm_native_end_request(model: ?*Model) u32 {
+    const m = model orelse return code(.invalid_argument);
+    const state = owned(m);
+    if (state != .ok) return code(state);
+    if (!m.native_loader) return reject(m, .unsupported);
+    // End never draws a bonus token or advances the target. Settle all IO and
+    // the whole stream before exposing final success to an iterator or Drop.
+    var first: ?anyerror = null;
+    requestDrain(m) catch |e| { first = e; };
+    m.module.starkDiscardTail();
+    clearReadout(m);
+    m.native_sampling = null;
+    m.native_pending = null;
+    m.native_started = false;
+    m.native_ended = true;
+    if (first) |e| return fail(m, e);
+    if (m.fenced) return code(.reload_required);
+    if (m.cancelled.load(.acquire)) return reject(m, .cancelled);
+    if (m.request_invalid) return code(.invalid_state);
+    return code(.ok);
+}
 pub export fn stark_glm_get_position(model: ?*Model, result: ?*u64) u32 {
     const m = model orelse return code(.invalid_argument);
     const dst = result orelse return code(.invalid_argument);
@@ -345,7 +530,12 @@ pub export fn stark_glm_get_info(model: ?*Model, info_ptr: ?*Info) u32 {
     if (dst.struct_size != @sizeOf(Info) or dst.abi_version != abi_version) return code(.abi_mismatch);
     dst.* = .{ .struct_size = @sizeOf(Info), .abi_version = abi_version, .vocab_size = m.config.model.vocab_size,
         .prefill_chunk_tokens = 16_384, .context_tokens = m.module.maxContext(), .position = m.module.position(),
-        .capabilities = if (experimental_prefix) 7 else 3, .fenced = @intFromBool(m.fenced), .reserved = 0 };
+        // Default builds keep native bits off. An explicit private stage may
+        // expose the implementation for worker qualification, even while the
+        // admitted head is parked before request-mode selection.
+        .capabilities = native_protocol.capabilities(experimental_prefix, m.module.mtp != null,
+            m.native_loader, m.native_head_loaded, private_native_caps),
+        .fenced = @intFromBool(m.fenced), .reserved = 0 };
     return code(.ok);
 }
 pub export fn stark_glm_get_rows(model: ?*Model, prompt_ptr: ?*u32, decode_ptr: ?*u32) u32 {
@@ -379,19 +569,19 @@ pub export fn stark_glm_drain(model: ?*Model) u32 {
     const m = model orelse return code(.invalid_argument);
     const state = owned(m);
     if (state != .ok) return code(state);
-    flush(m) catch |e| return fail(m, e);
+    requestDrain(m) catch |e| return fail(m, e);
     return code(.ok);
 }
 pub export fn stark_glm_reset(model: ?*Model) u32 {
     const m = model orelse return code(.invalid_argument);
     const state = owned(m);
     if (state != .ok) return code(state);
-    flush(m) catch |e| return fail(m, e);
+    requestDrain(m) catch |e| return fail(m, e);
     if (m.fenced) return code(.reload_required);
     if (m.cancelled.load(.acquire)) m.module.invalidatePrefix();
     m.module.clearPrefixCapture();
     clearReadout(m);
-    m.module.requestEnd();
+    if (m.native_loader) m.module.starkDiscardTail() else m.module.requestEnd();
     m.module.cache.restart(&m.module.g);
     // Eager-tail policy guarantees canonical routes, but restore explicitly.
     m.module.prompt_pass = m.module.installed.prompt;
@@ -400,6 +590,10 @@ pub export fn stark_glm_reset(model: ?*Model) u32 {
     m.module.tail = .{};
     m.module.decode = .{};
     m.fresh = true;
+    m.native_started = false;
+    m.native_ended = false;
+    m.native_sampling = null;
+    m.native_pending = null;
     m.request_invalid = false;
     m.cancelled.store(false, .release);
     return code(.ok);
@@ -461,7 +655,7 @@ pub export fn stark_glm_destroy(model_ptr: ?*?*Model) u32 {
     const state = owned(m);
     if (state != .ok) return code(state);
     var status: Status = .ok;
-    flush(m) catch |e| { status = statusOf(e); };
+    requestDrain(m) catch |e| { status = statusOf(e); };
     clearReadout(m);
     // Native teardown synchronizes again and joins the source's reader before
     // its owned slot/mmap buffers are released. Keep config/weights alive until then.

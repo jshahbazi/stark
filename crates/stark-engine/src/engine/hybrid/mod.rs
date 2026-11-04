@@ -74,7 +74,7 @@ impl PrefixSnapshot {
         match &self.inner {
             PrefixState::Glm(_) => false,
             #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
-            PrefixState::GlmExl3(_) => false,
+            PrefixState::GlmExl3(snapshot) => snapshot.mtp_enabled(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             PrefixState::Lily(snapshot) => snapshot.mtp_enabled(),
         }
@@ -116,6 +116,51 @@ pub struct MtpStats {
     pub draft_seconds: f64,
     pub verify_seconds: f64,
     pub rollback_seconds: f64,
+}
+
+/// Explicit device target-draw policy for the staged GLM native stream.
+/// Its position-keyed RNG is distinct from the caller-owned Rust sampler.
+#[derive(Clone, Copy)]
+pub enum NativeSampling {
+    Greedy {
+        seed: u64,
+    },
+    Stochastic {
+        temperature: f32,
+        top_p: f32,
+        seed: u64,
+    },
+}
+
+impl NativeSampling {
+    pub fn is_supported(self) -> bool {
+        match self {
+            Self::Greedy {
+                ..
+            } => true,
+            Self::Stochastic {
+                temperature,
+                top_p,
+                ..
+            } => {
+                temperature.is_finite()
+                    && (0.01..=100.0).contains(&temperature)
+                    && top_p.is_finite()
+                    && top_p > 0.0
+                    && top_p <= 1.0
+            },
+        }
+    }
+}
+
+/// Native request aggregates. `verified_drafts` counts gate-admitted drafts;
+/// it does not count every head proposal computed before the confidence gate.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub struct NativeDecodeStats {
+    pub rounds: usize,
+    pub verified_drafts: usize,
+    pub accepted: usize,
+    pub committed: usize,
 }
 
 fn json_file(
@@ -213,6 +258,34 @@ impl Model {
         path: &Path,
         with_mtp: bool,
     ) -> Result<Self> {
+        Self::load_with_policy(path, with_mtp, false)
+    }
+
+    /// Explicit source-bound development stage. The ordinary loader keeps its
+    /// current serial EXL3 behavior and does not preload a native MTP head.
+    /// Other model families, and builds without the stage, keep their loader.
+    pub fn load_with_native_decode(
+        path: &Path,
+        with_mtp: bool,
+    ) -> Result<Self> {
+        Self::load_with_policy(path, with_mtp, Self::native_decode_stage_available())
+    }
+
+    pub const fn native_decode_stage_available() -> bool {
+        cfg!(all(
+            feature = "glm-exl3",
+            target_os = "macos",
+            target_arch = "aarch64",
+            stark_glm_exl3_native_decode_available
+        ))
+    }
+
+    fn load_with_policy(
+        path: &Path,
+        with_mtp: bool,
+        native_decode_stage: bool,
+    ) -> Result<Self> {
+        let _ = native_decode_stage;
         #[cfg(not(all(feature = "metal", target_os = "macos")))]
         let _ = with_mtp;
         let outer = config(path)?;
@@ -276,6 +349,8 @@ impl Model {
                 let canonical = path.canonicalize()?;
                 let mut options = glm_exl3::LoadOptions::new(context as usize);
                 options.prefix_reuse = cfg!(stark_glm_exl3_prefix_available);
+                options.native_decode_stage = native_decode_stage;
+                options.load_mtp_head = native_decode_stage && with_mtp;
                 let model = glm_exl3::GlmExl3Model::load(&canonical, vocab_size, options)?;
                 if model.vocab_size() != vocab_size
                     || model.max_context_length() != context as usize
@@ -551,6 +626,10 @@ impl Model {
     }
 
     pub fn supports_mtp(&self) -> bool {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.mtp_capabilities().is_some();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.supports_mtp();
@@ -559,6 +638,10 @@ impl Model {
     }
 
     pub fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.mtp_capabilities();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.mtp_capabilities();
@@ -567,6 +650,10 @@ impl Model {
     }
 
     pub fn mtp_verification(&self) -> &'static str {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.mtp_verification();
+        }
         #[cfg(all(feature = "metal", target_os = "macos"))]
         if let Forward::Lily(model) = &self.forward {
             return model.mtp_verification();
@@ -579,6 +666,8 @@ impl Model {
         enabled: bool,
     ) -> Result<()> {
         match &mut self.forward {
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.set_mtp_enabled(enabled),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             Forward::Lily(model) => model.set_mtp_enabled(enabled),
             _ if !enabled => Ok(()),
@@ -592,6 +681,70 @@ impl Model {
             return model.mtp_stats();
         }
         MtpStats::default()
+    }
+
+    /// Complete a pending GLM prompt and draw its first token without a host
+    /// vocabulary copy. The explicit native stage has its own sampler policy.
+    pub fn step_native_initial(
+        &mut self,
+        token: u32,
+        sampling: NativeSampling,
+    ) -> Result<u32> {
+        match &mut self.forward {
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.step_native_initial(token, sampling),
+            _ => {
+                let _ = (token, sampling);
+                Err(Error::Unsupported("native target draw unavailable"))
+            },
+        }
+    }
+
+    /// Tail after the already-published first token. `total_budget` counts
+    /// committed native tokens including that first token, not visible tail IDs.
+    pub fn native_decode(
+        &mut self,
+        first: u32,
+        total_budget: usize,
+        drafts: usize,
+    ) -> Result<Box<dyn Iterator<Item = Result<u32>> + '_>> {
+        match &mut self.forward {
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => Ok(Box::new(model.native_decode(first, total_budget, drafts)?)),
+            _ => {
+                let _ = (first, total_budget, drafts);
+                Err(Error::Unsupported("native target stream unavailable"))
+            },
+        }
+    }
+
+    /// Idempotent post-iterator cleanup acknowledgement. Early Drop drains
+    /// without sampling; a deferred end failure is returned here and fences
+    /// the model, so a successful collector cannot hide cleanup failure.
+    pub fn finish_native_request(&mut self) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.finish_native_request(),
+            _ => Err(Error::Unsupported("native target stream unavailable")),
+        }
+    }
+
+    /// Cancellation or a host callback/transport failure invalidates every
+    /// request snapshot, even if the iterator already drained successfully.
+    pub fn abort_native_request(&mut self) -> Result<()> {
+        match &mut self.forward {
+            #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+            Forward::GlmExl3(model) => model.cancel(),
+            _ => Err(Error::Unsupported("native target stream unavailable")),
+        }
+    }
+
+    pub fn native_decode_stats(&self) -> NativeDecodeStats {
+        #[cfg(all(feature = "glm-exl3", target_os = "macos", target_arch = "aarch64"))]
+        if let Forward::GlmExl3(model) = &self.forward {
+            return model.native_decode_stats();
+        }
+        NativeDecodeStats::default()
     }
 
     pub fn mtp_decode<'a>(

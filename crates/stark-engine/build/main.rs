@@ -17,6 +17,8 @@ fn main() -> anyhow::Result<ExitCode> {
     println!("cargo::rerun-if-changed=build");
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_prefix_validation)");
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_prefix_available)");
+    println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_native_decode_stage)");
+    println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_native_decode_available)");
 
     if envs::build_always() {
         println!("cargo::rerun-if-changed=/var/empty/hack_nonexistent_file_to_always_rerun");

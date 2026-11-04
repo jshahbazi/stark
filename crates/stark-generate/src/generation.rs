@@ -211,6 +211,7 @@ fn valid_image_metadata(metadata: &PreparedImageMetadata) -> bool {
         && metadata.image_tokens <= 1024
 }
 
+#[derive(Clone)]
 pub(crate) struct GenerationOptions {
     pub context_tokens: u32,
     pub max_new_tokens: u32,
@@ -431,6 +432,14 @@ pub(crate) trait GenerationBackend {
     fn mtp_metadata(&self) -> Option<Value> {
         None
     }
+    /// Resolve sampling support before prefix planning and generation. Backends
+    /// may fall back to serial, and the reply reports the effective selection.
+    fn effective_mtp_drafts(
+        &self,
+        options: &GenerationOptions,
+    ) -> Result<u32, &'static str> {
+        Ok(options.mtp_drafts)
+    }
     fn image_artifact_identity(&self) -> Option<ImageArtifactIdentity<'_>> {
         None
     }
@@ -547,7 +556,7 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 capabilities.max_drafts == 0
                     || capabilities.max_drafts > u32::MAX as usize
                     || !(1..=capabilities.max_drafts).contains(&capabilities.recommended_drafts)
-                    || capabilities.sampling != "exact-rejection-v1"
+                    || !matches!(capabilities.sampling, "exact-rejection-v1" | "native-target-draw-match-v1")
                     || capabilities.verification.is_empty()
                     || capabilities.verification.len() > 128
                     || !capabilities
@@ -635,6 +644,21 @@ impl<B: GenerationBackend> GenerationWorker<B> {
         output: &mut impl Write,
     ) -> Result<Value, &'static str> {
         let started = Instant::now();
+        let requested_drafts = options.mtp_drafts;
+        let effective_drafts = self.backend.effective_mtp_drafts(options)?;
+        if effective_drafts > requested_drafts || (effective_drafts != 0 && effective_drafts != requested_drafts) {
+            return Err("invalid_generation_output");
+        }
+        let effective_options;
+        let options = if effective_drafts != requested_drafts {
+            effective_options = GenerationOptions {
+                mtp_drafts: effective_drafts,
+                ..options.clone()
+            };
+            &effective_options
+        } else {
+            options
+        };
         let output_token_budget = (options.context_tokens as usize - input_tokens).min(options.max_new_tokens as usize);
         let reused = match image {
             None => self.backend.prefix_cache_plan(input, options),
@@ -739,6 +763,10 @@ impl<B: GenerationBackend> GenerationWorker<B> {
                 } else {
                     fields.insert(name.to_owned(), expected);
                 }
+            }
+            if effective_drafts != requested_drafts {
+                fields.insert("requested_drafts".to_owned(), json!(requested_drafts));
+                fields.insert("fallback_reason".to_owned(), json!("unsupported_sampling"));
             }
             reply["mtp"] = metadata;
         }
@@ -1173,6 +1201,7 @@ mod tests {
         omit_mtp_metadata: bool,
         mtp_reply_override: Option<Value>,
         mtp_requests: Vec<u32>,
+        mtp_effective_override: Option<u32>,
         image_schema: u32,
         family_version: u32,
         family_profile: &'static str,
@@ -1214,6 +1243,12 @@ mod tests {
         }
         fn mtp_capabilities(&self) -> Option<MtpCapabilities> {
             self.mtp
+        }
+        fn effective_mtp_drafts(
+            &self,
+            options: &GenerationOptions,
+        ) -> Result<u32, &'static str> {
+            Ok(self.mtp_effective_override.unwrap_or(options.mtp_drafts))
         }
         fn mtp_metadata(&self) -> Option<Value> {
             if self.omit_mtp_metadata {
@@ -1449,6 +1484,7 @@ mod tests {
             omit_mtp_metadata: false,
             mtp_reply_override: None,
             mtp_requests: Vec::new(),
+            mtp_effective_override: None,
             image_schema: 2,
             family_version: 1,
             family_profile: "qwen35-dense-bf16-merged-v1",
@@ -1480,6 +1516,55 @@ mod tests {
             recommended_drafts,
             sampling: "exact-rejection-v1",
             verification: "fake-model-exact-v1",
+        }
+    }
+
+    #[test]
+    fn mtp_sampling_fallback_reports_effective_selection() {
+        let mut worker = worker();
+        let mut native = capabilities(3, 3);
+        native.sampling = "native-target-draw-match-v1";
+        worker.backend.mtp = Some(native);
+        worker.mtp = Some(native);
+        worker.backend.omit_mtp_metadata = true;
+        worker.backend.mtp_effective_override = Some(0);
+        let mut request = standard();
+        request["mtp_drafts"] = json!(3);
+        let reply = post(&mut worker, request);
+        assert_eq!(worker.backend.mtp_requests, vec![0]);
+        assert_eq!(reply["mtp"]["enabled"], false);
+        assert_eq!(reply["mtp"]["drafts"], 0);
+        assert_eq!(reply["mtp"]["requested_drafts"], 3);
+        assert_eq!(reply["mtp"]["sampling"], "native-target-draw-match-v1");
+        assert_eq!(reply["mtp"]["fallback_reason"], "unsupported_sampling");
+    }
+
+    #[test]
+    fn native_target_sampling_policy_is_admitted_at_startup() {
+        let mut backend = worker().backend;
+        let mut native = capabilities(3, 3);
+        native.sampling = "native-target-draw-match-v1";
+        backend.mtp = Some(native);
+        assert!(GenerationWorker::new(backend).is_ok());
+    }
+
+    #[test]
+    fn backend_cannot_silently_change_requested_draft_depth() {
+        for effective in [1, 2, 4] {
+            let mut worker = worker();
+            worker.backend.mtp = Some(capabilities(3, 3));
+            worker.mtp = worker.backend.mtp;
+            worker.backend.mtp_effective_override = Some(effective);
+            let mut request = standard();
+            request["mtp_drafts"] = json!(3);
+            let mut output = Vec::new();
+            assert_eq!(
+                worker.process_line(&serde_json::to_vec(&request).unwrap(), &mut output),
+                Err("native_operation_failed")
+            );
+            let reply: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(reply["error"], "invalid_generation_output");
+            assert_eq!(worker.backend.generation_calls, 0);
         }
     }
 

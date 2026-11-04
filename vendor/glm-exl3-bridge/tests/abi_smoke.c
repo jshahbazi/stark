@@ -3,6 +3,13 @@
 #include <stdio.h>
 #include <string.h>
 
+_Static_assert(sizeof(stark_glm_native_sampling) == 32, "native sampling ABI");
+_Static_assert(_Alignof(stark_glm_native_sampling) == 8, "native sampling alignment");
+_Static_assert(offsetof(stark_glm_native_sampling, seed) == 24, "native seed offset");
+_Static_assert(sizeof(stark_glm_native_round_result) == 48, "native round ABI");
+_Static_assert(offsetof(stark_glm_native_round_result, tokens) == 24, "native token offset");
+_Static_assert(offsetof(stark_glm_native_round_result, position) == 40, "native position offset");
+
 static int check(int condition, const char *message) {
     if (!condition) {
         fprintf(stderr, "FAIL: %s\n", message);
@@ -20,6 +27,8 @@ int main(void) {
     float logit = 0.0f;
     uint32_t token = 0;
     stark_glm_prefix_snapshot *snapshot = NULL;
+    stark_glm_native_sampling sampling = {0};
+    stark_glm_native_round_result round = {0};
 
     memset(&options, 0, sizeof(options));
     options.struct_size = (uint32_t)sizeof(options);
@@ -41,6 +50,18 @@ int main(void) {
     ok &= check(stark_glm_load(NULL, 0, NULL, NULL) ==
                     STARK_GLM_INVALID_ARGUMENT,
                 "load rejects null arguments");
+    ok &= check(stark_glm_load_native(NULL, 0, NULL, 0, NULL) == STARK_GLM_INVALID_ARGUMENT,
+                "native load rejects null arguments before device use");
+    ok &= check(stark_glm_load_native(NULL, 0, &options, 2, &model) == STARK_GLM_INVALID_ARGUMENT,
+                "native load rejects invalid preload flag before device use");
+    ok &= check(stark_glm_set_mtp_enabled(NULL, 0) == STARK_GLM_INVALID_ARGUMENT,
+                "native mode rejects null model");
+    ok &= check(stark_glm_native_initial(NULL, &sampling, &token) == STARK_GLM_INVALID_ARGUMENT,
+                "native initial rejects null model");
+    ok &= check(stark_glm_native_round(NULL, 0, 0, &round) == STARK_GLM_INVALID_ARGUMENT,
+                "native round rejects null model");
+    ok &= check(stark_glm_native_end_request(NULL) == STARK_GLM_INVALID_ARGUMENT,
+                "native end rejects null model");
     options.struct_size--;
     ok &= check(stark_glm_load(NULL, 0, &options, &model) ==
                     STARK_GLM_ABI_MISMATCH,

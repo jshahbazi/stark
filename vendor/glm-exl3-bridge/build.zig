@@ -20,6 +20,7 @@ pub fn build(b: *std.Build) void {
     const bridge = b.createModule(.{ .root_source_file = b.path("src/bridge.zig"), .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .imports = &.{ .{ .name = "mlx_stream", .module = plugin }, .{ .name = "mlx_host", .module = host }, .{ .name = "sdk", .module = sdk } } });
     const options = b.addOptions();
     options.addOption(bool, "experimental_prefix", b.option(bool, "experimental-prefix", "Compile model-local prefix support; artifact qualification is separate") orelse false);
+    options.addOption(bool, "private_native_caps", b.option(bool, "private-native-caps", "Advertise native/head-prefix implementation only in a private qualification stage") orelse false);
     bridge.addOptions("bridge_options", options);
     const csrc = b.pathJoin(&.{ plugin_dir, "csrc" });
     bridge.addCSourceFile(.{ .file = b.path("src/mlx_wired.cpp"), .flags = &.{ "-std=c++20", "-O2", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-Wno-deprecated-copy" } });
@@ -45,7 +46,13 @@ pub fn build(b: *std.Build) void {
     b.installFile("include/stark_glm.h", "include/stark_glm.h");
     const smoke = cExe(b, target, optimize, lib, libdir, frameworks, "stark-glm-abi-smoke", "tests/abi_smoke.c");
     b.installArtifact(smoke);
-    b.step("test", "Run model-free C ABI admission checks (no model or device calls)").dependOn(&b.addRunArtifact(smoke).step);
+    const test_step = b.step("test", "Run model-free C ABI admission checks (no model or device calls)");
+    test_step.dependOn(&b.addRunArtifact(smoke).step);
+    const protocol_tests = b.addTest(.{ .root_module = b.createModule(.{
+        .root_source_file = b.path("src/native_protocol.zig"), .target = target, .optimize = optimize,
+    }) });
+    // This root imports only std, so its test discovery cannot start MLX tests.
+    test_step.dependOn(&b.addRunArtifact(protocol_tests).step);
     const bench = cExe(b, target, optimize, lib, libdir, frameworks, "stark-glm-bench", "tools/bench.c");
     b.installArtifact(bench);
     b.step("bench", "Build the standalone benchmark without executing inference").dependOn(&bench.step);

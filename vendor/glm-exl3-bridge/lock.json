@@ -10,7 +10,7 @@
   "zig_version": "0.17.0",
   "zig_sha256": "1c5f706db0ed6d55451940f31dc05a6177d05696bc1fa5d853696d04c718b523",
   "plugin_patch_sha256": "29321d29027526e1371f249263e96b4aa820c019e54292104943bcdf3258942a",
-  "bridge_source_sha256": "fa5617ae3f8c5de87550d840603524fb9b992ca3de33e2df59b92c099a48ff71",
+  "bridge_source_sha256": "34da056a26a8b2ad64737f3dbf048021bfad5cf69a2c26df9e2e57d46761bd7d",
   "dependency_artifacts": {
     "mlx": "04352e86da9f34479c320168aa5911226ce6d14fe200c3440118244f4442fb91",
     "mlxc": "2ea0b00f39a3e9b69f2b651678565be095c41c1f49268bc5edc94ad19ad5864d",
@@ -24,7 +24,7 @@
     },
     {
       "path": "build.zig",
-      "sha256": "2c77d11123e43e3fcb2b4fc42b6f3a871f0432993dcac3de1ae6632a31e63dce"
+      "sha256": "2030b2378d3904dbc3fcf352c69a36d1b5b0b9b96bf38e41e1c7665c62c048eb"
     },
     {
       "path": "build.zig.zon",
@@ -32,7 +32,7 @@
     },
     {
       "path": "include/stark_glm.h",
-      "sha256": "985d9cebc4977a1ef2489c3f07e0f14c09e0116bdee5a281075dbe23bf5395ea"
+      "sha256": "2de15d6f232c835ee5c4df60650a6d73c0614dd5d191a3b90332d732eaa52d45"
     },
     {
       "path": "licenses/mlx-serve-LICENSE",
@@ -59,12 +59,16 @@
       "sha256": "72563c4aa3d81125df33a6d9502b8fbce1c4100cc9ffcda6f3eec05f97395ecd"
     },
     {
+      "path": "patches/mlx-stream-native.patch",
+      "sha256": "fa0e0b49669c6c5be294fae805b7e7dfce84abbd5eb3634be1c1d891422c8179"
+    },
+    {
       "path": "patches/mlx-stream-prefix.patch",
       "sha256": "29321d29027526e1371f249263e96b4aa820c019e54292104943bcdf3258942a"
     },
     {
       "path": "src/bridge.zig",
-      "sha256": "4edda06ee9e2f4a8b605e69abdb635a266f3ae5c2d2d79748b8394e47beb44f7"
+      "sha256": "26347b76dcf00765f19f3c5cdedadad7dd89afc47ed6d340931f7206ee18b39f"
     },
     {
       "path": "src/host/crt.zig",
@@ -103,8 +107,12 @@
       "sha256": "12b25cfd0b4f89d7ea0a3b49fd7fdfe0692aa8013d92a54fd0a9aa8b8432d59c"
     },
     {
+      "path": "src/native_protocol.zig",
+      "sha256": "99ea3e5ba8e3328f4e374800444ee35f00abba3e0aeae1aa61621c790a2f8ce3"
+    },
+    {
       "path": "tests/abi_smoke.c",
-      "sha256": "44af561be005b95ae8bf2638a7154408a4ac4745747650e2a3e1fa758c64f483"
+      "sha256": "b1338a0641c4ffce9a96f7ab48b4b7b1a25a5ac673f07c66d4f682306217909c"
     },
     {
       "path": "tools/bench.c",
@@ -112,7 +120,7 @@
     },
     {
       "path": "tools/prepare_stage.py",
-      "sha256": "51b0fdb14601a6e1e9a13fb3dd467b94a8c244e4875b9e6b087df9e2cd1ef982"
+      "sha256": "99124af7948853721865e5e3195b77ae15705012d605aa06d3dbea98abd2096e"
     }
   ],
   "dependency_headers": [
@@ -1848,5 +1856,7 @@
   "dependency_headers_sha256": "157040a6c6ed180302ca6ad3945e6e014f4d84409768982d68fbcbfa5c69cf0c",
   "mlxc_worktree_diff_sha256": "e87c9bb59e365ee8a19ee4b98c605a516f44ff5106cf099f2787f58ec9f48723",
   "mlx_getter_patch_sha256": "72563c4aa3d81125df33a6d9502b8fbce1c4100cc9ffcda6f3eec05f97395ecd",
-  "mlx_worktree_diff_sha256": "458411eb8ddd7a7a4ebaeeed6324ccffd5b3c68a86095074f49d58cf14305cfe"
+  "mlx_worktree_diff_sha256": "458411eb8ddd7a7a4ebaeeed6324ccffd5b3c68a86095074f49d58cf14305cfe",
+  "native_decode_api_version": 1,
+  "native_decode_patch_sha256": "fa0e0b49669c6c5be294fae805b7e7dfce84abbd5eb3634be1c1d891422c8179"
 }

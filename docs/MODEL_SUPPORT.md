@@ -15,7 +15,10 @@ GLM repositories remain outside generic converter preflight. The registry also
 includes a `qwen4_exp` converter for Lily-format Qwen3.8 text models. It writes
 a self-contained typed `Qwen38LanguageModelConfig` artifact with canonical
 MLX storage and unchanged mixed quantization, sharing the existing specialized
-Qwen kernels. Vision and MTP tensors are omitted. The
+Qwen kernels. Vision and MTP tensors are omitted from this converter path. The
+ordinary/catalog GLM GGUF path keeps MTP unavailable; the
+private EXL3/FP8 API1 candidate and its qualification status are documented in
+the [backend reference](validation/GLM_EXL3_BACKEND.md). The
 [Uzu-format study](benchmarks/QWEN38_UZU_FORMAT_2026_10_29.md) records storage,
 readout and sampled-generation controls for the pinned converted artifact.
 The native loader validates tensors; generic Decision use still requires a

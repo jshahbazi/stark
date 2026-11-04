@@ -53,6 +53,7 @@ pub fn link(
     ensure!(target_arch == "aarch64" && target_os == "macos", "glm-exl3 requires macOS arm64 26.2+");
     println!("cargo::rerun-if-env-changed=STARK_GLM_EXL3_STAGE");
     println!("cargo::rerun-if-env-changed=STARK_GLM_EXL3_VALIDATE_PREFIX");
+    println!("cargo::rerun-if-env-changed=STARK_GLM_EXL3_VALIDATE_NATIVE");
     println!("cargo::rustc-check-cfg=cfg(stark_glm_exl3_prefix_validation)");
     let vendor = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("../../vendor/glm-exl3-bridge").canonicalize()?;
     let lock_path = vendor.join("lock.json");
@@ -109,6 +110,37 @@ pub fn link(
     ] {
         ensure!(field(&receipt, key)? == field(&lock, key)?, "GLM bridge stage source mismatch: {key}");
     }
+    let native_api_version = match receipt.get("native_decode_api_version") {
+        None => 0,
+        Some(value) => value.as_u64().context("invalid GLM native decode API version")?,
+    };
+    let expected_native_api = match lock.get("native_decode_api_version") {
+        None => 0,
+        Some(value) => value.as_u64().context("invalid GLM native source API version")?,
+    };
+    ensure!(
+        native_api_version <= 1 && native_api_version == expected_native_api,
+        "GLM native decode stage API mismatch"
+    );
+    if native_api_version == 1 {
+        ensure!(
+            field(&receipt, "native_decode_patch_sha256")? == field(&lock, "native_decode_patch_sha256")?,
+            "GLM native decode patch mismatch"
+        );
+    }
+    let private_native_caps = match receipt.get("private_native_caps") {
+        None => false,
+        Some(value) => value.as_bool().context("invalid GLM private native capability disposition")?,
+    };
+    let native_validation = match env::var("STARK_GLM_EXL3_VALIDATE_NATIVE").as_deref() {
+        Err(env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => bail!("STARK_GLM_EXL3_VALIDATE_NATIVE must be 0 or 1"),
+    };
+    ensure!(
+        private_native_caps == native_validation && (!private_native_caps || native_api_version == 1),
+        "private GLM native capabilities require an API-1 stage and STARK_GLM_EXL3_VALIDATE_NATIVE=1"
+    );
     let experimental = receipt["experimental_prefix"].as_bool().context("missing GLM bridge prefix disposition")?;
     let validation = match env::var("STARK_GLM_EXL3_VALIDATE_PREFIX").as_deref() {
         Err(env::VarError::NotPresent) | Ok("0") => false,
@@ -155,6 +187,12 @@ pub fn link(
                 "GLM dependency artifact differs from the qualified stage: {key}"
             );
         }
+    }
+    if native_api_version == 1 {
+        println!("cargo::rustc-cfg=stark_glm_exl3_native_decode_stage");
+    }
+    if private_native_caps {
+        println!("cargo::rustc-cfg=stark_glm_exl3_native_decode_available");
     }
     println!("cargo::rustc-link-search=native={}", bridge_dir.context("missing GLM static library")?.display());
     println!("cargo::rustc-link-search=native={}", lib_dir.display());

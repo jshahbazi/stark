@@ -143,7 +143,9 @@ GLM implements all trunk layers, including channel convolutions, Kimi Delta
 Attention, compressed MLA, the pooled sparse indexer, mHC Sinkhorn mixing, and
 routed/shared MoE. The GGUF reader validates metadata against the source
 configuration and checks the transformed negative decay coefficients used by
-GGML. The included MTP layer is not executed.
+GGML. The ordinary included GGUF MTP layer is not executed. A separate private
+EXL3/FP8 API1 candidate is documented in the [backend reference](validation/GLM_EXL3_BACKEND.md)
+and is not enabled by the GGUF path.
 
 Qwen implements Gated DeltaNet, causal block-sparse QSA, gated residual streams,
 routed and gated shared experts, and the n-gram PLE embedding and convolution.
@@ -464,7 +466,9 @@ license boundaries.
 
 These paths are text-only. They do not execute vision, video, audio or DFlash.
 MTP is available through the native Lily and official mixed-affine generation
-paths described above when the checkpoint contains its trained head.
+paths described above when the checkpoint contains its trained head. The
+ordinary GLM GGUF path does not execute its MTP layer; the private EXL3/FP8 candidate and its
+qualification status are described in the [backend reference](validation/GLM_EXL3_BACKEND.md).
 The workers enforce the loaded model's configured context
 maximum and retain the 4,096-output-token cap; the upstream advertised maximum
 context is not a Stark memory qualification. A weight set fitting within 128 GiB does not establish

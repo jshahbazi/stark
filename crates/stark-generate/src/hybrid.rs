@@ -3,7 +3,7 @@
 use std::{collections::BTreeMap, fs::File, io::Write, path::Path, time::Instant};
 
 use rayon::prelude::*;
-use stark_engine::engine::hybrid::{Model, PrefixSnapshot, finite_guard, profile};
+use stark_engine::engine::hybrid::{Model, NativeSampling, PrefixSnapshot, finite_guard, profile};
 
 use crate::{
     cancel::CancelSignal,
@@ -21,6 +21,26 @@ mod nucleus;
 
 /// Recurrent snapshots also depend on whether the draft head ran in prefill.
 const PREFIX_CACHE_KEY: &str = "model-instance+context-tokens+cache-scope+mtp-selection";
+
+fn native_sampling(options: &GenerationOptions) -> Option<NativeSampling> {
+    let sampling = match options.sampling {
+        Sampling::Greedy {} => Some(NativeSampling::Greedy {
+            seed: options.seed,
+        }),
+        Sampling::Stochastic {
+            temperature,
+            top_k: None,
+            top_p,
+            min_p: None,
+        } if temperature >= 0.01 => Some(NativeSampling::Stochastic {
+            temperature,
+            top_p: top_p.unwrap_or(1.0),
+            seed: options.seed,
+        }),
+        _ => None,
+    };
+    sampling.filter(|sampling| sampling.is_supported())
+}
 
 pub(crate) struct HybridBackend {
     model: Model,
@@ -270,7 +290,7 @@ impl HybridBackend {
         let profile_mode = aggregate_profile_mode(qwen_profile_path.is_some(), native_profile_path.is_some())?;
         let profile_path = qwen_profile_path.or(native_profile_path);
         let profile_output = profile_path.map(|path| ProfileOutput::open(Path::new(&path))).transpose()?;
-        let mut model = Model::load_with_mtp(path, true).map_err(|_| "hybrid_model_load_failed")?;
+        let mut model = Model::load_with_native_decode(path, true).map_err(|_| "hybrid_model_load_failed")?;
         if profile_mode.is_some_and(AggregateProfileMode::enables_bf16_stage_profile) {
             model.set_bf16_stage_profiling(true).map_err(|_| "native_profile_initialization_failed")?;
         }
@@ -328,6 +348,12 @@ impl HybridBackend {
         }
         let tokenizer = self.model.tokenizer().clone();
         let vocab_size = self.model.vocab_size();
+        let native_policy = self
+            .model
+            .mtp_capabilities()
+            .filter(|caps| caps.sampling == "native-target-draw-match-v1")
+            .and_then(|_| native_sampling(options));
+        let native_decode = native_policy.is_some();
         let gpu_greedy = options.mtp_drafts == 0
             && matches!(options.sampling, Sampling::Greedy {})
             && self.model.supports_greedy_readout();
@@ -343,6 +369,7 @@ impl HybridBackend {
         }
         let mut logits = Vec::new();
         let mut greedy_token = None;
+        let mut native_first = None;
         let mut prefill_control_error = None;
         let prefix = input.get(reused..input.len() - 1).ok_or("native_generation_failed")?;
         let prefill = self.model.ingest_prefix(prefix, || {
@@ -361,7 +388,9 @@ impl HybridBackend {
             return Err("generation_cancelled");
         }
         let token = input[input.len() - 1];
-        if gpu_greedy {
+        if let Some(policy) = native_policy {
+            native_first = Some(self.model.step_native_initial(token, policy).map_err(|_| "native_generation_failed")?);
+        } else if gpu_greedy {
             greedy_token = Some(self.model.step_greedy(token).map_err(|_| "native_generation_failed")?);
         } else {
             logits = self.model.step(token).map_err(|_| "native_generation_failed")?;
@@ -377,7 +406,19 @@ impl HybridBackend {
         let mut previous = None;
         let mut rng = options.seed;
         let mut mtp_sampler;
-        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if options.mtp_drafts > 0 {
+        let tokens: Box<dyn Iterator<Item = Result<u64, &'static str>> + '_> = if native_decode {
+            let first = native_first.take().ok_or("native_generation_failed")?;
+            if options.eos_token_ids.contains(&first) || options.extra_stop_token_ids.contains(&first) {
+                Box::new(std::iter::once(Ok(u64::from(first))))
+            } else {
+                let budget = (options.context_tokens as usize - input.len()).min(options.max_new_tokens as usize);
+                let tail = model
+                    .native_decode(first, budget, options.mtp_drafts as usize)
+                    .map_err(|_| "native_generation_failed")?
+                    .map(|token| token.map(u64::from).map_err(|_| "native_generation_failed"));
+                Box::new(std::iter::once(Ok(u64::from(first))).chain(tail))
+            }
+        } else if options.mtp_drafts > 0 {
             // The first target draw comes from prefill. The MTP sampler owns
             // separate draft randomness and exact target rejection sampling.
             mtp_sampler = mtp::ExactMtpSampler::new(&options.sampling, &mut rng, probability_mapper);
@@ -454,7 +495,8 @@ impl HybridBackend {
         );
         // The collector has dropped its iterator and drained any submitted
         // lookahead, including EOS, cancellation and callback-error exits.
-        let mut result = native_result_after_cleanup(result, self.model.is_fenced())?;
+        let native_cleanup_failed = native_decode && self.model.finish_native_request().is_err();
+        let mut result = native_result_after_cleanup(result, self.model.is_fenced() || native_cleanup_failed)?;
         if needs_text {
             let full = tokenizer.decode(&result.generated_token_ids, false).map_err(|_| "decoding_failed")?;
             let suffix = full.strip_prefix(&raw).ok_or("decoding_failed")?;
@@ -527,6 +569,15 @@ impl GenerationBackend for HybridBackend {
         }
         let boundary = self.prefix_boundary(input, options);
         let mut result = self.generate_inner(input, reused, retained.as_ref(), boundary, options, on_text, on_progress);
+        // Host cancellation, callbacks and text decoding can fail after a
+        // native iterator has closed successfully. Invalidate its native epoch
+        // as well as the worker's retained entry before another request.
+        if result.is_err()
+            && self.model.mtp_capabilities().is_some_and(|caps| caps.sampling == "native-target-draw-match-v1")
+            && self.model.abort_native_request().is_err()
+        {
+            result = Err("native_generation_failed");
+        }
         if let Ok(generated) = result.as_mut() {
             generated.reused_input_tokens = reused;
             // A request that ended on the retained boundary keeps its snapshot.
@@ -540,16 +591,26 @@ impl GenerationBackend for HybridBackend {
                     Some(BoundaryEntry::new(snapshot, scope, options.context_tokens, &input[..boundary]));
             }
         }
-        if self.model.supports_mtp() {
+        if let Some(capabilities) = self.model.mtp_capabilities() {
+            let stats = if capabilities.sampling == "native-target-draw-match-v1" {
+                serde_json::to_value(self.model.native_decode_stats())
+            } else {
+                serde_json::to_value(self.model.mtp_stats())
+            }
+            .map_err(|_| "native_generation_failed")?;
             self.last_mtp = Some(serde_json::json!({
                 "enabled":options.mtp_drafts > 0,
                 "drafts":options.mtp_drafts,
-                "sampling":"exact-rejection-v1",
-                "verification":self.model.mtp_verification(),
-                "stats":self.model.mtp_stats(),
+                "sampling":capabilities.sampling,
+                "verification":capabilities.verification,
+                "stats":stats,
             }));
         }
         self.model.reset();
+        result = native_result_after_cleanup(result, self.model.is_fenced());
+        if result.is_err() {
+            self.pending_prefix = None;
+        }
         self.nucleus_sampler.clear();
         if let Some(output) = self.profile_output.as_mut() {
             let counters = profile::snapshot();
@@ -590,6 +651,21 @@ impl GenerationBackend for HybridBackend {
     }
     fn mtp_metadata(&self) -> Option<serde_json::Value> {
         self.last_mtp.clone()
+    }
+    fn effective_mtp_drafts(
+        &self,
+        options: &GenerationOptions,
+    ) -> Result<u32, &'static str> {
+        if options.mtp_drafts == 0
+            || !self.model.mtp_capabilities().is_some_and(|caps| caps.sampling == "native-target-draw-match-v1")
+        {
+            return Ok(options.mtp_drafts);
+        }
+        Ok(if native_sampling(options).is_some() {
+            options.mtp_drafts
+        } else {
+            0
+        })
     }
     fn prefix_cache_supported(&self) -> bool {
         self.model.prefix_chunk_tokens().is_some_and(|chunk| {

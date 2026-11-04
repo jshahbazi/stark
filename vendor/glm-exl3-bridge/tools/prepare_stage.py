@@ -51,6 +51,7 @@ def main() -> None:
     p.add_argument("--zig", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--experimental-prefix", action="store_true")
+    p.add_argument("--private-native-caps", action="store_true")
     args = p.parse_args()
     host, plugin, stage, zig, out = (x.resolve() for x in
         (args.host, args.plugin, args.mlx_stage, args.zig, args.output))
@@ -110,29 +111,41 @@ def main() -> None:
     patch = ROOT / "patches/mlx-stream-prefix.patch"
     require(sha(patch) == lock["plugin_patch_sha256"], "plugin patch hash mismatch")
     command("patch", "-p1", "--batch", "--forward", "-i", str(patch), cwd=copied)
+    native_patch = ROOT / "patches/mlx-stream-native.patch"
+    require(lock.get("native_decode_api_version") == 1 and
+            sha(native_patch) == lock["native_decode_patch_sha256"], "native decode source mismatch")
+    command("patch", "-p1", "--batch", "--forward", "-i", str(native_patch), cwd=copied)
     command(str(zig), "build", "test", "-Doptimize=ReleaseFast",
         "--cache-dir", str(out / "build-cache"),
         f"-Dhost-dir={host}", f"-Dplugin-dir={copied}", f"-Dmlx-stage={stage}",
         f"-Dsushi-dir={sushi}",
-        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}", cwd=ROOT)
+        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}",
+        f"-Dprivate-native-caps={'true' if args.private_native_caps else 'false'}", cwd=ROOT)
     command(str(zig), "build", "-Doptimize=ReleaseFast", "--prefix", str(out),
         "--cache-dir", str(out / "build-cache"),
         f"-Dhost-dir={host}", f"-Dplugin-dir={copied}", f"-Dmlx-stage={stage}",
         f"-Dsushi-dir={sushi}",
-        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}", cwd=ROOT)
+        f"-Dexperimental-prefix={'true' if args.experimental_prefix else 'false'}",
+        f"-Dprivate-native-caps={'true' if args.private_native_caps else 'false'}", cwd=ROOT)
     artifacts = {"stark_glm": {"path": "lib/libstark_glm.a", "sha256": sha(out / "lib/libstark_glm.a")}}
     for name, filename in dependency_paths.items():
         dep = stage / "lib" / filename
         artifacts[name] = {"path": str(dep), "sha256": sha(dep)}
-    receipt = {"version": 1, "abi_version": 1,
+    for entry in lock["owned_sources"]:
+        require(sha(ROOT / entry["path"]) == entry["sha256"], "bridge source changed during build")
+    receipt = {"version": 1, "abi_version": 1, "native_decode_api_version": 1,
+        "native_decode_patch_sha256": lock["native_decode_patch_sha256"],
         **{key: lock[key] for key in ("bridge_source_sha256", "host_revision", "plugin_revision", "mlx_revision", "mlxc_revision", "mlxc_patch_sha256", "plugin_patch_sha256", "sushi_revision", "zig_version", "zig_sha256")},
-        "experimental_prefix": args.experimental_prefix, "mlx_lib_dir": str(stage / "lib"),
+        "experimental_prefix": args.experimental_prefix, "private_native_caps": args.private_native_caps,
+        "mlx_lib_dir": str(stage / "lib"),
         "mlxc_worktree_diff_sha256": lock["mlxc_worktree_diff_sha256"],
         "mlx_worktree_diff_sha256": lock["mlx_worktree_diff_sha256"],
         "mlx_getter_patch_sha256": lock["mlx_getter_patch_sha256"],
         "dependency_headers_sha256": lock["dependency_headers_sha256"],
-        "artifacts": artifacts, "validation": {"c_abi_smoke": "passed", "model_loaded": False,
-            "gpu_inference": False, "prefix_restore_qualified": False}}
+        "artifacts": artifacts, "validation": {"c_abi_smoke": "passed", "native_protocol_tests": "passed", "model_loaded": False,
+            "gpu_inference": False, "prefix_restore_qualified": False,
+            "native_decode_qualified": False, "mtp_prefix_restore_qualified": False,
+            "worker_matrix_qualified": False, "seeded_native_qualified": False, "quality_smoke_qualified": False}}
     (out / "stark-glm-stage.json").write_text(json.dumps(receipt, indent=2) + "\n")
     print("bridge_stage_built=1 c_abi_smoke=passed model_loaded=0 gpu_inference=0")
 
